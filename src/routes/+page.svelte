@@ -6,7 +6,20 @@
  import Map from 'ol/Map';
  import View from 'ol/View';
  import TileLayer from 'ol/layer/Tile';
+ import Point from 'ol/geom/Point.js';
  import TileWMS from 'ol/source/TileWMS.js';
+ import Feature from 'ol/Feature.js';
+ import VectorSource from 'ol/source/Vector.js';
+ import {Vector, Tile} from 'ol/layer.js';
+
+ import {
+   Circle as CircleStyle,
+   Fill,
+   Icon,
+   Stroke,
+   Style,
+ } from 'ol/style.js';
+
 
  import XYZ from 'ol/source/XYZ';
 
@@ -17,9 +30,11 @@
  let numUpdates = 0;
  let speed = 0.0;
  let temp = 0.0;
+ let depth = 0.0;
  let status = "not connected yet";
  let map: Map = null;
  let view: View = null;
+ let myBoatMarker: Feature = null;
  
  function getTileUrlFunction(url, type, coordinates) {
    var x = coordinates[1];
@@ -43,19 +58,21 @@
    console.log("error: ", e);
  }
  
- function doUpdate(){
+ function doUpdate(loopNumber: int){
    if (!client) {
      return;
    }
    
-   numUpdates++;
-
    const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
    
    msClient.getPosition().then((p) => {
      pos = p.coordinate;
+
      var sz = map.getSize();
-     view.centerOn([pos.longitude, pos.latitude], map.getSize(), [sz[0]/2,sz[1]/2]);
+     var pp = [pos.longitude, pos.latitude];
+     view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
+
+     myBoatMarker.setGeometry(new Point(pp));
      
    }).catch(errorHandler);
 
@@ -63,19 +80,52 @@
      speed = v.y * 1.94384;
 
      // zoom of 10 is about 30 miles
-     // zoom of 15 is city level
+     // zoom of 16 is city level
 
-     var zoom = Math.floor(15-Math.floor(speed)^.05);
+     var zoom = Math.floor(16-Math.floor(speed)^.5);
      view.setZoom(zoom);
    }).catch(errorHandler);
    
    new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
      temp = 32 + (t.Temperature * 1.8);
    }).catch( errorHandler );
+
+   new VIAM.SensorClient(client, "cm90-garmin1-main:depth-raw").getReadings().then((d) => {
+     depth = d.Depth * 3.28084;
+   }).catch( errorHandler );
+
+   
  }
 
+ function doCameraLoop(loopNumber: int) {
+
+   new VIAM.CameraClient(client, "cockpit").getImage().then(
+     function(img){
+       document.getElementById('cam1').src = URL.createObjectURL(new Blob([img]));
+   }).catch(errorHandler);
+
+   new VIAM.CameraClient(client, "enginer").getImage().then(
+     function(img){
+       document.getElementById('cam2').src = URL.createObjectURL(new Blob([img]));
+   }).catch(errorHandler);
+   
+   new VIAM.CameraClient(client, "cm90-garmin1-main:flir-ffmpeg").getImage().then(
+     function(img){
+       document.getElementById('cam3').src = URL.createObjectURL(new Blob([img]));
+   }).catch(errorHandler);
+
+   new VIAM.CameraClient(client, "cm90-garmin1-main:flir-ffmpeg-ir").getImage().then(
+     function(img){
+       document.getElementById('cam4').src = URL.createObjectURL(new Blob([img]));
+   }).catch(errorHandler);
+
+ }
+ 
  function updateAndLoop() {
-   doUpdate();
+   numUpdates++;
+   
+   doUpdate(numUpdates);
+   doCameraLoop(numUpdates);
 
    setTimeout(updateAndLoop, 1000);
  }
@@ -126,15 +176,6 @@
      client.on('reconnected', reconnected);
      
      updateAndLoop();
-     /*
-        const streamClient = new VIAM.StreamClient(client)
-        streamClient.getStream("cockpit").then( 
-        function(mediaStream){
-        console.log(mediaStream);
-        document.getElementById("theVideo").srcObject = mediaStream;
-        }
-        );
-      */      
 
      setupMap();
      
@@ -201,9 +242,7 @@
      layers.push(layer_seamark);
    }
 
-   if (true) {
-     //
-
+   if (false) {
      layers.push(new TileLayer({
        opacity: .7,
        source: new TileWMS({
@@ -214,8 +253,32 @@
          //hidpi: false,
        }),
      }));
-
    }
+
+   myBoatMarker = new Feature({
+     type: 'geoMarker',
+     geometry: new Point([0,0]),
+   });
+   
+   const vectorLayer = new Vector({
+     source: new VectorSource({
+       features: [myBoatMarker],
+     }),
+     style: function (feature) {
+       return new Style({
+         image: new CircleStyle({
+           radius: 7,
+           fill: new Fill({color: 'black'}),
+           stroke: new Stroke({
+             color: 'white',
+             width: 2,
+           }),
+         })
+       })
+     },
+   });
+   layers.push(vectorLayer);
+   
    map = new Map({
      target: 'map',
      layers: layers,
@@ -223,8 +286,6 @@
    });
    
  }
-
-
  
  onMount(start);
 </script>
@@ -237,22 +298,30 @@
     </tr>
     <tr>
       <td>
-        <div id="map">
+        <div id="map"></div>
       </td>
-      <td>
-        <div id="navData">
-          <p class="data" >{speed.toFixed(2)} kts</p>
-          <p class="data" >{temp.toFixed(2)} f</p>
-          <p class="data" >
-            lat: {pos.latitude}
-            <br>
-            lon: {pos.longitude}
-          </p>
-        </div>
+      <td id="navData">
+        <p class="data" >{speed.toFixed(2)} kts</p>
+        <p class="data" >{depth.toFixed(2)} ft</p>
+        <p class="data" >{temp.toFixed(2)} f</p>
+        <p class="data" >
+          lat: {pos.latitude}
+          <br/>
+          lon: {pos.longitude}
+        </p>
       </td>
     </tr>
+    <tr>
+      <td colspan="2">
+        <img id="cam1" width="250"/>
+        <img id="cam2" width="250"/>
+        <img id="cam3" width="250"/>
+        <img id="cam4" width="250"/>
+      </td>
+    </tr>
+  </table>
 </div>
-
+        
 <small>{numUpdates}</small>
 
 
