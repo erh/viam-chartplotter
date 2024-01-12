@@ -1,15 +1,16 @@
 ## Viam Chartplotter
 
 ## ToDo
-* any map
-* COG / Heading
-* Configuration
-* Cameras
+* basics
+** open sea map
+** COG / Heading
+** Cameras
+** AIS
 * Multiple tabs
+* Configuration
 * History
-* navionics or noaa maps
-* tides
-
+* Later Cool Stuff
+** tides
 
 
 ## Developing

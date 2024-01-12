@@ -1,4 +1,13 @@
- .data {
+#navData {
+    float: right;
+}
+
+#map {
+    width: 50em;
+    height: 30em;
+}
+
+.data {
      border: 1px solid gray;
      width: 10em;
  }

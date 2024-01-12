@@ -27,6 +27,7 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"@viamrobotics/sdk": "^0.9.1"
+		"@viamrobotics/sdk": "^0.9.1",
+		"ol": "^8.2.0"
 	}
 }

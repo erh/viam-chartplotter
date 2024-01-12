@@ -1,6 +1,15 @@
 <script lang="ts">
  import '../app.css'
  import { onMount } from 'svelte';
+
+ import {useGeographic} from 'ol/proj.js';
+ import Map from 'ol/Map';
+ import View from 'ol/View';
+ import TileLayer from 'ol/layer/Tile';
+ import TileWMS from 'ol/source/TileWMS.js';
+
+ import XYZ from 'ol/source/XYZ';
+
  import * as VIAM from '@viamrobotics/sdk';
  
  let client: VIAM.RobotClient;
@@ -9,7 +18,27 @@
  let speed = 0.0;
  let temp = 0.0;
  let status = "not connected yet";
-
+ let map: Map = null;
+ let view: View = null;
+ 
+ function getTileUrlFunction(url, type, coordinates) {
+   var x = coordinates[1];
+   var y = coordinates[2];
+   var z = coordinates[0];
+   var limit = Math.pow(2, z);
+   if (y < 0 || y >= limit) {
+     return null;
+   } else {
+     x = ((x % limit) + limit) % limit;
+     
+     var path = z + "/" + x + "/" + y + "." + type;
+     if (url instanceof Array) {
+       url = this.selectUrl(path, url);
+     }
+     return url + path;
+   }
+ }
+ 
  function errorHandler(e) {
    console.log("error: ", e);
  }
@@ -25,10 +54,19 @@
    
    msClient.getPosition().then((p) => {
      pos = p.coordinate;
+     var sz = map.getSize();
+     view.centerOn([pos.longitude, pos.latitude], map.getSize(), [sz[0]/2,sz[1]/2]);
+     
    }).catch(errorHandler);
 
    msClient.getLinearVelocity().then((v) => {
      speed = v.y * 1.94384;
+
+     // zoom of 10 is about 30 miles
+     // zoom of 15 is city level
+
+     var zoom = Math.floor(15-Math.floor(speed)^.05);
+     view.setZoom(zoom);
    }).catch(errorHandler);
    
    new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
@@ -69,7 +107,6 @@
  async function start() {
 
    const urlParams = new URLSearchParams(window.location.search);
-   console.log(urlParams);
 
    const host = urlParams.get("host");
    const apiKey = urlParams.get("api-key");
@@ -98,31 +135,122 @@
         }
         );
       */      
+
+     setupMap();
      
      return { client: client, "x" : 5}
      
    } catch (error) {
      errorHandler(error);
    }
-
  }
 
+ function setupMap() {
+   
+
+   useGeographic();
+   
+   view = new View({
+     center: [0, 0],
+     zoom: 15
+   });
+
+   var layers = [];
+
+   // core open stream maps
+   if (true) {
+     layers.push(new TileLayer({
+       opacity: .5,
+       source: new XYZ({
+         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+       })
+     }));
+   }
+   
+   // depth data
+   if (false) {
+     layers.push(new TileLayer({
+       opacity: .7,
+       source: new TileWMS({
+         url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
+         params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
+         ratio: 1,
+         serverType: 'geoserver',
+         hidpi: false,
+       }),
+     }));
+   }
+   
+   // harbors
+   if (false) {
+     var layer_seamark = new TileLayer({
+       visible: true,
+       maxZom: 19,
+       source: new XYZ({
+         tileUrlFunction: function(coordinate) {
+           return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
+         }
+       }),
+       properties: {
+         name: "seamarks",
+         layerId: 3,
+         cookieKey: "SeamarkLayerVisible",
+         checkboxId: "checkLayerSeamark",
+       }
+     });
+     layers.push(layer_seamark);
+   }
+
+   if (true) {
+     //
+
+     layers.push(new TileLayer({
+       opacity: .7,
+       source: new TileWMS({
+         url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
+         //params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
+         //ratio: 1,
+         //serverType: 'geoserver',
+         //hidpi: false,
+       }),
+     }));
+
+   }
+   map = new Map({
+     target: 'map',
+     layers: layers,
+     view: view
+   });
+   
+ }
+
+
+ 
  onMount(start);
 </script>
 
-<h2>{status}</h2>
+
 <div>
-  <div>
-  </div>
-  <div id="navData">
-    <p class="data" >{speed.toFixed(2)} kts</p>
-    <p class="data" >{temp.toFixed(2)} f</p>
-    <p class="data" >
-      lat: {pos.latitude}
-      <br>
-      lon: {pos.longitude}
-    </p>
-  </div>
+  <table border="1">
+    <tr>
+      <th colspan="2">{status}</th>
+    </tr>
+    <tr>
+      <td>
+        <div id="map">
+      </td>
+      <td>
+        <div id="navData">
+          <p class="data" >{speed.toFixed(2)} kts</p>
+          <p class="data" >{temp.toFixed(2)} f</p>
+          <p class="data" >
+            lat: {pos.latitude}
+            <br>
+            lon: {pos.longitude}
+          </p>
+        </div>
+      </td>
+    </tr>
 </div>
 
 <small>{numUpdates}</small>
