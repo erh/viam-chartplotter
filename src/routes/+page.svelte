@@ -2,9 +2,12 @@
  import '../app.css'
  import { onMount } from 'svelte';
 
+ import { Logger } from "tslog";
+ 
  import {Coordinate} from "tsgeo/Coordinate";
  import {DMS}        from "tsgeo/Formatter/Coordinate/DMS";
 
+ import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
  import Map from 'ol/Map';
  import View from 'ol/View';
@@ -34,7 +37,8 @@
              .setUnits(DMS.UNITS_ASCII);
 
  
- let client: VIAM.RobotClient;
+ const globalLogger = new Logger({ name: "global" });
+ let globalClient: VIAM.RobotClient;
 
  let globalData = {
    pos : new Coordinate(0,0),
@@ -49,6 +53,8 @@
  let map: Map = null;
  let view: View = null;
  let myBoatMarker: Feature = null;
+ let allFeatures = new Collection();
+ let lastData = new Date();
  
  function getTileUrlFunction(url, type, coordinates) {
    var x = coordinates[1];
@@ -67,19 +73,39 @@
      return url + path;
    }
  }
- 
- function errorHandler(e) {
-   console.log("error: ", e);
+
+ function gotNewData() {
+   lastData = new Date();
  }
  
- function doUpdate(loopNumber: int){
-   if (!client) {
-     return;
+ function errorHandler(e) {
+   globalLogger.error(e);
+   var s = e.toString();
+
+   var reset = false;
+
+   var diff = new Date() - lastData;
+
+   if (diff > 1000 * 30) {
+     reset = true;
    }
    
+   if (s.indexOf("SESSION_EXPIRED") >= 0) {
+     reset = true;
+   }
+
+   if (reset) {
+     globalLogger.warn("Forcing reconnect b/c session_expired");
+     globalClient = null;
+   }
+
+ }
+ 
+ function doUpdate(loopNumber: int, client: VIAM.RobotClient){
    const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
    
    msClient.getPosition().then((p) => {
+     gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
      
      var sz = map.getSize();
@@ -108,10 +134,57 @@
      globalData.depth = d.Depth * 3.28084;
    }).catch( errorHandler );
 
+   if (loopNumber % 30 == 2 ) {
+     new VIAM.SensorClient(client, "cm90-garmin1-main:ais").getReadings().then((raw) => {
+       var good = {};
+       
+       for ( var mmsi in raw  ) {
+         
+         var boat = raw[mmsi];
+         
+         if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
+           continue;
+         }
+
+         good[mmsi] = true;
+         
+         var found = false;
+
+         for (var i = 1; i < allFeatures.getLength(); i++) {
+           var v = allFeatures.item(i);
+           if (v.get("mmsi") == mmsi) {
+             found = true;
+             v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
+             break;
+           }
+         }
+         
+         if (found) {
+           continue;
+         }
+         
+         allFeatures.push(new Feature({
+           type: "ais",
+           mmsi: mmsi,
+           geometry: new Point([boat.Location[1], boat.Location[0]]),
+         }));
+       }
+
+       for (var i = 1; i < allFeatures.getLength(); i++) {
+         var v = allFeatures.item(i);
+         var mmsi = v.get("mmsi");
+         if (!good[mmsi]) {
+           allFeatures.removeAt(i);
+         }
+       }
+       
+     }).catch( errorHandler );
+   }
+   
    
  }
 
- function doCameraLoop(loopNumber: int) {
+ function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
 
    new VIAM.CameraClient(client, "cockpit").getImage().then(
      function(img){
@@ -135,17 +208,42 @@
 
  }
  
- function updateAndLoop() {
+ async function updateAndLoop() {
    globalData.numUpdates++;
+
+   if (!globalClient) {
+     try {
+       globalClient = await connect();
+       
+     } catch(error) {
+       status = "connect failed: " + error;
+       globalClient = null;
+     }
+   }
+
+   var client = globalClient;
    
-   doUpdate(globalData.numUpdates);
-   doCameraLoop(globalData.numUpdates);
+   if (client) {
+     doUpdate(globalData.numUpdates, client);
+     doCameraLoop(globalData.numUpdates, client);
+   }
 
    setTimeout(updateAndLoop, 1000);
  }
 
- async function connect(host: string, credential, authEntity: string): Promise<VIAM.RobotClient> {
-   return VIAM.createRobotClient({
+ async function connect(): VIAM.RobotClient {
+   const urlParams = new URLSearchParams(window.location.search);
+
+   const host = urlParams.get("host");
+   const apiKey = urlParams.get("api-key");
+   const authEntity = urlParams.get("authEntity");
+   
+   const credential = {
+     type: 'api-key',
+     payload: apiKey
+   };
+
+   var c = await VIAM.createRobotClient({
      host,
      credential: credential,
      authEntity: authEntity,
@@ -155,46 +253,34 @@
      reconnectMaxAttempts: 20,
      reconnectMaxWait: 5000,
    });
+
+   status = "connected";
+   
+   globalLogger.info('connected!');
+   
+   c.on('disconnected', disconnected);
+   c.on('reconnected', reconnected);
+
+   return c;
  }
 
  async function disconnected(event) {
    status = "disconnected";
-   console.log('The robot has been disconnected. Trying reconnect...');
+   globalLogger.warn('The robot has been disconnected. Trying reconnect...');
  }
 
  async function reconnected(event) {
    status = "connected";
-   console.log('The robot has been reconnected. Work can be continued.');
+   globalLogger.warn('The robot has been reconnected. Work can be continued.');
  }
 
 
  async function start() {
 
-   const urlParams = new URLSearchParams(window.location.search);
-
-   const host = urlParams.get("host");
-   const apiKey = urlParams.get("api-key");
-   const authEntity = urlParams.get("authEntity");
-
-   const credential = {
-     type: 'api-key',
-     payload: apiKey
-   };
-   
    try {
-     client = await connect(host, credential, authEntity);
-     status = "connected";
-     console.log('connected!');
-     
-     client.on('disconnected', disconnected);
-     client.on('reconnected', reconnected);
-     
-     updateAndLoop();
-
      setupMap();
-     
-     return { client: client, "x" : 5}
-     
+     updateAndLoop();
+     return {}     
    } catch (error) {
      errorHandler(error);
    }
@@ -273,16 +359,22 @@
      type: 'geoMarker',
      geometry: new Point([0,0]),
    });
+
+   allFeatures.push(myBoatMarker);
    
-   const vectorLayer = new Vector({
+   var vectorLayer = new Vector({
      source: new VectorSource({
-       features: [myBoatMarker],
+       features: allFeatures,
      }),
      style: function (feature) {
+       var fill = "black";
+       if (feature.get("type") == "ais") {
+         fill = "yellow";
+       }
        return new Style({
          image: new CircleStyle({
            radius: 7,
-           fill: new Fill({color: 'black'}),
+           fill: new Fill({color: fill}),
            stroke: new Stroke({
              color: 'white',
              width: 2,
@@ -345,5 +437,3 @@
 </div>
         
 <small>{globalData.numUpdates}</small>
-
-
