@@ -10,4 +10,9 @@
 .data {
      border: 1px solid gray;
      width: 10em;
- }
+     font-size: 2em;
+}
+
+.data div {
+    font-size: .5em;
+}

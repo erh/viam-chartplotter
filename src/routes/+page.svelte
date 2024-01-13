@@ -2,6 +2,9 @@
  import '../app.css'
  import { onMount } from 'svelte';
 
+ import {Coordinate} from "tsgeo/Coordinate";
+ import {DMS}        from "tsgeo/Formatter/Coordinate/DMS";
+
  import {useGeographic} from 'ol/proj.js';
  import Map from 'ol/Map';
  import View from 'ol/View';
@@ -24,9 +27,15 @@
  import XYZ from 'ol/source/XYZ';
 
  import * as VIAM from '@viamrobotics/sdk';
+
+ let gpsFormatter = new DMS();
+ gpsFormatter.setSeparator("<br>")
+             .useCardinalLetters(true)
+             .setUnits(DMS.UNITS_ASCII);
+
  
  let client: VIAM.RobotClient;
- let pos = {};
+ let pos = new Coordinate(0,0);
  let numUpdates = 0;
  let speed = 0.0;
  let temp = 0.0;
@@ -66,10 +75,10 @@
    const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
    
    msClient.getPosition().then((p) => {
-     pos = p.coordinate;
-
+     pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+     
      var sz = map.getSize();
-     var pp = [pos.longitude, pos.latitude];
+     var pp = [pos.lng, pos.lat];
      view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
 
      myBoatMarker.setGeometry(new Point(pp));
@@ -138,8 +147,8 @@
      signalingAddress: 'https://app.viam.com:443',
 
      // optional: configure reconnection options
-     reconnectMaxAttempts: 7,
-     reconnectMaxWait: 1000,
+     reconnectMaxAttempts: 20,
+     reconnectMaxWait: 5000,
    });
  }
 
@@ -301,14 +310,22 @@
         <div id="map"></div>
       </td>
       <td id="navData">
-        <p class="data" >{speed.toFixed(2)} kts</p>
-        <p class="data" >{depth.toFixed(2)} ft</p>
-        <p class="data" >{temp.toFixed(2)} f</p>
-        <p class="data" >
-          lat: {pos.latitude}
-          <br/>
-          lon: {pos.longitude}
-        </p>
+        <div class="data" >
+          <div>Speed knots</div>
+          {speed.toFixed(2)}
+        </div>
+        <div class="data" >
+          <div>Depth ft</div>
+          {depth.toFixed(2)}
+        </div>
+        <div class="data" >
+          <div>Water Temp (f)</div>
+          {temp.toFixed(2)} f
+        </div>
+        <div class="data" >
+          <div>Location</div>
+          {@html pos.format(gpsFormatter)}
+        </div>
       </td>
     </tr>
     <tr>

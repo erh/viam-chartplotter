@@ -1,14 +1,18 @@
 ## Viam Chartplotter
 
 ## ToDo
+* display for what data old and restart
 * basics
-** open sea map
+** map layer selector
+** panning/zoom mode
 ** COG / Heading
-** Cameras
+*** raw data
+*** boat icon
+** Camera - make streaming when fixed
 ** AIS
-* Multiple tabs
-* Configuration
 * History
+* Configuration
+* Multiple tabs
 * Later Cool Stuff
 ** tides
 

@@ -28,6 +28,7 @@
 	"type": "module",
 	"dependencies": {
 		"@viamrobotics/sdk": "^0.9.1",
-		"ol": "^8.2.0"
+		"ol": "^8.2.0",
+		"tsgeo": "^1.2.2"
 	}
 }
