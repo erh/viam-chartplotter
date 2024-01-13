@@ -35,11 +35,16 @@
 
  
  let client: VIAM.RobotClient;
- let pos = new Coordinate(0,0);
- let numUpdates = 0;
- let speed = 0.0;
- let temp = 0.0;
- let depth = 0.0;
+
+ let globalData = {
+   pos : new Coordinate(0,0),
+   speed : 0.0,
+   temp : 0.0,
+   depth : 0.0,
+   
+   numUpdates: 0,
+ };
+
  let status = "not connected yet";
  let map: Map = null;
  let view: View = null;
@@ -75,10 +80,10 @@
    const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
    
    msClient.getPosition().then((p) => {
-     pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+     globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
      
      var sz = map.getSize();
-     var pp = [pos.lng, pos.lat];
+     var pp = [globalData.pos.lng, globalData.pos.lat];
      view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
 
      myBoatMarker.setGeometry(new Point(pp));
@@ -86,21 +91,21 @@
    }).catch(errorHandler);
 
    msClient.getLinearVelocity().then((v) => {
-     speed = v.y * 1.94384;
-
+     globalData.speed = v.y * 1.94384;
+     
      // zoom of 10 is about 30 miles
      // zoom of 16 is city level
 
-     var zoom = Math.floor(16-Math.floor(speed)^.5);
+     var zoom = Math.floor(16-Math.floor(globalData.speed)^.5);
      view.setZoom(zoom);
    }).catch(errorHandler);
    
    new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
-     temp = 32 + (t.Temperature * 1.8);
+     globalData.temp = 32 + (t.Temperature * 1.8);
    }).catch( errorHandler );
 
    new VIAM.SensorClient(client, "cm90-garmin1-main:depth-raw").getReadings().then((d) => {
-     depth = d.Depth * 3.28084;
+     globalData.depth = d.Depth * 3.28084;
    }).catch( errorHandler );
 
    
@@ -131,10 +136,10 @@
  }
  
  function updateAndLoop() {
-   numUpdates++;
+   globalData.numUpdates++;
    
-   doUpdate(numUpdates);
-   doCameraLoop(numUpdates);
+   doUpdate(globalData.numUpdates);
+   doCameraLoop(globalData.numUpdates);
 
    setTimeout(updateAndLoop, 1000);
  }
@@ -312,19 +317,19 @@
       <td id="navData">
         <div class="data" >
           <div>Speed knots</div>
-          {speed.toFixed(2)}
+          {globalData.speed.toFixed(2)}
         </div>
         <div class="data" >
           <div>Depth ft</div>
-          {depth.toFixed(2)}
+          {globalData.depth.toFixed(2)}
         </div>
         <div class="data" >
           <div>Water Temp (f)</div>
-          {temp.toFixed(2)} f
+          {globalData.temp.toFixed(2)} f
         </div>
         <div class="data" >
           <div>Location</div>
-          {@html pos.format(gpsFormatter)}
+          {@html globalData.pos.format(gpsFormatter)}
         </div>
       </td>
     </tr>
@@ -339,6 +344,6 @@
   </table>
 </div>
         
-<small>{numUpdates}</small>
+<small>{globalData.numUpdates}</small>
 
 
