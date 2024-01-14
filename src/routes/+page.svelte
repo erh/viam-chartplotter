@@ -56,6 +56,12 @@
  let allFeatures = new Collection();
  let lastData = new Date();
  
+ let mapHelpers = {
+   inPanMode: false,
+   lastZoom: 0,
+   lastCenter: null,
+ };
+ 
  function getTileUrlFunction(url, type, coordinates) {
    var x = coordinates[1];
    var y = coordinates[2];
@@ -100,30 +106,64 @@
    }
 
  }
+
+ function pointDiff(x, y) {
+   var a = x[0] - y[0];
+   var b = x[1] - y[1];
+   var c = a*a + b*b;
+   return Math.sqrt(c);
+ }
+
+ function stopPanning() {
+   mapHelpers.lastZoom = 0;
+   mapHelpers.lastCenter = [0,0];
+   mapHelpers.inPanMode = false;
+ }
  
  function doUpdate(loopNumber: int, client: VIAM.RobotClient){
    const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
    
    msClient.getPosition().then((p) => {
+     mapHelpers.inGetPositionHelper = true;
      gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
-     
-     var sz = map.getSize();
-     var pp = [globalData.pos.lng, globalData.pos.lat];
-     view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
 
-     myBoatMarker.setGeometry(new Point(pp));
+
+     if (mapHelpers.lastZoom > 0 && mapHelpers.lastCenter != null && mapHelpers.lastCenter[0] != 0 ) {
+       var z = view.getZoom();
+       if (z != mapHelpers.lastZoom) {
+         mapHelpers.inPanMode = true;
+       }
+
+       var c = view.getCenter();
+       var diff = pointDiff(c, mapHelpers.lastCenter);
+       if (diff > .003) {
+         mapHelpers.inPanMode = true;
+       }
+     }
+
+     
+     if (!mapHelpers.inPanMode) {
+       var sz = map.getSize();
+       var pp = [globalData.pos.lng, globalData.pos.lat];
+       view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
+       
+       myBoatMarker.setGeometry(new Point(pp));
+       
+       // zoom of 10 is about 30 miles
+       // zoom of 16 is city level
+       var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5));
+       view.setZoom(zoom);
+
+       mapHelpers.lastZoom = zoom;
+       mapHelpers.lastCenter = pp;
+     }
      
    }).catch(errorHandler);
 
    msClient.getLinearVelocity().then((v) => {
      globalData.speed = v.y * 1.94384;
      
-     // zoom of 10 is about 30 miles
-     // zoom of 16 is city level
-
-     var zoom = Math.floor(16-Math.floor(globalData.speed)^.5);
-     view.setZoom(zoom);
    }).catch(errorHandler);
    
    new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
@@ -390,9 +430,8 @@
      layers: layers,
      view: view
    });
-   
  }
- 
+
  onMount(start);
 </script>
 
@@ -405,6 +444,9 @@
     <tr>
       <td>
         <div id="map"></div>
+        {#if mapHelpers.inPanMode}
+          <button on:click="{stopPanning}">Stop Panning</button>
+        {/if}
       </td>
       <td id="navData">
         <div class="data" >
