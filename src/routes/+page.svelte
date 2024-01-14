@@ -39,7 +39,8 @@
  
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
-
+ let globalClientLastReset = new Date();
+ 
  let globalData = {
    pos : new Coordinate(0,0),
    speed : 0.0,
@@ -100,9 +101,10 @@
      reset = true;
    }
 
-   if (reset) {
+   if (reset && (new Date() - globalClientLastReset) > 1000 * 30) {
      globalLogger.warn("Forcing reconnect b/c session_expired");
      globalClient = null;
+     globalClientLastReset = new Date();
    }
 
  }
