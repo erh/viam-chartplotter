@@ -4,7 +4,6 @@
 * display for what data old and restart
 * basics
 ** map layer selector
-** panning/zoom mode
 ** COG / Heading
 *** raw data
 *** boat icon
