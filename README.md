@@ -2,13 +2,12 @@
 
 ## ToDo
 * display for what data old and restart
-* basics
-** map layer selector
-** COG / Heading
-*** raw data
-*** boat icon
-** Camera - make streaming when fixed
-** AIS
+* maps
+** layer selector
+** split ais data into own layer
+** option for ais tracks and prediction
+** COG / Heading for boat + ais
+* Camera - make streaming when fixed
 * History
 * Configuration
 * Multiple tabs
