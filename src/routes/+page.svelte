@@ -46,6 +46,7 @@
    speed : 0.0,
    temp : 0.0,
    depth : 0.0,
+   heading: 0.0,
    
    numUpdates: 0,
  };
@@ -165,8 +166,12 @@
 
    msClient.getLinearVelocity().then((v) => {
      globalData.speed = v.y * 1.94384;
-     
    }).catch(errorHandler);
+
+   msClient.getCompassHeading().then((ch) => {
+     globalData.heading = ch;
+   }).catch(errorHandler);
+
    
    new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
      globalData.temp = 32 + (t.Temperature * 1.8);
@@ -208,6 +213,7 @@
          allFeatures.push(new Feature({
            type: "ais",
            mmsi: mmsi,
+           heading: boat.Heading,
            geometry: new Point([boat.Location[1], boat.Location[0]]),
          }));
        }
@@ -351,7 +357,7 @@
    }
    
    // depth data
-   if (false) {
+   if (true) {
      layers.push(new TileLayer({
        opacity: .7,
        source: new TileWMS({
@@ -365,7 +371,7 @@
    }
    
    // harbors
-   if (false) {
+   if (true) {
      var layer_seamark = new TileLayer({
        visible: true,
        maxZom: 19,
@@ -399,6 +405,7 @@
 
    myBoatMarker = new Feature({
      type: 'geoMarker',
+     header: 0,
      geometry: new Point([0,0]),
    });
 
@@ -409,20 +416,28 @@
        features: allFeatures,
      }),
      style: function (feature) {
-       var fill = "black";
+
+       var scale = 0.5;
+       var rotation = 0;
+       
        if (feature.get("type") == "ais") {
-         fill = "yellow";
+         scale = 0.25;
+         var h = feature.get("heading");
+         if (h >= 0 && h < 360) {
+           rotation = (h/ 360) * Math.PI * 2;
+         }
+       } else {
+         rotation = (globalData.heading / 360) * Math.PI * 2;
        }
+       
        return new Style({
-         image: new CircleStyle({
-           radius: 7,
-           fill: new Fill({color: fill}),
-           stroke: new Stroke({
-             color: 'white',
-             width: 2,
-           }),
-         })
-       })
+         image: new Icon(
+           {
+             src:"/boat3.jpg",
+             scale: scale,
+             rotation: rotation,
+         }),
+       });
      },
    });
    layers.push(vectorLayer);
