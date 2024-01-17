@@ -89,6 +89,7 @@
  function errorHandler(e) {
    globalLogger.error(e);
    var s = e.toString();
+   status = "error: " + s;
 
    var reset = false;
 
@@ -104,6 +105,7 @@
 
    if (reset && (new Date() - globalClientLastReset) > 1000 * 30) {
      globalLogger.warn("Forcing reconnect b/c session_expired");
+     status = "forcing reconnect b/c of error: " + e.toString();
      globalClient = null;
      globalClientLastReset = new Date();
    }
