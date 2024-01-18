@@ -47,7 +47,8 @@
    temp : 0.0,
    depth : 0.0,
    heading: 0.0,
-
+   gauges : {},
+   
    allResources : [],
    cameraNames : [],
    
@@ -187,6 +188,23 @@
    }).catch( errorHandler );
 
    if (loopNumber % 30 == 2 ) {
+
+     globalData.allResources.forEach( (r) => {
+       if (r.subtype != "sensor") {
+         return;
+       }
+       if (r.name.indexOf("fuel-") < 0 && r.name.indexOf("freshwater") < 0) {
+         return;
+       }
+       
+       var sp = r.name.split(":");
+       var name = sp[sp.length-1];
+
+       new VIAM.SensorClient(client, r.name).getReadings().then((raw) => {
+         globalData.gauges[name] = raw;
+       });
+     });
+       
      new VIAM.SensorClient(client, "cm90-garmin1-main:ais").getReadings().then((raw) => {
        var good = {};
        
@@ -465,6 +483,19 @@
  }
 
  onMount(start);
+
+ function gaugesToArray(gauges) {
+   var names = Object.keys(gauges);
+   names.sort();
+
+   var a = [];
+   
+   for ( var i = 0; i < names.length; i++) {
+     var n = names[i];
+     a.push( [ n, gauges[n] ]);
+   }
+   return a;
+ }
 </script>
 
 
@@ -497,6 +528,15 @@
           <div>Location</div>
           {@html globalData.pos.format(gpsFormatter)}
         </div>
+        <table class="gauge">
+          {#each gaugesToArray(globalData.gauges) as [key, value]}
+            <tr>
+              <th>{key}</th>
+              <td>{value.Level} %</td>
+              <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)} g</td>
+            </tr>
+          {/each}
+        </table>
       </td>
     </tr>
     <tr>
