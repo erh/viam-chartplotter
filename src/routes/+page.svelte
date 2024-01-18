@@ -47,6 +47,9 @@
    temp : 0.0,
    depth : 0.0,
    heading: 0.0,
+
+   allResources : [],
+   cameraNames : [],
    
    numUpdates: 0,
  };
@@ -239,34 +242,40 @@
      return;
    }
 
-   new VIAM.CameraClient(client, "cockpit").getImage().then(
-     function(img){
-       document.getElementById('cam1').src = URL.createObjectURL(new Blob([img]));
-   }).catch(errorHandler);
+   globalData.allResources.forEach( (r) => {
+     if (r.subtype != "camera") {
+       return;
+     }
 
-   new VIAM.CameraClient(client, "enginer").getImage().then(
-     function(img){
-       document.getElementById('cam2').src = URL.createObjectURL(new Blob([img]));
-   }).catch(errorHandler);
-   
-   new VIAM.CameraClient(client, "cm90-garmin1-main:flir-ffmpeg").getImage().then(
-     function(img){
-       document.getElementById('cam3').src = URL.createObjectURL(new Blob([img]));
-   }).catch(errorHandler);
+     if (globalData.cameraNames.indexOf(r.name) < 0) {
+       globalData.cameraNames.push(r.name);
+       globalData.cameraNames.sort();
+     }
 
-   new VIAM.CameraClient(client, "cm90-garmin1-main:flir-ffmpeg-ir").getImage().then(
-     function(img){
-       document.getElementById('cam4').src = URL.createObjectURL(new Blob([img]));
-   }).catch(errorHandler);
+     new VIAM.CameraClient(client, r.name).getImage().then(
+       function(img){
+         var i = document.getElementById(r.name);
+         if (i) {
+           i.src = URL.createObjectURL(new Blob([img]));
+         }
+     }).catch(errorHandler);
+     
+   });
 
+ }
+
+ async function updateResources(client: VIAM.RobotClient) {
+   var resources = await client.resourceNames();
+   globalData.allResources = resources;
  }
  
  async function updateAndLoop() {
    globalData.numUpdates++;
-
+   
    if (!globalClient) {
      try {
        globalClient = await connect();
+       await updateResources(globalClient);
        
      } catch(error) {
        status = "connect failed: " + error;
@@ -274,6 +283,7 @@
      }
    }
 
+   
    var client = globalClient;
    
    if (client) {
@@ -286,7 +296,7 @@
 
  async function connect(): VIAM.RobotClient {
    const urlParams = new URLSearchParams(window.location.search);
-
+   
    const host = urlParams.get("host");
    const apiKey = urlParams.get("api-key");
    const authEntity = urlParams.get("authEntity");
@@ -491,10 +501,9 @@
     </tr>
     <tr>
       <td colspan="2">
-        <img id="cam1" width="250"/>
-        <img id="cam2" width="250"/>
-        <img id="cam3" width="250"/>
-        <img id="cam4" width="250"/>
+        {#each globalData.cameraNames as name, index}
+          <img id="{name}" width="250" alt="{name}" />
+        {/each}
       </td>
     </tr>
   </table>
