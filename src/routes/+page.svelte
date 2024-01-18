@@ -528,6 +528,10 @@
           <div>Location</div>
           {@html globalData.pos.format(gpsFormatter)}
         </div>
+        <div class="data" >
+          <div>Heading</div>
+          {@html globalData.heading}
+        </div>
         <table class="gauge">
           {#each gaugesToArray(globalData.gauges) as [key, value]}
             <tr>
