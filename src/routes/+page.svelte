@@ -235,6 +235,9 @@
  }
 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
+   if (loopNumber % 10 > 0) {
+     return;
+   }
 
    new VIAM.CameraClient(client, "cockpit").getImage().then(
      function(img){
