@@ -68,7 +68,7 @@
  let map: Map = null;
  let view: View = null;
  let myBoatMarker: Feature = null;
- let allFeatures = new Collection();
+ let aisFeatures = new Collection();
  let lastData = new Date();
  
  let mapHelpers = {
@@ -237,8 +237,8 @@
            
            var found = false;
            
-           for (var i = 1; i < allFeatures.getLength(); i++) {
-             var v = allFeatures.item(i);
+           for (var i = 0; i < aisFeatures.getLength(); i++) {
+             var v = aisFeatures.item(i);
              if (v.get("mmsi") == mmsi) {
                found = true;
                v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
@@ -250,7 +250,7 @@
              continue;
            }
            
-           allFeatures.push(new Feature({
+           aisFeatures.push(new Feature({
              type: "ais",
              mmsi: mmsi,
              heading: boat.Heading,
@@ -258,11 +258,11 @@
            }));
          }
          
-         for (var i = 1; i < allFeatures.getLength(); i++) {
-           var v = allFeatures.item(i);
+         for (var i = 0; i < aisFeatures.getLength(); i++) {
+           var v = aisFeatures.item(i);
            var mmsi = v.get("mmsi");
            if (!good[mmsi]) {
-             allFeatures.removeAt(i);
+             aisFeatures.removeAt(i);
            }
          }
          
@@ -555,25 +555,42 @@
      geometry: new Point([0,0]),
    });
 
-   allFeatures.push(myBoatMarker);
+   var myBoatFeatures = new Collection();
+   myBoatFeatures.push(myBoatMarker);
    
-   var vectorLayer = new Vector({
+   var myBoatLayer = new Vector({
      source: new VectorSource({
-       features: allFeatures,
+       features: myBoatFeatures,
      }),
      style: function (feature) {
 
-       var scale = 0.5;
+       var scale = 0.6;
+       var rotation = (globalData.heading / 360) * Math.PI * 2;
+
+       return new Style({
+         image: new Icon(
+           {
+             src:"/boat3.jpg",
+             scale: scale,
+             rotation: rotation,
+         }),
+       });
+     },
+   });
+   layers.push(myBoatLayer);
+
+   var aisLayer = new Vector({
+     source: new VectorSource({
+       features: aisFeatures,
+     }),
+     style: function (feature) {
+
+       var scale = 0.25;
        var rotation = 0;
        
-       if (feature.get("type") == "ais") {
-         scale = 0.25;
-         var h = feature.get("heading");
-         if (h >= 0 && h < 360) {
-           rotation = (h/ 360) * Math.PI * 2;
-         }
-       } else {
-         rotation = (globalData.heading / 360) * Math.PI * 2;
+       var h = feature.get("heading");
+       if (h >= 0 && h < 360) {
+         rotation = (h/ 360) * Math.PI * 2;
        }
        
        return new Style({
@@ -586,7 +603,7 @@
        });
      },
    });
-   layers.push(vectorLayer);
+   layers.push(aisLayer);
    
    map = new Map({
      target: 'map',
