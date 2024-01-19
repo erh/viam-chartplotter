@@ -55,6 +55,15 @@
    numUpdates: 0,
  };
 
+ var globalConfig = {
+   movementSensorName : "",
+   movementSensorProps : {},
+   
+   aisSensorName : "",
+   seatempSensorName : "",
+   depthSensorName : "",
+ };
+ 
  let status = "not connected yet";
  let map: Map = null;
  let view: View = null;
@@ -130,7 +139,7 @@
  }
  
  function doUpdate(loopNumber: int, client: VIAM.RobotClient){
-   const msClient = new VIAM.MovementSensorClient(client, 'cm90-garmin1-main:garmin');
+   const msClient = new VIAM.MovementSensorClient(client, globalConfig.movementSensorName);
    
    msClient.getPosition().then((p) => {
      mapHelpers.inGetPositionHelper = true;
@@ -178,15 +187,19 @@
      globalData.heading = ch;
    }).catch(errorHandler);
 
+
+   if (globalConfig.seatempSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.seatempSensorName).getReadings().then((t) => {
+       globalData.temp = 32 + (t.Temperature * 1.8);
+     }).catch( errorHandler );
+   }
+
+   if (globalConfig.depthSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.depthSensorName).getReadings().then((d) => {
+       globalData.depth = d.Depth * 3.28084;
+     }).catch( errorHandler );
+   }
    
-   new VIAM.SensorClient(client, "cm90-garmin1-main:seatemp").getReadings().then((t) => {
-     globalData.temp = 32 + (t.Temperature * 1.8);
-   }).catch( errorHandler );
-
-   new VIAM.SensorClient(client, "cm90-garmin1-main:depth-raw").getReadings().then((d) => {
-     globalData.depth = d.Depth * 3.28084;
-   }).catch( errorHandler );
-
    if (loopNumber % 30 == 2 ) {
 
      globalData.allResources.forEach( (r) => {
@@ -204,52 +217,54 @@
          globalData.gauges[name] = raw;
        });
      });
-       
-     new VIAM.SensorClient(client, "cm90-garmin1-main:ais").getReadings().then((raw) => {
-       var good = {};
-       
-       for ( var mmsi in raw  ) {
+
+     if (globalConfig.aisSensorName != "") {
+       new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
+         var good = {};
          
-         var boat = raw[mmsi];
-         
-         if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
-           continue;
+         for ( var mmsi in raw  ) {
+           
+           var boat = raw[mmsi];
+           
+           if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
+             continue;
+           }
+           
+           good[mmsi] = true;
+           
+           var found = false;
+           
+           for (var i = 1; i < allFeatures.getLength(); i++) {
+             var v = allFeatures.item(i);
+             if (v.get("mmsi") == mmsi) {
+               found = true;
+               v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
+               break;
+             }
+           }
+           
+           if (found) {
+             continue;
+           }
+           
+           allFeatures.push(new Feature({
+             type: "ais",
+             mmsi: mmsi,
+             heading: boat.Heading,
+             geometry: new Point([boat.Location[1], boat.Location[0]]),
+           }));
          }
-
-         good[mmsi] = true;
          
-         var found = false;
-
          for (var i = 1; i < allFeatures.getLength(); i++) {
            var v = allFeatures.item(i);
-           if (v.get("mmsi") == mmsi) {
-             found = true;
-             v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
-             break;
+           var mmsi = v.get("mmsi");
+           if (!good[mmsi]) {
+             allFeatures.removeAt(i);
            }
          }
          
-         if (found) {
-           continue;
-         }
-         
-         allFeatures.push(new Feature({
-           type: "ais",
-           mmsi: mmsi,
-           heading: boat.Heading,
-           geometry: new Point([boat.Location[1], boat.Location[0]]),
-         }));
-       }
-
-       for (var i = 1; i < allFeatures.getLength(); i++) {
-         var v = allFeatures.item(i);
-         var mmsi = v.get("mmsi");
-         if (!good[mmsi]) {
-           allFeatures.removeAt(i);
-         }
-       }
-       
-     }).catch( errorHandler );
+       }).catch( errorHandler );
+     }
    }
    
    
@@ -282,9 +297,103 @@
 
  }
 
+ // t - type
+ // st - subtype
+ // n - name regex
+ function filterResources(resources, t, st, n) {
+   var a = [];
+   for (var r of resources) {
+     if (t != "", r.type != t) {
+       continue;
+     }
+
+     if (st != "", r.subtype != st) {
+       continue;
+     }
+
+     if (n != null && !r.name.match(n) ) {
+       continue;
+     }
+
+     a.push(r);
+   }
+
+   return a;
+ }
+ 
  async function updateResources(client: VIAM.RobotClient) {
    var resources = await client.resourceNames();
    globalData.allResources = resources;
+
+   await setupMovementSensor(client, resources);
+   await setupAISSensor(client, resources);
+   await setupTempSensor(client, resources);
+   await setupDepthSensor(client, resources);
+
+   console.log("globalConfig", globalConfig);
+
+ }
+ 
+ async function setupAISSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "sensor", /\bais$/);
+
+   for (var r of resources) {
+     globalConfig.aisSensorName = r.name;
+   }
+
+ }
+ 
+ async function setupTempSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "sensor", /\bseatemp$/);
+
+   for (var r of resources) {
+     globalConfig.seatempSensorName = r.name;
+   }
+
+ }
+  
+ async function setupDepthSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "sensor", /depth/);
+
+   for (var r of resources) {
+     globalConfig.depthSensorName = r.name;
+   }
+
+ }
+
+ 
+ async function setupMovementSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "movement_sensor", null);
+   
+   // pick best movement sensor
+   var bestName = "";
+   var bestScore = 0;
+   var bestProp = {};
+   
+   for (var r of resources) {
+     const msClient = new VIAM.MovementSensorClient(client, r.name);
+     var prop = await msClient.getProperties();
+
+     var score = 0;
+     if (prop.positionSupported) {
+       score++;
+     }
+     if (prop.linearVelocitySupported) {
+       score++;
+     }
+     if (prop.compassHeadingSupported) {
+       score++;
+     }
+
+     if (score > bestScore) {
+       bestName = r.name;
+       bestScore = score;
+       bestProp = prop;
+     }
+   }
+   
+   globalConfig.movementSensorName = bestName;
+   globalConfig.movementSensorProps = bestProp;
  }
  
  async function updateAndLoop() {
@@ -512,31 +621,39 @@
         {/if}
       </td>
       <td id="navData">
-        <div class="data" >
-          <div>Speed knots</div>
-          {globalData.speed.toFixed(2)}
-        </div>
-        <div class="data" >
-          <div>Depth ft</div>
-          {globalData.depth.toFixed(2)}
-        </div>
-        <div class="data" >
-          <div>Water Temp (f)</div>
-          {globalData.temp.toFixed(2)} f
-        </div>
+        {#if globalConfig.movementSensorProps.linearVelocitySupported}
+          <div class="data" >
+            <div>Speed knots</div>
+            {globalData.speed.toFixed(2)}
+          </div>
+        {/if}
+        {#if globalConfig.depthSensorName != ""}
+          <div class="data" >
+            <div>Depth ft</div>
+            {globalData.depth.toFixed(2)}
+          </div>
+        {/if}
+        {#if globalConfig.seatempSensorName != ""}
+          <div class="data" >
+            <div>Water Temp (f)</div>
+            {globalData.temp.toFixed(2)} f
+          </div>
+        {/if}
         <div class="data" >
           <div>Location</div>
           {@html globalData.pos.format(gpsFormatter)}
         </div>
-        <div class="data" >
-          <div>Heading</div>
-          {@html globalData.heading}
-        </div>
+        {#if globalConfig.movementSensorProps.compassHeadingSupported}
+          <div class="data" >
+            <div>Heading</div>
+            {@html globalData.heading}
+          </div>
+        {/if}
         <table class="gauge">
           {#each gaugesToArray(globalData.gauges) as [key, value]}
             <tr>
               <th>{key}</th>
-              <td>{value.Level} %</td>
+              <td>{value.Level.toFixed(0)} %</td>
               <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)} g</td>
             </tr>
           {/each}
