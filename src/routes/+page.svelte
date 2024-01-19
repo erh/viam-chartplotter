@@ -197,7 +197,10 @@
    if (globalConfig.depthSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.depthSensorName).getReadings().then((d) => {
        globalData.depth = d.Depth * 3.28084;
-     }).catch( errorHandler );
+     }).catch( (e) => {
+       globalConfig.depthSensorName = "";
+       errorHandler(e);
+     });
    }
    
    if (loopNumber % 30 == 2 ) {
@@ -408,9 +411,10 @@
        status = "connect failed: " + error;
        globalClient = null;
      }
+   } else if (globalClient.numUpdates % 300 == 0) {
+     await updateResources(globalClient);     
    }
 
-   
    var client = globalClient;
    
    if (client) {
