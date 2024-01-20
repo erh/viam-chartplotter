@@ -53,6 +53,9 @@
    cameraNames : [],
    
    numUpdates: 0,
+   status: "not connected yet",
+   lastData: new Date(),
+   
  };
 
  var globalConfig = {
@@ -64,17 +67,17 @@
    depthSensorName : "",
  };
  
- let status = "not connected yet";
- let map: Map = null;
- let view: View = null;
- let myBoatMarker: Feature = null;
- let aisFeatures = new Collection();
- let lastData = new Date();
- 
- let mapHelpers = {
-   inPanMode: false,
-   lastZoom: 0,
-   lastCenter: null,
+ let mapGlobal = {
+
+   map: null,
+   view: null,
+
+   aisFeatures: new Collection(),
+     myBoatMarker: null,
+     
+     inPanMode: false,
+     lastZoom: 0,
+     lastCenter: null,
  };
  
  function getTileUrlFunction(url, type, coordinates) {
@@ -96,17 +99,17 @@
  }
 
  function gotNewData() {
-   lastData = new Date();
+   globalData.lastData = new Date();
  }
  
  function errorHandler(e) {
    globalLogger.error(e);
    var s = e.toString();
-   status = "error: " + s;
+   globalData.status = "error: " + s;
 
    var reset = false;
 
-   var diff = new Date() - lastData;
+   var diff = new Date() - globalData.lastData;
 
    if (diff > 1000 * 30) {
      reset = true;
@@ -118,7 +121,7 @@
 
    if (reset && (new Date() - globalClientLastReset) > 1000 * 30) {
      globalLogger.warn("Forcing reconnect b/c session_expired");
-     status = "forcing reconnect b/c of error: " + e.toString();
+     globalData.status = "forcing reconnect b/c of error: " + e.toString();
      globalClient = null;
      globalClientLastReset = new Date();
    }
@@ -133,48 +136,48 @@
  }
 
  function stopPanning() {
-   mapHelpers.lastZoom = 0;
-   mapHelpers.lastCenter = [0,0];
-   mapHelpers.inPanMode = false;
+   mapGlobal.lastZoom = 0;
+   mapGlobal.lastCenter = [0,0];
+   mapGlobal.inPanMode = false;
  }
  
  function doUpdate(loopNumber: int, client: VIAM.RobotClient){
    const msClient = new VIAM.MovementSensorClient(client, globalConfig.movementSensorName);
    
    msClient.getPosition().then((p) => {
-     mapHelpers.inGetPositionHelper = true;
+     mapGlobal.inGetPositionHelper = true;
      gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
 
 
-     if (mapHelpers.lastZoom > 0 && mapHelpers.lastCenter != null && mapHelpers.lastCenter[0] != 0 ) {
-       var z = view.getZoom();
-       if (z != mapHelpers.lastZoom) {
-         mapHelpers.inPanMode = true;
+     if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
+       var z = mapGlobal.view.getZoom();
+       if (z != mapGlobal.lastZoom) {
+         mapGlobal.inPanMode = true;
        }
 
-       var c = view.getCenter();
-       var diff = pointDiff(c, mapHelpers.lastCenter);
+       var c = mapGlobal.view.getCenter();
+       var diff = pointDiff(c, mapGlobal.lastCenter);
        if (diff > .003) {
-         mapHelpers.inPanMode = true;
+         mapGlobal.inPanMode = true;
        }
      }
 
      
-     if (!mapHelpers.inPanMode) {
-       var sz = map.getSize();
+     if (!mapGlobal.inPanMode) {
+       var sz = mapGlobal.map.getSize();
        var pp = [globalData.pos.lng, globalData.pos.lat];
-       view.centerOn(pp, map.getSize(), [sz[0]/2,sz[1]/2]);
+       mapGlobal.view.centerOn(pp, mapGlobal.map.getSize(), [sz[0]/2,sz[1]/2]);
        
-       myBoatMarker.setGeometry(new Point(pp));
+       mapGlobal.myBoatMarker.setGeometry(new Point(pp));
        
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
        var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5));
-       view.setZoom(zoom);
+       mapGlobal.view.setZoom(zoom);
 
-       mapHelpers.lastZoom = zoom;
-       mapHelpers.lastCenter = pp;
+       mapGlobal.lastZoom = zoom;
+       mapGlobal.lastCenter = pp;
      }
      
    }).catch(errorHandler);
@@ -237,8 +240,8 @@
            
            var found = false;
            
-           for (var i = 0; i < aisFeatures.getLength(); i++) {
-             var v = aisFeatures.item(i);
+           for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
+             var v = mapGlobal.aisFeatures.item(i);
              if (v.get("mmsi") == mmsi) {
                found = true;
                v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
@@ -250,7 +253,7 @@
              continue;
            }
            
-           aisFeatures.push(new Feature({
+           mapGlobal.aisFeatures.push(new Feature({
              type: "ais",
              mmsi: mmsi,
              heading: boat.Heading,
@@ -258,11 +261,11 @@
            }));
          }
          
-         for (var i = 0; i < aisFeatures.getLength(); i++) {
-           var v = aisFeatures.item(i);
+         for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
+           var v = mapGlobal.aisFeatures.item(i);
            var mmsi = v.get("mmsi");
            if (!good[mmsi]) {
-             aisFeatures.removeAt(i);
+             mapGlobal.aisFeatures.removeAt(i);
            }
          }
          
@@ -277,12 +280,8 @@
    if (loopNumber % 10 > 0) {
      return;
    }
-
-   globalData.allResources.forEach( (r) => {
-     if (r.subtype != "camera") {
-       return;
-     }
-
+   
+   filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
      if (globalData.cameraNames.indexOf(r.name) < 0) {
        globalData.cameraNames.push(r.name);
        globalData.cameraNames.sort();
@@ -408,7 +407,7 @@
        await updateResources(globalClient);
        
      } catch(error) {
-       status = "connect failed: " + error;
+       globalData.status = "connect failed: " + error;
        globalClient = null;
      }
    } else if (globalClient.numUpdates % 300 == 0) {
@@ -448,7 +447,7 @@
      reconnectMaxWait: 5000,
    });
 
-   status = "connected";
+   globalData.status = "connected";
    
    globalLogger.info('connected!');
    
@@ -459,12 +458,12 @@
  }
 
  async function disconnected(event) {
-   status = "disconnected";
+   globalData.status = "disconnected";
    globalLogger.warn('The robot has been disconnected. Trying reconnect...');
  }
 
  async function reconnected(event) {
-   status = "connected";
+   globalData.status = "connected";
    globalLogger.warn('The robot has been reconnected. Work can be continued.');
  }
 
@@ -485,7 +484,7 @@
 
    useGeographic();
    
-   view = new View({
+   mapGlobal.view = new View({
      center: [0, 0],
      zoom: 15
    });
@@ -549,14 +548,14 @@
      }));
    }
 
-   myBoatMarker = new Feature({
+   mapGlobal.myBoatMarker = new Feature({
      type: 'geoMarker',
      header: 0,
      geometry: new Point([0,0]),
    });
 
    var myBoatFeatures = new Collection();
-   myBoatFeatures.push(myBoatMarker);
+   myBoatFeatures.push(mapGlobal.myBoatMarker);
    
    var myBoatLayer = new Vector({
      source: new VectorSource({
@@ -581,7 +580,7 @@
 
    var aisLayer = new Vector({
      source: new VectorSource({
-       features: aisFeatures,
+       features: mapGlobal.aisFeatures,
      }),
      style: function (feature) {
 
@@ -605,10 +604,10 @@
    });
    layers.push(aisLayer);
    
-   map = new Map({
+   mapGlobal.map = new Map({
      target: 'map',
      layers: layers,
-     view: view
+     view: mapGlobal.view
    });
  }
 
@@ -632,12 +631,12 @@
 <div>
   <table border="1">
     <tr>
-      <th colspan="2">{status}</th>
+      <th colspan="2">{globalData.status}</th>
     </tr>
     <tr>
       <td>
         <div id="map"></div>
-        {#if mapHelpers.inPanMode}
+        {#if mapGlobal.inPanMode}
           <button on:click="{stopPanning}">Stop Panning</button>
         {/if}
       </td>
