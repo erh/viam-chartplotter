@@ -73,11 +73,14 @@
    view: null,
 
    aisFeatures: new Collection(),
-     myBoatMarker: null,
-     
-     inPanMode: false,
-     lastZoom: 0,
-     lastCenter: null,
+   myBoatMarker: null,
+   
+   inPanMode: false,
+   lastZoom: 0,
+   lastCenter: null,
+
+   layerOptions: [],
+   onLayers: new Collection(),
  };
  
  function getTileUrlFunction(url, type, coordinates) {
@@ -479,31 +482,25 @@
    }
  }
 
- function setupMap() {
-   
-
-   useGeographic();
-   
-   mapGlobal.view = new View({
-     center: [0, 0],
-     zoom: 15
-   });
-
-   var layers = [];
+ function setupLayers() {
 
    // core open stream maps
-   if (true) {
-     layers.push(new TileLayer({
+   mapGlobal.layerOptions.push( {
+     name : "open stream map",
+     on : true,
+     layer : new TileLayer({
        opacity: .5,
        source: new XYZ({
          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
        })
-     }));
-   }
+     }),
+   })
    
    // depth data
-   if (true) {
-     layers.push(new TileLayer({
+   mapGlobal.layerOptions.push({
+     name: "depth",
+     on: true,
+     layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
          url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
@@ -512,12 +509,14 @@
          serverType: 'geoserver',
          hidpi: false,
        }),
-     }));
-   }
+     }),
+   })
    
    // harbors
-   if (true) {
-     var layer_seamark = new TileLayer({
+   mapGlobal.layerOptions.push({
+     name: "seamark",
+     on: true,
+     layer : new TileLayer({
        visible: true,
        maxZom: 19,
        source: new XYZ({
@@ -531,12 +530,13 @@
          cookieKey: "SeamarkLayerVisible",
          checkboxId: "checkLayerSeamark",
        }
-     });
-     layers.push(layer_seamark);
-   }
-
-   if (false) {
-     layers.push(new TileLayer({
+     }),
+   });
+   
+   mapGlobal.layerOptions.push({
+     name: "noaa",
+     on: false,
+     layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
@@ -545,15 +545,16 @@
          //serverType: 'geoserver',
          //hidpi: false,
        }),
-     }));
-   }
+     }),
+   })
 
+   // by boat setup
    mapGlobal.myBoatMarker = new Feature({
      type: 'geoMarker',
      header: 0,
      geometry: new Point([0,0]),
    });
-
+   
    var myBoatFeatures = new Collection();
    myBoatFeatures.push(mapGlobal.myBoatMarker);
    
@@ -562,10 +563,10 @@
        features: myBoatFeatures,
      }),
      style: function (feature) {
-
+       
        var scale = 0.6;
        var rotation = (globalData.heading / 360) * Math.PI * 2;
-
+       
        return new Style({
          image: new Icon(
            {
@@ -576,8 +577,12 @@
        });
      },
    });
-   layers.push(myBoatLayer);
-
+   mapGlobal.layerOptions.push({
+     name: "boat",
+     on: true,
+     layer : myBoatLayer,
+   });
+   
    var aisLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.aisFeatures,
@@ -602,11 +607,37 @@
        });
      },
    });
-   layers.push(aisLayer);
+
+   mapGlobal.layerOptions.push({
+     name: "ais",
+     on: true,
+     layer : aisLayer,
+   });
+   
+ }
+
+ function updateOnLayers() {
+   for( var l of mapGlobal.layerOptions) {
+     if (l.on) {
+       mapGlobal.onLayers.push(l.layer);
+     }
+   }
+ }
+ 
+ function setupMap() {
+   useGeographic();
+   setupLayers();
+   
+   mapGlobal.view = new View({
+     center: [0, 0],
+     zoom: 15
+   });
+
+   updateOnLayers();
    
    mapGlobal.map = new Map({
      target: 'map',
-     layers: layers,
+     layers: mapGlobal.onLayers,
      view: mapGlobal.view
    });
  }
