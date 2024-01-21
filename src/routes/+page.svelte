@@ -484,9 +484,9 @@
 
  function setupLayers() {
 
-   // core open stream maps
+   // core open street maps
    mapGlobal.layerOptions.push( {
-     name : "open stream map",
+     name : "open street map",
      on : true,
      layer : new TileLayer({
        opacity: .5,
@@ -616,11 +616,43 @@
    
  }
 
+ function findLayerByName(name) {
+   for( var l of mapGlobal.layerOptions) {
+     if (l.name == name) {
+       return l;
+     }
+   }
+   return null;
+ }
+
+ function findOnLayerIndexOfName(name) {
+   var l = findLayerByName(name);
+   if (l == null) {
+     return -2;
+   }
+
+   for ( var i=0; i<mapGlobal.onLayers.getLength(); i++) {
+     if (mapGlobal.onLayers.item(i).ol_uid == l.layer.ol_uid) {
+       return i;
+     }
+   }
+   return -1;
+ }
+   
  function updateOnLayers() {
    for( var l of mapGlobal.layerOptions) {
+     var idx = findOnLayerIndexOfName(l.name);
+
      if (l.on) {
-       mapGlobal.onLayers.push(l.layer);
+       if ( idx < 0 ) {
+         mapGlobal.onLayers.push(l.layer);
+       }
+     } else {
+       if ( idx >= 0 ) {
+         mapGlobal.onLayers.removeAt(idx);
+       }
      }
+     
    }
  }
  
@@ -633,6 +665,7 @@
      zoom: 15
    });
 
+   updateOnLayers();
    updateOnLayers();
    
    mapGlobal.map = new Map({
