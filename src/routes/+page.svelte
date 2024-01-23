@@ -417,6 +417,8 @@
      await updateResources(globalClient);     
    }
 
+   updateOnLayers();
+   
    var client = globalClient;
    
    if (client) {
@@ -703,6 +705,10 @@
         {#if mapGlobal.inPanMode}
           <button on:click="{stopPanning}">Stop Panning</button>
         {/if}
+        {#each mapGlobal.layerOptions as l, idx}
+          <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
+          {l.name}
+        {/each}
       </td>
       <td id="navData">
         {#if globalConfig.movementSensorProps.linearVelocitySupported}
