@@ -744,7 +744,8 @@
             <tr>
               <th>{key}</th>
               <td>{value.Level.toFixed(0)} %</td>
-              <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)} g</td>
+              <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
+              <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
             </tr>
           {/each}
         </table>
