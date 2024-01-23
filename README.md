@@ -3,8 +3,6 @@
 ## ToDo
 * display for what data old and restart
 * maps
-** layer selector
-** split ais data into own layer
 ** option for ais tracks and prediction
 ** COG / Heading for boat + ais
 * Camera - make streaming when fixed
