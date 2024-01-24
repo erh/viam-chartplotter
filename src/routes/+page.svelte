@@ -50,7 +50,9 @@
    gauges : {},
    
    allResources : [],
+
    cameraNames : [],
+   lastCameraTimes : [],
    
    numUpdates: 0,
    status: "not connected yet",
@@ -280,9 +282,22 @@
  }
 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
-   if (loopNumber % 10 > 0) {
-     return;
+
+   while (globalData.lastCameraTimes.length > 20){
+     globalData.lastCameraTimes.shift();
    }
+
+   if (globalData.lastCameraTimes.length > 0) {
+     var avg = globalData.lastCameraTimes.reduce( (a,b) => a + b) / globalData.lastCameraTimes.length;
+     var mod = Math.floor((avg * 20) / 1000);
+     
+     if (mod > 0 && loopNumber > 4 && loopNumber % mod > 0) {
+       return;
+     }
+     
+   }
+
+   var start = new Date();
    
    filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
      if (globalData.cameraNames.indexOf(r.name) < 0) {
@@ -292,6 +307,8 @@
 
      new VIAM.CameraClient(client, r.name).getImage().then(
        function(img){
+         var ms = (new Date()) - start;
+         globalData.lastCameraTimes.push(ms);
          var i = document.getElementById(r.name);
          if (i) {
            i.src = URL.createObjectURL(new Blob([img]));
