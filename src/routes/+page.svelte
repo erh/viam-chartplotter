@@ -50,6 +50,7 @@
    depth : 0.0,
    heading: 0.0,
    gauges : {},
+   gaugesToHistorical : {},
    
    allResources : [],
 
@@ -446,6 +447,9 @@
    }
 
    setTimeout(updateAndLoop, 1000);
+   if (globalData.numUpdates == 1) {
+     setTimeout(updateCloudDataAndLoop, 1000);
+   }
  }
 
  async function updateCloudDataAndLoop() {
@@ -471,24 +475,39 @@
    
    if (globalCloudClient) {
      var dc = globalCloudClient.dataClient;
-     console.log(globalCloudClient);
-     console.log(dc);
 
      var hostPieces = urlParams.get("host").split("."); // TODO - fix
-     
+     var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
+     var location = hostPieces[1]; // TODO - fix
+
+     updateGaugeGraphs(globalCloudClient.dataClient, robotName, location);
+   }
+
+   setTimeout(updateCloudDataAndLoop, 1000);
+ }
+
+ async function updateGaugeGraphs(dc, robotName, location) {
+   for ( var g in globalData.gauges ) {
+     console.log(g);
+     var h = globalData.gaugesToHistorical[g];
+     if (h && (new Date() - h.ts) < 60000) {
+       continue;
+     }
+
      var f = dc.createFilter({
-       robotName: hostPieces[0].split("-main")[0], // TODO - fix
-       locationIdsList: [hostPieces[1]], // TODO - fix
+       robotName: robotName,
+       locationIdsList: [location],
        startTime: new Date(new Date() - 86400 * 1000),
-       componentName: "freshwater",
+       componentName: g,
      });
      console.log(f);
-
+     
      var data = await dc.tabularDataByFilter(f);
-     console.log(data);
+
+     h = { ts : new Date(), data : data };
+     globalData.gaugesToHistorical[g] = h;
+     
    }
-   
-   setTimeout(updateCloudDataAndLoop, 60 * 1000); // once a minute
  }
  
  async function connect(): VIAM.RobotClient {
@@ -540,7 +559,7 @@
    try {
      setupMap();
      updateAndLoop();
-     updateCloudDataAndLoop();
+     
      return {}     
    } catch (error) {
      errorHandler(error);
@@ -809,6 +828,7 @@
               <td>{value.Level.toFixed(0)} %</td>
               <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
               <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
+              <td>{globalData.gaugesToHistorical[key]}</td>
             </tr>
           {/each}
         </table>
