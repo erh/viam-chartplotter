@@ -782,7 +782,7 @@
    var res = {};
    for (var d in data.data) {
      var dd = data.data[d];
-     res[d] = dd.data.readings.Level;
+     res[dd.timeReceived.toISOString()] = dd.data.readings.Level;
    }
    return res;
  }
@@ -847,8 +847,15 @@
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     width="100"
                     heigh="30"
+                    type="line"
                     scaleMax=100
+                    linked="{key}"
+                    uid="{key}"
                   />
+                  <div style="position: absolute;">
+                    <LinkedValue uid="{key}"/>
+                    <LinkedLabel linked="{key}"/>
+                  </div>
                 </td>
               {/if}
             </tr>
