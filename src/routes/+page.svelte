@@ -505,7 +505,7 @@
        startTime: new Date(new Date() - 86400 * 1000),
        componentName: g,
      });
-     
+
      var data = await dc.tabularDataByFilter(f);
 
      h = { ts : new Date(), data : data };
@@ -765,6 +765,11 @@
 
  onMount(start);
 
+ function formatDate(date) {
+   return (date.getMonth()+1) + "/" + date.getDate() + "-" + date.getHours() + ":" + date.getMinutes();
+ }
+
+ 
  function gaugesToArray(gauges) {
    var names = Object.keys(gauges);
    names.sort();
@@ -782,7 +787,7 @@
    var res = {};
    for (var d in data.data) {
      var dd = data.data[d];
-     res[dd.timeReceived.toISOString()] = dd.data.readings.Level;
+     res[formatDate(dd.timeReceived)] = dd.data.readings.Level;
    }
    return res;
  }
@@ -846,14 +851,14 @@
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     width="100"
-                    heigh="30"
                     type="line"
                     scaleMax=100
                     linked="{key}"
                     uid="{key}"
+                    barMinWidth="1"
                   />
                   <div style="position: absolute;">
-                    <LinkedValue uid="{key}"/>
+                    <LinkedValue uid="{key}" />
                     <LinkedLabel linked="{key}"/>
                   </div>
                 </td>
