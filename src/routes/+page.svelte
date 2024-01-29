@@ -19,6 +19,12 @@
  import {Vector, Tile} from 'ol/layer.js';
 
  import {
+   LinkedChart,
+   LinkedLabel,
+   LinkedValue
+ } from "svelte-tiny-linked-charts"
+
+ import {
    Circle as CircleStyle,
    Fill,
    Icon,
@@ -376,7 +382,7 @@
    }
 
  }
-  
+ 
  async function setupDepthSensor(client: VIAM.RobotClient, resources) {
    resources = filterResources(resources, "component", "sensor", /depth/);
 
@@ -488,7 +494,6 @@
 
  async function updateGaugeGraphs(dc, robotName, location) {
    for ( var g in globalData.gauges ) {
-     console.log(g);
      var h = globalData.gaugesToHistorical[g];
      if (h && (new Date() - h.ts) < 60000) {
        continue;
@@ -500,7 +505,6 @@
        startTime: new Date(new Date() - 86400 * 1000),
        componentName: g,
      });
-     console.log(f);
      
      var data = await dc.tabularDataByFilter(f);
 
@@ -722,7 +726,7 @@
    }
    return -1;
  }
-   
+ 
  function updateOnLayers() {
    for( var l of mapGlobal.layerOptions) {
      var idx = findOnLayerIndexOfName(l.name);
@@ -773,6 +777,15 @@
    }
    return a;
  }
+
+ function gauageHistoricalToLinkedChart(data) {
+   var res = {};
+   for (var d in data.data) {
+     var dd = data.data[d];
+     res[d] = dd.data.readings.Level;
+   }
+   return res;
+ }
 </script>
 
 
@@ -821,14 +834,23 @@
             {@html globalData.heading}
           </div>
         {/if}
-        <table class="gauge">
+        <table class="gauge" border="1">
           {#each gaugesToArray(globalData.gauges) as [key, value]}
             <tr>
               <th>{key}</th>
               <td>{value.Level.toFixed(0)} %</td>
               <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
               <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
-              <td>{globalData.gaugesToHistorical[key]}</td>
+              {#if globalData.gaugesToHistorical[key]}
+                <td>
+                  <LinkedChart
+                    data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
+                    width="100"
+                    heigh="30"
+                    scaleMax=100
+                  />
+                </td>
+              {/if}
             </tr>
           {/each}
         </table>

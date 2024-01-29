@@ -16,3 +16,7 @@
 .data div {
     font-size: .5em;
 }
+
+.gauge td {
+    white-space: nowrap;
+}
