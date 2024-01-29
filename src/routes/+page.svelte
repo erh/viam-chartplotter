@@ -40,6 +40,8 @@
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
  let globalClientLastReset = new Date();
+
+ let globalCloudClient: VIAM.ViamClient;
  
  let globalData = {
    pos : new Coordinate(0,0),
@@ -425,7 +427,7 @@
      try {
        globalClient = await connect();
        await updateResources(globalClient);
-       
+
      } catch(error) {
        globalData.status = "connect failed: " + error;
        globalClient = null;
@@ -446,6 +448,49 @@
    setTimeout(updateAndLoop, 1000);
  }
 
+ async function updateCloudDataAndLoop() {
+   const urlParams = new URLSearchParams(window.location.search);
+   
+   if (!globalCloudClient) {
+     try {
+       
+       const opts: VIAM.ViamClientOptions = {
+         credential: {
+           type: 'api-key',
+           authEntity: urlParams.get("authEntity"),
+           payload: urlParams.get("api-key"),
+         },
+       };
+       
+       globalCloudClient = await VIAM.createViamClient(opts);
+       
+     } catch( error ) {
+       console.log("cannot connect to cloud: " + error);
+     }
+   }
+   
+   if (globalCloudClient) {
+     var dc = globalCloudClient.dataClient;
+     console.log(globalCloudClient);
+     console.log(dc);
+
+     var hostPieces = urlParams.get("host").split("."); // TODO - fix
+     
+     var f = dc.createFilter({
+       robotName: hostPieces[0].split("-main")[0], // TODO - fix
+       locationIdsList: [hostPieces[1]], // TODO - fix
+       startTime: new Date(new Date() - 86400 * 1000),
+       componentName: "freshwater",
+     });
+     console.log(f);
+
+     var data = await dc.tabularDataByFilter(f);
+     console.log(data);
+   }
+   
+   setTimeout(updateCloudDataAndLoop, 60 * 1000); // once a minute
+ }
+ 
  async function connect(): VIAM.RobotClient {
    const urlParams = new URLSearchParams(window.location.search);
    
@@ -495,6 +540,7 @@
    try {
      setupMap();
      updateAndLoop();
+     updateCloudDataAndLoop();
      return {}     
    } catch (error) {
      errorHandler(error);
