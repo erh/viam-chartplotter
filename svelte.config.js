@@ -19,7 +19,9 @@ const config = {
             base: process.env.NODE_ENV === 'production' ? '/viam-chartplotter' : '',
         }
 
-	}
+	},
+
+  postbuild: `tailwindcss -i ./src/app.css -o ./src/output.css` 
 };
 
 export default config;

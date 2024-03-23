@@ -1,5 +1,5 @@
 <script lang="ts">
- import '../app.css'
+ import '../output.css'
  import { onMount } from 'svelte';
 
  import { Logger } from "tslog";
