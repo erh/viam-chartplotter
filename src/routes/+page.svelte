@@ -797,7 +797,22 @@
 
 
 <main class="w-dvw h-dvh p-2 grid grid-cols-4 grid-rows-6 gap-2">
-  <div id="map" class="h-fit col-span-3 row-span-5 border border-light"></div>
+  <div class="relative col-span-3 row-span-5 border border-light">
+    <div id="map" class="h-fit"></div>
+    <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full bg-white/65 p-4">
+      {#if mapGlobal.inPanMode}
+      <div>
+        <button on:click="{stopPanning}">Stop Panning</button>
+      </div>
+      {/if}
+      {#each mapGlobal.layerOptions as l, idx}
+      <div>
+        <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
+        {l.name}
+      </div>
+      {/each}
+    </div>
+  </div>
 
   <aside class="row-span-6 border border-light p-1 bg-white min-h-full">
     {#if globalData.status === "Connected"}
@@ -832,13 +847,13 @@
     <tr>
       <td>
         <!-- <div id="map"></div> -->
-        {#if mapGlobal.inPanMode}
+        <!-- {#if mapGlobal.inPanMode}
           <button on:click="{stopPanning}">Stop Panning</button>
         {/if}
         {#each mapGlobal.layerOptions as l, idx}
           <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
           {l.name}
-        {/each}
+        {/each} -->
       </td>
       <td id="navData">
         {#if globalConfig.movementSensorProps.linearVelocitySupported}
