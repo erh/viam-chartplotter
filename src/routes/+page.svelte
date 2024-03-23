@@ -2,6 +2,7 @@
  import '../output.css'
  import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
+ import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
  import { Logger } from "tslog";
  
@@ -65,7 +66,7 @@
    lastCameraTimes : [],
    
    numUpdates: 0,
-   status: "not connected yet",
+   status: "Not connected yet",
    lastData: new Date(),
    
  };
@@ -120,7 +121,7 @@
  function errorHandler(e) {
    globalLogger.error(e);
    var s = e.toString();
-   globalData.status = "error: " + s;
+   globalData.status = "Error: " + s;
 
    var reset = false;
 
@@ -136,7 +137,7 @@
 
    if (reset && (new Date() - globalClientLastReset) > 1000 * 30) {
      globalLogger.warn("Forcing reconnect b/c session_expired");
-     globalData.status = "forcing reconnect b/c of error: " + e.toString();
+     globalData.status = "Forcing reconnect b/c of error: " + e.toString();
      globalClient = null;
      globalClientLastReset = new Date();
    }
@@ -437,7 +438,7 @@
        await updateResources(globalClient);
 
      } catch(error) {
-       globalData.status = "connect failed: " + error;
+       globalData.status = "Connect failed: " + error;
        globalClient = null;
      }
    } else if (globalClient.numUpdates % 300 == 0) {
@@ -538,7 +539,7 @@
      reconnectMaxWait: 5000,
    });
 
-   globalData.status = "connected";
+   globalData.status = "Connected";
    
    globalLogger.info('connected!');
    
@@ -549,12 +550,12 @@
  }
 
  async function disconnected(event) {
-   globalData.status = "disconnected";
+   globalData.status = "Disconnected";
    globalLogger.warn('The robot has been disconnected. Trying reconnect...');
  }
 
  async function reconnected(event) {
-   globalData.status = "connected";
+   globalData.status = "Connected";
    globalLogger.warn('The robot has been reconnected. Work can be continued.');
  }
 
@@ -794,6 +795,36 @@
  }
 </script>
 
+
+<div class="w-full h-full grid grid-cols-3 gap-2">
+  <div class="col-span-2">
+    map
+  </div>
+
+  <aside>
+    {#if globalData.status === "Connected"}
+      <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
+        <PrimeIcon
+          name="broadcast"
+          cx="text-success-dark"
+        />
+        <div class="text-sm text-success-dark">{globalData.status}</div>
+      </div>
+    {:else}
+    <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-info-medium bg-info-light">
+      <PrimeIcon
+        name="broadcast-off"
+        cx="text-info-dark"
+      />
+      <div class="text-sm text-info-dark">{globalData.status}</div>
+    </div>
+    {/if}
+  </aside>
+
+  <div class="col-span-3">
+    Feeds
+  </div>
+</div>
 
 <div>
   <table border="1">
