@@ -1,5 +1,6 @@
 <script lang="ts">
  import '../output.css'
+ import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
 
  import { Logger } from "tslog";
