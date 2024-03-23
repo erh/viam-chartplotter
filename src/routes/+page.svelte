@@ -796,12 +796,10 @@
 </script>
 
 
-<div class="w-full h-full grid grid-cols-3 gap-2">
-  <div class="col-span-2">
-    map
-  </div>
+<main class="w-dvw h-dvh p-2 grid grid-cols-4 grid-rows-6 gap-2">
+  <div id="map" class="h-fit col-span-3 row-span-5 border border-light"></div>
 
-  <aside>
+  <aside class="row-span-6 border border-light p-1 bg-white min-h-full">
     {#if globalData.status === "Connected"}
       <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
         <PrimeIcon
@@ -821,19 +819,19 @@
     {/if}
   </aside>
 
-  <div class="col-span-3">
+  <div class="col-span-3 border border-light p-1 bg-white">
     Feeds
   </div>
-</div>
+</main>
 
-<div>
+<div class="mt-24">
   <table border="1">
-    <tr>
+    <!-- <tr>
       <th colspan="2">{globalData.status}</th>
-    </tr>
+    </tr> -->
     <tr>
       <td>
-        <div id="map"></div>
+        <!-- <div id="map"></div> -->
         {#if mapGlobal.inPanMode}
           <button on:click="{stopPanning}">Stop Panning</button>
         {/if}

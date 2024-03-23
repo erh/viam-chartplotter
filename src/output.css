@@ -719,6 +719,26 @@ video {
   grid-column: span 3 / span 3;
 }
 
+.row-span-2 {
+  grid-row: span 2 / span 2;
+}
+
+.row-span-3 {
+  grid-row: span 3 / span 3;
+}
+
+.row-span-4 {
+  grid-row: span 4 / span 4;
+}
+
+.row-span-5 {
+  grid-row: span 5 / span 5;
+}
+
+.row-span-6 {
+  grid-row: span 6 / span 6;
+}
+
 .m-0 {
   margin: 0px;
 }
@@ -797,6 +817,10 @@ video {
 
 .mt-2 {
   margin-top: 0.5rem;
+}
+
+.mt-24 {
+  margin-top: 6rem;
 }
 
 .mt-6 {
@@ -915,6 +939,10 @@ video {
   height: calc(100% + 2px);
 }
 
+.h-dvh {
+  height: 100dvh;
+}
+
 .h-fit {
   height: -moz-fit-content;
   height: fit-content;
@@ -940,6 +968,10 @@ video {
   max-height: 600px;
 }
 
+.min-h-6 {
+  min-height: 1.5rem;
+}
+
 .min-h-\[400px\] {
   min-height: 400px;
 }
@@ -948,8 +980,8 @@ video {
   min-height: 4px;
 }
 
-.min-h-6 {
-  min-height: 1.5rem;
+.min-h-full {
+  min-height: 100%;
 }
 
 .w-1 {
@@ -1024,6 +1056,10 @@ video {
   width: 8.5px;
 }
 
+.w-dvw {
+  width: 100dvw;
+}
+
 .w-full {
   width: 100%;
 }
@@ -1039,11 +1075,6 @@ video {
 
 .w-screen {
   width: 100vw;
-}
-
-.w-fit {
-  width: -moz-fit-content;
-  width: fit-content;
 }
 
 .max-w-\[250px\] {
@@ -1185,6 +1216,26 @@ video {
   grid-template-columns: 3rem 1fr;
 }
 
+.grid-cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.grid-rows-2 {
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.grid-rows-4 {
+  grid-template-rows: repeat(4, minmax(0, 1fr));
+}
+
+.grid-rows-3 {
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+}
+
+.grid-rows-6 {
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+}
+
 .flex-col {
   flex-direction: column;
 }
@@ -1316,6 +1367,11 @@ video {
 .border-black {
   --tw-border-opacity: 1;
   border-color: rgb(19 20 20 / var(--tw-border-opacity));
+}
+
+.border-cyan-600 {
+  --tw-border-opacity: 1;
+  border-color: rgb(8 145 178 / var(--tw-border-opacity));
 }
 
 .border-danger-dark {
@@ -1577,6 +1633,10 @@ video {
 
 .p-0 {
   padding: 0px;
+}
+
+.p-1 {
+  padding: 0.25rem;
 }
 
 .p-2 {
@@ -1857,11 +1917,6 @@ video {
 .text-white {
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity));
-}
-
-.text-success-light {
-  --tw-text-opacity: 1;
-  color: rgb(224 250 227 / var(--tw-text-opacity));
 }
 
 .caret-transparent {
@@ -2198,8 +2253,8 @@ video {
 }
 
 #map {
-  width: 50em;
-  height: 30em;
+  width: 100%;
+  height: 100%;
 }
 
 .data {
