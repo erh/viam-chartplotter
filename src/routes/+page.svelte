@@ -814,7 +814,7 @@
     </div>
   </div>
 
-  <aside class="row-span-6 border border-light p-1 bg-white min-h-full">
+  <aside class="row-span-6 flex flex-col gap-4 border border-light p-1 bg-white min-h-full">
     {#if globalData.status === "Connected"}
       <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
         <PrimeIcon
@@ -862,97 +862,16 @@
           {@html globalData.heading}
         </div>
       {/if}
-      <table class="gauge" border="1">
+      <div class="flex flex-col divide-y">
         {#each gaugesToArray(globalData.gauges) as [key, value]}
-          <tr>
-            <th>{key}</th>
-            <td>{value.Level.toFixed(0)} %</td>
-            <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
-            <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
-            {#if globalData.gaugesToHistorical[key]}
-              <td>
-                <LinkedChart
-                  data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
-                  width="100"
-                  type="line"
-                  scaleMax=100
-                  linked="{key}"
-                  uid="{key}"
-                  barMinWidth="1"
-                />
-                <div style="position: absolute;">
-                  <LinkedValue uid="{key}" />
-                  <LinkedLabel linked="{key}"/>
-                </div>
-              </td>
-            {/if}
-          </tr>
-        {/each}
-      </table>
-    </div>
-  </aside>
-
-  <div class="flex col-span-3 border border-light p-1 bg-white">
-    {#each globalData.cameraNames as name, index}
-      <img id="{name}" width="250" alt="{name}" />
-    {/each}
-  </div>
-</main>
-
-<div class="mt-24">
-  <table border="1">
-    <!-- <tr>
-      <th colspan="2">{globalData.status}</th>
-    </tr> -->
-    <tr>
-      <td>
-        <!-- <div id="map"></div> -->
-        <!-- {#if mapGlobal.inPanMode}
-          <button on:click="{stopPanning}">Stop Panning</button>
-        {/if}
-        {#each mapGlobal.layerOptions as l, idx}
-          <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
-          {l.name}
-        {/each} -->
-      </td>
-      <td id="navData">
-        <!-- {#if globalConfig.movementSensorProps.linearVelocitySupported}
-          <div class="data" >
-            <div>Speed knots</div>
-            {globalData.speed.toFixed(2)}
-          </div>
-        {/if}
-        {#if globalConfig.depthSensorName != ""}
-          <div class="data" >
-            <div>Depth ft</div>
-            {globalData.depth.toFixed(2)}
-          </div>
-        {/if}
-        {#if globalConfig.seatempSensorName != ""}
-          <div class="data" >
-            <div>Water Temp (f)</div>
-            {globalData.temp.toFixed(2)} f
-          </div>
-        {/if}
-        <div class="data" >
-          <div>Location</div>
-          {@html globalData.pos.format(gpsFormatter)}
-        </div>
-        {#if globalConfig.movementSensorProps.compassHeadingSupported}
-          <div class="data" >
-            <div>Heading</div>
-            {@html globalData.heading}
-          </div>
-        {/if}
-        <table class="gauge" border="1">
-          {#each gaugesToArray(globalData.gauges) as [key, value]}
-            <tr>
-              <th>{key}</th>
-              <td>{value.Level.toFixed(0)} %</td>
-              <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
-              <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
+          <section>
+            <h2>{key}</h2>
+            <div class="flex gap-1">
+              <div>{value.Level.toFixed(0)} %</div>
+              <div>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</div>
+              <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
               {#if globalData.gaugesToHistorical[key]}
-                <td>
+                <div>
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     width="100"
@@ -966,21 +885,20 @@
                     <LinkedValue uid="{key}" />
                     <LinkedLabel linked="{key}"/>
                   </div>
-                </td>
-              {/if}
-            </tr>
-          {/each}
-        </table> -->
-      </td>
-    </tr>
-    <tr>
-      <td colspan="2">
-        <!-- {#each globalData.cameraNames as name, index}
-          <img id="{name}" width="250" alt="{name}" />
-        {/each} -->
-      </td>
-    </tr>
-  </table>
-</div>
-        
-<small>{globalData.numUpdates}</small>
+                </div>
+              {/if}  
+            </div>
+          </section>
+        {/each}
+      </div>
+    </div>
+
+    <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
+  </aside>
+
+  <div class="overflow-x-auto flex col-span-3 border border-light p-1 bg-white">
+    {#each globalData.cameraNames as name, index}
+      <img id="{name}" width="250" alt="{name}" />
+    {/each}
+  </div>
+</main>
