@@ -2,23 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-#navData {
-    float: right;
-}
-
 #map {
     width: 100%;
     height: 100%;
-}
-
-.data {
-     border: 1px solid gray;
-     width: 10em;
-     font-size: 2em;
-}
-
-.data div {
-    font-size: .5em;
 }
 
 .gauge td {

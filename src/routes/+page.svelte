@@ -832,10 +832,70 @@
       <div class="text-sm text-info-dark">{globalData.status}</div>
     </div>
     {/if}
+
+    <div id="navData" class="flex flex-col divide-y">
+      {#if globalConfig.movementSensorProps.linearVelocitySupported}
+        <div>
+          <div>Speed knots</div>
+          {globalData.speed.toFixed(2)}
+        </div>
+      {/if}
+      {#if globalConfig.depthSensorName != ""}
+        <div>
+          <div>Depth ft</div>
+          {globalData.depth.toFixed(2)}
+        </div>
+      {/if}
+      {#if globalConfig.seatempSensorName != ""}
+        <div>
+          <div>Water Temp (f)</div>
+          {globalData.temp.toFixed(2)} f
+        </div>
+      {/if}
+      <div>
+        <div>Location</div>
+        {@html globalData.pos.format(gpsFormatter)}
+      </div>
+      {#if globalConfig.movementSensorProps.compassHeadingSupported}
+        <div>
+          <div>Heading</div>
+          {@html globalData.heading}
+        </div>
+      {/if}
+      <table class="gauge" border="1">
+        {#each gaugesToArray(globalData.gauges) as [key, value]}
+          <tr>
+            <th>{key}</th>
+            <td>{value.Level.toFixed(0)} %</td>
+            <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
+            <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
+            {#if globalData.gaugesToHistorical[key]}
+              <td>
+                <LinkedChart
+                  data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
+                  width="100"
+                  type="line"
+                  scaleMax=100
+                  linked="{key}"
+                  uid="{key}"
+                  barMinWidth="1"
+                />
+                <div style="position: absolute;">
+                  <LinkedValue uid="{key}" />
+                  <LinkedLabel linked="{key}"/>
+                </div>
+              </td>
+            {/if}
+          </tr>
+        {/each}
+      </table>
+    </div>
   </aside>
 
-  <div class="col-span-3 border border-light p-1 bg-white">
-    Feeds
+  <div class="flex col-span-3 border border-light p-1 bg-white">
+    {#each globalData.cameraNames as name, index}
+      <img id="{name}" width="250" alt="{name}" />
+    {/each}
   </div>
 </main>
 
@@ -856,7 +916,7 @@
         {/each} -->
       </td>
       <td id="navData">
-        {#if globalConfig.movementSensorProps.linearVelocitySupported}
+        <!-- {#if globalConfig.movementSensorProps.linearVelocitySupported}
           <div class="data" >
             <div>Speed knots</div>
             {globalData.speed.toFixed(2)}
@@ -910,14 +970,14 @@
               {/if}
             </tr>
           {/each}
-        </table>
+        </table> -->
       </td>
     </tr>
     <tr>
       <td colspan="2">
-        {#each globalData.cameraNames as name, index}
+        <!-- {#each globalData.cameraNames as name, index}
           <img id="{name}" width="250" alt="{name}" />
-        {/each}
+        {/each} -->
       </td>
     </tr>
   </table>
