@@ -835,58 +835,76 @@
 
     <div id="navData" class="flex flex-col divide-y">
       {#if globalConfig.movementSensorProps.linearVelocitySupported}
-        <div>
-          <div>Speed knots</div>
-          {globalData.speed.toFixed(2)}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Speed</div>
+          <div>
+            <span class="font-bold">{globalData.speed.toFixed(2)}</span>
+            <sup>kn</sup>  
+          </div>
         </div>
       {/if}
       {#if globalConfig.depthSensorName != ""}
-        <div>
-          <div>Depth ft</div>
-          {globalData.depth.toFixed(2)}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Depth ft</div>
+          <div>
+            <span class="font-bold">{globalData.speed.toFixed(2)}</span>
+            <sup>kn</sup> 
+          </div>
         </div>
       {/if}
       {#if globalConfig.seatempSensorName != ""}
-        <div>
-          <div>Water Temp (f)</div>
-          {globalData.temp.toFixed(2)} f
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Water Temp (f)</div>
+          <div>
+            <span class="font-bold">{globalData.temp.toFixed(2)}</span>
+            <sup>f</sup>
+          </div>
         </div>
       {/if}
-      <div>
-        <div>Location</div>
-        {@html globalData.pos.format(gpsFormatter)}
+      <div class="flex gap-2 p-2 text-lg">
+        <div class="min-w-32">Location</div>
+        <span class="font-bold">{@html globalData.pos.format(gpsFormatter)}</span>
       </div>
       {#if globalConfig.movementSensorProps.compassHeadingSupported}
-        <div>
-          <div>Heading</div>
-          {@html globalData.heading}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Heading</div>
+          <div>
+            <span class="font-bold">{@html globalData.heading}</span>
+            <sup>kn</sup> 
+          </div>
         </div>
       {/if}
       <div class="flex flex-col divide-y">
         {#each gaugesToArray(globalData.gauges) as [key, value]}
-          <section>
-            <h2>{key}</h2>
-            <div class="flex gap-1">
-              <div>{value.Level.toFixed(0)} %</div>
-              <div>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</div>
-              <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
+          <section class="flex gap-2 p-2 text-lg">
+            <h2 class="min-w-32 capitalize">{key}</h2>
+            <div class="grow">
+              <div class="flex gap-1 font-bold">
+                <div>{value.Level.toFixed(0)} %</div>
+                <div>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</div>
+                <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
+              </div>
               {#if globalData.gaugesToHistorical[key]}
-                <div>
+              <div class="relative">
+                <div class="bg-light border-light p-1">
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
+                    style="width: 100%;"
                     width="100"
                     type="line"
                     scaleMax=100
                     linked="{key}"
                     uid="{key}"
                     barMinWidth="1"
+                    grow
                   />
-                  <div style="position: absolute;">
-                    <LinkedValue uid="{key}" />
-                    <LinkedLabel linked="{key}"/>
-                  </div>
                 </div>
-              {/if}  
+                <div class="bg-light p-1">
+                  <LinkedValue uid="{key}" />
+                  <LinkedLabel linked="{key}"/>
+                </div>
+              </div>
+            {/if}   
             </div>
           </section>
         {/each}
