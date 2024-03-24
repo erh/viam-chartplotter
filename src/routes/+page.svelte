@@ -845,16 +845,16 @@
       {/if}
       {#if globalConfig.depthSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Depth ft</div>
+          <div class="min-w-32">Depth</div>
           <div>
             <span class="font-bold">{globalData.speed.toFixed(2)}</span>
-            <sup>kn</sup> 
+            <sup>ft</sup> 
           </div>
         </div>
       {/if}
       {#if globalConfig.seatempSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Water Temp (f)</div>
+          <div class="min-w-32">Water Temp</div>
           <div>
             <span class="font-bold">{globalData.temp.toFixed(2)}</span>
             <sup>f</sup>
@@ -870,7 +870,6 @@
           <div class="min-w-32">Heading</div>
           <div>
             <span class="font-bold">{@html globalData.heading}</span>
-            <sup>kn</sup> 
           </div>
         </div>
       {/if}
