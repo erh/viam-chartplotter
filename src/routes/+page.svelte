@@ -1,6 +1,8 @@
 <script lang="ts">
- import '../app.css'
+ import '../output.css'
+ import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
+ import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
  import { Logger } from "tslog";
  
@@ -64,7 +66,7 @@
    lastCameraTimes : [],
    
    numUpdates: 0,
-   status: "not connected yet",
+   status: "Not connected yet",
    lastData: new Date(),
    
  };
@@ -119,7 +121,7 @@
  function errorHandler(e) {
    globalLogger.error(e);
    var s = e.toString();
-   globalData.status = "error: " + s;
+   globalData.status = "Error: " + s;
 
    var reset = false;
 
@@ -135,7 +137,7 @@
 
    if (reset && (new Date() - globalClientLastReset) > 1000 * 30) {
      globalLogger.warn("Forcing reconnect b/c session_expired");
-     globalData.status = "forcing reconnect b/c of error: " + e.toString();
+     globalData.status = "Forcing reconnect b/c of error: " + e.toString();
      globalClient = null;
      globalClientLastReset = new Date();
    }
@@ -436,7 +438,7 @@
        await updateResources(globalClient);
 
      } catch(error) {
-       globalData.status = "connect failed: " + error;
+       globalData.status = "Connect failed: " + error;
        globalClient = null;
      }
    } else if (globalClient.numUpdates % 300 == 0) {
@@ -537,7 +539,7 @@
      reconnectMaxWait: 5000,
    });
 
-   globalData.status = "connected";
+   globalData.status = "Connected";
    
    globalLogger.info('connected!');
    
@@ -548,12 +550,12 @@
  }
 
  async function disconnected(event) {
-   globalData.status = "disconnected";
+   globalData.status = "Disconnected";
    globalLogger.warn('The robot has been disconnected. Trying reconnect...');
  }
 
  async function reconnected(event) {
-   globalData.status = "connected";
+   globalData.status = "Connected";
    globalLogger.warn('The robot has been reconnected. Work can be continued.');
  }
 
@@ -794,88 +796,126 @@
 </script>
 
 
-<div>
-  <table border="1">
-    <tr>
-      <th colspan="2">{globalData.status}</th>
-    </tr>
-    <tr>
-      <td>
-        <div id="map"></div>
-        {#if mapGlobal.inPanMode}
-          <button on:click="{stopPanning}">Stop Panning</button>
-        {/if}
-        {#each mapGlobal.layerOptions as l, idx}
-          <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
-          {l.name}
-        {/each}
-      </td>
-      <td id="navData">
-        {#if globalConfig.movementSensorProps.linearVelocitySupported}
-          <div class="data" >
-            <div>Speed knots</div>
-            {globalData.speed.toFixed(2)}
+<main class="w-dvw h-dvh p-2 grid grid-cols-4 grid-rows-6 gap-2">
+  <div class="relative col-span-3 row-span-5 border border-light">
+    <div id="map" class="h-fit"></div>
+    <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full bg-white/65 p-4">
+      {#if mapGlobal.inPanMode}
+      <div>
+        <button on:click="{stopPanning}">Stop Panning</button>
+      </div>
+      {/if}
+      {#each mapGlobal.layerOptions as l, idx}
+      <div>
+        <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
+        {l.name}
+      </div>
+      {/each}
+    </div>
+  </div>
+
+  <aside class="row-span-6 flex flex-col gap-4 border border-light p-1 bg-white min-h-full">
+    {#if globalData.status === "Connected"}
+      <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
+        <PrimeIcon
+          name="broadcast"
+          cx="text-success-dark"
+        />
+        <div class="text-sm text-success-dark">{globalData.status}</div>
+      </div>
+    {:else}
+    <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-info-medium bg-info-light">
+      <PrimeIcon
+        name="broadcast-off"
+        cx="text-info-dark"
+      />
+      <div class="text-sm text-info-dark">{globalData.status}</div>
+    </div>
+    {/if}
+
+    <div id="navData" class="flex flex-col divide-y">
+      {#if globalConfig.movementSensorProps.linearVelocitySupported}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Speed</div>
+          <div>
+            <span class="font-bold">{globalData.speed.toFixed(2)}</span>
+            <sup>kn</sup>  
           </div>
-        {/if}
-        {#if globalConfig.depthSensorName != ""}
-          <div class="data" >
-            <div>Depth ft</div>
-            {globalData.depth.toFixed(2)}
-          </div>
-        {/if}
-        {#if globalConfig.seatempSensorName != ""}
-          <div class="data" >
-            <div>Water Temp (f)</div>
-            {globalData.temp.toFixed(2)} f
-          </div>
-        {/if}
-        <div class="data" >
-          <div>Location</div>
-          {@html globalData.pos.format(gpsFormatter)}
         </div>
-        {#if globalConfig.movementSensorProps.compassHeadingSupported}
-          <div class="data" >
-            <div>Heading</div>
-            {@html globalData.heading}
+      {/if}
+      {#if globalConfig.depthSensorName != ""}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Depth</div>
+          <div>
+            <span class="font-bold">{globalData.depth.toFixed(2)}</span>
+            <sup>ft</sup> 
           </div>
-        {/if}
-        <table class="gauge" border="1">
-          {#each gaugesToArray(globalData.gauges) as [key, value]}
-            <tr>
-              <th>{key}</th>
-              <td>{value.Level.toFixed(0)} %</td>
-              <td>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</td>
-              <td>/ {(value.Capacity * 0.264172).toFixed(0)}</td>
+        </div>
+      {/if}
+      {#if globalConfig.seatempSensorName != ""}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Water Temp</div>
+          <div>
+            <span class="font-bold">{globalData.temp.toFixed(2)}</span>
+            <sup>f</sup>
+          </div>
+        </div>
+      {/if}
+      <div class="flex gap-2 p-2 text-lg">
+        <div class="min-w-32">Location</div>
+        <span class="font-bold">{@html globalData.pos.format(gpsFormatter)}</span>
+      </div>
+      {#if globalConfig.movementSensorProps.compassHeadingSupported}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Heading</div>
+          <div>
+            <span class="font-bold">{@html globalData.heading}</span>
+          </div>
+        </div>
+      {/if}
+      <div class="flex flex-col divide-y">
+        {#each gaugesToArray(globalData.gauges) as [key, value]}
+          <section class="flex gap-2 p-2 text-lg">
+            <h2 class="min-w-32 capitalize">{key}</h2>
+            <div class="grow">
+              <div class="flex gap-1 font-bold">
+                <div>{value.Level.toFixed(0)} %</div>
+                <div>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</div>
+                <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
+              </div>
               {#if globalData.gaugesToHistorical[key]}
-                <td>
+              <div class="relative">
+                <div class="bg-light border-light p-1">
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
+                    style="width: 100%;"
                     width="100"
                     type="line"
                     scaleMax=100
                     linked="{key}"
                     uid="{key}"
                     barMinWidth="1"
+                    grow
                   />
-                  <div style="position: absolute;">
-                    <LinkedValue uid="{key}" />
-                    <LinkedLabel linked="{key}"/>
-                  </div>
-                </td>
-              {/if}
-            </tr>
-          {/each}
-        </table>
-      </td>
-    </tr>
-    <tr>
-      <td colspan="2">
-        {#each globalData.cameraNames as name, index}
-          <img id="{name}" width="250" alt="{name}" />
+                </div>
+                <div class="bg-light p-1">
+                  <LinkedValue uid="{key}" />
+                  <LinkedLabel linked="{key}"/>
+                </div>
+              </div>
+            {/if}   
+            </div>
+          </section>
         {/each}
-      </td>
-    </tr>
-  </table>
-</div>
-        
-<small>{globalData.numUpdates}</small>
+      </div>
+    </div>
+
+    <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
+  </aside>
+
+  <div class="overflow-x-auto flex col-span-3 border border-light p-1 bg-white">
+    {#each globalData.cameraNames as name, index}
+      <img id="{name}" width="250" alt="{name}" />
+    {/each}
+  </div>
+</main>

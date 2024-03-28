@@ -17,7 +17,7 @@
 
 ```
 npm install
-npm run dev -- --open
+npm run dev
 ```
 
 ## Building
