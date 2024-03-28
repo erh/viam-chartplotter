@@ -847,7 +847,7 @@
         <div class="flex gap-2 p-2 text-lg">
           <div class="min-w-32">Depth</div>
           <div>
-            <span class="font-bold">{globalData.speed.toFixed(2)}</span>
+            <span class="font-bold">{globalData.depth.toFixed(2)}</span>
             <sup>ft</sup> 
           </div>
         </div>
