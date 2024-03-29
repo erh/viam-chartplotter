@@ -504,19 +504,6 @@
      if (h && (new Date() - h.ts) < 60000) {
        continue;
      }
-         
-     var f = dc.createFilter({
-       robotName: robotName,
-       organizationIdsList: [globalClientCloudMetaData.primaryOrgId],
-       locationIdsList: [globalClientCloudMetaData.locationId],
-       startTime: startTime,
-       componentName: g,
-     });
-     
-     var data = await dc.tabularDataByFilter(f);
-
-     h = { ts : new Date(), data : data };
-     globalData.gaugesToHistorical[g] = h;
 
      var match = {
        "location_id" : globalClientCloudMetaData.locationId,
@@ -527,9 +514,11 @@
 
      var group = {
        "_id": { "$concat" : [
-                                  { "$toString": { "$year": "$time_received" } },
+                                  { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                   "-",
-                                  { "$toString" : { "$dayOfYear": "$time_received" } },
+                                  { "$toString" : { "$month": "$time_received" } },
+                                  ";",
+                                  { "$toString" : { "$dayOfMonth": "$time_received" } },
                                   "-",
                                   { "$toString" : { "$hour": "$time_received" } },
                                   "-",
@@ -539,16 +528,16 @@
        "max" : { "$max" : "$data.readings.Level" }
      };
      
-     console.log(match);
-     
      var query = [
        BSON.serialize( { "$match" : match } ),
        BSON.serialize( { "$group" : group } ),
-       BSON.serialize( { "$sort" : { _id : -1 } } ),
+       BSON.serialize( { "$sort" : { _id : 1 } } ),
      ];
      
-     var docs = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
-     console.log(docs);
+     var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+
+     h = { ts : new Date(), data : data };
+     globalData.gaugesToHistorical[g] = h;
    }
  }
  
@@ -805,11 +794,6 @@
 
  onMount(start);
 
- function formatDate(date) {
-   return (date.getMonth()+1) + "/" + date.getDate() + "-" + date.getHours() + ":" + date.getMinutes();
- }
-
- 
  function gaugesToArray(gauges) {
    var names = Object.keys(gauges);
    names.sort();
@@ -827,7 +811,7 @@
    var res = {};
    for (var d in data.data) {
      var dd = data.data[d];
-     res[formatDate(dd.timeReceived)] = dd.data.readings.Level;
+     res[dd._id] = dd.min;
    }
    return res;
  }
