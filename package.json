@@ -10,8 +10,7 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "eslint .",
-        "build": "vite build"
-
+		"build": "vite build"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^3.0.0",
@@ -34,7 +33,8 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"@viamrobotics/sdk": "^0.9.1",
+		"@viamrobotics/sdk": "^0.12.1",
+		"bsonfy": "^1.0.2",
 		"ol": "^8.2.0",
 		"svelte-tiny-linked-charts": "^1.4.2",
 		"tsgeo": "^1.2.2",

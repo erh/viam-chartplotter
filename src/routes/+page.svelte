@@ -9,6 +9,8 @@
  import {Coordinate} from "tsgeo/Coordinate";
  import {DMS}        from "tsgeo/Formatter/Coordinate/DMS";
 
+ import { BSON } from "bsonfy";
+
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
  import Map from 'ol/Map';
@@ -48,6 +50,7 @@
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
  let globalClientLastReset = new Date();
+ let globalClientCloudMetaData = null;
 
  let globalCloudClient: VIAM.ViamClient;
  
@@ -486,33 +489,52 @@
 
      var hostPieces = urlParams.get("host").split("."); // TODO - fix
      var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
-     var location = hostPieces[1]; // TODO - fix
 
-     updateGaugeGraphs(globalCloudClient.dataClient, robotName, location);
+     await updateGaugeGraphs(globalCloudClient.dataClient, robotName);
    }
 
    setTimeout(updateCloudDataAndLoop, 1000);
  }
 
- async function updateGaugeGraphs(dc, robotName, location) {
+ async function updateGaugeGraphs(dc, robotName) {
+   var startTime = new Date(new Date() - 86400 * 1000);
+   
    for ( var g in globalData.gauges ) {
      var h = globalData.gaugesToHistorical[g];
      if (h && (new Date() - h.ts) < 60000) {
        continue;
      }
-
+         
      var f = dc.createFilter({
        robotName: robotName,
-       locationIdsList: [location],
-       startTime: new Date(new Date() - 86400 * 1000),
+       organizationIdsList: [globalClientCloudMetaData.primaryOrgId],
+       locationIdsList: [globalClientCloudMetaData.locationId],
+       startTime: startTime,
        componentName: g,
      });
-
+     
      var data = await dc.tabularDataByFilter(f);
 
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
+
+     var match = {
+       "location_id" : globalClientCloudMetaData.locationId,
+       //"robot_id" : , // TODO - fix me
+       "component_name" : g,
+       time_received: { $gte: startTime }
+     };
+
+     console.log(match);
      
+     var query = [
+       BSON.serialize( { "$match" : match } ),
+       BSON.serialize({ "$limit" : 1 }),
+     ];
+     
+     var docs = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+     console.log(g);
+     console.log(docs[0]);
    }
  }
  
@@ -546,6 +568,8 @@
    c.on('disconnected', disconnected);
    c.on('reconnected', reconnected);
 
+   globalClientCloudMetaData = await c.getCloudMetadata();
+   
    return c;
  }
 
