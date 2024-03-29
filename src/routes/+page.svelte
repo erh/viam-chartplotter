@@ -525,16 +525,30 @@
        time_received: { $gte: startTime }
      };
 
+     var group = {
+       "_id": { "$concat" : [
+                                  { "$toString": { "$year": "$time_received" } },
+                                  "-",
+                                  { "$toString" : { "$dayOfYear": "$time_received" } },
+                                  "-",
+                                  { "$toString" : { "$hour": "$time_received" } },
+                                  "-",
+                                  { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
+                                  ] },
+       "min" : { "$min" : "$data.readings.Level" },
+       "max" : { "$max" : "$data.readings.Level" }
+     };
+     
      console.log(match);
      
      var query = [
        BSON.serialize( { "$match" : match } ),
-       BSON.serialize({ "$limit" : 1 }),
+       BSON.serialize( { "$group" : group } ),
+       BSON.serialize( { "$sort" : { _id : -1 } } ),
      ];
      
      var docs = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
-     console.log(g);
-     console.log(docs[0]);
+     console.log(docs);
    }
  }
  
