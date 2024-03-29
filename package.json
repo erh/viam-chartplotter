@@ -9,7 +9,9 @@
 		"preview": "vite preview",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"lint": "eslint ."
+		"lint": "eslint .",
+        "build": "vite build"
+
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^3.0.0",
