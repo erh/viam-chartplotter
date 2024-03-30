@@ -818,9 +818,9 @@
 </script>
 
 
-<main class="w-dvw h-dvh p-2 grid grid-cols-4 grid-rows-6 gap-2">
-  <div class="relative col-span-3 row-span-5 border border-light">
-    <div id="map" class="h-fit"></div>
+<main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2">
+  <div class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-light">
+    <div id="map" class="min-h-[50dvh] h-fit"></div>
     <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full bg-white/65 p-4">
       {#if mapGlobal.inPanMode}
       <div>
@@ -836,7 +836,7 @@
     </div>
   </div>
 
-  <aside class="row-span-6 flex flex-col gap-4 border border-light p-1 bg-white min-h-full">
+  <aside class="lg:row-span-6 flex flex-col gap-4 border border-light p-1 bg-white min-h-full">
     {#if globalData.status === "Connected"}
       <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
         <PrimeIcon
@@ -920,7 +920,7 @@
                     grow
                   />
                 </div>
-                <div class="bg-light p-1">
+                <div class="p-1 text-sm">
                   <LinkedValue uid="{key}" />
                   <LinkedLabel linked="{key}"/>
                 </div>
@@ -935,9 +935,9 @@
     <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
   </aside>
 
-  <div class="overflow-x-auto flex col-span-3 border border-light p-1 bg-white">
+  <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-light p-1 bg-white">
     {#each globalData.cameraNames as name, index}
-      <img id="{name}" width="250" alt="{name}" />
+      <img id="{name}" class="w-full lg:w-[250px]" alt="{name}" />
     {/each}
   </div>
 </main>
