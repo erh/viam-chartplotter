@@ -524,6 +524,7 @@
                                   ":",
                                   { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                   ] },
+       "ts" : { "$min" : "$time_received" },
        "min" : { "$min" : "$data.readings.Level" },
        "max" : { "$max" : "$data.readings.Level" }
      };
@@ -531,7 +532,7 @@
      var query = [
        BSON.serialize( { "$match" : match } ),
        BSON.serialize( { "$group" : group } ),
-       BSON.serialize( { "$sort" : { _id : 1 } } ),
+       BSON.serialize( { "$sort" : { ts : 1 } } ),
      ];
      
      var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
