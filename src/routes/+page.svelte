@@ -183,13 +183,14 @@
      }
 
      
+     var sz = mapGlobal.map.getSize();
+     var pp = [globalData.pos.lng, globalData.pos.lat];
+     
+     mapGlobal.myBoatMarker.setGeometry(new Point(pp));
+
      if (!mapGlobal.inPanMode) {
-       var sz = mapGlobal.map.getSize();
-       var pp = [globalData.pos.lng, globalData.pos.lat];
        mapGlobal.view.centerOn(pp, mapGlobal.map.getSize(), [sz[0]/2,sz[1]/2]);
-       
-       mapGlobal.myBoatMarker.setGeometry(new Point(pp));
-       
+
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
        var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5));
