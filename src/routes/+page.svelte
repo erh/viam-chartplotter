@@ -4,6 +4,7 @@
  import { onMount } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
+ 
  import { Logger } from "tslog";
  
  import {Coordinate} from "tsgeo/Coordinate";
@@ -41,6 +42,9 @@
 
  import * as VIAM from '@viamrobotics/sdk';
 
+ import { base } from '$app/paths';
+ let boatImage = base + "/boat3.jpg";
+ 
  let gpsFormatter = new DMS();
  gpsFormatter.setSeparator("<br>")
              .useCardinalLetters(true)
@@ -689,7 +693,7 @@
        return new Style({
          image: new Icon(
            {
-             src:"/boat3.jpg",
+             src:boatImage,
              scale: scale,
              rotation: rotation,
          }),
@@ -719,7 +723,7 @@
        return new Style({
          image: new Icon(
            {
-             src:"/boat3.jpg",
+             src:boatImage,
              scale: scale,
              rotation: rotation,
          }),
