@@ -869,16 +869,6 @@
    }
    return res;
  }
-
-  let showLabel = false;
-
-  const handleHover = (event: MouseEvent) => {
-    showLabel = true;
-  }
-
-  const handleMouseOut = () => {
-    showLabel = false;
-  }
 </script>
 
 
@@ -971,7 +961,7 @@
               </div>
               {#if globalData.gaugesToHistorical[key]}
               <div class="relative">
-                <div role="article" tabindex="-1" class="bg-light hover:cursor-pointer" on:mouseenter={handleHover} on:mouseleave={handleMouseOut}>
+                <div role="article" tabindex="-1" class="peer bg-light hover:cursor-pointer">
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     style="width: 100%;"
@@ -984,14 +974,12 @@
                     grow
                   />
                 </div>
-                {#if showLabel}
-                  <div
-                    class="z-10 text-nowrap -bottom-8 right-2 absolute border border-medium bg-white px-2 w-fit"
-                  >
-                    <LinkedValue uid="{key}" />
-                    <LinkedLabel linked="{key}"/>
-                  </div>
-                {/if}
+                <div
+                  class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium bg-white px-2 w-fit"
+                >
+                  <LinkedValue uid="{key}" />
+                  <LinkedLabel linked="{key}"/>
+                </div>
               </div>
             {/if}   
             </div>

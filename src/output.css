@@ -2566,6 +2566,10 @@ video {
   outline-color: #ddab3f;
 }
 
+.peer:hover ~ .peer-hover\:block {
+  display: block;
+}
+
 .peer:focus ~ .peer-focus\:visible {
   visibility: visible;
 }
