@@ -951,7 +951,7 @@
       {/if}
       <div class="flex flex-col divide-y">
         {#each gaugesToArray(globalData.gauges) as [key, value]}
-          <section class="flex gap-2 p-2 text-lg">
+          <section class="overflow-visible flex gap-2 p-2 text-lg">
             <h2 class="min-w-32 capitalize">{key}</h2>
             <div class="grow">
               <div class="flex gap-1 font-bold">
@@ -961,7 +961,7 @@
               </div>
               {#if globalData.gaugesToHistorical[key]}
               <div class="relative">
-                <div class="bg-light border-light p-1">
+                <div role="article" tabindex="-1" class="peer bg-light hover:cursor-pointer">
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     style="width: 100%;"
@@ -974,7 +974,9 @@
                     grow
                   />
                 </div>
-                <div class="p-1 text-sm">
+                <div
+                  class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium bg-white px-2 w-fit"
+                >
                   <LinkedValue uid="{key}" />
                   <LinkedLabel linked="{key}"/>
                 </div>
