@@ -611,6 +611,10 @@ video {
   right: 0px;
 }
 
+.-bottom-8 {
+  bottom: -2rem;
+}
+
 .bottom-0 {
   bottom: 0px;
 }
@@ -697,6 +701,10 @@ video {
 
 .top-full {
   top: 100%;
+}
+
+.z-10 {
+  z-index: 10;
 }
 
 .z-50 {
@@ -1036,6 +1044,11 @@ video {
   width: 100dvw;
 }
 
+.w-fit {
+  width: -moz-fit-content;
+  width: fit-content;
+}
+
 .w-full {
   width: 100%;
 }
@@ -1279,6 +1292,10 @@ video {
   overflow: hidden;
 }
 
+.overflow-visible {
+  overflow: visible;
+}
+
 .overflow-x-auto {
   overflow-x: auto;
 }
@@ -1303,6 +1320,10 @@ video {
 
 .whitespace-pre {
   white-space: pre;
+}
+
+.text-nowrap {
+  text-wrap: nowrap;
 }
 
 .rounded {
@@ -2327,6 +2348,10 @@ video {
 
 .first\:ml-6:first-child {
   margin-left: 1.5rem;
+}
+
+.hover\:cursor-pointer:hover {
+  cursor: pointer;
 }
 
 .hover\:border-black:hover {
