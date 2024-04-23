@@ -501,24 +501,16 @@
    setTimeout(updateCloudDataAndLoop, 1000);
  }
 
- async function updateGaugeGraphs(dc, robotName) {
-   var startTime = new Date(new Date() - 86400 * 1000);
+ async function getDataViaMQL(dc, g, startTime) {
+   var match = {
+     "location_id" : globalClientCloudMetaData.locationId,
+     //"robot_id" : , // TODO - fix me
+     "component_name" : g,
+     //time_received: { $gte: startTime }
+   };
    
-   for ( var g in globalData.gauges ) {
-     var h = globalData.gaugesToHistorical[g];
-     if (h && (new Date() - h.ts) < 60000) {
-       continue;
-     }
-
-     var match = {
-       "location_id" : globalClientCloudMetaData.locationId,
-       //"robot_id" : , // TODO - fix me
-       "component_name" : g,
-       time_received: { $gte: startTime }
-     };
-
-     var group = {
-       "_id": { "$concat" : [
+   var group = {
+     "_id": { "$concat" : [
                                   { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                   "-",
                                   { "$toString" : { "$month": "$time_received" } },
@@ -529,18 +521,74 @@
                                   ":",
                                   { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                   ] },
-       "ts" : { "$min" : "$time_received" },
-       "min" : { "$min" : "$data.readings.Level" },
-       "max" : { "$max" : "$data.readings.Level" }
-     };
+     "ts" : { "$min" : "$time_received" },
+     "min" : { "$min" : "$data.readings.Level" },
+     "max" : { "$max" : "$data.readings.Level" }
+   };
+   
+   var query = [
+     BSON.serialize( { "$match" : match } ),
+     BSON.serialize( { "$group" : group } ),
+     BSON.serialize( { "$sort" : { ts : -1 } } ),
+     BSON.serialize( { "$limit" : (24 * 4) } ),
+     BSON.serialize( { "$sort" : { ts : 1 } } ),
+   ];
+   
+   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+   console.log(match);
+   console.log(data);
+   return data;
+ }
+
+ async function getDataViaTbular(dc, robotName, g, startTime) {
+   console.log(globalClientCloudMetaData);
+   
+   var f = dc.createFilter({
+     robotName: robotName,
+     organizationIdsList: [globalClientCloudMetaData.primaryOrgId],
+     locationIdsList: [globalClientCloudMetaData.locationId],
+     startTime: startTime,
+     componentName: g,
+   });
+   
+   var data = await dc.tabularDataByFilter(f);
+
+   var m = {};
+   
+   data.forEach( (d) => {
+     var ts = d.timeReceived;
+     var key = (ts.getYear() - 100) + "-" + (1 + ts.getMonth()) + "-" + ts.getDate() + "-" + ts.getHours() + "-";
+     key += Math.floor(ts.getMinutes() / 15) * 15;
+     var r = d.data.readings;
+     var x = { _id : key, ts : ts , min : r.Level, max : r.Level };
+     m[key] = x; // TODO fix  me
      
-     var query = [
-       BSON.serialize( { "$match" : match } ),
-       BSON.serialize( { "$group" : group } ),
-       BSON.serialize( { "$sort" : { ts : 1 } } ),
-     ];
-     
-     var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+   } );
+
+   var all = [];
+   for ( var k in m ) {
+     all.push(m[k]);
+   }
+
+   all.sort( function(a,b){
+     return a.ts.getTime() < b.ts.getTime();
+   });
+   
+   return all;
+ }
+ 
+ async function updateGaugeGraphs(dc, robotName) {
+   console.log("updateGaugeGraphs called");
+   var startTime = new Date(new Date() - 86400 * 1000);
+   
+   for ( var g in globalData.gauges ) {
+     var h = globalData.gaugesToHistorical[g];
+     if (h && (new Date() - h.ts) < 60000) {
+       continue;
+     }
+
+     //var data = await getDataViaMQL(dc, g, startTime);
+     var data = await getDataViaTbular(dc, robotName, g, startTime);
 
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
