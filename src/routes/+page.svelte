@@ -535,14 +535,11 @@
    ];
    
    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
-   console.log(match);
-   console.log(data);
+
    return data;
  }
 
- async function getDataViaTbular(dc, robotName, g, startTime) {
-   console.log(globalClientCloudMetaData);
-   
+ async function getDataViaRaw(dc, robotName, g, startTime) {
    var f = dc.createFilter({
      robotName: robotName,
      organizationIdsList: [globalClientCloudMetaData.primaryOrgId],
@@ -578,7 +575,6 @@
  }
  
  async function updateGaugeGraphs(dc, robotName) {
-   console.log("updateGaugeGraphs called");
    var startTime = new Date(new Date() - 86400 * 1000);
    
    for ( var g in globalData.gauges ) {
@@ -587,9 +583,14 @@
        continue;
      }
 
-     //var data = await getDataViaMQL(dc, g, startTime);
-     var data = await getDataViaTbular(dc, robotName, g, startTime);
 
+     var timeStart = new Date();
+     var data = await getDataViaMQL(dc, g, startTime);
+     //var data = await getDataViaRaw(dc, robotName, g, startTime);
+     var getDataTime = (new Date()).getTime() - timeStart.getTime();
+     
+     console.log("time to get graph data for " + g + " took " + getDataTime);
+     
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
    }
