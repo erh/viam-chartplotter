@@ -504,9 +504,9 @@
  async function getDataViaMQL(dc, g, startTime) {
    var match = {
      "location_id" : globalClientCloudMetaData.locationId,
-     //"robot_id" : , // TODO - fix me
+     "robot_id" : globalClientCloudMetaData.machineId,
      "component_name" : g,
-     //time_received: { $gte: startTime }
+     time_received: { $gte: startTime }
    };
    
    var group = {
@@ -589,7 +589,7 @@
      //var data = await getDataViaRaw(dc, robotName, g, startTime);
      var getDataTime = (new Date()).getTime() - timeStart.getTime();
      
-     console.log("time to get graph data for " + g + " took " + getDataTime);
+     console.log("time to get graph data for " + g + " took " + getDataTime + " and had " + data.length + " points");
      
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
@@ -627,7 +627,7 @@
    c.on('reconnected', reconnected);
 
    globalClientCloudMetaData = await c.getCloudMetadata();
-   
+   console.log(globalClientCloudMetaData);
    return c;
  }
 
