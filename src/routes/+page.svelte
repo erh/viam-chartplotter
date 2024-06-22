@@ -62,6 +62,7 @@
  
  let globalData = {
    pos : new Coordinate(0,0),
+   posString : "n/a",
    speed : 0.0,
    temp : 0.0,
    depth : 0.0,
@@ -175,6 +176,7 @@
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+     globalData.posString = globalData.pos.format(gpsFormatter);
 
 
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
@@ -1043,7 +1045,7 @@
       {/if}
       <div class="flex gap-2 p-2 text-lg">
         <div class="min-w-32">Location</div>
-        <span class="font-bold" style="white-space: pre-line;">{globalData.pos.format(gpsFormatter)}</span>
+        <span class="font-bold" style="white-space: pre-line;">{globalData.posString}</span>
       </div>
       {#if globalConfig.movementSensorProps.compassHeadingSupported}
         <div class="flex gap-2 p-2 text-lg">
