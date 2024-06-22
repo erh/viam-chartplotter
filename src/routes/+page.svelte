@@ -169,12 +169,16 @@
    msClient.getPosition().then((p) => {
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
-     globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+
+     var myPos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+
+     globalData.pos = myPos;
+
      var gpsFormatter = new DecimalMinutes();
      gpsFormatter.setSeparator("\n")
                  .useCardinalLetters(true);
      
-     globalData.posString = globalData.pos.format(gpsFormatter);
+     globalData.posString = gpsFormatter.format(myPos);
 
 
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
