@@ -47,12 +47,6 @@
  import { base } from '$app/paths';
  let boatImage = base + "/boat3.jpg";
  
- let gpsFormatter = new DMS();
- gpsFormatter.setSeparator("\n")
-             .useCardinalLetters(true)
-             .setUnits(DMS.UNITS_ASCII);
-
- 
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
  let globalClientLastReset = new Date();
@@ -176,6 +170,11 @@
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
+     var gpsFormatter = new DMS();
+     gpsFormatter.setSeparator("\n")
+                 .useCardinalLetters(true)
+                 .setUnits(DMS.UNITS_ASCII);
+     
      globalData.posString = globalData.pos.format(gpsFormatter);
 
 
@@ -1105,7 +1104,7 @@
 
   <div>
     <h3>Powered By</h3>
-    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" />
+    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" />
   </div>
 
 </main>
