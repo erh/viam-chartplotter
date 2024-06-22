@@ -1090,6 +1090,10 @@
           </section>
         {/each}
       </div>
+      <div>
+        <h3>Powered By</h3>
+        <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" />
+      </div>
     </div>
 
     <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
