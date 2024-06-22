@@ -171,16 +171,19 @@
      gotNewData();
 
      var myPos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
-
      globalData.pos = myPos;
 
-     var gpsFormatter = new DecimalMinutes();
-     gpsFormatter.setSeparator("\n")
-                 .useCardinalLetters(true);
+     if (false) {
+       // this is being stupid on mobile
+       var gpsFormatter = new DecimalMinutes();
+       gpsFormatter.setSeparator("\n")
+                   .useCardinalLetters(true);
      
-     globalData.posString = gpsFormatter.format(myPos);
-
-
+       globalData.posString = gpsFormatter.format(myPos);
+     } else {
+       globalData.posString = p.coordinate.latitude + "\n" + p.coordinate.longitude;
+     }
+     
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
        var z = mapGlobal.view.getZoom();
        if (z != mapGlobal.lastZoom) {

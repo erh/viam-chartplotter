@@ -3,9 +3,9 @@
 	"version": "0.0.1",
 	"private": true,
 	"scripts": {
-		"dev": "npm-run-all --parallel dev:*",
+		"dev": "npm-run-all --parallel dev --host ",
 		"dev:tailwind": "tailwindcss -i ./src/app.css -o ./src/output.css --watch",
-		"dev:svelte": "vite dev -- --open",
+		"dev:svelte": "vite dev --host",
 		"preview": "vite preview",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
