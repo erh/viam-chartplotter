@@ -48,7 +48,7 @@
  let boatImage = base + "/boat3.jpg";
  
  let gpsFormatter = new DMS();
- gpsFormatter.setSeparator("<br>")
+ gpsFormatter.setSeparator("\n")
              .useCardinalLetters(true)
              .setUnits(DMS.UNITS_ASCII);
 
@@ -1043,7 +1043,7 @@
       {/if}
       <div class="flex gap-2 p-2 text-lg">
         <div class="min-w-32">Location</div>
-        <span class="font-bold">{@html globalData.pos.format(gpsFormatter)}</span>
+        <span class="font-bold" style="white-space: pre-line;">{globalData.pos.format(gpsFormatter)}</span>
       </div>
       {#if globalConfig.movementSensorProps.compassHeadingSupported}
         <div class="flex gap-2 p-2 text-lg">
@@ -1090,10 +1090,6 @@
           </section>
         {/each}
       </div>
-      <div>
-        <h3>Powered By</h3>
-        <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" />
-      </div>
     </div>
 
     <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
@@ -1104,4 +1100,10 @@
       <img id="{name}" class="w-full lg:w-[250px]" alt="{name}" />
     {/each}
   </div>
+
+  <div>
+    <h3>Powered By</h3>
+    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" />
+  </div>
+
 </main>
