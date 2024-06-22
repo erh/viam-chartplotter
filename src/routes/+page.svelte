@@ -8,7 +8,7 @@
  import { Logger } from "tslog";
  
  import {Coordinate} from "tsgeo/Coordinate";
- import {DMS}        from "tsgeo/Formatter/Coordinate/DMS";
+ import {DecimalMinutes}        from "tsgeo/Formatter/Coordinate/DecimalMinutes";
 
  import { BSON } from "bsonfy";
 
@@ -170,10 +170,9 @@
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
      globalData.pos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
-     var gpsFormatter = new DMS();
+     var gpsFormatter = new DecimalMinutes();
      gpsFormatter.setSeparator("\n")
-                 .useCardinalLetters(true)
-                 .setUnits(DMS.UNITS_ASCII);
+                 .useCardinalLetters(true);
      
      globalData.posString = globalData.pos.format(gpsFormatter);
 
