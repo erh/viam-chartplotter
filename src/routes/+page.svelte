@@ -623,9 +623,19 @@
    var startTime = new Date(new Date() - 86400 * 1000);
    
    if (globalConfig.movementSensorName && ( new Date() - mapGlobal.trackFeaturesLastCheck ) > 60000 ) {
-     
-     var data = await positionHistoryMQL(dc, startTime);
 
+     // HACK HACK
+     const urlParams = new URLSearchParams(window.location.search);
+     var data = [];
+     if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
+       console.log("eliot")
+       var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
+       var bar = await foo.json();
+       data = bar.data;
+     } else {
+       data = await positionHistoryMQL(dc, startTime);
+     }
+     
      mapGlobal.trackFeatures.clear();
 
      var prev = [];
