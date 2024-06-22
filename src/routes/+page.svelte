@@ -18,6 +18,8 @@
  import View from 'ol/View';
  import TileLayer from 'ol/layer/Tile';
  import Point from 'ol/geom/Point.js';
+ import Circle from 'ol/geom/Circle.js';
+ import LineString from 'ol/geom/LineString.js';
  import TileWMS from 'ol/source/TileWMS.js';
  import Feature from 'ol/Feature.js';
  import VectorSource from 'ol/source/Vector.js';
@@ -93,6 +95,8 @@
    view: null,
 
    aisFeatures: new Collection(),
+   trackFeatures: new Collection(),
+   trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null,
    
    inPanMode: false,
@@ -573,10 +577,77 @@
    
    return all;
  }
+
+ async function positionHistoryMQL(dc, startTime) {
+   var name = globalConfig.movementSensorName.split(":");
+   
+   var match = {
+     "location_id" : globalClientCloudMetaData.locationId,
+     "robot_id" : globalClientCloudMetaData.machineId,
+     "component_name" : name[name.length-1],
+     "method_name" : "Position",
+     "time_received": { $gte: startTime }
+   };
+   
+   var group = {
+     "_id": { "$concat" : [
+                                  { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
+                                  "-",
+                                  { "$toString" : { "$month": "$time_received" } },
+                                  "-",
+                                  { "$toString" : { "$dayOfMonth": "$time_received" } },
+                                  " ",
+                                  { "$toString" : { "$hour": "$time_received" } },
+                                  ":",
+                                  { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
+                                  ] },
+     "ts" : { "$min" : "$time_received" },
+     "pos" : { "$first" : "$data" },
+   };
+   
+   
+   var query = [
+     BSON.serialize( { "$match" : match } ),
+     BSON.serialize( { "$sort" : { ts : -1 } } ),
+     BSON.serialize( { "$group" : group } ),
+     BSON.serialize( { "$sort" : { ts : -1 } } ),
+   ];
+   
+   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+   console.log("got " + data.length + " history data points");
+   return data;
+ }
+
  
  async function updateGaugeGraphs(dc, robotName) {
    var startTime = new Date(new Date() - 86400 * 1000);
    
+   if (globalConfig.movementSensorName && ( new Date() - mapGlobal.trackFeaturesLastCheck ) > 60000 ) {
+     
+     var data = await positionHistoryMQL(dc, startTime);
+
+     mapGlobal.trackFeatures.clear();
+
+     var prev = [];
+     for ( var i = 0; i < data.length; i++) {
+       var p = data[i];
+       var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
+       mapGlobal.trackFeatures.push(new Feature({
+         type: "track",
+         geometry: new Circle(x),
+       }))
+       if ( i > 0 ) {
+         mapGlobal.trackFeatures.push(new Feature({
+           type: "track",
+           geometry: new LineString([x, prev]),
+         }))
+       }
+       prev = x;
+     }
+
+     mapGlobal.trackFeaturesLastCheck = new Date();
+   }
+
    for ( var g in globalData.gauges ) {
      var h = globalData.gaugesToHistorical[g];
      if (h && (new Date() - h.ts) < 60000) {
@@ -594,6 +665,7 @@
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
    }
+
  }
  
  async function connect(): VIAM.RobotClient {
@@ -785,7 +857,28 @@
      on: true,
      layer : aisLayer,
    });
+
+   var trackLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.trackFeatures,
+     }),
+     style: new Style({
+       stroke: new Stroke({
+         color: "blue",
+         width: 3
+       }),
+       fill: new Fill({
+         color: "rgba(0, 255, 0, 0.1)"
+       })
+     }),
+   });
    
+   mapGlobal.layerOptions.push({
+     name: "track",
+     on: true,
+     layer : trackLayer,
+   });
+
  }
 
  function findLayerByName(name) {

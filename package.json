@@ -20,7 +20,7 @@
 		"@types/eslint": "8.56.0",
 		"@typescript-eslint/eslint-plugin": "^6.0.0",
 		"@typescript-eslint/parser": "^6.0.0",
-		"@viamrobotics/prime-core": "^0.0.98",
+		"@viamrobotics/prime-core": "^0.0.125",
 		"eslint": "^8.56.0",
 		"eslint-plugin-svelte": "^2.35.1",
 		"npm-run-all": "^4.1.5",
@@ -33,7 +33,7 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"@viamrobotics/sdk": "^0.16.0",
+		"@viamrobotics/sdk": "^0.17.1",
 		"bsonfy": "^1.0.2",
 		"ol": "^8.2.0",
 		"svelte-tiny-linked-charts": "^1.4.2",
