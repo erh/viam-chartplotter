@@ -211,6 +211,9 @@
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
        var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5)) + globalConfig.zoomModifier;
+       if ( zoom <= 0 ) {
+         zoom = 1;
+       }
        mapGlobal.view.setZoom(zoom);
 
        mapGlobal.lastZoom = zoom;
