@@ -82,6 +82,8 @@
    aisSensorName : "",
    seatempSensorName : "",
    depthSensorName : "",
+
+   zoomModifier : 0,
  };
  
  let mapGlobal = {
@@ -208,7 +210,7 @@
 
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
-       var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5));
+       var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5)) + globalConfig.zoomModifier;
        mapGlobal.view.setZoom(zoom);
 
        mapGlobal.lastZoom = zoom;
@@ -939,6 +941,12 @@
  }
  
  function setupMap() {
+   const urlParams = new URLSearchParams(window.location.search);
+   var temp = urlParams.get("zoomModifier");
+   if (temp) {
+     temp = parseInt(temp);
+     globalConfig.zoomModifier = temp;
+   }
    useGeographic();
    setupLayers();
    

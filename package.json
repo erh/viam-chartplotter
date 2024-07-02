@@ -3,7 +3,7 @@
 	"version": "0.0.1",
 	"private": true,
 	"scripts": {
-		"dev": "npm-run-all --parallel dev --host ",
+		"dev": "npm-run-all --parallel dev:*",
 		"dev:tailwind": "tailwindcss -i ./src/app.css -o ./src/output.css --watch",
 		"dev:svelte": "vite dev --host",
 		"preview": "vite preview",
