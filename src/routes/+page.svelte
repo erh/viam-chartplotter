@@ -61,6 +61,8 @@
    temp : 0.0,
    depth : 0.0,
    heading: 0.0,
+   windSpeed: 0.0,
+   windAngle: 0.0,
    gauges : {},
    gaugesToHistorical : {},
    
@@ -82,6 +84,7 @@
    aisSensorName : "",
    seatempSensorName : "",
    depthSensorName : "",
+   windSensorName : "",
 
    zoomModifier : 0,
  };
@@ -233,7 +236,9 @@
 
    if (globalConfig.seatempSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.seatempSensorName).getReadings().then((t) => {
-       globalData.temp = 32 + (t.Temperature * 1.8);
+       if (!isNaN(t.Temperature)) {
+         globalData.temp = 32 + (t.Temperature * 1.8);
+       }
      }).catch( errorHandler );
    }
 
@@ -242,6 +247,18 @@
        globalData.depth = d.Depth * 3.28084;
      }).catch( (e) => {
        globalConfig.depthSensorName = "";
+       errorHandler(e);
+     });
+   }
+
+   if (globalConfig.windSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.windSensorName).getReadings().then((d) => {
+       if (d["Reference"] == "True (ground referenced to North)") {
+         globalData.windAngle = d["Wind Angle"];
+         globalData.windSpeed = d["Wind Speed"] * 1.94384;
+       }
+     }).catch( (e) => {
+       globalConfig.windSensorName = "";
        errorHandler(e);
      });
    }
@@ -386,6 +403,8 @@
    await setupAISSensor(client, resources);
    await setupTempSensor(client, resources);
    await setupDepthSensor(client, resources);
+   await setupWindSensor(client, resources);
+   
 
    console.log("globalConfig", globalConfig);
 
@@ -417,6 +436,15 @@
    }
 
  }
+
+ async function setupWindSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "sensor", /wind/);
+
+   for (var r of resources) {
+     globalConfig.windSensorName = r.name;
+   }
+   
+  }
 
  
  async function setupMovementSensor(client: VIAM.RobotClient, resources) {
@@ -594,15 +622,15 @@
    var name = globalConfig.movementSensorName.split(":");
    
    var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : name[name.length-1],
-     "method_name" : "Position",
-     "time_received": { $gte: startTime }
+   "location_id" : globalClientCloudMetaData.locationId,
+   "robot_id" : globalClientCloudMetaData.machineId,
+   "component_name" : name[name.length-1],
+   "method_name" : "Position",
+   "time_received": { $gte: startTime }
    };
    
    var group = {
-     "_id": { "$concat" : [
+   "_id": { "$concat" : [
                                   { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                   "-",
                                   { "$toString" : { "$month": "$time_received" } },
@@ -613,8 +641,8 @@
                                   ":",
                                   { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                   ] },
-     "ts" : { "$min" : "$time_received" },
-     "pos" : { "$first" : "$data" },
+   "ts" : { "$min" : "$time_received" },
+   "pos" : { "$first" : "$data" },
    };
    
    
@@ -640,7 +668,6 @@
      const urlParams = new URLSearchParams(window.location.search);
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
-       console.log("eliot")
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
        var bar = await foo.json();
        data = bar.data;
@@ -1034,7 +1061,7 @@
     <div id="navData" class="flex flex-col divide-y">
       {#if globalConfig.movementSensorProps.linearVelocitySupported}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Speed</div>
+          <div class="min-w-32">Speed<br><small>over ground<small></div>
           <div>
             <span class="font-bold">{globalData.speed.toFixed(2)}</span>
             <sup>kn</sup>  
@@ -1050,6 +1077,24 @@
           </div>
         </div>
       {/if}
+      {#if globalConfig.windSensorName != ""}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Wind Angle</div>
+          <div>
+            <span class="font-bold">{globalData.windAngle.toFixed(0)}</span>
+            <sup>degrees</sup>
+          </div>
+        </div>
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Wind Speed</div>
+          <div>
+            <span class="font-bold">{globalData.windSpeed.toFixed(1)}</span>
+            <sup>kn</sup>
+          </div>
+        </div>
+
+      {/if}
+
       {#if globalConfig.seatempSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
           <div class="min-w-32">Water Temp</div>
