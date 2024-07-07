@@ -1079,7 +1079,7 @@
       {/if}
       {#if globalConfig.windSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Wind Angle</div>
+          <div class="min-w-32">Wind Direction</div>
           <div>
             <span class="font-bold">{globalData.windAngle.toFixed(0)}</span>
             <sup>degrees</sup>
