@@ -63,6 +63,7 @@
    heading: 0.0,
    windSpeed: 0.0,
    windAngle: 0.0,
+   spotZeroFW : 0.0,
    gauges : {},
    gaugesToHistorical : {},
    
@@ -85,7 +86,8 @@
    seatempSensorName : "",
    depthSensorName : "",
    windSensorName : "",
-
+   spotZeroFWSensorName : "",
+   
    zoomModifier : 0,
  };
  
@@ -262,7 +264,16 @@
        errorHandler(e);
      });
    }
-   
+
+   if (globalConfig.spotZeroFWSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.spotZeroFWSensorName).getReadings().then((d) => {
+       globalData.spotZeroFW = d["Product Water Flow"] * 0.00440287;
+     }).catch( (e) => {
+       globalConfig.spotZeroFWSensorName = "";
+       errorHandler(e);
+     });
+      }
+
    if (loopNumber % 30 == 2 ) {
 
      globalData.allResources.forEach( (r) => {
@@ -404,6 +415,7 @@
    await setupTempSensor(client, resources);
    await setupDepthSensor(client, resources);
    await setupWindSensor(client, resources);
+   await setupSpotZeroSensor(client, resources);
    
 
    console.log("globalConfig", globalConfig);
@@ -444,6 +456,15 @@
      globalConfig.windSensorName = r.name;
    }
    
+  }
+
+  async function setupSpotZeroSensor(client: VIAM.RobotClient, resources) {
+   resources = filterResources(resources, "component", "sensor", /spotzero-fw/);
+
+   for (var r of resources) {
+     globalConfig.spotZeroFWSensorName = r.name;
+   }
+    
   }
 
  
@@ -669,7 +690,7 @@
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-       var bar = await foo.json();
+                                 var bar = await foo.json();
        data = bar.data;
      } else {
        data = await positionHistoryMQL(dc, startTime);
@@ -1113,6 +1134,14 @@
           <div class="min-w-32">Heading</div>
           <div>
             <span class="font-bold">{@html globalData.heading}</span>
+          </div>
+        </div>
+      {/if}
+      {#if globalConfig.spotZeroFWSensorName != ""}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">SpotZero FW </div>
+          <div>
+            <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)} gpm</span>
           </div>
         </div>
       {/if}
