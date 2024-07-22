@@ -504,7 +504,7 @@
  
  async function updateAndLoop() {
    globalData.numUpdates++;
-   
+
    if (!globalClient) {
      try {
        globalClient = await connect();
@@ -514,7 +514,7 @@
        globalData.status = "Connect failed: " + error;
        globalClient = null;
      }
-   } else if (globalClient.numUpdates % 300 == 0) {
+   } else if (globalData.numUpdates % 120 == 0) {
      await updateResources(globalClient);     
    }
 
