@@ -65,6 +65,8 @@
    windAngle: 0.0,
    spotZeroFW : 0.0,
    gauges : {},
+   acPowers : {},
+   acPowerData : false,
    gaugesToHistorical : {},
    
    allResources : [],
@@ -87,6 +89,7 @@
    depthSensorName : "",
    windSensorName : "",
    spotZeroFWSensorName : "",
+   acPowers : [],
    
    zoomModifier : 0,
  };
@@ -188,7 +191,7 @@
      
        globalData.posString = gpsFormatter.format(myPos);
      } else {
-       globalData.posString = p.coordinate.latitude + "\n" + p.coordinate.longitude;
+       globalData.posString = p.coordinate.latitude + ", " + p.coordinate.longitude;
      }
      
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
@@ -272,8 +275,21 @@
        globalConfig.spotZeroFWSensorName = "";
        errorHandler(e);
      });
-      }
+   }
 
+   globalConfig.acPowers.forEach( (acPowerName) => {
+     new VIAM.SensorClient(client, acPowerName).getReadings().then((d) => {
+       var n = acPowerName.split("ac-")[1];
+       globalData.acPowers[n] = d;
+       globalData.acPowerData = true;
+     }).catch( (e) => {
+       globalConfig.spotZeroFWSensorName = "";
+       errorHandler(e);
+     });
+     
+   });
+
+   
    if (loopNumber % 30 == 2 ) {
 
      globalData.allResources.forEach( (r) => {
@@ -382,6 +398,23 @@
 
  }
 
+ function filterResourcesFirstMatchingName(resources, t, st, n) {
+   var matching = filterResources(resources, t, st, n);
+   if (matching.length > 0) {
+     return matching[0].name;
+   }
+   return "";
+ }
+
+ function filterResourcesAllMatchingNames(resources, t, st, n) {
+   var matching = filterResources(resources, t, st, n);
+   var names = [];
+   for ( var r of matching) {
+     names.push(r.name);
+   }
+   return names.sort();
+  }
+
  // t - type
  // st - subtype
  // n - name regex
@@ -411,62 +444,17 @@
    globalData.allResources = resources;
 
    await setupMovementSensor(client, resources);
-   await setupAISSensor(client, resources);
-   await setupTempSensor(client, resources);
-   await setupDepthSensor(client, resources);
-   await setupWindSensor(client, resources);
-   await setupSpotZeroSensor(client, resources);
-   
 
+   globalConfig.aisSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bais$/);
+   globalConfig.seatempSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bseatemp$/);
+   globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
+   globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
+   globalConfig.spotZeroFWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-fw/);
+   globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
+   
    console.log("globalConfig", globalConfig);
 
  }
- 
- async function setupAISSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "sensor", /\bais$/);
-
-   for (var r of resources) {
-     globalConfig.aisSensorName = r.name;
-   }
-
- }
- 
- async function setupTempSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "sensor", /\bseatemp$/);
-
-   for (var r of resources) {
-     globalConfig.seatempSensorName = r.name;
-   }
-
- }
- 
- async function setupDepthSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "sensor", /depth/);
-
-   for (var r of resources) {
-     globalConfig.depthSensorName = r.name;
-   }
-
- }
-
- async function setupWindSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "sensor", /wind/);
-
-   for (var r of resources) {
-     globalConfig.windSensorName = r.name;
-   }
-   
-  }
-
-  async function setupSpotZeroSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "sensor", /spotzero-fw/);
-
-   for (var r of resources) {
-     globalConfig.spotZeroFWSensorName = r.name;
-   }
-    
-  }
-
  
  async function setupMovementSensor(client: VIAM.RobotClient, resources) {
    resources = filterResources(resources, "component", "movement_sensor", null);
@@ -1018,18 +1006,18 @@
 
  onMount(start);
 
- function gaugesToArray(gauges) {
-   var names = Object.keys(gauges);
+ function dicToArray(d) {
+   var names = Object.keys(d);
    names.sort();
 
    var a = [];
    
    for ( var i = 0; i < names.length; i++) {
      var n = names[i];
-     a.push( [ n, gauges[n] ]);
+     a.push( [ n, d[n] ]);
    }
    return a;
- }
+  }
 
  function gauageHistoricalToLinkedChart(data) {
    var res = {};
@@ -1082,10 +1070,10 @@
     <div id="navData" class="flex flex-col divide-y">
       {#if globalConfig.movementSensorProps.linearVelocitySupported}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Speed<br><small>over ground<small></div>
+          <div class="min-w-32">SOG<br></div>
           <div>
             <span class="font-bold">{globalData.speed.toFixed(2)}</span>
-            <sup>kn</sup>  
+            <sup>knots</sup>  
           </div>
         </div>
       {/if}
@@ -1127,7 +1115,7 @@
       {/if}
       <div class="flex gap-2 p-2 text-lg">
         <div class="min-w-32">Location</div>
-        <span class="font-bold" style="white-space: pre-line;">{globalData.posString}</span>
+        <span><small>{globalData.posString}</small></span>
       </div>
       {#if globalConfig.movementSensorProps.compassHeadingSupported}
         <div class="flex gap-2 p-2 text-lg">
@@ -1146,7 +1134,7 @@
         </div>
       {/if}
       <div class="flex flex-col divide-y">
-        {#each gaugesToArray(globalData.gauges) as [key, value]}
+        {#each dicToArray(globalData.gauges) as [key, value]}
           <section class="overflow-visible flex gap-2 p-2 text-lg">
             <h2 class="min-w-32 capitalize">{key}</h2>
             <div class="grow">
@@ -1182,6 +1170,27 @@
           </section>
         {/each}
       </div>
+      {#if globalData.acPowerData}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">AC Power</div>
+          <div style="font-size:.7em;">
+            <table>
+              <tr>
+                <td/>
+                <th>Voltage</th>
+                <th>Current</th>
+              </tr>
+              {#each dicToArray(globalData.acPowers) as [name, d]}
+                <tr>
+                  <th>{name}</th>
+                  <td>{d["Line-Neutral AC RMS Voltage"]}</td>
+                  <td>{d["AC RMS Current"]}</td>
+                </tr>
+              {/each}
+            </table>
+          </div>
+        </div>
+      {/if}
     </div>
 
     <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
