@@ -83,6 +83,7 @@
  var globalConfig = {
    movementSensorName : "",
    movementSensorProps : {},
+   movementSensorAlternates : [],
    
    aisSensorName : "",
    seatempSensorName : "",
@@ -458,6 +459,8 @@
  
  async function setupMovementSensor(client: VIAM.RobotClient, resources) {
    resources = filterResources(resources, "component", "movement_sensor", null);
+
+   var allGpsNames = [];
    
    // pick best movement sensor
    var bestName = "";
@@ -470,6 +473,7 @@
 
      var score = 0;
      if (prop.positionSupported) {
+       allGpsNames.push(r.name);
        score++;
      }
      if (prop.linearVelocitySupported) {
@@ -488,6 +492,7 @@
    
    globalConfig.movementSensorName = bestName;
    globalConfig.movementSensorProps = bestProp;
+   globalConfig.movementSensorAlternates = allGpsNames;
  }
  
  async function updateAndLoop() {
@@ -628,7 +633,28 @@
  }
 
  async function positionHistoryMQL(dc, startTime) {
-   var name = globalConfig.movementSensorName.split(":");
+   var res = positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorName);
+   if (res.length > 0) {
+     return res;
+   }
+   
+   for (var i=0; i<globalConfig.movementSensorAlternates.length; i++){
+     var n = globalConfig.movementSensorAlternates[i];
+     if (n == globalConfig.movementSensorName) {
+       continue;
+     }
+     
+     res = positionHistoryMQLNamed(dc, startTime, n);
+     if (res.length > 0) {
+       return res;
+     }
+     
+   }
+   return res;
+ }
+ 
+ async function positionHistoryMQLNamed(dc, startTime, n) {
+   var name = n.split(":");
    
    var match = {
    "location_id" : globalClientCloudMetaData.locationId,
@@ -663,7 +689,7 @@
    ];
    
    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
-   console.log("got " + data.length + " history data points");
+   console.log("got " + data.length + " history data points from:" + n);
    return data;
  }
 
