@@ -577,7 +577,7 @@
                                   " ",
                                   { "$toString" : { "$hour": "$time_received" } },
                                   ":",
-                                  { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
+                                  { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                   ] },
      "ts" : { "$min" : "$time_received" },
      "min" : { "$min" : "$data.readings.Level" },
@@ -674,7 +674,7 @@
                                   " ",
                                   { "$toString" : { "$hour": "$time_received" } },
                                   ":",
-                                  { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
+                                  { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
                                   ] },
    "ts" : { "$min" : "$time_received" },
    "pos" : { "$first" : "$data" },
