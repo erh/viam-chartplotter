@@ -192,7 +192,7 @@
      
        globalData.posString = gpsFormatter.format(myPos);
      } else {
-       globalData.posString = p.coordinate.latitude + ", " + p.coordinate.longitude;
+       globalData.posString = p.coordinate.latitude.toFixed(5) + ", " + p.coordinate.longitude.toFixed(5);
      }
      
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
@@ -1147,7 +1147,7 @@
         <div class="flex gap-2 p-2 text-lg">
           <div class="min-w-32">Heading</div>
           <div>
-            <span class="font-bold">{@html globalData.heading}</span>
+            <span class="font-bold">{@html globalData.heading.toFixed(2)}</span>
           </div>
         </div>
       {/if}
