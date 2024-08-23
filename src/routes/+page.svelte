@@ -483,11 +483,14 @@
        score++;
      }
 
-     if (score > bestScore) {
+     console.log(r.name + " : " + score);
+     
+     if (score > bestScore || (score == bestScore && r.name.length < bestName.length) ) {
        bestName = r.name;
        bestScore = score;
        bestProp = prop;
      }
+
    }
    
    globalConfig.movementSensorName = bestName;
