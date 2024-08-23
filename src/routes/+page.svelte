@@ -297,7 +297,7 @@
        if (r.subtype != "sensor") {
          return;
        }
-       if (r.name.indexOf("fuel-") < 0 && r.name.indexOf("freshwater") < 0) {
+       if (r.name.indexOf("fuel") < 0 && r.name.indexOf("freshwater") < 0) {
          return;
        }
        
