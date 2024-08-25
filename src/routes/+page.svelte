@@ -64,6 +64,13 @@
    windSpeed: 0.0,
    windAngle: 0.0,
    spotZeroFW : 0.0,
+   seakeeperData : {
+     power_available: 0,
+     power_enabled: 0,
+     stabilize_available: false,
+     stabilize_enabled: false,
+     "progress_bar_percentage" : 0.0
+   },
    gauges : {},
    acPowers : {},
    acPowerData : false,
@@ -90,6 +97,7 @@
    depthSensorName : "",
    windSensorName : "",
    spotZeroFWSensorName : "",
+   seakeeperSensorName : "",
    acPowers : [],
    
    zoomModifier : 0,
@@ -278,6 +286,15 @@
      });
    }
 
+   if (globalConfig.seakeeperSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.seakeeperSensorName).getReadings().then((d) => {
+       globalData.seakeeperData = d;
+     }).catch( (e) => {
+       globalConfig.spotZeroFWSensorName = "";
+       errorHandler(e);
+     });
+   }
+
    globalConfig.acPowers.forEach( (acPowerName) => {
      new VIAM.SensorClient(client, acPowerName).getReadings().then((d) => {
        var n = acPowerName.split("ac-")[1];
@@ -451,6 +468,7 @@
    globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
    globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
    globalConfig.spotZeroFWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-fw/);
+   globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
    globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
    
    console.log("globalConfig", globalConfig);
@@ -1159,6 +1177,26 @@
           <div class="min-w-32">SpotZero FW </div>
           <div>
             <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)} gpm</span>
+          </div>
+        </div>
+      {/if}
+      {#if globalConfig.seakeeperSensorName != ""}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Seakeeper </div>
+          <div>
+            <span class="font-bold">
+              {#if globalData.seakeeperData["power_enabled"] >= 1}
+                P
+              {:else if globalData.seakeeperData["power_available"] >= 1 }
+                p
+              {/if}
+              {#if globalData.seakeeperData["stabilize_enabled"] >= 1}
+                E
+              {:else if globalData.seakeeperData["stabilize_available"] >= 1 }
+                e
+              {/if}
+              {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}%
+            </span>
           </div>
         </div>
       {/if}
