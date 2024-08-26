@@ -197,7 +197,7 @@
        var gpsFormatter = new DecimalMinutes();
        gpsFormatter.setSeparator("\n")
                    .useCardinalLetters(true);
-     
+       
        globalData.posString = gpsFormatter.format(myPos);
      } else {
        globalData.posString = p.coordinate.latitude.toFixed(5) + ", " + p.coordinate.longitude.toFixed(5);
@@ -431,7 +431,7 @@
      names.push(r.name);
    }
    return names.sort();
-  }
+ }
 
  // t - type
  // st - subtype
@@ -590,16 +590,16 @@
    
    var group = {
      "_id": { "$concat" : [
-                                  { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
-                                  "-",
-                                  { "$toString" : { "$month": "$time_received" } },
-                                  "-",
-                                  { "$toString" : { "$dayOfMonth": "$time_received" } },
-                                  " ",
-                                  { "$toString" : { "$hour": "$time_received" } },
-                                  ":",
-                                  { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
-                                  ] },
+                                      { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
+                                      "-",
+                                      { "$toString" : { "$month": "$time_received" } },
+                                      "-",
+                                      { "$toString" : { "$dayOfMonth": "$time_received" } },
+                                      " ",
+                                      { "$toString" : { "$hour": "$time_received" } },
+                                      ":",
+                                      { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
+                                      ] },
      "ts" : { "$min" : "$time_received" },
      "min" : { "$min" : "$data.readings.Level" },
      "max" : { "$max" : "$data.readings.Level" }
@@ -678,27 +678,27 @@
    var name = n.split(":");
    
    var match = {
-   "location_id" : globalClientCloudMetaData.locationId,
-   "robot_id" : globalClientCloudMetaData.machineId,
-   "component_name" : name[name.length-1],
-   "method_name" : "Position",
-   "time_received": { $gte: startTime }
+     "location_id" : globalClientCloudMetaData.locationId,
+     "robot_id" : globalClientCloudMetaData.machineId,
+     "component_name" : name[name.length-1],
+     "method_name" : "Position",
+     "time_received": { $gte: startTime }
    };
    
    var group = {
-   "_id": { "$concat" : [
-                                  { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
-                                  "-",
-                                  { "$toString" : { "$month": "$time_received" } },
-                                  "-",
-                                  { "$toString" : { "$dayOfMonth": "$time_received" } },
-                                  " ",
-                                  { "$toString" : { "$hour": "$time_received" } },
-                                  ":",
-                                  { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
-                                  ] },
-   "ts" : { "$min" : "$time_received" },
-   "pos" : { "$first" : "$data" },
+     "_id": { "$concat" : [
+                                      { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
+                                      "-",
+                                      { "$toString" : { "$month": "$time_received" } },
+                                      "-",
+                                      { "$toString" : { "$dayOfMonth": "$time_received" } },
+                                      " ",
+                                      { "$toString" : { "$hour": "$time_received" } },
+                                      ":",
+                                      { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
+                                      ] },
+     "ts" : { "$min" : "$time_received" },
+     "pos" : { "$first" : "$data" },
    };
    
    
@@ -725,7 +725,7 @@
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-                                 var bar = await foo.json();
+       var bar = await foo.json();
        data = bar.data;
      } else {
        data = await positionHistoryMQL(dc, startTime);
@@ -1064,7 +1064,7 @@
      a.push( [ n, d[n] ]);
    }
    return a;
-  }
+ }
 
  function gauageHistoricalToLinkedChart(data) {
    var res = {};
@@ -1074,11 +1074,25 @@
    }
    return res;
  }
+
+ function seakeeper(name, value) {
+   var cmd = {};
+   cmd[name] = value;
+   console.log(cmd);
+
+   new VIAM.SensorClient(globalClient, globalConfig.seakeeperSensorName).doCommand(cmd).then((r) => {
+     console.log(r);
+   }).catch( (e) => {
+     errorHandler(e);
+   });
+   
+   return true;
+ }
 </script>
 
 
 <main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2">
-  <div class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-light">
+    <div class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-light">
     <div id="map" class="min-h-[50dvh] h-fit"></div>
     <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full bg-white/65 p-4">
       {#if mapGlobal.inPanMode}
@@ -1186,14 +1200,14 @@
           <div>
             <span class="font-bold">
               {#if globalData.seakeeperData["power_enabled"] >= 1}
-                P
+                <button on:click={() => seakeeper('power',false)}>P</button>
               {:else if globalData.seakeeperData["power_available"] >= 1 }
-                p
+                <button on:click={() => seakeeper('power', true)}>p</button>
               {/if}
               {#if globalData.seakeeperData["stabilize_enabled"] >= 1}
-                E
+                <button on:click={() => seakeeper('enable',false)}>E</button>
               {:else if globalData.seakeeperData["stabilize_available"] >= 1 }
-                e
+                <button on:click={() => seakeeper('enable',true)}>e</button>
               {/if}
               {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}%
             </span>
