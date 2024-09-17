@@ -290,7 +290,7 @@
      new VIAM.SensorClient(client, globalConfig.seakeeperSensorName).getReadings().then((d) => {
        globalData.seakeeperData = d;
      }).catch( (e) => {
-       globalConfig.spotZeroFWSensorName = "";
+       globalConfig.seakeeperSensorName = "";
        errorHandler(e);
      });
    }
