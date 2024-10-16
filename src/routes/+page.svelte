@@ -142,16 +142,29 @@
  function gotNewData() {
    globalData.lastData = new Date();
  }
+
+ function errorHandlerMaker(m) {
+   return function(e) {
+     return errorHandler(e, m);
+   };
+ }
  
- function errorHandler(e) {
-   globalLogger.error(e);
+ function errorHandler(e, context) {
+   if (context) {
+     globalLogger.error(context + " : " + e);
+   } else {
+     globalLogger.error(e);
+   }
    var s = e.toString();
    globalData.status = "Error: " + s;
-
+   if (context) {
+     globalData.status = context + " : " + globalData.status;
+   }
+   
    var reset = false;
-
+   
    var diff = new Date() - globalData.lastData;
-
+   
    if (diff > 1000 * 30) {
      reset = true;
    }
@@ -237,15 +250,15 @@
        mapGlobal.lastCenter = pp;
      }
      
-   }).catch(errorHandler);
-
+   }).catch(errorHandlerMaker("movement sensor"));
+   
    msClient.getLinearVelocity().then((v) => {
      globalData.speed = v.y * 1.94384;
-   }).catch(errorHandler);
-
+   }).catch(errorHandlerMaker("linear velocity"));
+   
    msClient.getCompassHeading().then((ch) => {
      globalData.heading = ch;
-   }).catch(errorHandler);
+   }).catch(errorHandlerMaker("compass"));
 
 
    if (globalConfig.seatempSensorName != "") {
@@ -253,7 +266,7 @@
        if (!isNaN(t.Temperature)) {
          globalData.temp = 32 + (t.Temperature * 1.8);
        }
-     }).catch( errorHandler );
+     }).catch( errorHandlerMaker("seatemp") );
    }
 
    if (globalConfig.depthSensorName != "") {
@@ -261,7 +274,7 @@
        globalData.depth = d.Depth * 3.28084;
      }).catch( (e) => {
        globalConfig.depthSensorName = "";
-       errorHandler(e);
+       errorHandler(e, "depth");
      });
    }
 
@@ -273,7 +286,7 @@
        }
      }).catch( (e) => {
        globalConfig.windSensorName = "";
-       errorHandler(e);
+       errorHandler(e, "wind");
      });
    }
 
@@ -282,7 +295,7 @@
        globalData.spotZeroFW = d["Product Water Flow"] * 0.00440287;
      }).catch( (e) => {
        globalConfig.spotZeroFWSensorName = "";
-       errorHandler(e);
+       errorHandler(e, "spot zero");
      });
    }
 
@@ -291,7 +304,7 @@
        globalData.seakeeperData = d;
      }).catch( (e) => {
        globalConfig.seakeeperSensorName = "";
-       errorHandler(e);
+       errorHandler(e, "seakeeper");
      });
    }
 
@@ -300,10 +313,7 @@
        var n = acPowerName.split("ac-")[1];
        globalData.acPowers[n] = d;
        globalData.acPowerData = true;
-     }).catch( (e) => {
-       globalConfig.spotZeroFWSensorName = "";
-       errorHandler(e);
-     });
+     }).catch( errorHandlerMaker(acPowerName));
      
    });
 
@@ -323,7 +333,8 @@
 
        new VIAM.SensorClient(client, r.name).getReadings().then((raw) => {
          globalData.gauges[name] = raw;
-       });
+       }).catch( errorHandlerMaker(r.name) );
+       
      });
 
      if (globalConfig.aisSensorName != "") {
@@ -371,7 +382,7 @@
            }
          }
          
-       }).catch( errorHandler );
+       }).catch( errorHandlerMaker("ais") );
      }
    }
    
@@ -410,7 +421,7 @@
          if (i) {
            i.src = URL.createObjectURL(new Blob([img]));
          }
-     }).catch(errorHandler);
+     }).catch(errorHandlerMaker(r.name));
      
    });
 
@@ -654,7 +665,7 @@
  }
 
  async function positionHistoryMQL(dc, startTime) {
-   var res = positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorName);
+   var res = await positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorName);
    if (res.length > 0) {
      return res;
    }
@@ -665,7 +676,7 @@
        continue;
      }
      
-     res = positionHistoryMQLNamed(dc, startTime, n);
+     res = await positionHistoryMQLNamed(dc, startTime, n);
      if (res.length > 0) {
        return res;
      }
