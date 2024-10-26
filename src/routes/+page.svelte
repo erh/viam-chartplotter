@@ -83,6 +83,7 @@
    
    numUpdates: 0,
    status: "Not connected yet",
+   statusLastError: new Date(),
    lastData: new Date(),
    
  };
@@ -150,6 +151,7 @@
  }
  
  function errorHandler(e, context) {
+   globalData.statusLastError = new Date();
    if (context) {
      globalLogger.error(context + " : " + e);
    } else {
@@ -530,6 +532,11 @@
  async function updateAndLoop() {
    globalData.numUpdates++;
 
+   var timeSinceLastError = new Date() - globalData.statusLastError;
+   if (timeSinceLastError > (120 * 1000) ) {
+     globalData.status = "";
+   }
+   
    if (!globalClient) {
      try {
        globalClient = await connect();
