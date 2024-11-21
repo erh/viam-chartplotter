@@ -33,7 +33,7 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"@viamrobotics/sdk": "^0.17.1",
+		"@viamrobotics/sdk": "^0.30.0",
 		"bsonfy": "^1.0.2",
 		"ol": "^8.2.0",
 		"svelte-tiny-linked-charts": "^1.6.0",

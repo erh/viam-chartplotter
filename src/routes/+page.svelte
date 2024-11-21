@@ -570,9 +570,8 @@
    
    if (!globalCloudClient) {
      try {
-       
        const opts: VIAM.ViamClientOptions = {
-         credential: {
+         credentials: {
            type: 'api-key',
            authEntity: urlParams.get("authEntity"),
            payload: urlParams.get("api-key"),
@@ -800,20 +799,21 @@
    
    const credential = {
      type: 'api-key',
-     payload: apiKey
+     payload: apiKey,
+     authEntity: authEntity
    };
 
+   
    var c = await VIAM.createRobotClient({
      host,
-     credential: credential,
-     authEntity: authEntity,
+     credentials: credential,
      signalingAddress: 'https://app.viam.com:443',
 
      // optional: configure reconnection options
      reconnectMaxAttempts: 20,
      reconnectMaxWait: 5000,
    });
-
+   
    globalData.status = "Connected";
    
    globalLogger.info('connected!');
