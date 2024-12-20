@@ -1096,9 +1096,10 @@
  function seakeeper(name, value) {
    var cmd = {};
    cmd[name] = value;
+   console.log("sending to: "+ globalConfig.seakeeperSensorName);
    console.log(cmd);
 
-   new VIAM.SensorClient(globalClient, globalConfig.seakeeperSensorName).doCommand(cmd).then((r) => {
+   new VIAM.SensorClient(globalClient, globalConfig.seakeeperSensorName).doCommand(VIAM.Struct.fromJson(cmd)).then((r) => {
      console.log(r);
    }).catch( (e) => {
      errorHandler(e);
