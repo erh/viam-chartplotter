@@ -586,12 +586,15 @@
    }
    
    if (globalCloudClient) {
-     var dc = globalCloudClient.dataClient;
-
-     var hostPieces = urlParams.get("host").split("."); // TODO - fix
-     var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
-
-     await updateGaugeGraphs(globalCloudClient.dataClient, robotName);
+     try {
+       var dc = globalCloudClient.dataClient;
+       
+       var hostPieces = urlParams.get("host").split("."); // TODO - fix
+       var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
+       await updateGaugeGraphs(globalCloudClient.dataClient, robotName);
+     } catch ( error ) {
+       console.log("updateGaugeGraphs error: " + error);
+     }
    }
 
    setTimeout(updateCloudDataAndLoop, 1000);
