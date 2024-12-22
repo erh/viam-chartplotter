@@ -1074,6 +1074,48 @@
 
  onMount(start);
 
+ function moreThanOneFuelTank(gauges) {
+   var found = false;
+   for (var k in gauges) {
+     var g = gauges[k];
+     if (g["Type"] == "Fuel"){
+       if (found) {
+         return true;
+       }
+       found = true;
+     }
+   }
+   return false;
+ }
+
+ function fuelTotalLevel(gauges) {
+   var total = 0;
+   for (var k in gauges) {
+     var g = gauges[k];
+     if (g["Type"] != "Fuel"){
+       continue;
+     }
+
+     total += g["Level"] * g["Capacity"] / 100;
+
+   }
+   return Math.round(total * .264172);
+ }
+
+ function fuelTotalCapacity(gauges) {
+   var total = 0;
+   for (var k in gauges) {
+     var g = gauges[k];
+     if (g["Type"] != "Fuel"){
+       continue;
+     }
+
+     total += g["Capacity"];
+
+   }
+   return Math.round(total * .264172);
+ }
+
  function dicToArray(d) {
    var names = Object.keys(d);
    names.sort();
@@ -1272,6 +1314,16 @@
             </div>
           </section>
         {/each}
+        {#if moreThanOneFuelTank(globalData.gauges)}
+          <section>
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">Total Fuel </div>
+              <div>
+                <span class="font-bold">{fuelTotalLevel(globalData.gauges)} / {fuelTotalCapacity(globalData.gauges)} gallons</span>
+              </div>
+            </div>
+          </section>
+        {/if}
       </div>
       {#if globalData.acPowerData}
         <div class="flex gap-2 p-2 text-lg">
