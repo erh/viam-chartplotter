@@ -64,6 +64,7 @@
    windSpeed: 0.0,
    windAngle: 0.0,
    spotZeroFW : 0.0,
+   spotZeroSW : 0.0,
    seakeeperData : {
      power_available: 0,
      power_enabled: 0,
@@ -98,6 +99,7 @@
    depthSensorName : "",
    windSensorName : "",
    spotZeroFWSensorName : "",
+   spotZeroSWSensorName : "",
    seakeeperSensorName : "",
    acPowers : [],
    
@@ -297,9 +299,18 @@
        globalData.spotZeroFW = d["Product Water Flow"] * 0.00440287;
      }).catch( (e) => {
        globalConfig.spotZeroFWSensorName = "";
-       errorHandler(e, "spot zero");
+       errorHandler(e, "spot zero fw");
      });
    }
+
+   if (globalConfig.spotZeroSWSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.spotZeroSWSensorName).getReadings().then((d) => {
+       globalData.spotZeroSW = d["Product Water Flow"] * 0.00440287;
+     }).catch( (e) => {
+       globalConfig.spotZeroSWSensorName = "";
+       errorHandler(e, "spot zero sw");
+     });
+      }
 
    if (globalConfig.seakeeperSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.seakeeperSensorName).getReadings().then((d) => {
@@ -481,6 +492,7 @@
    globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
    globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
    globalConfig.spotZeroFWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-fw/);
+   globalConfig.spotZeroSWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-sw/);
    globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
    globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
    
@@ -1252,9 +1264,11 @@
       {/if}
       {#if globalConfig.spotZeroFWSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">SpotZero FW </div>
+          <div class="min-w-32">SpotZero F/S</div>
           <div>
-            <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)} gpm</span>
+            <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)}</span> /
+            <span class="font-bold">{@html globalData.spotZeroSW.toFixed(2)}</span>
+            gpm
           </div>
         </div>
       {/if}
