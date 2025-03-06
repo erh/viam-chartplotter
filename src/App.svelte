@@ -1,5 +1,4 @@
 <script lang="ts">
- import '../output.css'
  import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
@@ -44,8 +43,7 @@
 
  import * as VIAM from '@viamrobotics/sdk';
 
- import { base } from '$app/paths';
- let boatImage = base + "/boat3.jpg";
+ let boatImage = "boat3.jpg";
  
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
@@ -1344,18 +1342,20 @@
           <div class="min-w-32">AC Power</div>
           <div style="font-size:.7em;">
             <table>
-              <tr>
-                <td/>
-                <th>Voltage</th>
-                <th>Current</th>
-              </tr>
-              {#each dicToArray(globalData.acPowers) as [name, d]}
+              <tbody>
                 <tr>
-                  <th>{name}</th>
-                  <td>{d["Line-Neutral AC RMS Voltage"]}</td>
-                  <td>{d["AC RMS Current"]}</td>
+                  <td></td>
+                  <th>Voltage</th>
+                  <th>Current</th>
                 </tr>
-              {/each}
+                {#each dicToArray(globalData.acPowers) as [name, d]}
+                  <tr>
+                    <th>{name}</th>
+                    <td>{d["Line-Neutral AC RMS Voltage"]}</td>
+                    <td>{d["AC RMS Current"]}</td>
+                  </tr>
+                {/each}
+              </tbody>
             </table>
           </div>
         </div>
