@@ -2476,6 +2476,12 @@ video {
   overflow-wrap: anywhere;
 }
 
+#map-container {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
 #map {
   width: 100%;
   height: 100%;
