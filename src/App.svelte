@@ -1286,6 +1286,7 @@
                 <button on:click={() => seakeeper('enable',true)}>e</button>
               {/if}
               {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}%
+              ({globalData.seakeeperData["flywheel_speed"]})
             </span>
           </div>
         </div>
