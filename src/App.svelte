@@ -44,6 +44,8 @@
  import * as VIAM from '@viamrobotics/sdk';
 
  let boatImage = "boat3.jpg";
+
+ import { tankSort } from "./helpers.ts"
  
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
@@ -1126,9 +1128,13 @@
    return Math.round(total * .264172);
  }
 
- function dicToArray(d) {
+ function dicToArray(d, sortFunction) {
    var names = Object.keys(d);
-   names.sort();
+   if (sortFunction) {
+     names = sortFunction(names);
+   } else {
+     names.sort();
+   }
 
    var a = [];
    
@@ -1292,7 +1298,7 @@
         </div>
       {/if}
       <div class="flex flex-col divide-y">
-        {#each dicToArray(globalData.gauges) as [key, value]}
+        {#each dicToArray(globalData.gauges, tankSort) as [key, value]}
           <section class="overflow-visible flex gap-2 p-2 text-lg">
             <h2 class="min-w-32 capitalize">{key}</h2>
             <div class="grow">
