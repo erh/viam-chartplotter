@@ -86,7 +86,8 @@
    status: "Not connected yet",
    statusLastError: new Date(),
    lastData: new Date(),
-   
+
+   partConfig : {},
  };
 
  var globalConfig = {
@@ -421,6 +422,18 @@
    var start = new Date();
    
    filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
+
+     var cc = findComponentConfig(r.name);
+     var skip = cc && cc.attributes && cc.attributes["chartplotter-hide"];
+
+     if (skip) {
+       var idx = globalData.cameraNames.indexOf(r.name);
+       if (idx >= 0) {
+         globalData.cameraNames.splice(idx,1);
+       }
+       return;
+     }
+     
      if (globalData.cameraNames.indexOf(r.name) < 0) {
        globalData.cameraNames.push(r.name);
        globalData.cameraNames.sort();
@@ -599,8 +612,9 @@
    
    if (globalCloudClient) {
      try {
-       var dc = globalCloudClient.dataClient;
+       await updateMachineConfig(globalCloudClient.appClient);
        
+       var dc = globalCloudClient.dataClient;
        var hostPieces = urlParams.get("host").split("."); // TODO - fix
        var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
        await updateGaugeGraphs(globalCloudClient.dataClient, robotName);
@@ -612,6 +626,36 @@
    setTimeout(updateCloudDataAndLoop, 1000);
  }
 
+ async function updateMachineConfig(ac) {
+   const part = await ac.getRobotPart(
+     globalClientCloudMetaData.robotPartId
+   )
+
+   if (!part || !part.part) {
+     throw new Error('Failed to get robot part: part or part.part is undefined')
+   }
+   
+   globalData.partConfig = JSON.parse(part.configJson);
+ }
+
+ function findComponentConfig(n) {
+   if (!globalData.partConfig) {
+     return null;
+   }
+
+   if (!globalData.partConfig.components) {
+     return null;
+   }
+
+   for ( var i=0; i < globalData.partConfig.components.length; i++) {
+     var c = globalData.partConfig.components[i];
+     if (c.name == n) {
+       return c;
+     }
+   }
+   return null;
+ }
+ 
  async function getDataViaMQL(dc, g, startTime) {
    var match = {
      "location_id" : globalClientCloudMetaData.locationId,
