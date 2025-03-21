@@ -96,6 +96,7 @@
    movementSensorAlternates : [],
    
    aisSensorName : "",
+   allPgnSensorName : "",
    seatempSensorName : "",
    depthSensorName : "",
    windSensorName : "",
@@ -114,6 +115,7 @@
 
    aisFeatures: new Collection(),
    trackFeatures: new Collection(),
+   routeFeatures: new Collection(),
    trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null,
    
@@ -351,8 +353,20 @@
        
      });
 
+     if (globalConfig.allPgnSensorName != "") {
+       new VIAM.SensorClient(client, globalConfig.allPgnSensorName).getReadings().then((raw) => {
+
+         for (var k in raw) {
+           var doc = raw[k];
+           if (k.indexOf("129285")==0){
+             processRoute129285(doc);
+           }
+         }
+       });
+     }
+     
      if (globalConfig.aisSensorName != "") {
-       new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
+           new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
          var good = {};
          
          for ( var mmsi in raw  ) {
@@ -403,6 +417,34 @@
    
  }
 
+ function processRoute129285(doc) {
+   console.log(doc);
+   
+   mapGlobal.routeFeatures.clear();
+
+   if (!doc.list) {
+     return;
+   }
+   
+   var prev = [];
+   
+   for (var x=0; x<doc.list.length; x++) {
+     var wp = doc.list[x];
+     var loc = [wp["WP Longitude"], wp["WP Latitude"]];
+     if (prev) {
+       var f = new Feature({
+         type: "track",
+         geometry: new LineString([prev, loc]),
+       });
+       mapGlobal.routeFeatures.push(f);
+     }
+     prev = loc;
+   }
+   
+   console.log(mapGlobal.routeFeatures);
+
+ }
+ 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
 
    while (globalData.lastCameraTimes.length > 20){
@@ -501,6 +543,7 @@
    await setupMovementSensor(client, resources);
 
    globalConfig.aisSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bais$/);
+   globalConfig.allPgnSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\ball.pgn$/);
    globalConfig.seatempSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bseatemp$/);
    globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
    globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
@@ -508,7 +551,7 @@
    globalConfig.spotZeroSWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-sw/);
    globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
    globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
-   
+
    console.log("globalConfig", globalConfig);
 
  }
@@ -539,7 +582,7 @@
        score++;
      }
 
-     console.log(r.name + " : " + score);
+     //console.log(r.name + " : " + score);
      
      if (score > bestScore || (score == bestScore && r.name.length < bestName.length) ) {
        bestName = r.name;
@@ -658,14 +701,14 @@
  
  async function getDataViaMQL(dc, g, startTime) {
    var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : g,
+       "location_id" : globalClientCloudMetaData.locationId,
+       "robot_id" : globalClientCloudMetaData.machineId,
+       "component_name" : g,
      time_received: { $gte: startTime }
    };
    
    var group = {
-     "_id": { "$concat" : [
+       "_id": { "$concat" : [
                                       { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                       "-",
                                       { "$toString" : { "$month": "$time_received" } },
@@ -676,9 +719,9 @@
                                       ":",
                                       { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                       ] },
-     "ts" : { "$min" : "$time_received" },
-     "min" : { "$min" : "$data.readings.Level" },
-     "max" : { "$max" : "$data.readings.Level" }
+       "ts" : { "$min" : "$time_received" },
+       "min" : { "$min" : "$data.readings.Level" },
+       "max" : { "$max" : "$data.readings.Level" }
    };
    
    var query = [
@@ -754,15 +797,15 @@
    var name = n.split(":");
    
    var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : name[name.length-1],
-     "method_name" : "Position",
-     "time_received": { $gte: startTime }
+   "location_id" : globalClientCloudMetaData.locationId,
+   "robot_id" : globalClientCloudMetaData.machineId,
+   "component_name" : name[name.length-1],
+   "method_name" : "Position",
+   "time_received": { $gte: startTime }
    };
    
    var group = {
-     "_id": { "$concat" : [
+   "_id": { "$concat" : [
                                       { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                       "-",
                                       { "$toString" : { "$month": "$time_received" } },
@@ -773,8 +816,8 @@
                                       ":",
                                       { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
                                       ] },
-     "ts" : { "$min" : "$time_received" },
-     "pos" : { "$first" : "$data" },
+   "ts" : { "$min" : "$time_received" },
+   "pos" : { "$first" : "$data" },
    };
    
    
@@ -801,7 +844,7 @@
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-       var bar = await foo.json();
+                                                         var bar = await foo.json();
        data = bar.data;
      } else {
        data = await positionHistoryMQL(dc, startTime);
@@ -1054,12 +1097,35 @@
        })
      }),
    });
-   
+
    mapGlobal.layerOptions.push({
      name: "track",
      on: true,
      layer : trackLayer,
    });
+   
+   var routeLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.routeFeatures,
+     }),
+     style: new Style({
+       stroke: new Stroke({
+         color: "green",
+         width: 3
+       }),
+       fill: new Fill({
+         color: "rgba(0, 255, 0, 0.1)"
+       })
+     }),
+   });
+
+   mapGlobal.layerOptions.push({
+     name: "route",
+     on: true,
+     layer : routeLayer,
+   });
+
+
 
  }
 
