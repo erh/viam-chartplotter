@@ -90,7 +90,7 @@
    partConfig : {},
  });
 
- var globalConfig = {
+ var globalConfig = $state({
    movementSensorName : "",
    movementSensorProps : {},
    movementSensorAlternates : [],
@@ -106,9 +106,9 @@
    acPowers : [],
    
    zoomModifier : 0,
- };
+ });
  
- let mapGlobal = {
+ let mapGlobal = $state({
 
    map: null,
    view: null,
@@ -125,7 +125,7 @@
 
    layerOptions: [],
    onLayers: new Collection(),
- };
+ });
  
  function getTileUrlFunction(url, type, coordinates) {
    var x = coordinates[1];
