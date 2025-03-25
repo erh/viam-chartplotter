@@ -54,7 +54,7 @@
 
  let globalCloudClient: VIAM.ViamClient;
  
- let globalData = {
+ let globalData = $state({
    pos : new Coordinate(0,0),
    posString : "n/a",
    speed : 0.0,
@@ -88,7 +88,7 @@
    lastData: new Date(),
 
    partConfig : {},
- };
+ });
 
  var globalConfig = {
    movementSensorName : "",
@@ -464,15 +464,11 @@
    var start = new Date();
    
    filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
-
      var cc = findComponentConfig(r.name);
      var skip = cc && cc.attributes && cc.attributes["chartplotter-hide"];
 
      if (skip) {
-       var idx = globalData.cameraNames.indexOf(r.name);
-       if (idx >= 0) {
-         globalData.cameraNames.splice(idx,1);
-       }
+       removeCamera(r.name);
        return;
      }
      
@@ -489,12 +485,22 @@
          if (i) {
            i.src = URL.createObjectURL(new Blob([img]));
          }
-     }).catch(errorHandlerMaker(r.name));
+     }).catch((e) => {
+       removeCamera(r.name);
+       errorHandler(e, r.name);
+     });
      
    });
 
  }
 
+ function removeCamera(n) {
+   var idx = globalData.cameraNames.indexOf(n);
+   if (idx >= 0) {
+     globalData.cameraNames.splice(idx,1);
+   }
+ }
+ 
  function filterResourcesFirstMatchingName(resources, t, st, n) {
    var matching = filterResources(resources, t, st, n);
    if (matching.length > 0) {
