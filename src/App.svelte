@@ -468,7 +468,9 @@
      var skip = cc && cc.attributes && cc.attributes["chartplotter-hide"];
 
      if (skip) {
-       removeCamera(r.name);
+       if (removeCamera(r.name)) {
+         console.log("removed camera: " + r.name);
+       }
        return;
      }
      
@@ -498,7 +500,9 @@
    var idx = globalData.cameraNames.indexOf(n);
    if (idx >= 0) {
      globalData.cameraNames.splice(idx,1);
+     return true;
    }
+   return false;
  }
  
  function filterResourcesFirstMatchingName(resources, t, st, n) {
