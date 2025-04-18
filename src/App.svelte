@@ -1517,8 +1517,8 @@
                 </tr>
                 <tr>
                   <th>Ttl</th>
-                  <td>220</td>
-                  <td>{acPowerAmpAt(220, globalData.acPowers).toFixed(0)}</td>
+                  <td>{(2*acPowerVoltAverage(globalData.acPowers)).toFixed(0)}</td>
+                  <td>{acPowerAmpAt(2*acPowerVoltAverage(globalData.acPowers), globalData.acPowers).toFixed(0)}</td>
                 </tr>
               </tbody>
             </table>
