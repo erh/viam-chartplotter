@@ -417,6 +417,34 @@
    
  }
 
+ function acPowerVoltAverage(data) {
+   var total = 0;
+   var num = 0;
+   
+   for (var k in data) {
+     var dd = data[k];
+     total += dd["Line-Neutral AC RMS Voltage"];
+     num++;
+   }
+   
+   return total / num;
+ }
+ 
+ function acPowerAmpAt(vvv, data) {
+   var total = 0;
+   
+   for (var k in data) {
+     var dd = data[k];
+     var a = dd["AC RMS Current"];
+     var v = dd["Line-Neutral AC RMS Voltage"];
+     var w = a * v;
+     total += w / vvv;
+   }
+   
+   return total;
+   
+ }
+
  function processRoute129285(doc) {
    console.log(doc);
    
@@ -854,7 +882,7 @@
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-                                                         var bar = await foo.json();
+                var bar = await foo.json();
        data = bar.data;
      } else {
        data = await positionHistoryMQL(dc, startTime);
@@ -1482,6 +1510,16 @@
                     <td>{d["AC RMS Current"]}</td>
                   </tr>
                 {/each}
+                <tr>
+                  <th>Ttl</th>
+                  <td>{acPowerVoltAverage(globalData.acPowers).toFixed(0)}</td>
+                  <td>{acPowerAmpAt(acPowerVoltAverage(globalData.acPowers), globalData.acPowers).toFixed(0)}</td>
+                </tr>
+                <tr>
+                  <th>Ttl</th>
+                  <td>220</td>
+                  <td>{acPowerAmpAt(220, globalData.acPowers).toFixed(0)}</td>
+                </tr>
               </tbody>
             </table>
           </div>
