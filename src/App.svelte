@@ -94,6 +94,7 @@
    movementSensorName : "",
    movementSensorProps : {},
    movementSensorAlternates : [],
+   movementSensorForQuery : "",
    
    aisSensorName : "",
    allPgnSensorName : "",
@@ -590,7 +591,7 @@
    globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
    globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
 
-   console.log("globalConfig", globalConfig);
+   console.log("globalConfig", $state.snapshot(globalConfig));
 
  }
  
@@ -736,17 +737,47 @@
    }
    return null;
  }
+
+ function isComponentMethodHot(n, method) {
+   var c = findComponentConfig(n);
+   if (!c) {
+     return false
+   }
+
+   var scs = c["service_configs"];
+   if (!scs) {
+     return false;
+   }
+   scs = scs.filter( (x) => x["type"] == "data_manager");
+   for (var i=0; i < scs.length; i++) {
+     var sc = scs[i];
+     var cm = sc["attributes"]["capture_methods"];
+     if (!cm) {
+       continue;
+     }
+     var p = cm.filter( (x) => x["method"] == method );
+     if (p.length < 1) {
+       continue;
+     }
+     var pp = p[0];
+     if (pp["recent_data_store"] && pp["recent_data_store"]["stored_hours"] >= 24) {
+       return true;
+     }
+   }
+
+   return false;
+ }
  
  async function getDataViaMQL(dc, g, startTime) {
    var match = {
-       "location_id" : globalClientCloudMetaData.locationId,
-       "robot_id" : globalClientCloudMetaData.machineId,
-       "component_name" : g,
+     "location_id" : globalClientCloudMetaData.locationId,
+     "robot_id" : globalClientCloudMetaData.machineId,
+     "component_name" : g,
      time_received: { $gte: startTime }
    };
    
    var group = {
-       "_id": { "$concat" : [
+     "_id": { "$concat" : [
                                       { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                       "-",
                                       { "$toString" : { "$month": "$time_received" } },
@@ -757,9 +788,9 @@
                                       ":",
                                       { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
                                       ] },
-       "ts" : { "$min" : "$time_received" },
-       "min" : { "$min" : "$data.readings.Level" },
-       "max" : { "$max" : "$data.readings.Level" }
+     "ts" : { "$min" : "$time_received" },
+     "min" : { "$min" : "$data.readings.Level" },
+     "max" : { "$max" : "$data.readings.Level" }
    };
    
    var query = [
@@ -769,61 +800,26 @@
      BSON.serialize( { "$limit" : (24 * 4) } ),
      BSON.serialize( { "$sort" : { ts : 1 } } ),
    ];
-   
-   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
+
+   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, true);
 
    return data;
  }
 
- async function getDataViaRaw(dc, robotName, g, startTime) {
-   var f = dc.createFilter({
-     robotName: robotName,
-     organizationIdsList: [globalClientCloudMetaData.primaryOrgId],
-     locationIdsList: [globalClientCloudMetaData.locationId],
-     startTime: startTime,
-     componentName: g,
-   });
-   
-   var data = await dc.tabularDataByFilter(f);
-
-   var m = {};
-   
-   data.forEach( (d) => {
-     var ts = d.timeReceived;
-     var key = (ts.getYear() - 100) + "-" + (1 + ts.getMonth()) + "-" + ts.getDate() + "-" + ts.getHours() + "-";
-     key += Math.floor(ts.getMinutes() / 15) * 15;
-     var r = d.data.readings;
-     var x = { _id : key, ts : ts , min : r.Level, max : r.Level };
-     m[key] = x; // TODO fix  me
-     
-   } );
-
-   var all = [];
-   for ( var k in m ) {
-     all.push(m[k]);
-   }
-
-   all.sort( function(a,b){
-     return a.ts.getTime() < b.ts.getTime();
-   });
-   
-   return all;
- }
-
  async function positionHistoryMQL(dc, startTime) {
-   var res = await positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorName);
-   if (res.length > 0) {
-     return res;
+   if (globalConfig.movementSensorForQuery != "") {
+     var res = await positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorForQuery);
+     if (res.length > 0) {
+       return res;
+     }
    }
    
    for (var i=0; i<globalConfig.movementSensorAlternates.length; i++){
      var n = globalConfig.movementSensorAlternates[i];
-     if (n == globalConfig.movementSensorName) {
-       continue;
-     }
      
      res = await positionHistoryMQLNamed(dc, startTime, n);
      if (res.length > 0) {
+       globalConfig.movementSensorForQuery = n;
        return res;
      }
      
@@ -835,11 +831,11 @@
    var name = n.split(":");
    
    var match = {
-   "location_id" : globalClientCloudMetaData.locationId,
-   "robot_id" : globalClientCloudMetaData.machineId,
-   "component_name" : name[name.length-1],
-   "method_name" : "Position",
-   "time_received": { $gte: startTime }
+     "location_id" : globalClientCloudMetaData.locationId,
+     "robot_id" : globalClientCloudMetaData.machineId,
+     "component_name" : name[name.length-1],
+     "method_name" : "Position",
+     "time_received": { $gte: startTime }
    };
    
    var group = {
@@ -865,9 +861,14 @@
      BSON.serialize( { "$group" : group } ),
      BSON.serialize( { "$sort" : { ts : -1 } } ),
    ];
+
+   var hot = isComponentMethodHot(n, "Position");
    
-   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query);
-   console.log("got " + data.length + " history data points from:" + n);
+   var timeStart = new Date();
+   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, hot);
+   var getDataTime = (new Date()).getTime() - timeStart.getTime();
+   console.log("got " + data.length + " history data points from:" + n + " in " + getDataTime + "ms hot: " + hot);
+
    return data;
  }
 
@@ -882,7 +883,7 @@
      var data = [];
      if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
        var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-                var bar = await foo.json();
+       var bar = await foo.json();
        data = bar.data;
      } else {
        data = await positionHistoryMQL(dc, startTime);
@@ -919,7 +920,6 @@
 
      var timeStart = new Date();
      var data = await getDataViaMQL(dc, g, startTime);
-     //var data = await getDataViaRaw(dc, robotName, g, startTime);
      var getDataTime = (new Date()).getTime() - timeStart.getTime();
      
      console.log("time to get graph data for " + g + " took " + getDataTime + " and had " + data.length + " points");
