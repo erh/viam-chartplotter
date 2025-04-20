@@ -314,7 +314,7 @@
        globalConfig.spotZeroSWSensorName = "";
        errorHandler(e, "spot zero sw");
      });
-      }
+   }
 
    if (globalConfig.seakeeperSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.seakeeperSensorName).getReadings().then((d) => {
@@ -367,7 +367,7 @@
      }
      
      if (globalConfig.aisSensorName != "") {
-           new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
+       new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
          var good = {};
          
          for ( var mmsi in raw  ) {
@@ -839,7 +839,7 @@
    };
    
    var group = {
-   "_id": { "$concat" : [
+     "_id": { "$concat" : [
                                       { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
                                       "-",
                                       { "$toString" : { "$month": "$time_received" } },
@@ -850,8 +850,8 @@
                                       ":",
                                       { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
                                       ] },
-   "ts" : { "$min" : "$time_received" },
-   "pos" : { "$first" : "$data" },
+     "ts" : { "$min" : "$time_received" },
+     "pos" : { "$first" : "$data" },
    };
    
    
@@ -1297,7 +1297,7 @@
    var res = {};
    for (var d in data.data) {
      var dd = data.data[d];
-     res[dd._id] = dd.min;
+     res[dd._id] = Math.floor(dd.min)
    }
    return res;
  }
@@ -1319,10 +1319,10 @@
 </script>
 
 
-<main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2">
-  <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-light">
-    <div id="map" class="min-h-[50dvh] h-fit"></div>
-    <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full bg-white/65 p-4">
+<main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black text-white">
+  <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
+    <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
+    <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full p-4">
       {#if mapGlobal.inPanMode}
         <div>
           <button on:click="{stopPanning}">Stop Panning</button>
@@ -1337,9 +1337,9 @@
     </div>
   </div>
   
-  <aside class="lg:row-span-6 flex flex-col gap-4 border border-light p-1 bg-white min-h-full">
+  <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full">
     {#if globalData.status === "Connected"}
-      <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-success-medium bg-success-light">
+      <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
         <PrimeIcon
           name="broadcast"
           cx="text-success-dark"
@@ -1347,7 +1347,7 @@
         <div class="text-sm text-success-dark">{globalData.status}</div>
       </div>
     {:else}
-    <div class="flex gap-2 items-center w-full min-h-6 px-2 border border-info-medium bg-info-light">
+    <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-info-medium">
       <PrimeIcon
         name="broadcast-off"
         cx="text-info-dark"
@@ -1457,7 +1457,7 @@
               </div>
               {#if globalData.gaugesToHistorical[key]}
               <div class="relative">
-                <div role="article" tabindex="-1" class="peer bg-light hover:cursor-pointer">
+                <div role="article" tabindex="-1" class="peer bg-dark hover:cursor-pointer">
                   <LinkedChart
                     data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
                     style="width: 100%;"
@@ -1471,7 +1471,7 @@
                   />
                 </div>
                 <div
-                  class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium bg-white px-2 w-fit"
+                  class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium px-2 w-fit"
                 >
                   <LinkedValue uid="{key}" />
                   <LinkedLabel linked="{key}"/>
@@ -1493,10 +1493,10 @@
         {/if}
       </div>
       {#if globalData.acPowerData}
-        <div class="flex gap-2 p-2 text-lg">
+        <div class="flex gap-2 p-2">
           <div class="min-w-32">AC Power</div>
           <div style="font-size:.7em;">
-            <table>
+            <table class="text-white">
               <tbody>
                 <tr>
                   <td></td>
@@ -1530,7 +1530,7 @@
     <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
   </aside>
 
-  <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-light p-1 bg-white">
+  <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-dark p-1 ">
     {#each globalData.cameraNames as name, index}
       <img id="{name}" class="w-full lg:w-[250px]" alt="{name}" />
     {/each}
@@ -1538,7 +1538,7 @@
 
   <div>
     <h3>Powered By</h3>
-    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" />
+    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
   </div>
 
 </main>
