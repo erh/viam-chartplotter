@@ -1463,6 +1463,7 @@
                     style="width: 100%;"
                     width="100"
                     type="line"
+                    lineColor="#0000ff"
                     scaleMax=100
                     linked="{key}"
                     uid="{key}"

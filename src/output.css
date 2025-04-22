@@ -1056,10 +1056,6 @@ video {
   min-height: 3rem;
 }
 
-.min-h-6 {
-  min-height: 1.5rem;
-}
-
 .min-h-\[200px\] {
   min-height: 200px;
 }
@@ -1813,10 +1809,6 @@ video {
   background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
 }
 
-.bg-white\/65 {
-  background-color: rgb(255 255 255 / 0.65);
-}
-
 .bg-yellow-100 {
   --tw-bg-opacity: 1;
   background-color: rgb(254 249 195 / var(--tw-bg-opacity, 1));
@@ -2178,16 +2170,6 @@ video {
 .text-white {
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity, 1));
-}
-
-.text-info-light {
-  --tw-text-opacity: 1;
-  color: rgb(225 243 255 / var(--tw-text-opacity, 1));
-}
-
-.text-success-light {
-  --tw-text-opacity: 1;
-  color: rgb(224 250 227 / var(--tw-text-opacity, 1));
 }
 
 .underline {
