@@ -672,17 +672,29 @@
    }
  }
 
- async function updateCloudDataAndLoop() {
+ function getHostAndCredentials() {
    const urlParams = new URLSearchParams(window.location.search);
+
+   const host = urlParams.get("host");
+   const apiKey = urlParams.get("api-key");
+   const authEntity = urlParams.get("authEntity");
    
+   const credential = {
+     type: 'api-key',
+     payload: apiKey,
+     authEntity: authEntity
+   };
+
+   return [host, credential];
+ }
+ 
+ async function updateCloudDataAndLoop() {
+   const [host, credential] = getHostAndCredentials();
+
    if (!globalCloudClient) {
      try {
        const opts: VIAM.ViamClientOptions = {
-         credentials: {
-           type: 'api-key',
-           authEntity: urlParams.get("authEntity"),
-           payload: urlParams.get("api-key"),
-         },
+         credentials: credential,
        };
        
        globalCloudClient = await VIAM.createViamClient(opts);
@@ -695,11 +707,7 @@
    if (globalCloudClient) {
      try {
        await updateMachineConfig(globalCloudClient.appClient);
-       
-       var dc = globalCloudClient.dataClient;
-       var hostPieces = urlParams.get("host").split("."); // TODO - fix
-       var robotName = hostPieces[0].split("-main")[0]; // TODO - fix
-       await updateGaugeGraphs(globalCloudClient.dataClient, robotName);
+       await updateGaugeGraphs(globalCloudClient.dataClient);
      } catch ( error ) {
        console.log("updateGaugeGraphs error: " + error);
      }
@@ -931,18 +939,7 @@
  }
  
  async function connect(): VIAM.RobotClient {
-   const urlParams = new URLSearchParams(window.location.search);
-   
-   const host = urlParams.get("host");
-   const apiKey = urlParams.get("api-key");
-   const authEntity = urlParams.get("authEntity");
-   
-   const credential = {
-     type: 'api-key',
-     payload: apiKey,
-     authEntity: authEntity
-   };
-
+   const [host, credential] = getHostAndCredentials();
    
    var c = await VIAM.createRobotClient({
      host,
