@@ -3,8 +3,8 @@ module github.com/erh/viam-chartplotter
 go 1.23.8
 
 require (
-	github.com/erh/vmodutils v0.0.3
-	go.viam.com/rdk v0.68.1
+	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
+	go.viam.com/rdk v0.73.1-0.20250505140427-608c7b61f924
 )
 
 require (
@@ -18,6 +18,7 @@ require (
 	github.com/a8m/envsubst v1.4.2 // indirect
 	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b // indirect
 	github.com/bep/debounce v1.2.1 // indirect
+	github.com/bluenviron/gortsplib/v4 v4.8.0 // indirect
 	github.com/bufbuild/protocompile v0.9.0 // indirect
 	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/campoy/embedmd v1.0.0 // indirect
@@ -151,7 +152,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	nhooyr.io/websocket v1.8.7 // indirect
 )
-
-replace github.com/erh/vmodutils => /Users/erh/work/vmodutils
-
-replace go.viam.com/rdk => github.com/erh/rdk v0.0.0-20250504230250-b0250e6b5356

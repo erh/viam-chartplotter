@@ -1,0 +1,24 @@
+{
+    "$schema": "https://dl.viam.dev/module.schema.json",
+    "module_id": "erh:viam-chartplotter",
+    "visibility": "public",
+    "url": "https://github.com/erh/viam-chartplotter",
+    "description": "silly chart plotter",
+    "models": [
+        {
+            "api": "rdk:component:generic",
+            "model": "erh:viam-chartplotter:chartplotter"
+        }
+    ],
+    "applications": null,
+    "first_run": "",
+    "entrypoint": "./bin/viamchartplottermodule",
+    "build": {
+        "build": "make module",
+        "arch": [
+            "linux/amd64",
+            "linux/arm64"
+        ],
+        "path" : "module.tar.gz"
+    }
+}
