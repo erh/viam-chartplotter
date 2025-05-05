@@ -39,6 +39,7 @@
 		"ol": "^8.2.0",
 		"svelte-tiny-linked-charts": "^1.6.0",
 		"tsgeo": "^1.2.2",
-		"tslog": "^4.9.3"
+		"tslog": "^4.9.3",
+		"typescript-cookie": "^1.0.6"
 	}
 }

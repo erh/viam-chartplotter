@@ -1,4 +1,5 @@
 <script lang="ts">
+ import { getCookie } from 'typescript-cookie'
  import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
@@ -675,9 +676,17 @@
  function getHostAndCredentials() {
    const urlParams = new URLSearchParams(window.location.search);
 
-   const host = urlParams.get("host");
-   const apiKey = urlParams.get("api-key");
-   const authEntity = urlParams.get("authEntity");
+   var host = urlParams.get("host");
+   var apiKey = urlParams.get("api-key");
+   var authEntity = urlParams.get("authEntity");
+
+   console.log("yo [" + host + "]");
+   if (!host || host == "") {
+     console.log("yo");
+     host = getCookie("host");
+     apiKey = getCookie("api-key");
+     authEntity = getCookie("api-key-id");
+   }
    
    const credential = {
      type: 'api-key',
