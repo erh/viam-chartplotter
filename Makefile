@@ -29,3 +29,6 @@ bin:
 
 node_modules: package.json
 	npm install
+
+setup-linux:
+	which npm > /dev/null 2>&1 || apt -y install nodejs
