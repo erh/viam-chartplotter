@@ -687,6 +687,19 @@
      apiKey = getCookie("api-key");
      authEntity = getCookie("api-key-id");
    }
+
+   if (!host || host == "") {
+     var machineId = window.location.pathname.split("/")[2];
+     if (machineId != "") {
+       var x = getCookie(machineId);
+       if (x != "") {
+         var x = JSON.parse(x);
+         host = x.hostname;
+         authEntity = x.id;
+         apiKey = x.key;
+       }
+     }
+   }
    
    const credential = {
      type: 'api-key',
