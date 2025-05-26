@@ -4,8 +4,8 @@ ifneq (,$(wildcard test.make))
     export $(shell sed 's/=.*//' test.make)
 endif
 
-module: bin/viamchartplottermodule
-	tar czf module.tar.gz bin/viamchartplottermodule meta.json
+module: bin/viamchartplottermodule dist/index.html
+	tar czf module.tar.gz bin/viamchartplottermodule meta.json dist
 
 run: dist/index.html  Makefile
 	go run cmd/run/cmd-run.go
