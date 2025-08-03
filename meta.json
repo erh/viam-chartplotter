@@ -26,7 +26,13 @@
         {
             "name": "chartplotter",
             "type": "single_machine",
-            "entrypoint": "dist/index.html"
+            "entrypoint": "dist/index.html",
+            "customizations": {
+		        "machinePicker": {
+	                "heading": "Demo Chartplotter app on Viam",
+	      		    "subheading": "https://github.com/erh/viam-chartplotter"
+		        }
+            }
         }
     ]
 }
