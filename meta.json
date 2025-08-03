@@ -27,7 +27,7 @@
             "name": "chartplotter",
             "type": "single_machine",
             "entrypoint": "dist/index.html",
-            "logoPath": "logo.png",
+            "logoPath": "dist/logo.png",
             "customizations": {
 		        "machinePicker": {
 	                "heading": "Demo Chartplotter app on Viam",
