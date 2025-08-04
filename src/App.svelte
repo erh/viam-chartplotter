@@ -57,6 +57,8 @@
  
  let globalData = $state({
    pos : new Coordinate(0,0),
+   posHistory : [],
+   posHistorical : [],
    posString : "n/a",
    speed : 0.0,
    temp : 0.0,
@@ -210,6 +212,12 @@
    msClient.getPosition().then((p) => {
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
+
+     globalData.posHistory.push({"pos" : p});
+     mapGlobal.trackFeatures.push(new Feature({
+       type: "track",
+       geometry: new Circle([p.coordinate.longitude, p.coordinate.latitude])
+     }))
 
      var myPos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
      globalData.pos = myPos;
@@ -680,7 +688,6 @@
    var apiKey = urlParams.get("api-key");
    var authEntity = urlParams.get("authEntity");
 
-   console.log("yo [" + host + "]");
    if (!host || host == "") {
      console.log("yo");
      host = getCookie("host");
@@ -878,7 +885,7 @@
                                       " ",
                                       { "$toString" : { "$hour": "$time_received" } },
                                       ":",
-                                      { "$toString" : { "$multiply" : [ 5, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 5] } } ] } }
+                                      { "$toString" : { "$minute": "$time_received"} },
                                       ] },
      "ts" : { "$min" : "$time_received" },
      "pos" : { "$first" : "$data" },
@@ -898,7 +905,6 @@
    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, hot);
    var getDataTime = (new Date()).getTime() - timeStart.getTime();
    console.log("got " + data.length + " history data points from:" + n + " in " + getDataTime + "ms hot: " + hot);
-
    return data;
  }
 
@@ -906,8 +912,7 @@
  async function updateGaugeGraphs(dc, robotName) {
    var startTime = new Date(new Date() - 86400 * 1000);
    
-   if (globalConfig.movementSensorName && ( new Date() - mapGlobal.trackFeaturesLastCheck ) > 60000 ) {
-
+   if (globalConfig.movementSensorName && globalData.posHistorical.length == 0) {
      // HACK HACK
      const urlParams = new URLSearchParams(window.location.search);
      var data = [];
@@ -921,6 +926,7 @@
      
      mapGlobal.trackFeatures.clear();
 
+     var first = [];
      var prev = [];
      for ( var i = 0; i < data.length; i++) {
        var p = data[i];
@@ -936,9 +942,22 @@
          }))
        }
        prev = x;
+       if (first.length == 0) {
+         first = x;
+       }
      }
 
+     if (first.length > 0 && globalData.posHistory.length > 0) {
+       var p = globalData.posHistory[0];
+       var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
+       mapGlobal.trackFeatures.push(new Feature({
+         type: "track",
+         geometry: new LineString([x, first]),
+       }))
+     }
+     
      mapGlobal.trackFeaturesLastCheck = new Date();
+     globalData.posHistorical = data;
    }
 
    for ( var g in globalData.gauges ) {
