@@ -257,7 +257,8 @@
 
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
-       var zoom = Math.floor(16-Math.sqrt(Math.floor(globalData.speed)^.5)) + globalConfig.zoomModifier;
+       var zoom = Math.pow(Math.floor(globalData.speed),.45)
+       zoom = Math.floor(16-zoom) + globalConfig.zoomModifier;
        if ( zoom <= 0 ) {
          zoom = 1;
        }
@@ -1032,7 +1033,7 @@
    // core open street maps
    mapGlobal.layerOptions.push( {
      name : "open street map",
-     on : true,
+     on : false,
      layer : new TileLayer({
        opacity: .5,
        source: new XYZ({
@@ -1044,7 +1045,7 @@
    // depth data
    mapGlobal.layerOptions.push({
      name: "depth",
-     on: true,
+     on: false,
      layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
@@ -1060,7 +1061,7 @@
    // harbors
    mapGlobal.layerOptions.push({
      name: "seamark",
-     on: true,
+     on: false,
      layer : new TileLayer({
        visible: true,
        maxZom: 19,
@@ -1080,7 +1081,7 @@
    
    mapGlobal.layerOptions.push({
      name: "noaa",
-     on: false,
+     on: true,
      layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
