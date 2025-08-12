@@ -12,6 +12,9 @@
 
  import { BSON } from "bsonfy";
 
+ import 'ol/ol.css';
+ import ScaleLine from 'ol/control/ScaleLine.js';
+ import {defaults as defaultControls} from 'ol/control/defaults.js';
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
  import Map from 'ol/Map';
@@ -1263,11 +1266,20 @@
 
    updateOnLayers();
    updateOnLayers();
+
+   var scaleThing = new ScaleLine({
+     units: "nautical",
+     bar: true,
+     text: false,
+     //minWidth: 140,
+   });
+
    
    mapGlobal.map = new Map({
      target: 'map',
      layers: mapGlobal.onLayers,
-     view: mapGlobal.view
+     view: mapGlobal.view,
+     controls: defaultControls().extend([scaleThing])
    });
  }
 
@@ -1358,10 +1370,10 @@
 </script>
 
 
-<main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black text-white">
+<main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black">
   <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
     <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
-    <div class="absolute bottom-0 right-0 left-0 flex gap-4 w-full p-4">
+    <div class="absolute bottom-0 right-0">
       {#if mapGlobal.inPanMode}
         <div>
           <button on:click="{stopPanning}">Stop Panning</button>
@@ -1376,7 +1388,7 @@
     </div>
   </div>
   
-  <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full">
+  <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
     {#if globalData.status === "Connected"}
       <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
         <PrimeIcon
