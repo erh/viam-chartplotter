@@ -260,7 +260,7 @@
 
        // zoom of 10 is about 30 miles
        // zoom of 16 is city level
-       var zoom = Math.pow(Math.floor(globalData.speed),.45)
+       var zoom = Math.pow(Math.floor(globalData.speed),.41)
        zoom = Math.floor(16-zoom) + globalConfig.zoomModifier;
        if ( zoom <= 0 ) {
          zoom = 1;
