@@ -10,8 +10,6 @@
  import {Coordinate} from "tsgeo/Coordinate";
  import {DecimalMinutes}        from "tsgeo/Formatter/Coordinate/DecimalMinutes";
 
- import { BSON } from "bsonfy";
-
  import 'ol/ol.css';
  import ScaleLine from 'ol/control/ScaleLine.js';
  import {defaults as defaultControls} from 'ol/control/defaults.js';
@@ -19,14 +17,7 @@
  import {useGeographic} from 'ol/proj.js';
  import Map from 'ol/Map';
  import View from 'ol/View';
- import TileLayer from 'ol/layer/Tile';
  import Point from 'ol/geom/Point.js';
- import Circle from 'ol/geom/Circle.js';
- import LineString from 'ol/geom/LineString.js';
- import TileWMS from 'ol/source/TileWMS.js';
- import Feature from 'ol/Feature.js';
- import VectorSource from 'ol/source/Vector.js';
- import {Vector, Tile} from 'ol/layer.js';
 
  import {
    LinkedChart,
@@ -35,15 +26,48 @@
  } from "svelte-tiny-linked-charts"
 
  import {
-   Circle as CircleStyle,
-   Fill,
-   Icon,
-   Stroke,
-   Style,
- } from 'ol/style.js';
+   setupLayers,
+   updateOnLayers,
+   findLayerByName,
+   findOnLayerIndexOfName
+ } from './lib/chart/setup.js';
 
+ import {
+   processRoute129285,
+   updateAISFeatures,
+   createTrackPoint,
+   createTrackLine
+ } from './lib/chart/features.js';
 
- import XYZ from 'ol/source/XYZ';
+ import {
+   msToKnots,
+   pointDiff,
+   celsiusToFahrenheit,
+   fuelTotalLevel,
+   fuelTotalCapacity,
+   acPowerVoltAverage,
+   acPowerAmpAt
+ } from './lib/utils/conversions.js';
+
+ import {
+   dicToArray,
+   moreThanOneFuelTank,
+   gauageHistoricalToLinkedChart
+ } from './lib/utils/helpers.js';
+
+ import {
+   getDataViaMQL,
+   positionHistoryMQL,
+   positionHistoryMQLNamed
+ } from './lib/data/queries.js';
+
+ import {
+   filterResources,
+   filterResourcesFirstMatchingName,
+   filterResourcesAllMatchingNames,
+   setupMovementSensor,
+   discoverSensorNames
+ } from './lib/data/sensors.js';
 
  import * as VIAM from '@viamrobotics/sdk';
 
@@ -134,24 +158,6 @@
    onLayers: new Collection(),
  });
  
- function getTileUrlFunction(url, type, coordinates) {
-   var x = coordinates[1];
-   var y = coordinates[2];
-   var z = coordinates[0];
-   var limit = Math.pow(2, z);
-   if (y < 0 || y >= limit) {
-     return null;
-   } else {
-     x = ((x % limit) + limit) % limit;
-     
-     var path = z + "/" + x + "/" + y + "." + type;
-     if (url instanceof Array) {
-       url = this.selectUrl(path, url);
-     }
-     return url + path;
-   }
- }
-
  function gotNewData() {
    globalData.lastData = new Date();
  }
@@ -196,13 +202,6 @@
 
  }
 
- function pointDiff(x, y) {
-   var a = x[0] - y[0];
-   var b = x[1] - y[1];
-   var c = a*a + b*b;
-   return Math.sqrt(c);
- }
-
  function stopPanning() {
    mapGlobal.lastZoom = 0;
    mapGlobal.lastCenter = [0,0];
@@ -217,10 +216,7 @@
      gotNewData();
 
      globalData.posHistory.push({"pos" : p});
-     mapGlobal.trackFeatures.push(new Feature({
-       type: "track",
-       geometry: new Circle([p.coordinate.longitude, p.coordinate.latitude])
-     }))
+     mapGlobal.trackFeatures.push(createTrackPoint([p.coordinate.longitude, p.coordinate.latitude]));
 
      var myPos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
      globalData.pos = myPos;
@@ -274,7 +270,7 @@
    }).catch(errorHandlerMaker("movement sensor"));
    
    msClient.getLinearVelocity().then((v) => {
-     globalData.speed = v.y * 1.94384;
+     globalData.speed = msToKnots(v.y);
    }).catch(errorHandlerMaker("linear velocity"));
    
    msClient.getCompassHeading().then((ch) => {
@@ -285,7 +281,7 @@
    if (globalConfig.seatempSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.seatempSensorName).getReadings().then((t) => {
        if (!isNaN(t.Temperature)) {
-         globalData.temp = 32 + (t.Temperature * 1.8);
+         globalData.temp = celsiusToFahrenheit(t.Temperature);
        }
      }).catch( errorHandlerMaker("seatemp") );
    }
@@ -303,7 +299,7 @@
      new VIAM.SensorClient(client, globalConfig.windSensorName).getReadings().then((d) => {
        if (d["Reference"] == "True (ground referenced to North)") {
          globalData.windAngle = d["Wind Angle"];
-         globalData.windSpeed = d["Wind Speed"] * 1.94384;
+         globalData.windSpeed = msToKnots(d["Wind Speed"]);
        }
      }).catch( (e) => {
        globalConfig.windSensorName = "";
@@ -373,7 +369,7 @@
          for (var k in raw) {
            var doc = raw[k];
            if (k.indexOf("129285")==0){
-             processRoute129285(doc);
+             processRoute129285(doc, mapGlobal.routeFeatures);
            }
          }
        });
@@ -381,109 +377,11 @@
      
      if (globalConfig.aisSensorName != "") {
        new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
-         var good = {};
-         
-         for ( var mmsi in raw  ) {
-           
-           var boat = raw[mmsi];
-           
-           if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
-             continue;
-           }
-           
-           good[mmsi] = true;
-           
-           var found = false;
-           
-           for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-             var v = mapGlobal.aisFeatures.item(i);
-             if (v.get("mmsi") == mmsi) {
-               found = true;
-               v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
-               break;
-             }
-           }
-           
-           if (found) {
-             continue;
-           }
-           
-           mapGlobal.aisFeatures.push(new Feature({
-             type: "ais",
-             mmsi: mmsi,
-             heading: boat.Heading,
-             geometry: new Point([boat.Location[1], boat.Location[0]]),
-           }));
-         }
-         
-         for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-           var v = mapGlobal.aisFeatures.item(i);
-           var mmsi = v.get("mmsi");
-           if (!good[mmsi]) {
-             mapGlobal.aisFeatures.removeAt(i);
-           }
-         }
-         
+         updateAISFeatures(mapGlobal.aisFeatures, raw);
        }).catch( errorHandlerMaker("ais") );
      }
    }
-   
-   
- }
 
- function acPowerVoltAverage(data) {
-   var total = 0;
-   var num = 0;
-   
-   for (var k in data) {
-     var dd = data[k];
-     total += dd["Line-Neutral AC RMS Voltage"];
-     num++;
-   }
-   
-   return total / num;
- }
- 
- function acPowerAmpAt(vvv, data) {
-   var total = 0;
-   
-   for (var k in data) {
-     var dd = data[k];
-     var a = dd["AC RMS Current"];
-     var v = dd["Line-Neutral AC RMS Voltage"];
-     var w = a * v;
-     total += w / vvv;
-   }
-   
-   return total;
-   
- }
-
- function processRoute129285(doc) {
-   console.log(doc);
-   
-   mapGlobal.routeFeatures.clear();
-
-   if (!doc.list) {
-     return;
-   }
-   
-   var prev = [];
-   
-   for (var x=0; x<doc.list.length; x++) {
-     var wp = doc.list[x];
-     var loc = [wp["WP Longitude"], wp["WP Latitude"]];
-     if (prev) {
-       var f = new Feature({
-         type: "track",
-         geometry: new LineString([prev, loc]),
-       });
-       mapGlobal.routeFeatures.push(f);
-     }
-     prev = loc;
-   }
-   
-   console.log(mapGlobal.routeFeatures);
 
  }
  
@@ -546,109 +444,31 @@
    }
    return false;
  }
- 
- function filterResourcesFirstMatchingName(resources, t, st, n) {
-   var matching = filterResources(resources, t, st, n);
-   if (matching.length > 0) {
-     return matching[0].name;
-   }
-   return "";
- }
 
- function filterResourcesAllMatchingNames(resources, t, st, n) {
-   var matching = filterResources(resources, t, st, n);
-   var names = [];
-   for ( var r of matching) {
-     names.push(r.name);
-   }
-   return names.sort();
- }
-
- // t - type
- // st - subtype
- // n - name regex
- function filterResources(resources, t, st, n) {
-   var a = [];
-   for (var r of resources) {
-     if (t != "", r.type != t) {
-       continue;
-     }
-
-     if (st != "", r.subtype != st) {
-       continue;
-     }
-
-     if (n != null && !r.name.match(n) ) {
-       continue;
-     }
-
-     a.push(r);
-   }
-
-   return a;
- }
- 
  async function updateResources(client: VIAM.RobotClient) {
    var resources = await client.resourceNames();
    globalData.allResources = resources;
 
-   await setupMovementSensor(client, resources);
+   const movementSensorResult = await setupMovementSensor(client, resources);
+   globalConfig.movementSensorName = movementSensorResult.movementSensorName;
+   globalConfig.movementSensorProps = movementSensorResult.movementSensorProps;
+   globalConfig.movementSensorAlternates = movementSensorResult.movementSensorAlternates;
 
-   globalConfig.aisSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bais$/);
-   globalConfig.allPgnSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\ball.pgn$/);
-   globalConfig.seatempSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bseatemp$/);
-   globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
-   globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
-   globalConfig.spotZeroFWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-fw/);
-   globalConfig.spotZeroSWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-sw/);
-   globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
-   globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
+   const sensorNames = discoverSensorNames(resources);
+   globalConfig.aisSensorName = sensorNames.aisSensorName;
+   globalConfig.allPgnSensorName = sensorNames.allPgnSensorName;
+   globalConfig.seatempSensorName = sensorNames.seatempSensorName;
+   globalConfig.depthSensorName = sensorNames.depthSensorName;
+   globalConfig.windSensorName = sensorNames.windSensorName;
+   globalConfig.spotZeroFWSensorName = sensorNames.spotZeroFWSensorName;
+   globalConfig.spotZeroSWSensorName = sensorNames.spotZeroSWSensorName;
+   globalConfig.seakeeperSensorName = sensorNames.seakeeperSensorName;
+   globalConfig.acPowers = sensorNames.acPowers;
 
    console.log("globalConfig", $state.snapshot(globalConfig));
 
  }
- 
- async function setupMovementSensor(client: VIAM.RobotClient, resources) {
-   resources = filterResources(resources, "component", "movement_sensor", null);
 
-   var allGpsNames = [];
-   
-   // pick best movement sensor
-   var bestName = "";
-   var bestScore = 0;
-   var bestProp = {};
-   
-   for (var r of resources) {
-     const msClient = new VIAM.MovementSensorClient(client, r.name);
-     var prop = await msClient.getProperties();
-
-     var score = 0;
-     if (prop.positionSupported) {
-       allGpsNames.push(r.name);
-       score++;
-     }
-     if (prop.linearVelocitySupported) {
-       score++;
-     }
-     if (prop.compassHeadingSupported) {
-       score++;
-     }
-
-     //console.log(r.name + " : " + score);
-     
-     if (score > bestScore || (score == bestScore && r.name.length < bestName.length) ) {
-       bestName = r.name;
-       bestScore = score;
-       bestProp = prop;
-     }
-
-   }
-   
-   globalConfig.movementSensorName = bestName;
-   globalConfig.movementSensorProps = bestProp;
-   globalConfig.movementSensorAlternates = allGpsNames;
- }
- 
  async function updateAndLoop() {
    globalData.numUpdates++;
 
@@ -670,7 +490,7 @@
      await updateResources(globalClient);     
    }
 
-   updateOnLayers();
+   updateOnLayers(mapGlobal.layerOptions, mapGlobal.onLayers);
    
    var client = globalClient;
    
@@ -808,111 +628,8 @@
 
    return false;
  }
- 
- async function getDataViaMQL(dc, g, startTime) {
-   var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : g,
-     time_received: { $gte: startTime }
-   };
-   
-   var group = {
-     "_id": { "$concat" : [
-                                      { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
-                                      "-",
-                                      { "$toString" : { "$month": "$time_received" } },
-                                      "-",
-                                      { "$toString" : { "$dayOfMonth": "$time_received" } },
-                                      " ",
-                                      { "$toString" : { "$hour": "$time_received" } },
-                                      ":",
-                                      { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
-                                      ] },
-     "ts" : { "$min" : "$time_received" },
-     "min" : { "$min" : "$data.readings.Level" },
-     "max" : { "$max" : "$data.readings.Level" }
-   };
-   
-   var query = [
-     BSON.serialize( { "$match" : match } ),
-     BSON.serialize( { "$group" : group } ),
-     BSON.serialize( { "$sort" : { ts : -1 } } ),
-     BSON.serialize( { "$limit" : (24 * 4) } ),
-     BSON.serialize( { "$sort" : { ts : 1 } } ),
-   ];
 
-   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, true);
 
-   return data;
- }
-
- async function positionHistoryMQL(dc, startTime) {
-   if (globalConfig.movementSensorForQuery != "") {
-     var res = await positionHistoryMQLNamed(dc, startTime, globalConfig.movementSensorForQuery);
-     if (res.length > 0) {
-       return res;
-     }
-   }
-   
-   for (var i=0; i<globalConfig.movementSensorAlternates.length; i++){
-     var n = globalConfig.movementSensorAlternates[i];
-     
-     res = await positionHistoryMQLNamed(dc, startTime, n);
-     if (res.length > 0) {
-       globalConfig.movementSensorForQuery = n;
-       return res;
-     }
-     
-   }
-   return res;
- }
- 
- async function positionHistoryMQLNamed(dc, startTime, n) {
-   var name = n.split(":");
-   
-   var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : name[name.length-1],
-     "method_name" : "Position",
-     "time_received": { $gte: startTime }
-   };
-   
-   var group = {
-     "_id": { "$concat" : [
-                                      { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
-                                      "-",
-                                      { "$toString" : { "$month": "$time_received" } },
-                                      "-",
-                                      { "$toString" : { "$dayOfMonth": "$time_received" } },
-                                      " ",
-                                      { "$toString" : { "$hour": "$time_received" } },
-                                      ":",
-                                      { "$toString" : { "$minute": "$time_received"} },
-                                      ] },
-     "ts" : { "$min" : "$time_received" },
-     "pos" : { "$first" : "$data" },
-   };
-   
-   
-   var query = [
-     BSON.serialize( { "$match" : match } ),
-     BSON.serialize( { "$sort" : { ts : -1 } } ),
-     BSON.serialize( { "$group" : group } ),
-     BSON.serialize( { "$sort" : { ts : -1 } } ),
-   ];
-
-   var hot = isComponentMethodHot(n, "Position");
-   
-   var timeStart = new Date();
-   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, hot);
-   var getDataTime = (new Date()).getTime() - timeStart.getTime();
-   console.log("got " + data.length + " history data points from:" + n + " in " + getDataTime + "ms hot: " + hot);
-   return data;
- }
-
- 
  async function updateGaugeGraphs(dc, robotName) {
    var startTime = new Date(new Date() - 86400 * 1000);
    
@@ -925,7 +642,7 @@
        var bar = await foo.json();
        data = bar.data;
      } else {
-       data = await positionHistoryMQL(dc, startTime);
+       data = await positionHistoryMQL(dc, startTime, globalConfig, globalClientCloudMetaData);
      }
      
      mapGlobal.trackFeatures.clear();
@@ -935,15 +652,9 @@
      for ( var i = 0; i < data.length; i++) {
        var p = data[i];
        var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
-       mapGlobal.trackFeatures.push(new Feature({
-         type: "track",
-         geometry: new Circle(x),
-       }))
+       mapGlobal.trackFeatures.push(createTrackPoint(x));
        if ( i > 0 ) {
-         mapGlobal.trackFeatures.push(new Feature({
-           type: "track",
-           geometry: new LineString([x, prev]),
-         }))
+         mapGlobal.trackFeatures.push(createTrackLine(x, prev));
        }
        prev = x;
        if (first.length == 0) {
@@ -954,10 +665,7 @@
      if (first.length > 0 && globalData.posHistory.length > 0) {
        var p = globalData.posHistory[0];
        var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
-       mapGlobal.trackFeatures.push(new Feature({
-         type: "track",
-         geometry: new LineString([x, first]),
-       }))
+       mapGlobal.trackFeatures.push(createTrackLine(x, first));
      }
      
      mapGlobal.trackFeaturesLastCheck = new Date();
@@ -972,7 +680,7 @@
 
 
      var timeStart = new Date();
-     var data = await getDataViaMQL(dc, g, startTime);
+     var data = await getDataViaMQL(dc, g, startTime, globalClientCloudMetaData);
      var getDataTime = (new Date()).getTime() - timeStart.getTime();
      
      console.log("time to get graph data for " + g + " took " + getDataTime + " and had " + data.length + " points");
@@ -1031,224 +739,6 @@
    }
  }
 
- function setupLayers() {
-
-   // core open street maps
-   mapGlobal.layerOptions.push( {
-     name : "open street map",
-     on : false,
-     layer : new TileLayer({
-       opacity: .5,
-       source: new XYZ({
-         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-       })
-     }),
-   })
-   
-   // depth data
-   mapGlobal.layerOptions.push({
-     name: "depth",
-     on: false,
-     layer: new TileLayer({
-       opacity: .7,
-       source: new TileWMS({
-         url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
-         params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-         ratio: 1,
-         serverType: 'geoserver',
-         hidpi: false,
-       }),
-     }),
-   })
-   
-   // harbors
-   mapGlobal.layerOptions.push({
-     name: "seamark",
-     on: false,
-     layer : new TileLayer({
-       visible: true,
-       maxZom: 19,
-       source: new XYZ({
-         tileUrlFunction: function(coordinate) {
-           return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
-         }
-       }),
-       properties: {
-         name: "seamarks",
-         layerId: 3,
-         cookieKey: "SeamarkLayerVisible",
-         checkboxId: "checkLayerSeamark",
-       }
-     }),
-   });
-   
-   mapGlobal.layerOptions.push({
-     name: "noaa",
-     on: true,
-     layer: new TileLayer({
-       opacity: .7,
-       source: new TileWMS({
-         url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-         //params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-         //ratio: 1,
-         //serverType: 'geoserver',
-         //hidpi: false,
-       }),
-     }),
-   })
-
-   // by boat setup
-   mapGlobal.myBoatMarker = new Feature({
-     type: 'geoMarker',
-     header: 0,
-     geometry: new Point([0,0]),
-   });
-   
-   var myBoatFeatures = new Collection();
-   myBoatFeatures.push(mapGlobal.myBoatMarker);
-   
-   var myBoatLayer = new Vector({
-     source: new VectorSource({
-       features: myBoatFeatures,
-     }),
-     style: function (feature) {
-       
-       var scale = 0.6;
-       var rotation = (globalData.heading / 360) * Math.PI * 2;
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
-     },
-   });
-   mapGlobal.layerOptions.push({
-     name: "boat",
-     on: true,
-     layer : myBoatLayer,
-   });
-   
-   var aisLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.aisFeatures,
-     }),
-     style: function (feature) {
-
-       var scale = 0.25;
-       var rotation = 0;
-       
-       var h = feature.get("heading");
-       if (h >= 0 && h < 360) {
-         rotation = (h/ 360) * Math.PI * 2;
-       }
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
-     },
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "ais",
-     on: true,
-     layer : aisLayer,
-   });
-
-   var trackLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.trackFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "blue",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "track",
-     on: true,
-     layer : trackLayer,
-   });
-   
-   var routeLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.routeFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "green",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "route",
-     on: true,
-     layer : routeLayer,
-   });
-
-
-
- }
-
- function findLayerByName(name) {
-   for( var l of mapGlobal.layerOptions) {
-     if (l.name == name) {
-       return l;
-     }
-   }
-   return null;
- }
-
- function findOnLayerIndexOfName(name) {
-   var l = findLayerByName(name);
-   if (l == null) {
-     return -2;
-   }
-
-   for ( var i=0; i<mapGlobal.onLayers.getLength(); i++) {
-     if (mapGlobal.onLayers.item(i).ol_uid == l.layer.ol_uid) {
-       return i;
-     }
-   }
-   return -1;
- }
- 
- function updateOnLayers() {
-   for( var l of mapGlobal.layerOptions) {
-     var idx = findOnLayerIndexOfName(l.name);
-
-     if (l.on) {
-       if ( idx < 0 ) {
-         mapGlobal.onLayers.push(l.layer);
-       }
-     } else {
-       if ( idx >= 0 ) {
-         mapGlobal.onLayers.removeAt(idx);
-       }
-     }
-     
-   }
- }
- 
  function setupMap() {
    const urlParams = new URLSearchParams(window.location.search);
    var temp = urlParams.get("zoomModifier");
@@ -1257,15 +747,28 @@
      globalConfig.zoomModifier = temp;
    }
    useGeographic();
-   setupLayers();
    
+   mapGlobal.layerOptions = setupLayers(
+     mapGlobal.aisFeatures,
+     mapGlobal.trackFeatures,
+     mapGlobal.routeFeatures,
+     boatImage,
+     () => globalData.heading
+   );
+
+   // Extract myBoatMarker from the layerOptions
+   const boatLayer = findLayerByName(mapGlobal.layerOptions, "boat");
+   if (boatLayer) {
+     const features = boatLayer.layer.getSource().getFeatures();
+     if (features.length > 0) {
+       mapGlobal.myBoatMarker = features[0];
+     }
+   }
+
    mapGlobal.view = new View({
      center: [0, 0],
      zoom: 15
    });
-
-   updateOnLayers();
-   updateOnLayers();
 
    var scaleThing = new ScaleLine({
      units: "nautical",
@@ -1281,77 +784,12 @@
      view: mapGlobal.view,
      controls: defaultControls().extend([scaleThing])
    });
+
+   updateOnLayers(mapGlobal.layerOptions, mapGlobal.onLayers);
+   updateOnLayers(mapGlobal.layerOptions, mapGlobal.onLayers);
  }
 
  onMount(start);
-
- function moreThanOneFuelTank(gauges) {
-   var found = false;
-   for (var k in gauges) {
-     var g = gauges[k];
-     if (g["Type"] == "Fuel"){
-       if (found) {
-         return true;
-       }
-       found = true;
-     }
-   }
-   return false;
- }
-
- function fuelTotalLevel(gauges) {
-   var total = 0;
-   for (var k in gauges) {
-     var g = gauges[k];
-     if (g["Type"] != "Fuel"){
-       continue;
-     }
-
-     total += g["Level"] * g["Capacity"] / 100;
-
-   }
-   return Math.round(total * .264172);
- }
-
- function fuelTotalCapacity(gauges) {
-   var total = 0;
-   for (var k in gauges) {
-     var g = gauges[k];
-     if (g["Type"] != "Fuel"){
-       continue;
-     }
-
-     total += g["Capacity"];
-
-   }
-   return Math.round(total * .264172);
- }
-
- function dicToArray(d, sortFunction) {
-   var names = Object.keys(d);
-   if (sortFunction) {
-     names = sortFunction(names);
-   } else {
-     names.sort();
-   }
-
-   var a = [];
-   
-   for ( var i = 0; i < names.length; i++) {
-     var n = names[i];
-     a.push( [ n, d[n] ]);
-   }
-   return a;
- }
-
- function gauageHistoricalToLinkedChart(data) {
-   var res = {};
-   for (var d in data.data) {
-     var dd = data.data[d];
-     res[dd._id] = Math.floor(dd.min)
-   }
-   return res;
- }
 
  function seakeeper(name, value) {
    var cmd = {};
