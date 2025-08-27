@@ -25,7 +25,6 @@
    LinkedValue
  } from "svelte-tiny-linked-charts"
 
-
  import * as VIAM from '@viamrobotics/sdk';
 
  import {
@@ -82,7 +81,7 @@
  let globalClientCloudMetaData = null;
 
  let globalCloudClient: VIAM.ViamClient;
-
+ 
  let globalData = $state({
    pos : new Coordinate(0,0),
    posHistory : [],
