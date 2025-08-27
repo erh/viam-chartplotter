@@ -25,8 +25,6 @@
    LinkedValue
  } from "svelte-tiny-linked-charts"
 
- import * as VIAM from '@viamrobotics/sdk';
-
  import {
    setupLayers,
    updateOnLayers,
@@ -70,6 +68,8 @@
    setupMovementSensor,
    discoverSensorNames
  } from './lib/data/sensors.js';
+
+ import * as VIAM from '@viamrobotics/sdk';
 
  let boatImage = "boat3.jpg";
 
