@@ -10,7 +10,8 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "eslint .",
-		"build": "vite build"
+		"build": "vite build",
+		"build:lib": "tsc -p tsconfig.lib.json"
 	},
 	"devDependencies": {
 		"@types/eslint": "8.56.0",
@@ -29,13 +30,13 @@
 	},
 	"type": "module",
 	"exports": {
-		"./chart/setup": "./src/lib/chart/setup.js",
-		"./chart/features": "./src/lib/chart/features.js",
-		"./chart/layers": "./src/lib/chart/layers.js",
-		"./data/queries": "./src/lib/data/queries.js",
-		"./data/sensors": "./src/lib/data/sensors.js",
-		"./utils/conversions": "./src/lib/utils/conversions.js",
-		"./utils/helpers": "./src/lib/utils/helpers.js"
+		"./chart/setup": "./lib/chart/setup.js",
+		"./chart/features": "./lib/chart/features.js",
+		"./chart/layers": "./lib/chart/layers.js",
+		"./data/queries": "./lib/data/queries.js",
+		"./data/sensors": "./lib/data/sensors.js",
+		"./utils/conversions": "./lib/utils/conversions.js",
+		"./utils/helpers": "./lib/utils/helpers.js"
 	},
 	"dependencies": {
 		"@ag-grid-community/client-side-row-model": "^32.3.5",
