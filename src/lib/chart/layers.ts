@@ -45,7 +45,6 @@ export function createDepthLayer() {
     source: new TileWMS({
       url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
       params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-      ratio: 1,
       serverType: 'geoserver',
       hidpi: false,
     }),
@@ -81,6 +80,7 @@ export function createNOAALayer() {
     opacity: .7,
     source: new TileWMS({
       url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
+      params: {}
     }),
   });
 }

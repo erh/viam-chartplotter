@@ -1,6 +1,7 @@
 import Map from 'ol/Map';
 import View from 'ol/View';
 import Collection from 'ol/Collection.js';
+import Feature from 'ol/Feature';
 import VectorSource from 'ol/source/Vector.js';
 import { Vector, Tile } from 'ol/layer.js';
 import { Icon, Style } from 'ol/style.js';
@@ -77,7 +78,7 @@ export function setupLayers(
 
   // Boat marker layer
   const myBoatMarker = createBoatMarker();
-  const myBoatFeatures = new Collection();
+  const myBoatFeatures = new Collection<Feature>();
   myBoatFeatures.push(myBoatMarker);
   
   const myBoatLayer = new Vector({
