@@ -4,9 +4,9 @@
  import { onMount } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
-
+ 
  import { Logger } from "tslog";
-
+ 
  import {Coordinate} from "tsgeo/Coordinate";
  import {DecimalMinutes}        from "tsgeo/Formatter/Coordinate/DecimalMinutes";
 
@@ -75,7 +75,7 @@
  let boatImage = "boat3.jpg";
 
  import { tankSort } from "./helpers.ts"
-
+ 
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
  let globalClientLastReset = new Date();
@@ -107,12 +107,12 @@
    acPowers : {},
    acPowerData : false,
    gaugesToHistorical : {},
-
+   
    allResources : [],
 
    cameraNames : [],
    lastCameraTimes : [],
-
+   
    numUpdates: 0,
    status: "Not connected yet",
    statusLastError: new Date(),
@@ -126,7 +126,7 @@
    movementSensorProps : {},
    movementSensorAlternates : [],
    movementSensorForQuery : "",
-
+   
    aisSensorName : "",
    allPgnSensorName : "",
    seatempSensorName : "",
@@ -136,10 +136,10 @@
    spotZeroSWSensorName : "",
    seakeeperSensorName : "",
    acPowers : [],
-
+   
    zoomModifier : 0,
  });
-
+ 
  let mapGlobal = $state({
 
    map: null,
@@ -150,7 +150,7 @@
    routeFeatures: new Collection(),
    trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null,
-
+   
    inPanMode: false,
    lastZoom: 0,
    lastCenter: null,
@@ -158,7 +158,7 @@
    layerOptions: [],
    onLayers: new Collection(),
  });
-
+ 
  function gotNewData() {
    globalData.lastData = new Date();
  }
@@ -168,7 +168,7 @@
      return errorHandler(e, m);
    };
  }
-
+ 
  function errorHandler(e, context) {
    globalData.statusLastError = new Date();
    if (context) {
@@ -181,15 +181,15 @@
    if (context) {
      globalData.status = context + " : " + globalData.status;
    }
-
+   
    var reset = false;
-
+   
    var diff = new Date() - globalData.lastData;
-
+   
    if (diff > 1000 * 30) {
      reset = true;
    }
-
+   
    if (s.indexOf("SESSION_EXPIRED") >= 0) {
      reset = true;
    }
@@ -208,10 +208,10 @@
    mapGlobal.lastCenter = [0,0];
    mapGlobal.inPanMode = false;
  }
-
+ 
  function doUpdate(loopNumber: int, client: VIAM.RobotClient){
    const msClient = new VIAM.MovementSensorClient(client, globalConfig.movementSensorName);
-
+   
    msClient.getPosition().then((p) => {
      mapGlobal.inGetPositionHelper = true;
      gotNewData();
@@ -227,12 +227,12 @@
        var gpsFormatter = new DecimalMinutes();
        gpsFormatter.setSeparator("\n")
                    .useCardinalLetters(true);
-
+       
        globalData.posString = gpsFormatter.format(myPos);
      } else {
        globalData.posString = p.coordinate.latitude.toFixed(5) + ", " + p.coordinate.longitude.toFixed(5);
      }
-
+     
      if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
        var z = mapGlobal.view.getZoom();
        if (z != mapGlobal.lastZoom) {
@@ -246,10 +246,10 @@
        }
      }
 
-
+     
      var sz = mapGlobal.map.getSize();
      var pp = [globalData.pos.lng, globalData.pos.lat];
-
+     
      mapGlobal.myBoatMarker.setGeometry(new Point(pp));
 
      if (!mapGlobal.inPanMode) {
@@ -267,13 +267,13 @@
        mapGlobal.lastZoom = zoom;
        mapGlobal.lastCenter = pp;
      }
-
+     
    }).catch(errorHandlerMaker("movement sensor"));
-
+   
    msClient.getLinearVelocity().then((v) => {
      globalData.speed = msToKnots(v.y);
    }).catch(errorHandlerMaker("linear velocity"));
-
+   
    msClient.getCompassHeading().then((ch) => {
      globalData.heading = ch;
    }).catch(errorHandlerMaker("compass"));
@@ -341,10 +341,10 @@
        globalData.acPowers[n] = d;
        globalData.acPowerData = true;
      }).catch( errorHandlerMaker(acPowerName));
-
+     
    });
 
-
+   
    if (loopNumber % 30 == 2 ) {
 
      globalData.allResources.forEach( (r) => {
@@ -354,14 +354,14 @@
        if (r.name.indexOf("fuel") < 0 && r.name.indexOf("freshwater") < 0) {
          return;
        }
-
+       
        var sp = r.name.split(":");
        var name = sp[sp.length-1];
 
        new VIAM.SensorClient(client, r.name).getReadings().then((raw) => {
          globalData.gauges[name] = raw;
        }).catch( errorHandlerMaker(r.name) );
-
+       
      });
 
      if (globalConfig.allPgnSensorName != "") {
@@ -375,7 +375,7 @@
          }
        });
      }
-
+     
      if (globalConfig.aisSensorName != "") {
        new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
          updateAISFeatures(mapGlobal.aisFeatures, raw);
@@ -385,7 +385,7 @@
 
 
  }
-
+ 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
 
    while (globalData.lastCameraTimes.length > 20){
@@ -395,15 +395,15 @@
    if (globalData.lastCameraTimes.length > 0) {
      var avg = globalData.lastCameraTimes.reduce( (a,b) => a + b) / globalData.lastCameraTimes.length;
      var mod = Math.floor((avg * 20) / 1000);
-
+     
      if (mod > 0 && loopNumber > 4 && loopNumber % mod > 0) {
        return;
      }
-
+     
    }
 
    var start = new Date();
-
+   
    filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
      var cc = findComponentConfig(r.name);
      var skip = cc && cc.attributes && cc.attributes["chartplotter-hide"];
@@ -414,7 +414,7 @@
        }
        return;
      }
-
+     
      if (globalData.cameraNames.indexOf(r.name) < 0) {
        globalData.cameraNames.push(r.name);
        globalData.cameraNames.sort();
@@ -432,7 +432,7 @@
        removeCamera(r.name);
        errorHandler(e, r.name);
      });
-
+     
    });
 
  }
@@ -467,6 +467,7 @@
    globalConfig.acPowers = sensorNames.acPowers;
 
    console.log("globalConfig", $state.snapshot(globalConfig));
+
  }
 
  async function updateAndLoop() {
@@ -476,7 +477,7 @@
    if (timeSinceLastError > (120 * 1000) ) {
      globalData.status = "";
    }
-
+   
    if (!globalClient) {
      try {
        globalClient = await connect();
@@ -487,13 +488,13 @@
        globalClient = null;
      }
    } else if (globalData.numUpdates % 120 == 0) {
-     await updateResources(globalClient);
+     await updateResources(globalClient);     
    }
 
    updateOnLayers(mapGlobal.layerOptions, mapGlobal.onLayers);
-
+   
    var client = globalClient;
-
+   
    if (client) {
      doUpdate(globalData.numUpdates, client);
      doCameraLoop(globalData.numUpdates, client);
@@ -531,7 +532,7 @@
        }
      }
    }
-
+   
    const credential = {
      type: 'api-key',
      payload: apiKey,
@@ -540,7 +541,7 @@
 
    return [host, credential];
  }
-
+ 
  async function updateCloudDataAndLoop() {
    const [host, credential] = getHostAndCredentials();
 
@@ -549,14 +550,14 @@
        const opts: VIAM.ViamClientOptions = {
          credentials: credential,
        };
-
+       
        globalCloudClient = await VIAM.createViamClient(opts);
-
+       
      } catch( error ) {
        console.log("cannot connect to cloud: " + error);
      }
    }
-
+   
    if (globalCloudClient) {
      try {
        await updateMachineConfig(globalCloudClient.appClient);
@@ -577,7 +578,7 @@
    if (!part || !part.part) {
      throw new Error('Failed to get robot part: part or part.part is undefined')
    }
-
+   
    globalData.partConfig = JSON.parse(part.configJson);
  }
 
@@ -629,9 +630,10 @@
    return false;
  }
 
+
  async function updateGaugeGraphs(dc, robotName) {
    var startTime = new Date(new Date() - 86400 * 1000);
-
+   
    if (globalConfig.movementSensorName && globalData.posHistorical.length == 0) {
      // HACK HACK
      const urlParams = new URLSearchParams(window.location.search);
@@ -643,7 +645,7 @@
      } else {
        data = await positionHistoryMQL(dc, startTime, globalConfig, globalClientCloudMetaData);
      }
-
+     
      mapGlobal.trackFeatures.clear();
 
      var first = [];
@@ -666,7 +668,7 @@
        var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
        mapGlobal.trackFeatures.push(createTrackLine(x, first));
      }
-
+     
      mapGlobal.trackFeaturesLastCheck = new Date();
      globalData.posHistorical = data;
    }
@@ -677,21 +679,22 @@
        continue;
      }
 
+
      var timeStart = new Date();
      var data = await getDataViaMQL(dc, g, startTime, globalClientCloudMetaData);
      var getDataTime = (new Date()).getTime() - timeStart.getTime();
-
+     
      console.log("time to get graph data for " + g + " took " + getDataTime + " and had " + data.length + " points");
-
+     
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
    }
 
  }
-
+ 
  async function connect(): VIAM.RobotClient {
    const [host, credential] = getHostAndCredentials();
-
+   
    var c = await VIAM.createRobotClient({
      host,
      credentials: credential,
@@ -701,11 +704,11 @@
      reconnectMaxAttempts: 20,
      reconnectMaxWait: 5000,
    });
-
+   
    globalData.status = "Connected";
-
+   
    globalLogger.info('connected!');
-
+   
    c.on('disconnected', disconnected);
    c.on('reconnected', reconnected);
 
@@ -730,8 +733,8 @@
    try {
      setupMap();
      updateAndLoop();
-
-     return {}
+     
+     return {}     
    } catch (error) {
      errorHandler(error);
    }
@@ -744,9 +747,8 @@
      temp = parseInt(temp);
      globalConfig.zoomModifier = temp;
    }
-
    useGeographic();
-
+   
    mapGlobal.layerOptions = setupLayers(
      mapGlobal.aisFeatures,
      mapGlobal.trackFeatures,
@@ -769,17 +771,19 @@
      zoom: 15
    });
 
-   const scaleThing = new ScaleLine({
-    units: "nautical",
-    bar: true,
-    text: false,
+   var scaleThing = new ScaleLine({
+     units: "nautical",
+     bar: true,
+     text: false,
+     //minWidth: 140,
    });
 
+   
    mapGlobal.map = new Map({
-    target: 'map',
-    layers: mapGlobal.onLayers,
-    view: mapGlobal.view,
-    controls: defaultControls().extend([scaleThing])
+     target: 'map',
+     layers: mapGlobal.onLayers,
+     view: mapGlobal.view,
+     controls: defaultControls().extend([scaleThing])
    });
 
    updateOnLayers(mapGlobal.layerOptions, mapGlobal.onLayers);
@@ -799,7 +803,7 @@
    }).catch( (e) => {
      errorHandler(e);
    });
-
+   
    return true;
  }
 </script>
@@ -822,7 +826,7 @@
       {/each}
     </div>
   </div>
-
+  
   <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
     {#if globalData.status === "Connected"}
       <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
@@ -848,7 +852,7 @@
           <div class="min-w-32">SOG<br></div>
           <div>
             <span class="font-bold">{globalData.speed.toFixed(2)}</span>
-            <sup>knots</sup>
+            <sup>knots</sup>  
           </div>
         </div>
       {/if}
@@ -857,7 +861,7 @@
           <div class="min-w-32">Depth</div>
           <div>
             <span class="font-bold">{globalData.depth.toFixed(2)}</span>
-            <sup>ft</sup>
+            <sup>ft</sup> 
           </div>
         </div>
       {/if}
@@ -964,7 +968,7 @@
                   <LinkedLabel linked="{key}"/>
                 </div>
               </div>
-            {/if}
+            {/if}   
             </div>
           </section>
         {/each}
