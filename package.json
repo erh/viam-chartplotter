@@ -28,6 +28,15 @@
 		"vite": "^6.0.5"
 	},
 	"type": "module",
+	"exports": {
+		"./chart/setup": "./src/lib/chart/setup.js",
+		"./chart/features": "./src/lib/chart/features.js",
+		"./chart/layers": "./src/lib/chart/layers.js",
+		"./data/queries": "./src/lib/data/queries.js",
+		"./data/sensors": "./src/lib/data/sensors.js",
+		"./utils/conversions": "./src/lib/utils/conversions.js",
+		"./utils/helpers": "./src/lib/utils/helpers.js"
+	},
 	"dependencies": {
 		"@ag-grid-community/client-side-row-model": "^32.3.5",
 		"@ag-grid-community/core": "^32.3.5",
