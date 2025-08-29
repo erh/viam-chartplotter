@@ -12,44 +12,16 @@
 
  import { BSON } from "bsonfy";
 
- import 'ol/ol.css';
- import ScaleLine from 'ol/control/ScaleLine.js';
- import {defaults as defaultControls} from 'ol/control/defaults.js';
- import Collection from 'ol/Collection.js';
- import {useGeographic} from 'ol/proj.js';
- import Map from 'ol/Map';
- import View from 'ol/View';
- import TileLayer from 'ol/layer/Tile';
- import Point from 'ol/geom/Point.js';
- import Circle from 'ol/geom/Circle.js';
- import LineString from 'ol/geom/LineString.js';
- import TileWMS from 'ol/source/TileWMS.js';
- import Feature from 'ol/Feature.js';
- import VectorSource from 'ol/source/Vector.js';
- import {Vector, Tile} from 'ol/layer.js';
-
  import {
    LinkedChart,
    LinkedLabel,
    LinkedValue
  } from "svelte-tiny-linked-charts"
 
- import {
-   Circle as CircleStyle,
-   Fill,
-   Icon,
-   Stroke,
-   Style,
- } from 'ol/style.js';
-
-
- import XYZ from 'ol/source/XYZ';
-
  import * as VIAM from '@viamrobotics/sdk';
 
- let boatImage = "boat3.jpg";
-
  import { tankSort } from "./helpers.ts"
+ import MarineMap from "./marineMap.svelte"
  
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
@@ -61,7 +33,7 @@
  let globalData = $state({
    pos : new Coordinate(0,0),
    posHistory : [],
-   posHistorical : [],
+   posHistoryLastCheck : 0,
    posString : "n/a",
    speed : 0.0,
    temp : 0.0,
@@ -94,6 +66,7 @@
    lastData: new Date(),
 
    partConfig : {},
+   aisBoats : [],
  });
 
  var globalConfig = $state({
@@ -103,7 +76,7 @@
    movementSensorForQuery : "",
    
    aisSensorName : "",
-   allPgnSensorName : "",
+   routeSensorName : "",
    seatempSensorName : "",
    depthSensorName : "",
    windSensorName : "",
@@ -114,43 +87,6 @@
    
    zoomModifier : 0,
  });
- 
- let mapGlobal = $state({
-
-   map: null,
-   view: null,
-
-   aisFeatures: new Collection(),
-   trackFeatures: new Collection(),
-   routeFeatures: new Collection(),
-   trackFeaturesLastCheck : new Date(0),
-   myBoatMarker: null,
-   
-   inPanMode: false,
-   lastZoom: 0,
-   lastCenter: null,
-
-   layerOptions: [],
-   onLayers: new Collection(),
- });
- 
- function getTileUrlFunction(url, type, coordinates) {
-   var x = coordinates[1];
-   var y = coordinates[2];
-   var z = coordinates[0];
-   var limit = Math.pow(2, z);
-   if (y < 0 || y >= limit) {
-     return null;
-   } else {
-     x = ((x % limit) + limit) % limit;
-     
-     var path = z + "/" + x + "/" + y + "." + type;
-     if (url instanceof Array) {
-       url = this.selectUrl(path, url);
-     }
-     return url + path;
-   }
- }
 
  function gotNewData() {
    globalData.lastData = new Date();
@@ -196,31 +132,11 @@
 
  }
 
- function pointDiff(x, y) {
-   var a = x[0] - y[0];
-   var b = x[1] - y[1];
-   var c = a*a + b*b;
-   return Math.sqrt(c);
- }
-
- function stopPanning() {
-   mapGlobal.lastZoom = 0;
-   mapGlobal.lastCenter = [0,0];
-   mapGlobal.inPanMode = false;
- }
- 
  function doUpdate(loopNumber: int, client: VIAM.RobotClient){
    const msClient = new VIAM.MovementSensorClient(client, globalConfig.movementSensorName);
    
    msClient.getPosition().then((p) => {
-     mapGlobal.inGetPositionHelper = true;
      gotNewData();
-
-     globalData.posHistory.push({"pos" : p});
-     mapGlobal.trackFeatures.push(new Feature({
-       type: "track",
-       geometry: new Circle([p.coordinate.longitude, p.coordinate.latitude])
-     }))
 
      var myPos = new Coordinate(p.coordinate.latitude, p.coordinate.longitude);
      globalData.pos = myPos;
@@ -235,41 +151,7 @@
      } else {
        globalData.posString = p.coordinate.latitude.toFixed(5) + ", " + p.coordinate.longitude.toFixed(5);
      }
-     
-     if (mapGlobal.lastZoom > 0 && mapGlobal.lastCenter != null && mapGlobal.lastCenter[0] != 0 ) {
-       var z = mapGlobal.view.getZoom();
-       if (z != mapGlobal.lastZoom) {
-         mapGlobal.inPanMode = true;
-       }
 
-       var c = mapGlobal.view.getCenter();
-       var diff = pointDiff(c, mapGlobal.lastCenter);
-       if (diff > .003) {
-         mapGlobal.inPanMode = true;
-       }
-     }
-
-     
-     var sz = mapGlobal.map.getSize();
-     var pp = [globalData.pos.lng, globalData.pos.lat];
-     
-     mapGlobal.myBoatMarker.setGeometry(new Point(pp));
-
-     if (!mapGlobal.inPanMode) {
-       mapGlobal.view.centerOn(pp, mapGlobal.map.getSize(), [sz[0]/2,sz[1]/2]);
-
-       // zoom of 10 is about 30 miles
-       // zoom of 16 is city level
-       var zoom = Math.pow(Math.floor(globalData.speed),.41)
-       zoom = Math.floor(16-zoom) + globalConfig.zoomModifier;
-       if ( zoom <= 0 ) {
-         zoom = 1;
-       }
-       mapGlobal.view.setZoom(zoom);
-
-       mapGlobal.lastZoom = zoom;
-       mapGlobal.lastCenter = pp;
-     }
      
    }).catch(errorHandlerMaker("movement sensor"));
    
@@ -367,68 +249,40 @@
        
      });
 
-     if (globalConfig.allPgnSensorName != "") {
-       new VIAM.SensorClient(client, globalConfig.allPgnSensorName).getReadings().then((raw) => {
-
-         for (var k in raw) {
-           var doc = raw[k];
-           if (k.indexOf("129285")==0){
-             processRoute129285(doc);
-           }
-         }
+     if (globalConfig.routeSensorName != "") {
+       new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
+         console.log("route data");
+         console.log(raw);
+         globalData.route = raw.list;
+         console.log(globalData.route);
+       }).catch( function(e) {
+         globalData.route = [];
        });
      }
      
      if (globalConfig.aisSensorName != "") {
        new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
-         var good = {};
+         var good = [];
          
          for ( var mmsi in raw  ) {
            
            var boat = raw[mmsi];
-           
            if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
              continue;
            }
+           boat["User ID"] = mmsi;
            
-           good[mmsi] = true;
-           
-           var found = false;
-           
-           for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-             var v = mapGlobal.aisFeatures.item(i);
-             if (v.get("mmsi") == mmsi) {
-               found = true;
-               v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
-               break;
-             }
-           }
-           
-           if (found) {
-             continue;
-           }
-           
-           mapGlobal.aisFeatures.push(new Feature({
-             type: "ais",
-             mmsi: mmsi,
-             heading: boat.Heading,
-             geometry: new Point([boat.Location[1], boat.Location[0]]),
-           }));
+           good.push(boat);
          }
          
-         for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-           var v = mapGlobal.aisFeatures.item(i);
-           var mmsi = v.get("mmsi");
-           if (!good[mmsi]) {
-             mapGlobal.aisFeatures.removeAt(i);
-           }
-         }
-         
-       }).catch( errorHandlerMaker("ais") );
+         globalData.aisBoats = good;
+
+       }).catch( (e) => {
+         globalData.aisBoats = [];
+         errorHandler(e, "ais");
+       });
      }
    }
-   
-   
  }
 
  function acPowerVoltAverage(data) {
@@ -459,34 +313,6 @@
    
  }
 
- function processRoute129285(doc) {
-   console.log(doc);
-   
-   mapGlobal.routeFeatures.clear();
-
-   if (!doc.list) {
-     return;
-   }
-   
-   var prev = [];
-   
-   for (var x=0; x<doc.list.length; x++) {
-     var wp = doc.list[x];
-     var loc = [wp["WP Longitude"], wp["WP Latitude"]];
-     if (prev) {
-       var f = new Feature({
-         type: "track",
-         geometry: new LineString([prev, loc]),
-       });
-       mapGlobal.routeFeatures.push(f);
-     }
-     prev = loc;
-   }
-   
-   console.log(mapGlobal.routeFeatures);
-
- }
- 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
 
    while (globalData.lastCameraTimes.length > 20){
@@ -595,7 +421,7 @@
    await setupMovementSensor(client, resources);
 
    globalConfig.aisSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bais$/);
-   globalConfig.allPgnSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\ball.pgn$/);
+   globalConfig.routeSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\broute$/);
    globalConfig.seatempSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /\bseatemp$/);
    globalConfig.depthSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /depth/);
    globalConfig.windSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /wind/);
@@ -669,8 +495,6 @@
    } else if (globalData.numUpdates % 120 == 0) {
      await updateResources(globalClient);     
    }
-
-   updateOnLayers();
    
    var client = globalClient;
    
@@ -912,57 +736,40 @@
    return data;
  }
 
+ async function updatePositionHistory(dc, robotName, startTime) {
+   if (!globalConfig.movementSensorName) {
+     return;
+   }
+
+   var timeSince = (new Date()) - globalData.posHistoryLastCheck;
+   if (timeSince < (120  * 1000)) {
+     return;
+   }
+   
+   // HACK HACK
+   const urlParams = new URLSearchParams(window.location.search);
+   var data = [];
+   if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
+     var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
+     var bar = await foo.json();
+     data = bar.data;
+   } else {
+     data = await positionHistoryMQL(dc, startTime);
+   }
+
+   data = data.map( (raw) => {
+     return {lat: raw.pos.coordinate.latitude, lng: raw.pos.coordinate.longitude};
+   });
+
+   globalData.posHistoryLastCheck = new Date();
+   globalData.posHistory = data;
+ }
  
  async function updateGaugeGraphs(dc, robotName) {
    var startTime = new Date(new Date() - 86400 * 1000);
-   
-   if (globalConfig.movementSensorName && globalData.posHistorical.length == 0) {
-     // HACK HACK
-     const urlParams = new URLSearchParams(window.location.search);
-     var data = [];
-     if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
-       var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-       var bar = await foo.json();
-       data = bar.data;
-     } else {
-       data = await positionHistoryMQL(dc, startTime);
-     }
-     
-     mapGlobal.trackFeatures.clear();
 
-     var first = [];
-     var prev = [];
-     for ( var i = 0; i < data.length; i++) {
-       var p = data[i];
-       var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
-       mapGlobal.trackFeatures.push(new Feature({
-         type: "track",
-         geometry: new Circle(x),
-       }))
-       if ( i > 0 ) {
-         mapGlobal.trackFeatures.push(new Feature({
-           type: "track",
-           geometry: new LineString([x, prev]),
-         }))
-       }
-       prev = x;
-       if (first.length == 0) {
-         first = x;
-       }
-     }
+   updatePositionHistory(dc, robotName, startTime);
 
-     if (first.length > 0 && globalData.posHistory.length > 0) {
-       var p = globalData.posHistory[0];
-       var x = [p.pos.coordinate.longitude, p.pos.coordinate.latitude];
-       mapGlobal.trackFeatures.push(new Feature({
-         type: "track",
-         geometry: new LineString([x, first]),
-       }))
-     }
-     
-     mapGlobal.trackFeaturesLastCheck = new Date();
-     globalData.posHistorical = data;
-   }
 
    for ( var g in globalData.gauges ) {
      var h = globalData.gaugesToHistorical[g];
@@ -1020,267 +827,13 @@
 
 
  async function start() {
-
    try {
-     setupMap();
      updateAndLoop();
-     
      return {}     
    } catch (error) {
      errorHandler(error);
+     console.log(error.stack);
    }
- }
-
- function setupLayers() {
-
-   // core open street maps
-   mapGlobal.layerOptions.push( {
-     name : "open street map",
-     on : false,
-     layer : new TileLayer({
-       opacity: .5,
-       source: new XYZ({
-         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-       })
-     }),
-   })
-   
-   // depth data
-   mapGlobal.layerOptions.push({
-     name: "depth",
-     on: false,
-     layer: new TileLayer({
-       opacity: .7,
-       source: new TileWMS({
-         url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
-         params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-         ratio: 1,
-         serverType: 'geoserver',
-         hidpi: false,
-       }),
-     }),
-   })
-   
-   // harbors
-   mapGlobal.layerOptions.push({
-     name: "seamark",
-     on: false,
-     layer : new TileLayer({
-       visible: true,
-       maxZom: 19,
-       source: new XYZ({
-         tileUrlFunction: function(coordinate) {
-           return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
-         }
-       }),
-       properties: {
-         name: "seamarks",
-         layerId: 3,
-         cookieKey: "SeamarkLayerVisible",
-         checkboxId: "checkLayerSeamark",
-       }
-     }),
-   });
-   
-   mapGlobal.layerOptions.push({
-     name: "noaa",
-     on: true,
-     layer: new TileLayer({
-       opacity: .7,
-       source: new TileWMS({
-         url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-         //params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-         //ratio: 1,
-         //serverType: 'geoserver',
-         //hidpi: false,
-       }),
-     }),
-   })
-
-   // by boat setup
-   mapGlobal.myBoatMarker = new Feature({
-     type: 'geoMarker',
-     header: 0,
-     geometry: new Point([0,0]),
-   });
-   
-   var myBoatFeatures = new Collection();
-   myBoatFeatures.push(mapGlobal.myBoatMarker);
-   
-   var myBoatLayer = new Vector({
-     source: new VectorSource({
-       features: myBoatFeatures,
-     }),
-     style: function (feature) {
-       
-       var scale = 0.6;
-       var rotation = (globalData.heading / 360) * Math.PI * 2;
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
-     },
-   });
-   mapGlobal.layerOptions.push({
-     name: "boat",
-     on: true,
-     layer : myBoatLayer,
-   });
-   
-   var aisLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.aisFeatures,
-     }),
-     style: function (feature) {
-
-       var scale = 0.25;
-       var rotation = 0;
-       
-       var h = feature.get("heading");
-       if (h >= 0 && h < 360) {
-         rotation = (h/ 360) * Math.PI * 2;
-       }
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
-     },
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "ais",
-     on: true,
-     layer : aisLayer,
-   });
-
-   var trackLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.trackFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "blue",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "track",
-     on: true,
-     layer : trackLayer,
-   });
-   
-   var routeLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.routeFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "green",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "route",
-     on: true,
-     layer : routeLayer,
-   });
-
-
-
- }
-
- function findLayerByName(name) {
-   for( var l of mapGlobal.layerOptions) {
-     if (l.name == name) {
-       return l;
-     }
-   }
-   return null;
- }
-
- function findOnLayerIndexOfName(name) {
-   var l = findLayerByName(name);
-   if (l == null) {
-     return -2;
-   }
-
-   for ( var i=0; i<mapGlobal.onLayers.getLength(); i++) {
-     if (mapGlobal.onLayers.item(i).ol_uid == l.layer.ol_uid) {
-       return i;
-     }
-   }
-   return -1;
- }
- 
- function updateOnLayers() {
-   for( var l of mapGlobal.layerOptions) {
-     var idx = findOnLayerIndexOfName(l.name);
-
-     if (l.on) {
-       if ( idx < 0 ) {
-         mapGlobal.onLayers.push(l.layer);
-       }
-     } else {
-       if ( idx >= 0 ) {
-         mapGlobal.onLayers.removeAt(idx);
-       }
-     }
-     
-   }
- }
- 
- function setupMap() {
-   const urlParams = new URLSearchParams(window.location.search);
-   var temp = urlParams.get("zoomModifier");
-   if (temp) {
-     temp = parseInt(temp);
-     globalConfig.zoomModifier = temp;
-   }
-   useGeographic();
-   setupLayers();
-   
-   mapGlobal.view = new View({
-     center: [0, 0],
-     zoom: 15
-   });
-
-   updateOnLayers();
-   updateOnLayers();
-
-   var scaleThing = new ScaleLine({
-     units: "nautical",
-     bar: true,
-     text: false,
-     //minWidth: 140,
-   });
-
-   
-   mapGlobal.map = new Map({
-     target: 'map',
-     layers: mapGlobal.onLayers,
-     view: mapGlobal.view,
-     controls: defaultControls().extend([scaleThing])
-   });
  }
 
  onMount(start);
@@ -1371,22 +924,10 @@
 
 
 <main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black">
-  <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
-    <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
-    <div class="absolute bottom-0 right-0">
-      {#if mapGlobal.inPanMode}
-        <div>
-          <button on:click="{stopPanning}">Stop Panning</button>
-        </div>
-      {/if}
-      {#each mapGlobal.layerOptions as l, idx}
-        <div>
-          <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
-          {l.name}
-        </div>
-      {/each}
-    </div>
-  </div>
+
+  <MarineMap position={globalData.pos}  speed={globalData.speed} heading={globalData.heading} zoomModifier={globalConfig.zoomModifier} route={globalData.route} boats={globalData.aisBoats} positionHistorical={globalData.posHistory}>
+  </MarineMap>
+    
   
   <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
     {#if globalData.status === "Connected"}
