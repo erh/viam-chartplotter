@@ -660,6 +660,7 @@
    
    var query = [
      BSON.serialize( { "$match" : match } ),
+     BSON.serialize( { "$sort" : { "$time_received" : 1 } } ),
      BSON.serialize( { "$group" : group } ),
      BSON.serialize( { "$sort" : { ts : -1 } } ),
      BSON.serialize( { "$limit" : (24 * 4) } ),
