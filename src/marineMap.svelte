@@ -176,7 +176,6 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
 
    if (positionHistorical) {
-     var start = new Date();
      var prev = null;
      positionHistorical.forEach( (p) => {
        var pp = [p.lng, p.lat];
@@ -190,9 +189,6 @@ import type { BoatInfo } from './lib/BoatInfo';
        }
        prev = pp;
      });
-     var end = new Date();
-     console.log("length: " + mapGlobal.trackFeatures.getLength());
-     console.log(" positionHistorical took " + (end.getTime() - start.getTime()) + " ms");
    }
 
  }
