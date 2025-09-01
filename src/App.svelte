@@ -660,7 +660,6 @@
    
    var query = [
      BSON.serialize( { "$match" : match } ),
-     BSON.serialize( { "$sort" : { "$time_received" : 1 } } ),
      BSON.serialize( { "$group" : group } ),
      BSON.serialize( { "$sort" : { ts : -1 } } ),
      BSON.serialize( { "$limit" : (24 * 4) } ),
@@ -723,7 +722,7 @@
    
    var query = [
      BSON.serialize( { "$match" : match } ),
-     BSON.serialize( { "$sort" : { ts : -1 } } ),
+     BSON.serialize( { "$sort" : { time_received : -1 } } ),
      BSON.serialize( { "$group" : group } ),
      BSON.serialize( { "$sort" : { ts : -1 } } ),
    ];
@@ -734,6 +733,11 @@
    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, hot);
    var getDataTime = (new Date()).getTime() - timeStart.getTime();
    console.log("got " + data.length + " history data points from:" + n + " in " + getDataTime + "ms hot: " + hot);
+   /*
+   if (data.length > 0) {
+     console.log("first : " + data[0]._id + " " + data[0].ts.getTime() + " " + data[0].pos.coordinate.latitude);
+   }
+   */
    return data;
  }
 
@@ -741,7 +745,6 @@
    if (!globalConfig.movementSensorName) {
      return;
    }
-
    var timeSince = (new Date()) - globalData.posHistoryLastCheck;
    if (timeSince < (120  * 1000)) {
      return;
