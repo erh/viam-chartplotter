@@ -1,6 +1,7 @@
 <script lang="ts">
 
  import { onMount } from 'svelte';
+import type { BoatInfo } from './lib/BoatInfo';
  
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
@@ -28,7 +29,15 @@
 
  let boatImage = "boat3.jpg";
 
- let { position, speed, heading, zoomModifier, route, boats, positionHistorical} = $props();
+ let { position, speed, heading, zoomModifier, route, boats, positionHistorical}: {
+  position: { lat: number; lng: number };
+  speed: number;
+  heading: number;
+  zoomModifier?: number;
+  route?: any;
+  boats?: BoatInfo[];
+  positionHistorical?: { lat: number; lng: number }[];
+} = $props();
 
  $effect( () => {
    if (heading || position || speed || route) {
@@ -136,7 +145,7 @@
      var seen = {};
      boats.forEach( (boat) => {
 
-       var mmsi = boat["User ID"];
+       var mmsi = boat.mmsi;
        if (!mmsi) {
          return;
        }
@@ -145,17 +154,17 @@
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
          var v = mapGlobal.aisFeatures.item(i);
          if (v.get("mmsi") == mmsi) {
-           v.setGeometry(new Point([boat.Location[1], boat.Location[0]]));
+           v.setGeometry(new Point([boat.location[1], boat.location[0]]));
            return;
          }
        }
 
        mapGlobal.aisFeatures.push(new Feature({
          type: "ais",
-         name: boat.Name,
+         name: boat.name,
          mmsi: mmsi,
-         heading: boat.Heading,
-         geometry: new Point([boat.Location[1], boat.Location[0]]),
+         heading: boat.heading,
+         geometry: new Point([boat.location[1], boat.location[0]]),
        }));
      });
 

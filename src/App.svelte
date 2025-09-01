@@ -6,6 +6,7 @@
 
  
  import { Logger } from "tslog";
+import type { BoatInfo } from './lib/BoatInfo';
  
  import {Coordinate} from "tsgeo/Coordinate";
  import {DecimalMinutes}        from "tsgeo/Formatter/Coordinate/DecimalMinutes";
@@ -66,7 +67,7 @@
    lastData: new Date(),
 
    partConfig : {},
-   aisBoats : [],
+   aisBoats : [] as BoatInfo[],
  });
 
  var globalConfig = $state({
@@ -262,11 +263,18 @@
          
          for ( var mmsi in raw  ) {
            
-           var boat = raw[mmsi];
-           if (boat == null || boat.Location == null || boat.Location.length != 2 || boat.Location[0] == null) {
+           var rawBoat = raw[mmsi];
+           if (rawBoat == null || rawBoat.Location == null || rawBoat.Location.length != 2 || rawBoat.Location[0] == null) {
              continue;
            }
-           boat["User ID"] = mmsi;
+           
+          var boat = {
+            name: rawBoat.Name || "",
+            location: rawBoat.Location,
+            speed: rawBoat.Speed || 0,
+            heading: rawBoat.Heading || 0,
+            mmsi: mmsi
+          };
            
            good.push(boat);
          }
