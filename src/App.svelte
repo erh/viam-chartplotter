@@ -253,7 +253,7 @@
        new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
          globalData.route = raw;
        }).catch( function(e) {
-         globalData.route = [];
+         globalData.route = {};
        });
      }
      
@@ -972,9 +972,8 @@
         <div class="flex gap-2 p-2 text-lg">
           <div class="min-w-32">Route Info</div>
           <div>
-            <span class="font-bold">{(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm</span>
-            <span class="font-bold">{((globalData.route["Distance to Waypoint"] / globalData.route["Waypoint Closing Velocity"]) / 60).toFixed(1)} minutes</span>
-            
+            <div class="font-bold">{(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm</div>
+            <div class="font-bold">{((globalData.route["Distance to Waypoint"] / globalData.route["Waypoint Closing Velocity"]) / 60).toFixed(1)} minutes</div>
           </div>
         </div>
       {/if}
