@@ -970,7 +970,7 @@
       {/if}
       {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
         <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Route Info</div>
+          <div class="min-w-32">Next Waypoint</div>
           <div>
             <div class="font-bold">{(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm</div>
             <div class="font-bold">{((globalData.route["Distance to Waypoint"] / globalData.route["Waypoint Closing Velocity"]) / 60).toFixed(1)} minutes</div>
