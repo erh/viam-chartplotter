@@ -29,18 +29,15 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  let boatImage = "boat3.jpg";
 
- let { position, speed, heading, zoomModifier, route, boats, positionHistorical}: {
-  position: { lat: number; lng: number };
-  speed: number;
-  heading: number;
+ let { myBoat, zoomModifier, boats, positionHistorical}: {
+  myBoat: BoatInfo;
   zoomModifier?: number;
-  route?: any;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
 } = $props();
 
  $effect( () => {
-   if (heading || position || speed || route) {
+   if (myBoat.heading || myBoat.location || myBoat.speed || myBoat.route) {
      updateFromData();
    }
  });
@@ -87,7 +84,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
    
    var sz = mapGlobal.map.getSize();
-   var pp = [position.lng, position.lat];
+   var pp = [myBoat.location[1], myBoat.location[0]];
    mapGlobal.myBoatMarker.setGeometry(new Point(pp));
    
    if (!mapInternalState.inPanMode) {
@@ -95,12 +92,12 @@ import type { BoatInfo } from './lib/BoatInfo';
      
      // zoom of 10 is about 30 miles
      // zoom of 16 is city level
-     var zoom = Math.pow(Math.floor(speed),.41)
+     var zoom = Math.pow(Math.floor(myBoat.speed),.41)
      zoom = Math.floor(16-zoom) + (zoomModifier||0);
      if ( zoom <= 0 ) {
        zoom = 1;
      }
-     //console.log("speed: " + speed + " zoom: " + zoom);
+     //console.log("speed: " + myBoat.speed + " zoom: " + zoom);
      mapGlobal.view.setZoom(zoom);
      
      mapInternalState.lastZoom = zoom;
@@ -129,8 +126,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    // route stuff
    mapGlobal.routeFeatures.clear();
-   if (route) {
-     var dest = [route["Destination Longitude"], route["Destination Latitude"]];
+   if (myBoat.route && myBoat.route.destinationLongitude && myBoat.route.destinationLatitude) {
+     var dest = [myBoat.route.destinationLongitude, myBoat.route.destinationLatitude];
 
      var f = new Feature({
        type: "track",
@@ -317,7 +314,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      style: function (feature) {
        
        var scale = 0.6;
-       var rotation = (heading / 360) * Math.PI * 2;
+       var rotation = (myBoat.heading / 360) * Math.PI * 2;
        
        return new Style({
          image: new Icon(

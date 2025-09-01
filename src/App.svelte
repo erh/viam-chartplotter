@@ -933,7 +933,18 @@ import type { BoatInfo } from './lib/BoatInfo';
 
 <main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black">
 
-  <MarineMap position={globalData.pos}  speed={globalData.speed} heading={globalData.heading} zoomModifier={globalConfig.zoomModifier} route={globalData.route} boats={globalData.aisBoats} positionHistorical={globalData.posHistory}>
+  <MarineMap myBoat={{
+    name: "me",
+    location: [globalData.pos.getLat(), globalData.pos.getLng()],
+    speed: globalData.speed,
+    heading: globalData.heading,
+    route: globalData.route ? {
+      destinationLongitude: globalData.route["Destination Longitude"],
+      destinationLatitude: globalData.route["Destination Latitude"],
+      distanceToWaypoint: globalData.route["Distance to Waypoint"],
+      waypointClosingVelocity: globalData.route["Waypoint Closing Velocity"]
+    } : undefined
+  }} zoomModifier={globalConfig.zoomModifier} boats={globalData.aisBoats} positionHistorical={globalData.posHistory}>
   </MarineMap>
     
   
