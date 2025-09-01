@@ -63,6 +63,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastZoom: 0,
    lastCenter: null,
    lastPosition: [0,0],
+   trackFeatureIds : {},
  }
 
  function updateFromData() {
@@ -137,7 +138,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
 
    if (boats == null) {
-     mapGlobal.aisFeatures.Clear();
+     mapGlobal.aisFeatures.clear();
    } else {
      var seen = {};
      boats.forEach( (boat) => {
@@ -175,31 +176,34 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
 
    if (positionHistorical) {
+     var start = new Date();
      var prev = null;
      positionHistorical.forEach( (p) => {
        var pp = [p.lng, p.lat];
 
-       addTreackFeature("p-" + p.lng + "-" + p.lat,
+       addTrackFeature("p-" + p.lng + "-" + p.lat,
                         new Circle(pp));
        
        if (prev) {
-         addTreackFeature("line-" + p.lng + "-" + p.lat, 
+         addTrackFeature("line-" + p.lng + "-" + p.lat, 
                           new LineString([prev, pp]));
        }
        prev = pp;
      });
+     var end = new Date();
+     console.log("length: " + mapGlobal.trackFeatures.getLength());
+     console.log(" positionHistorical took " + (end.getTime() - start.getTime()) + " ms");
    }
 
  }
 
- function addTreackFeature(id, g) {
-   for (var i = 0; i < mapGlobal.trackFeatures.getLength(); i++) {
-     var v = mapGlobal.trackFeatures.item(i);
-     if (id == v.get("myid")) {
-       return;
-     }
+ function addTrackFeature(id, g) {
+   if (mapInternalState.trackFeatureIds[id] == true) {
+     return;
    }
-       
+
+   mapInternalState.trackFeatureIds[id] = true;
+   
    mapGlobal.trackFeatures.push(new Feature({
      type: "track",
      "myid" : id,
