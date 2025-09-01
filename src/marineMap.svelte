@@ -121,19 +121,13 @@
    // route stuff
    mapGlobal.routeFeatures.clear();
    if (route) {
-     var prev = [];
-     for (var x=0; x<route.length; x++) {
-       var wp = route[x];
-       var loc = [wp["WP Longitude"], wp["WP Latitude"]];
-       if (prev) {
-         var f = new Feature({
-           type: "track",
-           geometry: new LineString([prev, loc]),
-         });
-         mapGlobal.routeFeatures.push(f);
-       }
-       prev = loc;
-     }
+     var dest = [route["Destination Longitude"], route["Destination Latitude"]];
+
+     var f = new Feature({
+       type: "track",
+       geometry: new LineString([mapInternalState.lastPosition, dest]),
+     });
+     mapGlobal.routeFeatures.push(f);
    }
 
    if (boats == null) {
@@ -271,7 +265,7 @@
        source: new XYZ({
          tileUrlFunction: function(coordinate) {
            return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
-         }
+   }
        }),
        properties: {
          name: "seamarks",

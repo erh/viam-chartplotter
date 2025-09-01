@@ -251,10 +251,7 @@
 
      if (globalConfig.routeSensorName != "") {
        new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
-         console.log("route data");
-         console.log(raw);
-         globalData.route = raw.list;
-         console.log(globalData.route);
+         globalData.route = raw;
        }).catch( function(e) {
          globalData.route = [];
        });
@@ -971,6 +968,17 @@
           </div>
         </div>
       {/if}
+      {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
+        <div class="flex gap-2 p-2 text-lg">
+          <div class="min-w-32">Route Info</div>
+          <div>
+            <span class="font-bold">{(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm</span>
+            <span class="font-bold">{((globalData.route["Distance to Waypoint"] / globalData.route["Waypoint Closing Velocity"]) / 60).toFixed(1)} minutes</span>
+            
+          </div>
+        </div>
+      {/if}
+      
       {#if globalConfig.windSensorName != ""}
         <div class="flex gap-2 p-2 text-lg">
           <div class="min-w-32">Wind Direction</div>
