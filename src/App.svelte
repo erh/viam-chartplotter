@@ -229,6 +229,13 @@
      
    });
 
+   if (globalConfig.routeSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
+       globalData.route = raw;
+     }).catch( function(e) {
+       globalData.route = {};
+     });
+   }
    
    if (loopNumber % 30 == 2 ) {
 
@@ -249,14 +256,6 @@
        
      });
 
-     if (globalConfig.routeSensorName != "") {
-       new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
-         globalData.route = raw;
-       }).catch( function(e) {
-         globalData.route = {};
-       });
-     }
-     
      if (globalConfig.aisSensorName != "") {
        new VIAM.SensorClient(client, globalConfig.aisSensorName).getReadings().then((raw) => {
          var good = [];
