@@ -1,6 +1,6 @@
 <script lang="ts">
  import { getCookie } from 'typescript-cookie'
- import '@viamrobotics/prime-core/prime.css';
+ // import '@viamrobotics/prime-core/prime.css';
  import { onMount } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
@@ -454,6 +454,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
      var score = 0;
      if (prop.positionSupported) {
+       console.log(r)
        allGpsNames.push(r.name);
        score++;
      }

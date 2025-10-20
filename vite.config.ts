@@ -3,5 +3,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [svelte()],
-  base: process.env.NODE_ENV === 'production' ? '/viam-chartplotter' : ''
+  base: process.env.NODE_ENV === 'production' ? '/viam-chartplotter' : '',
+  css: {
+    postcss: false
+  }
 });
