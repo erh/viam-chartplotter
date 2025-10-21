@@ -562,7 +562,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (!globalCloudClient) {
      try {
 
-       const opts: VIAM.ViamClientOptions = {
+       var opts: VIAM.ViamClientOptions = {
          serviceHost: "https://app.viam.com",
          credentials: credential,
        };
@@ -574,11 +574,11 @@ import type { BoatInfo } from './lib/BoatInfo';
          userTokenCookie = userTokenCookie.slice(startIndex, endIndex+1);
 
          const {access_token: accessToken} = JSON.parse(userTokenCookie);
-         opts.credential = {
+         opts.credentials = {
            type: "access-token",
            payload: accessToken
          }
-         console.log("new credentials", opts.credential);
+         console.log("new credentials", opts.credentials);
        }
        
        globalCloudClient = await VIAM.createViamClient(opts);
