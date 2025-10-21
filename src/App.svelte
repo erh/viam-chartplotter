@@ -561,9 +561,21 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    if (!globalCloudClient) {
      try {
+
        const opts: VIAM.ViamClientOptions = {
+         serviceHost: "https://app.viam.com",
          credentials: credential,
        };
+       
+       const userTokenCookie = getCookie("userToken");
+       console.log("userTokenCookie", userTokenCookie);
+       if (userTokenCookie) {
+         const {access_token: accessToken} = JSON.parse(userTokenCookie);
+         opts.credential = {
+           type: "access-token",
+           payload: accessToken
+         }
+       }
        
        globalCloudClient = await VIAM.createViamClient(opts);
        
@@ -719,11 +731,11 @@ import type { BoatInfo } from './lib/BoatInfo';
    var orgId = globalClientCloudMetaData.primaryOrgId;
    
    var match = {
-     "location_id" : globalClientCloudMetaData.locationId,
-     "robot_id" : globalClientCloudMetaData.machineId,
-     "component_name" : name[name.length-1],
-     "method_name" : "Position",
-     "time_received": { $gte: startTime }
+   "location_id" : globalClientCloudMetaData.locationId,
+   "robot_id" : globalClientCloudMetaData.machineId,
+   "component_name" : name[name.length-1],
+   "method_name" : "Position",
+   "time_received": { $gte: startTime }
    };
 
    var compStatus = findComponentStatus(n);
