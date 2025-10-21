@@ -731,6 +731,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      match.location_id = compStatus.locationId;
      match.robot_id = compStatus.machineId;
      orgId = compStatus.primaryOrgId;
+     console.log("newInfo", match, orgId)
    }
    
    var group = {
