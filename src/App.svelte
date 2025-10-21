@@ -567,7 +567,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          credentials: credential,
        };
        
-       const userTokenCookie = getCookie("userToken");
+       var userTokenCookie = getCookie("userToken");
        console.log("userTokenCookie", userTokenCookie);
        if (userTokenCookie) {
          const startIndex = userTokenCookie.indexOf("{");
