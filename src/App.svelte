@@ -570,12 +570,16 @@ import type { BoatInfo } from './lib/BoatInfo';
        const userTokenCookie = getCookie("userToken");
        console.log("userTokenCookie", userTokenCookie);
        if (userTokenCookie) {
+         const startIndex = userTokenCookie.indexOf("{");
+         const endIndex = userTokenCookie.indexOf("}");
+         userTokenCookie = userTokenCookie.slice(startIndex, endIndex+1);
+
          const {access_token: accessToken} = JSON.parse(userTokenCookie);
          opts.credential = {
            type: "access-token",
            payload: accessToken
          }
-       }
+                                      }
        
        globalCloudClient = await VIAM.createViamClient(opts);
        
