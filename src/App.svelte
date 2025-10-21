@@ -529,7 +529,6 @@ import type { BoatInfo } from './lib/BoatInfo';
    var authEntity = urlParams.get("authEntity");
 
    if (!host || host == "") {
-     console.log("yo");
      host = getCookie("host");
      apiKey = getCookie("api-key");
      authEntity = getCookie("api-key-id");
