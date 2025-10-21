@@ -705,7 +705,6 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
  
  function findComponentStatus(n) {
-   console.log("eliot", n);
    for (var i=0; i<globalData.machineStatus.resources.length; i++) {
      var x = globalData.machineStatus.resources[i];
      if (x.name.name == n) {
@@ -730,13 +729,9 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    var compStatus = findComponentStatus(n);
    if (compStatus) {
-     console.log("eliot", compStatus);
-     console.log("e1", match);
      match.location_id = compStatus.locationId;
      match.robot_id = compStatus.machineId;
      orgId = compStatus.primaryOrgId;
-     console.log("e2", match);
-     console.log("e2", orgId);
    }
    
    var group = {
