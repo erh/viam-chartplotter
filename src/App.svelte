@@ -568,7 +568,6 @@ import type { BoatInfo } from './lib/BoatInfo';
        };
        
        var userTokenCookie = getCookie("userToken");
-       console.log("userTokenCookie", userTokenCookie);
        if (userTokenCookie) {
          const startIndex = userTokenCookie.indexOf("{");
          const endIndex = userTokenCookie.indexOf("}");
@@ -579,7 +578,8 @@ import type { BoatInfo } from './lib/BoatInfo';
            type: "access-token",
            payload: accessToken
          }
-                                      }
+         console.log("new credentials", opts.credential);
+       }
        
        globalCloudClient = await VIAM.createViamClient(opts);
        
