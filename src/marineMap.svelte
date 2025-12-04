@@ -26,8 +26,23 @@ import type { BoatInfo } from './lib/BoatInfo';
    Stroke,
    Style,
  } from 'ol/style.js';
+ import Overlay from "ol/Overlay.js";
 
  let boatImage = "boat3.jpg";
+
+ let popupState = $state({
+   overlay: null as Overlay | null,
+   visible: false,
+   content: {
+     name: "",
+     mmsi: "",
+     speed: 0,
+     heading: 0,
+     lat: 0,
+     lng: 0,
+     isMyBoat: false,
+   },
+ });
 
  let { myBoat, zoomModifier, boats, positionHistorical}: {
   myBoat: BoatInfo;
@@ -40,6 +55,11 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (myBoat.heading || myBoat.location || myBoat.speed || myBoat.route) {
      updateFromData();
    }
+ });
+
+ $effect(() => {
+   mapGlobal.layerOptions.forEach((l) => l.on);
+   updateOnLayers();
  });
 
  let mapGlobal = $state({
@@ -161,6 +181,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          type: "ais",
          name: boat.name,
          mmsi: mmsi,
+         speed: boat.speed,
          heading: boat.heading,
          geometry: new Point([boat.location[1], boat.location[0]]),
        }));
@@ -485,7 +506,92 @@ import type { BoatInfo } from './lib/BoatInfo';
      controls: defaultControls().extend([scaleThing])
    });
 
+   // Setup popup overlay
+   const popupElement = document.getElementById("boat-popup");
+   popupState.overlay = new Overlay({
+     element: popupElement,
+     autoPan: false,
+     positioning: "bottom-center",
+     offset: [0, -15],
+   });
+   mapGlobal.map.addOverlay(popupState.overlay);
+
+   // Click handler for boat features
+   mapGlobal.map.on("click", function (evt) {
+     const feature = mapGlobal.map.forEachFeatureAtPixel(
+       evt.pixel,
+       function (f) {
+         const type = f.get("type");
+         if (type === "ais" || type === "geoMarker") {
+           return f;
+         }
+         return null;
+       }
+     );
+
+     if (feature) {
+       const type = feature.get("type");
+       const geom = feature.getGeometry();
+       const coords = geom.getCoordinates();
+
+       if (type === "geoMarker") {
+         popupState.content = {
+           name: "My Boat",
+           mmsi: "",
+           speed: myBoat.speed,
+           heading: myBoat.heading,
+           lat: coords[1],
+           lng: coords[0],
+           isMyBoat: true,
+         };
+       } else {
+         popupState.content = {
+           name: feature.get("name") || "Unknown",
+           mmsi: feature.get("mmsi") || "",
+           speed: feature.get("speed") || 0,
+           heading: feature.get("heading") || 0,
+           lat: coords[1],
+           lng: coords[0],
+           isMyBoat: false,
+         };
+       }
+       popupState.visible = true;
+       popupState.overlay.setPosition(coords);
+     } else {
+       closePopup();
+     }
+   });
+
+   // Change cursor on hover over boats
+   mapGlobal.map.on("pointermove", function (evt) {
+     const hit = mapGlobal.map.hasFeatureAtPixel(evt.pixel, {
+       layerFilter: (layer) => {
+         return (
+           layer
+             .getSource()
+             ?.getFeatures?.()
+             ?.some?.(
+               (f) => f.get("type") === "ais" || f.get("type") === "geoMarker"
+             ) ?? false
+         );
+       },
+     });
+     mapGlobal.map.getTargetElement().style.cursor = hit ? "pointer" : "";
+   });
+
    console.log("setupMap finished");
+ }
+
+ function closePopup() {
+   popupState.visible = false;
+   if (popupState.overlay) {
+     popupState.overlay.setPosition(undefined);
+   }
+ }
+
+ function formatCoord(val: number, isLat: boolean): string {
+   const dir = isLat ? (val >= 0 ? "N" : "S") : val >= 0 ? "E" : "W";
+   return Math.abs(val).toFixed(4) + "° " + dir;
  }
 
  onMount(setupMap);
@@ -494,10 +600,42 @@ import type { BoatInfo } from './lib/BoatInfo';
 
 <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
   <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
+
+  <!-- Boat Info Popup -->
+  <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
+    <button class="popup-closer" onclick={closePopup}>✕</button>
+    <div class="popup-content">
+      <h3 class="popup-title">{popupState.content.name}</h3>
+      {#if !popupState.content.isMyBoat && popupState.content.mmsi}
+        <div class="popup-row">
+          <span class="popup-label">MMSI</span>
+          <span class="popup-value">{popupState.content.mmsi}</span>
+        </div>
+      {/if}
+      <div class="popup-row">
+        <span class="popup-label">SPD</span>
+        <span class="popup-value">{popupState.content.speed.toFixed(1)} kn</span>
+      </div>
+      <div class="popup-row">
+        <span class="popup-label">HDG</span>
+        <span class="popup-value">{popupState.content.heading.toFixed(0)}°<span class="compass-arrow" style="transform: rotate({popupState.content.heading}deg)">↑</span></span>
+      </div>
+      <div class="popup-row">
+        <span class="popup-label">LAT</span>
+        <span class="popup-value">{formatCoord(popupState.content.lat, true)}</span>
+      </div>
+      <div class="popup-row">
+        <span class="popup-label">LNG</span>
+        <span class="popup-value">{formatCoord(popupState.content.lng, false)}</span>
+      </div>
+    </div>
+    <div class="popup-arrow"></div>
+  </div>
+
   <div class="absolute bottom-0 right-0">
     {#if mapInternalState.inPanMode}
       <div>
-        <button on:click="{stopPanning}">Stop Panning</button>
+        <button onclick={stopPanning}>Stop Panning</button>
       </div>
     {/if}
     {#each mapGlobal.layerOptions as l, idx}
@@ -508,3 +646,104 @@ import type { BoatInfo } from './lib/BoatInfo';
     {/each}
   </div>
 </div>
+
+<style>
+  .boat-popup {
+    position: absolute;
+    background: rgba(15, 23, 42, 0.95);
+    backdrop-filter: blur(8px);
+    color: white;
+    border-radius: 4px;
+    padding: 10px 12px;
+    min-width: 160px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+    z-index: 1000;
+    transform: translate(-50%, -100%);
+    margin-bottom: 50px;
+  }
+
+  .boat-popup.hidden {
+    display: none;
+  }
+
+  .popup-closer {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px;
+    line-height: 1;
+    transition: color 0.15s;
+  }
+
+  .popup-closer:hover {
+    color: white;
+  }
+
+  .popup-content {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .popup-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0 0 4px 0;
+    padding-right: 16px;
+    color: #38bdf8;
+    letter-spacing: 0.01em;
+  }
+
+  .popup-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+  }
+
+  .popup-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    min-width: 28px;
+  }
+
+  .popup-value {
+    font-weight: 500;
+    font-size: 12px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, monospace;
+  }
+
+  .compass-arrow {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 14px;
+    color: #38bdf8;
+    transition: transform 0.3s ease;
+  }
+
+  .popup-arrow {
+    position: absolute;
+    bottom: -5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid rgba(15, 23, 42, 0.95);
+  }
+</style>
