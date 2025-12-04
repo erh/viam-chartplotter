@@ -42,6 +42,11 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  });
 
+ $effect(() => {
+   mapGlobal.layerOptions.forEach((l) => l.on);
+   updateOnLayers();
+ });
+
  let mapGlobal = $state({
 
    map: null,
