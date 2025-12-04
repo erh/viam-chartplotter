@@ -618,7 +618,7 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
       <div class="popup-row">
         <span class="popup-label">HDG</span>
-        <span class="popup-value">{popupState.content.heading.toFixed(0)}°</span>
+        <span class="popup-value">{popupState.content.heading.toFixed(0)}°<span class="compass-arrow" style="transform: rotate({popupState.content.heading}deg)">↑</span></span>
       </div>
       <div class="popup-row">
         <span class="popup-label">LAT</span>
@@ -725,6 +725,14 @@ import type { BoatInfo } from './lib/BoatInfo';
     text-align: right;
     font-variant-numeric: tabular-nums;
     font-family: ui-monospace, monospace;
+  }
+
+  .compass-arrow {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 14px;
+    color: #38bdf8;
+    transition: transform 0.3s ease;
   }
 
   .popup-arrow {
