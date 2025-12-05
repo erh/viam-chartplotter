@@ -1095,14 +1095,14 @@ import type { BoatInfo } from './lib/BoatInfo';
           <div>
             <span class="font-bold">
               {#if globalData.seakeeperData["power_enabled"] >= 1}
-                <button on:click={() => seakeeper('power',false)}>P</button>
+                <button onclick={() => seakeeper('power',false)}>P</button>
               {:else if globalData.seakeeperData["power_available"] >= 1 }
-                <button on:click={() => seakeeper('power', true)}>p</button>
+                <button onclick={() => seakeeper('power', true)}>p</button>
               {/if}
               {#if globalData.seakeeperData["stabilize_enabled"] >= 1}
-                <button on:click={() => seakeeper('enable',false)}>E</button>
+                <button onclick={() => seakeeper('enable',false)}>E</button>
               {:else if globalData.seakeeperData["stabilize_available"] >= 1 }
-                <button on:click={() => seakeeper('enable',true)}>e</button>
+                <button onclick={() => seakeeper('enable',true)}>e</button>
               {/if}
               {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}%
               ({globalData.seakeeperData["flywheel_speed"]})
@@ -1129,9 +1129,9 @@ import type { BoatInfo } from './lib/BoatInfo';
                     width="100"
                     type="line"
                     lineColor="#0000ff"
-                    scaleMax=100
-                    linked="{key}"
-                    uid="{key}"
+                    scaleMax={100}
+                    linked={key}
+                    uid={key}
                     barMinWidth="1"
                     grow
                   />
@@ -1139,8 +1139,8 @@ import type { BoatInfo } from './lib/BoatInfo';
                 <div
                   class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium px-2 w-fit"
                 >
-                  <LinkedValue uid="{key}" />
-                  <LinkedLabel linked="{key}"/>
+                  <LinkedValue uid={key} />
+                  <LinkedLabel linked={key}/>
                 </div>
               </div>
             {/if}   
