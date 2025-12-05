@@ -275,7 +275,6 @@ import type { BoatInfo } from './lib/BoatInfo';
        source: new TileWMS({
          url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
          params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
-         ratio: 1,
          serverType: 'geoserver',
          hidpi: false,
        }),
@@ -288,7 +287,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      on: false,
      layer : new TileLayer({
        visible: true,
-       maxZom: 19,
+       maxZoom: 19,
        source: new XYZ({
          tileUrlFunction: function(coordinate) {
            return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
@@ -456,7 +455,22 @@ import type { BoatInfo } from './lib/BoatInfo';
      var idx = findOnLayerIndexOfName(l.name);
      if (l.on) {
        if ( idx < 0 ) {
-         mapGlobal.onLayers.push(l.layer);
+         // Insert tile layers before vector layers to ensure proper z-ordering
+         // Vector layers (boat, ais, track, route) should always be on top
+         if (l.layer instanceof TileLayer) {
+           // Find the first vector layer index and insert before it
+           let insertIdx = 0;
+           for (let i = 0; i < mapGlobal.onLayers.getLength(); i++) {
+             if (mapGlobal.onLayers.item(i) instanceof Vector) {
+               break;
+             }
+             insertIdx = i + 1;
+           }
+           mapGlobal.onLayers.insertAt(insertIdx, l.layer);
+         } else {
+           // Vector layers go on top
+           mapGlobal.onLayers.push(l.layer);
+         }
        }
      } else {
        if ( idx >= 0 ) {
@@ -632,7 +646,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     <div class="popup-arrow"></div>
   </div>
 
-  <div class="absolute bottom-0 right-0">
+  <div class="layer-controls">
     {#if mapInternalState.inPanMode}
       <div>
         <button onclick={stopPanning}>Stop Panning</button>
@@ -745,5 +759,11 @@ import type { BoatInfo } from './lib/BoatInfo';
     border-left: 5px solid transparent;
     border-right: 5px solid transparent;
     border-top: 5px solid rgba(15, 23, 42, 0.95);
+  }
+
+  .layer-controls {
+    position: absolute;
+    bottom: 0;
+    right: 0;
   }
 </style>
