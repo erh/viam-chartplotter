@@ -616,12 +616,6 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  function setupMap() {
-   const urlParams = new URLSearchParams(window.location.search);
-   var temp = urlParams.get("zoomModifier");
-   if (temp) {
-     var tempNum = parseInt(temp);
-     // Note: globalConfig is not defined, using zoomModifier prop instead
-   }
    useGeographic();
    setupLayers();
    
@@ -771,11 +765,18 @@ import type { BoatInfo } from './lib/BoatInfo';
  onMount(() => {
    setupMap();
    
-   // Add click-outside handler for boats panel
+   // Add click-outside handler for panels
    const container = document.getElementById('map-container');
    if (container) {
      container.addEventListener('click', handleMapContainerClick as EventListener);
    }
+   
+   // Cleanup on unmount
+   return () => {
+     if (container) {
+       container.removeEventListener('click', handleMapContainerClick as EventListener);
+     }
+   };
  });
 
 </script>
