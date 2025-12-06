@@ -62,9 +62,36 @@ import type { BoatInfo } from './lib/BoatInfo';
   positionHistorical?: { lat: number; lng: number }[];
 } = $props();
 
+ // Create derived values for reactivity tracking
+ let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading])));
+ let myBoatKey = $derived(JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]));
+
  $effect( () => {
-   if (myBoat.heading || myBoat.location || myBoat.speed || myBoat.route) {
-     updateFromData();
+   // Read derived keys to create dependencies
+   const _boats = boatsKey;
+   const _myBoat = myBoatKey;
+   updateFromData();
+ });
+
+ // Update popup content if it's open and showing a boat that moved
+ $effect(() => {
+   if (!popupState.visible) return;
+   
+   if (popupState.content.isMyBoat) {
+     // Update my boat popup
+     popupState.content.speed = myBoat.speed;
+     popupState.content.heading = myBoat.heading;
+     popupState.content.lat = myBoat.location[0];
+     popupState.content.lng = myBoat.location[1];
+   } else if (popupState.content.mmsi && boats) {
+     // Update AIS boat popup
+     const boat = boats.find(b => b.mmsi === popupState.content.mmsi);
+     if (boat) {
+       popupState.content.speed = boat.speed;
+       popupState.content.heading = boat.heading;
+       popupState.content.lat = boat.location[0];
+       popupState.content.lng = boat.location[1];
+     }
    }
  });
 
@@ -192,6 +219,9 @@ import type { BoatInfo } from './lib/BoatInfo';
          var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
          if (v.get("mmsi") == mmsi) {
            v.setGeometry(new Point([boat.location[1], boat.location[0]]));
+           v.set("speed", boat.speed);
+           v.set("heading", boat.heading);
+           v.set("name", boat.name);
            return;
          }
        }
