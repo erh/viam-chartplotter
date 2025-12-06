@@ -44,6 +44,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    },
  });
 
+ let layersExpanded = $state(false);
+
  let { myBoat, zoomModifier, boats, positionHistorical}: {
   myBoat: BoatInfo;
   zoomModifier?: number;
@@ -257,9 +259,9 @@ import type { BoatInfo } from './lib/BoatInfo';
    // core open street maps
    mapGlobal.layerOptions.push( {
      name : "open street map",
-     on : false,
+     on : true,
      layer : new TileLayer({
-       opacity: .5,
+       opacity: 1,
        source: new XYZ({
          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
        })
@@ -304,7 +306,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    mapGlobal.layerOptions.push({
      name: "noaa",
-     on: true,
+     on: false,
      layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
@@ -612,7 +614,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
 </script>
 
-<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
+<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded}>
   <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
 
   <!-- Boat Info Popup -->
@@ -659,6 +661,18 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
     {/each}
   </div>
+
+  <button 
+    class="layers-toggle"
+    onclick={() => layersExpanded = !layersExpanded}
+    aria-label="Toggle map layers"
+  >
+    {#if layersExpanded}
+      ▼ Layers
+    {:else}
+      ▲ Layers
+    {/if}
+  </button>
 </div>
 
 <style>
@@ -761,9 +775,67 @@ import type { BoatInfo } from './lib/BoatInfo';
     border-top: 5px solid rgba(15, 23, 42, 0.95);
   }
 
+  /* Layer controls panel - hidden by default */
   .layer-controls {
     position: absolute;
-    bottom: 0;
-    right: 0;
+    bottom: 45px;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    z-index: 1000;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    border: 1px solid #ccc;
+    display: none;
+  }
+
+  /* Show when expanded */
+  .layers-expanded .layer-controls {
+    display: block;
+  }
+
+  .layer-controls > div {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .layer-controls > div:hover {
+    color: #0066cc;
+  }
+
+  .layer-controls input[type="checkbox"] {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+  }
+
+  /* Layers toggle button */
+  .layers-toggle {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .layers-toggle:hover {
+    background: white;
+    border-color: #999;
   }
 </style>
