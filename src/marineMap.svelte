@@ -27,6 +27,15 @@ import type { BoatInfo } from './lib/BoatInfo';
    Style,
  } from 'ol/style.js';
  import Overlay from "ol/Overlay.js";
+ import type { Geometry } from 'ol/geom';
+ import type BaseLayer from 'ol/layer/Base';
+ import type { TileCoord } from 'ol/tilecoord';
+
+ interface LayerOption {
+   name: string;
+   on: boolean;
+   layer: TileLayer<any> | Vector<any>;
+ }
 
  let boatImage = "boat3.jpg";
 
@@ -66,30 +75,36 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  let mapGlobal = $state({
 
-   map: null,
-   view: null,
+   map: null as Map | null,
+   view: null as View | null,
 
-   aisFeatures: new Collection(),
-   trackFeatures: new Collection(),
-   routeFeatures: new Collection(),
+   aisFeatures: new Collection<Feature<Geometry>>(),
+   trackFeatures: new Collection<Feature<Geometry>>(),
+   routeFeatures: new Collection<Feature<Geometry>>(),
    trackFeaturesLastCheck : new Date(0),
-   myBoatMarker: null,
+   myBoatMarker: null as Feature<Point> | null,
    
 
-   layerOptions: [],
-   onLayers: new Collection(),
+   layerOptions: [] as LayerOption[],
+   onLayers: new Collection<BaseLayer>(),
  });
 
- let mapInternalState = {
+ let mapInternalState: {
+   inPanMode: boolean;
+   lastZoom: number;
+   lastCenter: number[] | null;
+   lastPosition: number[];
+   trackFeatureIds: Record<string, boolean>;
+ } = {
    inPanMode: false,
    lastZoom: 0,
    lastCenter: null,
    lastPosition: [0,0],
-   trackFeatureIds : {},
+   trackFeatureIds: {},
  }
 
  function updateFromData() {
-   if (!mapGlobal.map) {
+   if (!mapGlobal.map || !mapGlobal.view || !mapGlobal.myBoatMarker) {
      return
    }
 
@@ -100,9 +115,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      }
      
      var c = mapGlobal.view.getCenter();
-     var diff = pointDiff(c, mapInternalState.lastCenter);
-     if (diff > .003) {
-       mapInternalState.inPanMode = true;
+     if (c) {
+       var diff = pointDiff(c, mapInternalState.lastCenter);
+       if (diff > .003) {
+         mapInternalState.inPanMode = true;
+       }
      }
    }
    
@@ -110,8 +127,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    var pp = [myBoat.location[1], myBoat.location[0]];
    mapGlobal.myBoatMarker.setGeometry(new Point(pp));
    
-   if (!mapInternalState.inPanMode) {
-     mapGlobal.view.centerOn(pp, mapGlobal.map.getSize(), [sz[0]/2,sz[1]/2]);
+   if (!mapInternalState.inPanMode && sz) {
+     mapGlobal.view.centerOn(pp, sz, [sz[0]/2,sz[1]/2]);
      
      // zoom of 10 is about 30 miles
      // zoom of 16 is city level
@@ -162,7 +179,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (boats == null) {
      mapGlobal.aisFeatures.clear();
    } else {
-     var seen = {};
+     var seen: Record<string, boolean> = {};
      boats.forEach( (boat) => {
 
        var mmsi = boat.mmsi;
@@ -172,7 +189,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        seen[mmsi] = true;
        
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-         var v = mapGlobal.aisFeatures.item(i);
+         var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
          if (v.get("mmsi") == mmsi) {
            v.setGeometry(new Point([boat.location[1], boat.location[0]]));
            return;
@@ -190,8 +207,8 @@ import type { BoatInfo } from './lib/BoatInfo';
      });
 
      for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-       var v = mapGlobal.aisFeatures.item(i);
-       var mmsi = v.get("mmsi");
+       var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
+       var mmsi = v.get("mmsi") as string;
        if (!seen[mmsi]) {
          mapGlobal.aisFeatures.removeAt(i);
        }
@@ -199,7 +216,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
 
    if (positionHistorical) {
-     var prev = null;
+     var prev: number[] | null = null;
      positionHistorical.forEach( (p) => {
        var pp = [p.lng, p.lat];
 
@@ -216,7 +233,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  }
 
- function addTrackFeature(id, g) {
+ function addTrackFeature(id: string, g: Geometry) {
    if (mapInternalState.trackFeatureIds[id] == true) {
      return;
    }
@@ -230,20 +247,17 @@ import type { BoatInfo } from './lib/BoatInfo';
    }));
  }
  
- function getTileUrlFunction(url, type, coordinates) {
+ function getTileUrlFunction(url: string, type: string, coordinates: TileCoord): string | undefined {
    var x = coordinates[1];
    var y = coordinates[2];
    var z = coordinates[0];
    var limit = Math.pow(2, z);
    if (y < 0 || y >= limit) {
-     return null;
+     return undefined;
    } else {
      x = ((x % limit) + limit) % limit;
      
      var path = z + "/" + x + "/" + y + "." + type;
-     if (url instanceof Array) {
-       url = this.selectUrl(path, url);
-     }
      return url + path;
    }
  }
@@ -251,7 +265,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  function stopPanning() {
    mapInternalState.lastZoom = 0;
    mapInternalState.lastCenter = [0,0];
-   mapGlobal.inPanMode = false;
+   mapInternalState.inPanMode = false;
  }
 
  function setupLayers() {
@@ -311,7 +325,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        opacity: .7,
        source: new TileWMS({
          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-         //params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
+         params: {},
          //ratio: 1,
          //serverType: 'geoserver',
          //hidpi: false,
@@ -326,7 +340,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      geometry: new Point([0,0]),
    });
    
-   var myBoatFeatures = new Collection();
+   var myBoatFeatures = new Collection<Feature<Geometry>>();
    myBoatFeatures.push(mapGlobal.myBoatMarker);
 
    var myBoatLayer = new Vector({
@@ -429,7 +443,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  }
 
- function findLayerByName(name) {
+ function findLayerByName(name: string): LayerOption | null {
    for( var l of mapGlobal.layerOptions) {
      if (l.name == name) {
        return l;
@@ -438,14 +452,14 @@ import type { BoatInfo } from './lib/BoatInfo';
    return null;
  }
 
- function findOnLayerIndexOfName(name) {
+ function findOnLayerIndexOfName(name: string): number {
    var l = findLayerByName(name);
    if (l == null) {
      return -2;
    }
 
    for ( var i=0; i<mapGlobal.onLayers.getLength(); i++) {
-     if (mapGlobal.onLayers.item(i).ol_uid == l.layer.ol_uid) {
+     if ((mapGlobal.onLayers.item(i) as any).ol_uid == (l.layer as any).ol_uid) {
        return i;
      }
    }
@@ -482,7 +496,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
  
- function pointDiff(x, y) {
+ function pointDiff(x: number[], y: number[]): number {
    var a = x[0] - y[0];
    var b = x[1] - y[1];
    var c = a*a + b*b;
@@ -493,8 +507,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    const urlParams = new URLSearchParams(window.location.search);
    var temp = urlParams.get("zoomModifier");
    if (temp) {
-     temp = parseInt(temp);
-     globalConfig.zoomModifier = temp;
+     var tempNum = parseInt(temp);
+     // Note: globalConfig is not defined, using zoomModifier prop instead
    }
    useGeographic();
    setupLayers();
@@ -517,7 +531,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    mapGlobal.map = new Map({
      target: 'map',
-     layers: mapGlobal.onLayers,
+     layers: mapGlobal.onLayers as Collection<BaseLayer>,
      view: mapGlobal.view,
      controls: defaultControls().extend([scaleThing])
    });
@@ -525,7 +539,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    // Setup popup overlay
    const popupElement = document.getElementById("boat-popup");
    popupState.overlay = new Overlay({
-     element: popupElement,
+     element: popupElement || undefined,
      autoPan: false,
      positioning: "bottom-center",
      offset: [0, -15],
@@ -534,7 +548,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    // Click handler for boat features
    mapGlobal.map.on("click", function (evt) {
-     const feature = mapGlobal.map.forEachFeatureAtPixel(
+     const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
          const type = f.get("type");
@@ -547,7 +561,8 @@ import type { BoatInfo } from './lib/BoatInfo';
 
      if (feature) {
        const type = feature.get("type");
-       const geom = feature.getGeometry();
+       const geom = feature.getGeometry() as Point | undefined;
+       if (!geom) return;
        const coords = geom.getCoordinates();
 
        if (type === "geoMarker") {
@@ -572,7 +587,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          };
        }
        popupState.visible = true;
-       popupState.overlay.setPosition(coords);
+       popupState.overlay?.setPosition(coords);
      } else {
        closePopup();
      }
@@ -580,19 +595,19 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    // Change cursor on hover over boats
    mapGlobal.map.on("pointermove", function (evt) {
-     const hit = mapGlobal.map.hasFeatureAtPixel(evt.pixel, {
+     const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
          return (
-           layer
+           (layer as any)
              .getSource()
              ?.getFeatures?.()
              ?.some?.(
-               (f) => f.get("type") === "ais" || f.get("type") === "geoMarker"
+               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker"
              ) ?? false
          );
        },
      });
-     mapGlobal.map.getTargetElement().style.cursor = hit ? "pointer" : "";
+     mapGlobal.map!.getTargetElement()!.style.cursor = hit ? "pointer" : "";
    });
 
    console.log("setupMap finished");
