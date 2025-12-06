@@ -8,7 +8,7 @@
     name: "My Boat",
     location: [26.7759, -80.0523], // Port of Palm Beach
     speed: 8.5,
-    heading: 281,
+    heading: 90,
   });
 
   // Mock AIS boats - clustered around Florida/Gulf for visibility
@@ -126,6 +126,7 @@
       boats={mockBoats} 
       zoomModifier={-8}
       positionHistorical={mockPositionHistorical}
+      enableBoatsPanel={true}
     />
   </div>
 

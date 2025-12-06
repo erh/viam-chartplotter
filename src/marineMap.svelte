@@ -5,6 +5,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
+ import {boundingExtent} from 'ol/extent.js';
  import 'ol/ol.css';
  import ScaleLine from 'ol/control/ScaleLine.js';
  import {defaults as defaultControls} from 'ol/control/defaults.js';
@@ -54,22 +55,92 @@ import type { BoatInfo } from './lib/BoatInfo';
  });
 
  let layersExpanded = $state(false);
+ let boatsExpanded = $state(false);
 
- let { myBoat, zoomModifier, boats, positionHistorical}: {
+ // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
+ let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
+
+ // Initialize visibleBoats when boats prop changes
+ let lastBoatsLength = $state(0);
+ $effect(() => {
+   const currentLength = boats?.length ?? 0;
+   if (currentLength !== lastBoatsLength) {
+     // Add any new boats to visible set
+     boats?.forEach(b => {
+       if (b.mmsi && !visibleBoats.has(b.mmsi)) {
+         visibleBoats.add(b.mmsi);
+       }
+     });
+     lastBoatsLength = currentLength;
+   }
+ });
+
+ function toggleBoatVisibility(id: string) {
+   if (visibleBoats.has(id)) {
+     visibleBoats.delete(id);
+   } else {
+     visibleBoats.add(id);
+   }
+   visibleBoats = new Set(visibleBoats); // Trigger reactivity
+ }
+
+ function fitToVisibleBoats() {
+   if (!mapGlobal.map || !mapGlobal.view) return;
+
+   const coords: number[][] = [];
+
+   // Add my boat if visible
+   if (visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
+     coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
+   }
+
+   // Add visible AIS boats
+   boats?.forEach(boat => {
+     if (boat.mmsi && visibleBoats.has(boat.mmsi)) {
+       coords.push([boat.location[1], boat.location[0]]);
+     }
+   });
+
+   if (coords.length === 0) return;
+
+   if (coords.length === 1) {
+     // Single boat - center on it with reasonable zoom
+     mapGlobal.view.animate({
+       center: coords[0],
+       zoom: 10,
+       duration: 500
+     });
+   } else {
+     // Multiple boats - fit to extent with generous padding for popups
+     const extent = boundingExtent(coords);
+     mapGlobal.view.fit(extent, {
+       padding: [180, 80, 80, 80], // Extra top padding for popups
+       duration: 500,
+       maxZoom: 12
+     });
+   }
+
+   mapInternalState.inPanMode = true; // Prevent auto-centering
+ }
+
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false }: {
   myBoat: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
+  enableBoatsPanel?: boolean;
 } = $props();
 
  // Create derived values for reactivity tracking
  let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading])));
  let myBoatKey = $derived(JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]));
+ let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
 
  $effect( () => {
    // Read derived keys to create dependencies
    const _boats = boatsKey;
    const _myBoat = myBoatKey;
+   const _visible = visibleBoatsKey;
    updateFromData();
  });
 
@@ -214,6 +285,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          return;
        }
        seen[mmsi] = true;
+       const isVisible = visibleBoats.has(mmsi);
        
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
          var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
@@ -222,6 +294,7 @@ import type { BoatInfo } from './lib/BoatInfo';
            v.set("speed", boat.speed);
            v.set("heading", boat.heading);
            v.set("name", boat.name);
+           v.set("visible", isVisible);
            return;
          }
        }
@@ -232,6 +305,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          mmsi: mmsi,
          speed: boat.speed,
          heading: boat.heading,
+         visible: isVisible,
          geometry: new Point([boat.location[1], boat.location[0]]),
        }));
      });
@@ -378,6 +452,10 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: myBoatFeatures,
      }),
      style: function (feature) {
+       // Hide if myBoat is not in visibleBoats
+       if (!visibleBoats.has('myBoat')) {
+         return new Style({}); // Empty style = hidden
+       }
        
        var scale = 0.6;
        var rotation = (myBoat.heading / 360) * Math.PI * 2;
@@ -403,6 +481,10 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: mapGlobal.aisFeatures,
      }),
      style: function (feature) {
+       // Hide if boat is not visible
+       if (!feature.get("visible")) {
+         return new Style({}); // Empty style = hidden
+       }
 
        var scale = 0.25;
        var rotation = 0;
@@ -641,6 +723,13 @@ import type { BoatInfo } from './lib/BoatInfo';
    });
 
    console.log("setupMap finished");
+   
+   // Initial fit to show all boats with room for popups (only when boats panel enabled)
+   setTimeout(() => {
+     if (enableBoatsPanel && boats && boats.length > 0) {
+       fitToVisibleBoats();
+     }
+   }, 100);
  }
 
  function closePopup() {
@@ -655,12 +744,44 @@ import type { BoatInfo } from './lib/BoatInfo';
    return Math.abs(val).toFixed(4) + "° " + dir;
  }
 
- onMount(setupMap);
+ function handleMapContainerClick(event: MouseEvent) {
+   const target = event.target as HTMLElement;
+   
+   // Close boats panel if clicking outside of it
+   if (boatsExpanded) {
+     const boatsPanel = target.closest('.boats-panel');
+     const boatsToggle = target.closest('.boats-toggle');
+     
+     if (!boatsPanel && !boatsToggle) {
+       boatsExpanded = false;
+     }
+   }
+   
+   // Close layers panel if clicking outside of it
+   if (layersExpanded) {
+     const layersPanel = target.closest('.layer-controls');
+     const layersToggle = target.closest('.layers-toggle');
+     
+     if (!layersPanel && !layersToggle) {
+       layersExpanded = false;
+     }
+   }
+ }
+
+ onMount(() => {
+   setupMap();
+   
+   // Add click-outside handler for boats panel
+   const container = document.getElementById('map-container');
+   if (container) {
+     container.addEventListener('click', handleMapContainerClick as EventListener);
+   }
+ });
 
 </script>
 
-<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded}>
-  <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
+<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded}>
+  <div id="map" class="w-full aspect-video bg-white"></div>
 
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
@@ -700,10 +821,10 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
     {/if}
     {#each mapGlobal.layerOptions as l, idx}
-      <div>
+      <label>
         <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
         {l.name}
-      </div>
+      </label>
     {/each}
   </div>
 
@@ -718,6 +839,51 @@ import type { BoatInfo } from './lib/BoatInfo';
       ▲ Layers
     {/if}
   </button>
+
+  {#if enableBoatsPanel}
+  <!-- Boats Panel (bottom-right, next to Layers) -->
+  <div class="boats-panel">
+    <div class="boats-list">
+      <label class="boat-item">
+        <input 
+          type="checkbox" 
+          checked={visibleBoats.has('myBoat')}
+          onchange={() => toggleBoatVisibility('myBoat')}
+        >
+        <span class="boat-name my-boat">My Boat</span>
+      </label>
+      {#if boats}
+        {#each boats as boat}
+          {#if boat.mmsi}
+            <label class="boat-item">
+              <input 
+                type="checkbox" 
+                checked={visibleBoats.has(boat.mmsi)}
+                onchange={() => toggleBoatVisibility(boat.mmsi!)}
+              >
+              <span class="boat-name">{boat.name}</span>
+            </label>
+          {/if}
+        {/each}
+      {/if}
+    </div>
+    <button class="fit-all-btn" onclick={fitToVisibleBoats}>
+      Fit All Visible
+    </button>
+  </div>
+
+  <button 
+    class="boats-toggle"
+    onclick={() => boatsExpanded = !boatsExpanded}
+    aria-label="Toggle boats panel"
+  >
+    {#if boatsExpanded}
+      ▼ Boats
+    {:else}
+      ▲ Boats
+    {/if}
+  </button>
+  {/if}
 </div>
 
 <style>
@@ -842,7 +1008,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     display: block;
   }
 
-  .layer-controls > div {
+  .layer-controls > label {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -851,7 +1017,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     white-space: nowrap;
   }
 
-  .layer-controls > div:hover {
+  .layer-controls > label:hover {
     color: #0066cc;
   }
 
@@ -880,6 +1046,116 @@ import type { BoatInfo } from './lib/BoatInfo';
   }
 
   .layers-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  /* Boats panel (bottom-right, next to Layers) */
+  .boats-panel {
+    position: absolute;
+    bottom: 45px;
+    right: calc(10px + 70px + 1rem); /* Match boats-toggle position */
+    background: rgba(255, 255, 255, 0.95);
+    padding: 0;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    z-index: 1000;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    border: 1px solid #ccc;
+    display: none;
+    max-height: 280px;
+    width: 200px;
+    flex-direction: column;
+  }
+
+  .boats-expanded .boats-panel {
+    display: flex;
+  }
+
+  .boats-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 14px;
+    padding-bottom: 0;
+    max-height: 200px;
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+    border-bottom: 1px solid #ddd;
+  }
+
+  .boat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    cursor: pointer;
+    white-space: nowrap;
+    -webkit-tap-highlight-color: transparent; /* Remove tap highlight on mobile */
+  }
+
+  .boat-item:active {
+    background: rgba(0, 102, 204, 0.1);
+  }
+
+  .boat-item input[type="checkbox"] {
+    margin: 0;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .boat-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+  }
+
+  .boat-name.my-boat {
+    font-weight: 600;
+  }
+
+  .fit-all-btn {
+    padding: 6px 12px;
+    margin: 10px 14px;
+    background: #0066cc;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .fit-all-btn:hover {
+    background: #0052a3;
+  }
+
+  .fit-all-btn:active {
+    background: #004080;
+  }
+
+  /* Boats toggle button (bottom-right, 1rem gap from Layers) */
+  .boats-toggle {
+    position: absolute;
+    bottom: 10px;
+    right: calc(10px + 70px + 1rem); /* 10px margin + ~70px layers button + 1rem gap */
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .boats-toggle:hover {
     background: white;
     border-color: #999;
   }
