@@ -5,6 +5,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
+ import {boundingExtent} from 'ol/extent.js';
  import 'ol/ol.css';
  import ScaleLine from 'ol/control/ScaleLine.js';
  import {defaults as defaultControls} from 'ol/control/defaults.js';
@@ -27,6 +28,15 @@ import type { BoatInfo } from './lib/BoatInfo';
    Style,
  } from 'ol/style.js';
  import Overlay from "ol/Overlay.js";
+ import type { Geometry } from 'ol/geom';
+ import type BaseLayer from 'ol/layer/Base';
+ import type { TileCoord } from 'ol/tilecoord';
+
+ interface LayerOption {
+   name: string;
+   on: boolean;
+   layer: TileLayer<any> | Vector<any>;
+ }
 
  let boatImage = "boat3.jpg";
 
@@ -44,16 +54,115 @@ import type { BoatInfo } from './lib/BoatInfo';
    },
  });
 
- let { myBoat, zoomModifier, boats, positionHistorical}: {
+ let layersExpanded = $state(false);
+ let boatsExpanded = $state(false);
+
+ // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
+ let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
+
+ // Initialize visibleBoats when boats prop changes
+ let lastBoatsLength = $state(0);
+ $effect(() => {
+   const currentLength = boats?.length ?? 0;
+   if (currentLength !== lastBoatsLength) {
+     // Add any new boats to visible set
+     boats?.forEach(b => {
+       if (b.mmsi && !visibleBoats.has(b.mmsi)) {
+         visibleBoats.add(b.mmsi);
+       }
+     });
+     lastBoatsLength = currentLength;
+   }
+ });
+
+ function toggleBoatVisibility(id: string) {
+   if (visibleBoats.has(id)) {
+     visibleBoats.delete(id);
+   } else {
+     visibleBoats.add(id);
+   }
+   visibleBoats = new Set(visibleBoats); // Trigger reactivity
+ }
+
+ function fitToVisibleBoats() {
+   if (!mapGlobal.map || !mapGlobal.view) return;
+
+   const coords: number[][] = [];
+
+   // Add my boat if visible
+   if (visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
+     coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
+   }
+
+   // Add visible AIS boats
+   boats?.forEach(boat => {
+     if (boat.mmsi && visibleBoats.has(boat.mmsi)) {
+       coords.push([boat.location[1], boat.location[0]]);
+     }
+   });
+
+   if (coords.length === 0) return;
+
+   if (coords.length === 1) {
+     // Single boat - center on it with reasonable zoom
+     mapGlobal.view.animate({
+       center: coords[0],
+       zoom: 10,
+       duration: 500
+     });
+   } else {
+     // Multiple boats - fit to extent with generous padding for popups
+     const extent = boundingExtent(coords);
+     mapGlobal.view.fit(extent, {
+       padding: [180, 80, 80, 80], // Extra top padding for popups
+       duration: 500,
+       maxZoom: 12
+     });
+   }
+
+   mapInternalState.inPanMode = true; // Prevent auto-centering
+ }
+
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false }: {
   myBoat: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
+  enableBoatsPanel?: boolean;
 } = $props();
 
+ // Create derived values for reactivity tracking
+ let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading])));
+ let myBoatKey = $derived(JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]));
+ let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
+
  $effect( () => {
-   if (myBoat.heading || myBoat.location || myBoat.speed || myBoat.route) {
-     updateFromData();
+   // Read derived keys to create dependencies
+   const _boats = boatsKey;
+   const _myBoat = myBoatKey;
+   const _visible = visibleBoatsKey;
+   updateFromData();
+ });
+
+ // Update popup content if it's open and showing a boat that moved
+ $effect(() => {
+   if (!popupState.visible) return;
+   
+   if (popupState.content.isMyBoat) {
+     // Update my boat popup
+     popupState.content.speed = myBoat.speed;
+     popupState.content.heading = myBoat.heading;
+     popupState.content.lat = myBoat.location[0];
+     popupState.content.lng = myBoat.location[1];
+   } else if (popupState.content.mmsi && boats) {
+     // Update AIS boat popup
+     const boat = boats.find(b => b.mmsi === popupState.content.mmsi);
+     if (boat) {
+       popupState.content.speed = boat.speed;
+       popupState.content.heading = boat.heading;
+       popupState.content.lat = boat.location[0];
+       popupState.content.lng = boat.location[1];
+     }
    }
  });
 
@@ -64,30 +173,36 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  let mapGlobal = $state({
 
-   map: null,
-   view: null,
+   map: null as Map | null,
+   view: null as View | null,
 
-   aisFeatures: new Collection(),
-   trackFeatures: new Collection(),
-   routeFeatures: new Collection(),
+   aisFeatures: new Collection<Feature<Geometry>>(),
+   trackFeatures: new Collection<Feature<Geometry>>(),
+   routeFeatures: new Collection<Feature<Geometry>>(),
    trackFeaturesLastCheck : new Date(0),
-   myBoatMarker: null,
+   myBoatMarker: null as Feature<Point> | null,
    
 
-   layerOptions: [],
-   onLayers: new Collection(),
+   layerOptions: [] as LayerOption[],
+   onLayers: new Collection<BaseLayer>(),
  });
 
- let mapInternalState = {
+ let mapInternalState: {
+   inPanMode: boolean;
+   lastZoom: number;
+   lastCenter: number[] | null;
+   lastPosition: number[];
+   trackFeatureIds: Record<string, boolean>;
+ } = {
    inPanMode: false,
    lastZoom: 0,
    lastCenter: null,
    lastPosition: [0,0],
-   trackFeatureIds : {},
+   trackFeatureIds: {},
  }
 
  function updateFromData() {
-   if (!mapGlobal.map) {
+   if (!mapGlobal.map || !mapGlobal.view || !mapGlobal.myBoatMarker) {
      return
    }
 
@@ -98,9 +213,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      }
      
      var c = mapGlobal.view.getCenter();
-     var diff = pointDiff(c, mapInternalState.lastCenter);
-     if (diff > .003) {
-       mapInternalState.inPanMode = true;
+     if (c) {
+       var diff = pointDiff(c, mapInternalState.lastCenter);
+       if (diff > .003) {
+         mapInternalState.inPanMode = true;
+       }
      }
    }
    
@@ -108,8 +225,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    var pp = [myBoat.location[1], myBoat.location[0]];
    mapGlobal.myBoatMarker.setGeometry(new Point(pp));
    
-   if (!mapInternalState.inPanMode) {
-     mapGlobal.view.centerOn(pp, mapGlobal.map.getSize(), [sz[0]/2,sz[1]/2]);
+   if (!mapInternalState.inPanMode && sz) {
+     mapGlobal.view.centerOn(pp, sz, [sz[0]/2,sz[1]/2]);
      
      // zoom of 10 is about 30 miles
      // zoom of 16 is city level
@@ -160,7 +277,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (boats == null) {
      mapGlobal.aisFeatures.clear();
    } else {
-     var seen = {};
+     var seen: Record<string, boolean> = {};
      boats.forEach( (boat) => {
 
        var mmsi = boat.mmsi;
@@ -168,11 +285,16 @@ import type { BoatInfo } from './lib/BoatInfo';
          return;
        }
        seen[mmsi] = true;
+       const isVisible = visibleBoats.has(mmsi);
        
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-         var v = mapGlobal.aisFeatures.item(i);
+         var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
          if (v.get("mmsi") == mmsi) {
            v.setGeometry(new Point([boat.location[1], boat.location[0]]));
+           v.set("speed", boat.speed);
+           v.set("heading", boat.heading);
+           v.set("name", boat.name);
+           v.set("visible", isVisible);
            return;
          }
        }
@@ -183,13 +305,14 @@ import type { BoatInfo } from './lib/BoatInfo';
          mmsi: mmsi,
          speed: boat.speed,
          heading: boat.heading,
+         visible: isVisible,
          geometry: new Point([boat.location[1], boat.location[0]]),
        }));
      });
 
      for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
-       var v = mapGlobal.aisFeatures.item(i);
-       var mmsi = v.get("mmsi");
+       var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
+       var mmsi = v.get("mmsi") as string;
        if (!seen[mmsi]) {
          mapGlobal.aisFeatures.removeAt(i);
        }
@@ -197,7 +320,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
 
    if (positionHistorical) {
-     var prev = null;
+     var prev: number[] | null = null;
      positionHistorical.forEach( (p) => {
        var pp = [p.lng, p.lat];
 
@@ -214,7 +337,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  }
 
- function addTrackFeature(id, g) {
+ function addTrackFeature(id: string, g: Geometry) {
    if (mapInternalState.trackFeatureIds[id] == true) {
      return;
    }
@@ -228,20 +351,17 @@ import type { BoatInfo } from './lib/BoatInfo';
    }));
  }
  
- function getTileUrlFunction(url, type, coordinates) {
+ function getTileUrlFunction(url: string, type: string, coordinates: TileCoord): string | undefined {
    var x = coordinates[1];
    var y = coordinates[2];
    var z = coordinates[0];
    var limit = Math.pow(2, z);
    if (y < 0 || y >= limit) {
-     return null;
+     return undefined;
    } else {
      x = ((x % limit) + limit) % limit;
      
      var path = z + "/" + x + "/" + y + "." + type;
-     if (url instanceof Array) {
-       url = this.selectUrl(path, url);
-     }
      return url + path;
    }
  }
@@ -249,7 +369,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  function stopPanning() {
    mapInternalState.lastZoom = 0;
    mapInternalState.lastCenter = [0,0];
-   mapGlobal.inPanMode = false;
+   mapInternalState.inPanMode = false;
  }
 
  function setupLayers() {
@@ -257,9 +377,9 @@ import type { BoatInfo } from './lib/BoatInfo';
    // core open street maps
    mapGlobal.layerOptions.push( {
      name : "open street map",
-     on : false,
+     on : true,
      layer : new TileLayer({
-       opacity: .5,
+       opacity: 1,
        source: new XYZ({
          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
        })
@@ -304,12 +424,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    mapGlobal.layerOptions.push({
      name: "noaa",
-     on: true,
+     on: false,
      layer: new TileLayer({
        opacity: .7,
        source: new TileWMS({
          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-         //params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
+         params: {},
          //ratio: 1,
          //serverType: 'geoserver',
          //hidpi: false,
@@ -324,7 +444,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      geometry: new Point([0,0]),
    });
    
-   var myBoatFeatures = new Collection();
+   var myBoatFeatures = new Collection<Feature<Geometry>>();
    myBoatFeatures.push(mapGlobal.myBoatMarker);
 
    var myBoatLayer = new Vector({
@@ -332,6 +452,10 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: myBoatFeatures,
      }),
      style: function (feature) {
+       // Hide if myBoat is not in visibleBoats
+       if (!visibleBoats.has('myBoat')) {
+         return new Style({}); // Empty style = hidden
+       }
        
        var scale = 0.6;
        var rotation = (myBoat.heading / 360) * Math.PI * 2;
@@ -357,6 +481,10 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: mapGlobal.aisFeatures,
      }),
      style: function (feature) {
+       // Hide if boat is not visible
+       if (!feature.get("visible")) {
+         return new Style({}); // Empty style = hidden
+       }
 
        var scale = 0.25;
        var rotation = 0;
@@ -427,7 +555,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  }
 
- function findLayerByName(name) {
+ function findLayerByName(name: string): LayerOption | null {
    for( var l of mapGlobal.layerOptions) {
      if (l.name == name) {
        return l;
@@ -436,14 +564,14 @@ import type { BoatInfo } from './lib/BoatInfo';
    return null;
  }
 
- function findOnLayerIndexOfName(name) {
+ function findOnLayerIndexOfName(name: string): number {
    var l = findLayerByName(name);
    if (l == null) {
      return -2;
    }
 
    for ( var i=0; i<mapGlobal.onLayers.getLength(); i++) {
-     if (mapGlobal.onLayers.item(i).ol_uid == l.layer.ol_uid) {
+     if ((mapGlobal.onLayers.item(i) as any).ol_uid == (l.layer as any).ol_uid) {
        return i;
      }
    }
@@ -480,7 +608,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
  
- function pointDiff(x, y) {
+ function pointDiff(x: number[], y: number[]): number {
    var a = x[0] - y[0];
    var b = x[1] - y[1];
    var c = a*a + b*b;
@@ -488,12 +616,6 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  function setupMap() {
-   const urlParams = new URLSearchParams(window.location.search);
-   var temp = urlParams.get("zoomModifier");
-   if (temp) {
-     temp = parseInt(temp);
-     globalConfig.zoomModifier = temp;
-   }
    useGeographic();
    setupLayers();
    
@@ -515,7 +637,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    mapGlobal.map = new Map({
      target: 'map',
-     layers: mapGlobal.onLayers,
+     layers: mapGlobal.onLayers as Collection<BaseLayer>,
      view: mapGlobal.view,
      controls: defaultControls().extend([scaleThing])
    });
@@ -523,7 +645,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    // Setup popup overlay
    const popupElement = document.getElementById("boat-popup");
    popupState.overlay = new Overlay({
-     element: popupElement,
+     element: popupElement || undefined,
      autoPan: false,
      positioning: "bottom-center",
      offset: [0, -15],
@@ -532,7 +654,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    // Click handler for boat features
    mapGlobal.map.on("click", function (evt) {
-     const feature = mapGlobal.map.forEachFeatureAtPixel(
+     const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
          const type = f.get("type");
@@ -545,7 +667,8 @@ import type { BoatInfo } from './lib/BoatInfo';
 
      if (feature) {
        const type = feature.get("type");
-       const geom = feature.getGeometry();
+       const geom = feature.getGeometry() as Point | undefined;
+       if (!geom) return;
        const coords = geom.getCoordinates();
 
        if (type === "geoMarker") {
@@ -570,7 +693,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          };
        }
        popupState.visible = true;
-       popupState.overlay.setPosition(coords);
+       popupState.overlay?.setPosition(coords);
      } else {
        closePopup();
      }
@@ -578,22 +701,29 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    // Change cursor on hover over boats
    mapGlobal.map.on("pointermove", function (evt) {
-     const hit = mapGlobal.map.hasFeatureAtPixel(evt.pixel, {
+     const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
          return (
-           layer
+           (layer as any)
              .getSource()
              ?.getFeatures?.()
              ?.some?.(
-               (f) => f.get("type") === "ais" || f.get("type") === "geoMarker"
+               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker"
              ) ?? false
          );
        },
      });
-     mapGlobal.map.getTargetElement().style.cursor = hit ? "pointer" : "";
+     mapGlobal.map!.getTargetElement()!.style.cursor = hit ? "pointer" : "";
    });
 
    console.log("setupMap finished");
+   
+   // Initial fit to show all boats with room for popups (only when boats panel enabled)
+   setTimeout(() => {
+     if (enableBoatsPanel && boats && boats.length > 0) {
+       fitToVisibleBoats();
+     }
+   }, 100);
  }
 
  function closePopup() {
@@ -608,12 +738,51 @@ import type { BoatInfo } from './lib/BoatInfo';
    return Math.abs(val).toFixed(4) + "° " + dir;
  }
 
- onMount(setupMap);
+ function handleMapContainerClick(event: MouseEvent) {
+   const target = event.target as HTMLElement;
+   
+   // Close boats panel if clicking outside of it
+   if (boatsExpanded) {
+     const boatsPanel = target.closest('.boats-panel');
+     const boatsToggle = target.closest('.boats-toggle');
+     
+     if (!boatsPanel && !boatsToggle) {
+       boatsExpanded = false;
+     }
+   }
+   
+   // Close layers panel if clicking outside of it
+   if (layersExpanded) {
+     const layersPanel = target.closest('.layer-controls');
+     const layersToggle = target.closest('.layers-toggle');
+     
+     if (!layersPanel && !layersToggle) {
+       layersExpanded = false;
+     }
+   }
+ }
+
+ onMount(() => {
+   setupMap();
+   
+   // Add click-outside handler for panels
+   const container = document.getElementById('map-container');
+   if (container) {
+     container.addEventListener('click', handleMapContainerClick as EventListener);
+   }
+   
+   // Cleanup on unmount
+   return () => {
+     if (container) {
+       container.removeEventListener('click', handleMapContainerClick as EventListener);
+     }
+   };
+ });
 
 </script>
 
-<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark">
-  <div id="map" class="min-h-[50dvh] h-fit bg-white"></div>
+<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded}>
+  <div id="map" class="w-full aspect-video bg-white"></div>
 
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
@@ -653,12 +822,69 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
     {/if}
     {#each mapGlobal.layerOptions as l, idx}
-      <div>
+      <label>
         <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
         {l.name}
-      </div>
+      </label>
     {/each}
   </div>
+
+  <button 
+    class="layers-toggle"
+    onclick={() => layersExpanded = !layersExpanded}
+    aria-label="Toggle map layers"
+  >
+    {#if layersExpanded}
+      ▼ Layers
+    {:else}
+      ▲ Layers
+    {/if}
+  </button>
+
+  {#if enableBoatsPanel}
+  <!-- Boats Panel (bottom-right, next to Layers) -->
+  <div class="boats-panel">
+    <div class="boats-list">
+      <label class="boat-item">
+        <input 
+          type="checkbox" 
+          checked={visibleBoats.has('myBoat')}
+          onchange={() => toggleBoatVisibility('myBoat')}
+        >
+        <span class="boat-name my-boat">My Boat</span>
+      </label>
+      {#if boats}
+        {#each boats as boat}
+          {#if boat.mmsi}
+            <label class="boat-item">
+              <input 
+                type="checkbox" 
+                checked={visibleBoats.has(boat.mmsi)}
+                onchange={() => toggleBoatVisibility(boat.mmsi!)}
+              >
+              <span class="boat-name">{boat.name}</span>
+            </label>
+          {/if}
+        {/each}
+      {/if}
+    </div>
+    <button class="fit-all-btn" onclick={fitToVisibleBoats}>
+      Fit All Visible
+    </button>
+  </div>
+
+  <button 
+    class="boats-toggle"
+    onclick={() => boatsExpanded = !boatsExpanded}
+    aria-label="Toggle boats panel"
+  >
+    {#if boatsExpanded}
+      ▼ Boats
+    {:else}
+      ▲ Boats
+    {/if}
+  </button>
+  {/if}
 </div>
 
 <style>
@@ -761,9 +987,177 @@ import type { BoatInfo } from './lib/BoatInfo';
     border-top: 5px solid rgba(15, 23, 42, 0.95);
   }
 
+  /* Layer controls panel - hidden by default */
   .layer-controls {
     position: absolute;
-    bottom: 0;
-    right: 0;
+    bottom: 45px;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    z-index: 1000;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    border: 1px solid #ccc;
+    display: none;
+  }
+
+  /* Show when expanded */
+  .layers-expanded .layer-controls {
+    display: block;
+  }
+
+  .layer-controls > label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .layer-controls > label:hover {
+    color: #0066cc;
+  }
+
+  .layer-controls input[type="checkbox"] {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+  }
+
+  /* Layers toggle button */
+  .layers-toggle {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .layers-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  /* Boats panel (bottom-right, next to Layers) */
+  .boats-panel {
+    position: absolute;
+    bottom: 45px;
+    right: calc(10px + 70px + 1rem); /* Match boats-toggle position */
+    background: rgba(255, 255, 255, 0.95);
+    padding: 0;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    z-index: 1000;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    border: 1px solid #ccc;
+    display: none;
+    max-height: 280px;
+    width: 200px;
+    flex-direction: column;
+  }
+
+  .boats-expanded .boats-panel {
+    display: flex;
+  }
+
+  .boats-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 14px;
+    padding-bottom: 0;
+    max-height: 200px;
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+    border-bottom: 1px solid #ddd;
+  }
+
+  .boat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    cursor: pointer;
+    white-space: nowrap;
+    -webkit-tap-highlight-color: transparent; /* Remove tap highlight on mobile */
+  }
+
+  .boat-item:active {
+    background: rgba(0, 102, 204, 0.1);
+  }
+
+  .boat-item input[type="checkbox"] {
+    margin: 0;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .boat-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+  }
+
+  .boat-name.my-boat {
+    font-weight: 600;
+  }
+
+  .fit-all-btn {
+    padding: 6px 12px;
+    margin: 10px 14px;
+    background: #0066cc;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .fit-all-btn:hover {
+    background: #0052a3;
+  }
+
+  .fit-all-btn:active {
+    background: #004080;
+  }
+
+  /* Boats toggle button (bottom-right, 1rem gap from Layers) */
+  .boats-toggle {
+    position: absolute;
+    bottom: 10px;
+    right: calc(10px + 70px + 1rem); /* 10px margin + ~70px layers button + 1rem gap */
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .boats-toggle:hover {
+    background: white;
+    border-color: #999;
   }
 </style>
