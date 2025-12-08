@@ -10,4 +10,5 @@ export interface BoatInfo {
     distanceToWaypoint?: number;
     waypointClosingVelocity?: number;
   };
+  positionHistory?: { lat: number; lng: number }[]; // Historical track positions
 }

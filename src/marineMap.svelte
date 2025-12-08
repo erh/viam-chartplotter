@@ -132,7 +132,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 } = $props();
 
  // Create derived values for reactivity tracking
- let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading])));
+ let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading, b.positionHistory?.length])));
  let myBoatKey = $derived(JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]));
  let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
 
@@ -166,6 +166,16 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  });
 
+ // Force track layer to re-render when visibility changes
+ $effect(() => {
+   const _visible = visibleBoatsKey;
+   // Trigger style recalculation by notifying the source
+   const trackLayer = mapGlobal.layerOptions.find(l => l.name === "track");
+   if (trackLayer?.layer) {
+     trackLayer.layer.changed();
+   }
+ });
+
  $effect(() => {
    mapGlobal.layerOptions.forEach((l) => l.on);
    updateOnLayers();
@@ -192,12 +202,14 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastZoom: number;
    lastCenter: number[] | null;
    lastPosition: number[];
+   lastPositions: Record<string, number[]>;
    trackFeatureIds: Record<string, boolean>;
  } = {
    inPanMode: false,
    lastZoom: 0,
    lastCenter: null,
    lastPosition: [0,0],
+   lastPositions: {},
    trackFeatureIds: {},
  }
 
@@ -243,23 +255,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
    
    if (pp[0] != 0) {
-     var addToTrack = false;
-     if (mapInternalState.lastPosition[0] == 0) {
-       addToTrack = true;
-     } else {
-       var diff = pointDiff(mapInternalState.lastPosition, pp);
-       if (diff > .0000001) {
-         addToTrack = true;
-       }
-     }
-     if (addToTrack) {
-       mapGlobal.trackFeatures.push(new Feature({
-         type: "track",
-         geometry: new Circle(pp),
-       }));
-     }
-     
-     mapInternalState.lastPosition = pp;
+     recordTrackPoint("myBoat", pp);
    }
    
    // route stuff
@@ -287,10 +283,15 @@ import type { BoatInfo } from './lib/BoatInfo';
        seen[mmsi] = true;
        const isVisible = visibleBoats.has(mmsi);
        
+       const boatPos = [boat.location[1], boat.location[0]];
+       
+       // Track AIS boat position history
+       recordTrackPoint(mmsi, boatPos);
+       
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
          var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
          if (v.get("mmsi") == mmsi) {
-           v.setGeometry(new Point([boat.location[1], boat.location[0]]));
+           v.setGeometry(new Point(boatPos));
            v.set("speed", boat.speed);
            v.set("heading", boat.heading);
            v.set("name", boat.name);
@@ -306,7 +307,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          speed: boat.speed,
          heading: boat.heading,
          visible: isVisible,
-         geometry: new Point([boat.location[1], boat.location[0]]),
+         geometry: new Point(boatPos),
        }));
      });
 
@@ -315,29 +316,27 @@ import type { BoatInfo } from './lib/BoatInfo';
        var mmsi = v.get("mmsi") as string;
        if (!seen[mmsi]) {
          mapGlobal.aisFeatures.removeAt(i);
+         delete mapInternalState.lastPositions[mmsi];
        }
      }
    }
 
+   // Render historical tracks
    if (positionHistorical) {
-     var prev: number[] | null = null;
-     positionHistorical.forEach( (p) => {
-       var pp = [p.lng, p.lat];
+     renderHistoricalTrack("myBoat", positionHistorical, "myBoat");
+   }
 
-       addTrackFeature("p-" + p.lng + "-" + p.lat,
-                        new Circle(pp));
-       
-       if (prev) {
-         addTrackFeature("line-" + p.lng + "-" + p.lat, 
-                          new LineString([prev, pp]));
+   if (boats) {
+     boats.forEach((boat) => {
+       if (boat.mmsi && boat.positionHistory && boat.positionHistory.length > 0) {
+         renderHistoricalTrack(boat.mmsi, boat.positionHistory, `ais-${boat.mmsi}`);
        }
-       prev = pp;
      });
    }
 
  }
 
- function addTrackFeature(id: string, g: Geometry) {
+ function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat") {
    if (mapInternalState.trackFeatureIds[id] == true) {
      return;
    }
@@ -346,9 +345,86 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    mapGlobal.trackFeatures.push(new Feature({
      type: "track",
+     boatId: boatId,
      "myid" : id,
      geometry: g,
    }));
+ }
+
+ // Record a track point for any boat, updating lastPositions and adding feature if moved
+ function recordTrackPoint(boatId: string, position: number[]): void {
+   const lastPosKey = boatId === "myBoat" ? null : boatId;
+   const lastPos = lastPosKey 
+     ? mapInternalState.lastPositions[lastPosKey] 
+     : mapInternalState.lastPosition;
+   
+   if (!lastPos || lastPos[0] === 0) {
+     if (lastPosKey) {
+       mapInternalState.lastPositions[lastPosKey] = position;
+     } else {
+       mapInternalState.lastPosition = position;
+     }
+     return;
+   }
+   
+   const diff = pointDiff(lastPos, position);
+   if (diff > .0000001) {
+     mapGlobal.trackFeatures.push(new Feature({
+       type: "track",
+       boatId: boatId,
+       geometry: new Circle(position),
+     }));
+     
+     if (lastPosKey) {
+       mapInternalState.lastPositions[lastPosKey] = position;
+     } else {
+       mapInternalState.lastPosition = position;
+     }
+   }
+ }
+
+ // Render historical track from position history array
+ function renderHistoricalTrack(
+   boatId: string, 
+   history: { lat: number; lng: number }[], 
+   idPrefix: string
+ ): void {
+   let prev: number[] | null = null;
+   history.forEach((p) => {
+     const pp = [p.lng, p.lat];
+     
+     addTrackFeature(
+       `${idPrefix}-p-${p.lng}-${p.lat}`,
+       new Circle(pp),
+       boatId
+     );
+     
+     if (prev) {
+       addTrackFeature(
+         `${idPrefix}-line-${p.lng}-${p.lat}`,
+         new LineString([prev, pp]),
+         boatId
+       );
+     }
+     prev = pp;
+   });
+ }
+
+ // Create boat icon style
+ function createBoatStyle(heading: number, scale: number, visible: boolean): Style {
+   if (!visible) {
+     return new Style({}); // Empty style = hidden
+   }
+   
+   const rotation = (heading / 360) * Math.PI * 2;
+   
+   return new Style({
+     image: new Icon({
+       src: boatImage,
+       scale: scale,
+       rotation: rotation,
+     }),
+   });
  }
  
  function getTileUrlFunction(url: string, type: string, coordinates: TileCoord): string | undefined {
@@ -452,22 +528,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: myBoatFeatures,
      }),
      style: function (feature) {
-       // Hide if myBoat is not in visibleBoats
-       if (!visibleBoats.has('myBoat')) {
-         return new Style({}); // Empty style = hidden
-       }
-       
-       var scale = 0.6;
-       var rotation = (myBoat.heading / 360) * Math.PI * 2;
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
+       return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
      },
    });
    mapGlobal.layerOptions.push({
@@ -481,27 +542,9 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: mapGlobal.aisFeatures,
      }),
      style: function (feature) {
-       // Hide if boat is not visible
-       if (!feature.get("visible")) {
-         return new Style({}); // Empty style = hidden
-       }
-
-       var scale = 0.25;
-       var rotation = 0;
-       
-       var h = feature.get("heading");
-       if (h >= 0 && h < 360) {
-         rotation = (h/ 360) * Math.PI * 2;
-       }
-       
-       return new Style({
-         image: new Icon(
-           {
-             src:boatImage,
-             scale: scale,
-             rotation: rotation,
-         }),
-       });
+       const heading = feature.get("heading") ?? 0;
+       const visible = feature.get("visible") ?? false;
+       return createBoatStyle(heading, 0.25, visible);
      },
    });
 
@@ -515,15 +558,21 @@ import type { BoatInfo } from './lib/BoatInfo';
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
      }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "blue",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
+     style: function(feature) {
+       const boatId = feature.get("boatId") || "myBoat";
+       if (!visibleBoats.has(boatId)) {
+         return new Style({}); // Hidden - return empty style
+       }
+       return new Style({
+         stroke: new Stroke({
+           color: "blue",
+           width: 3
+         }),
+         fill: new Fill({
+           color: "rgba(0, 255, 0, 0.1)"
+         })
+       });
+     },
    });
 
    mapGlobal.layerOptions.push({
