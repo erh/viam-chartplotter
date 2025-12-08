@@ -72,6 +72,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        }
      });
      lastBoatsLength = currentLength;
+     visibleBoats = new Set(visibleBoats); // Trigger reactivity
    }
  });
 
