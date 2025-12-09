@@ -91,7 +91,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    const coords: number[][] = [];
 
    // Add my boat if visible
-   if (visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
+   if (myBoat && visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
      coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
    }
 
@@ -125,7 +125,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false }: {
-  myBoat: BoatInfo;
+  myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
@@ -134,7 +134,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  // Create derived values for reactivity tracking
  let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading, b.positionHistory?.length])));
- let myBoatKey = $derived(JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]));
+ let myBoatKey = $derived(myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null);
  let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
 
  $effect( () => {
@@ -149,7 +149,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  $effect(() => {
    if (!popupState.visible) return;
    
-   if (popupState.content.isMyBoat) {
+   if (popupState.content.isMyBoat && myBoat) {
      // Update my boat popup
      popupState.content.speed = myBoat.speed;
      popupState.content.heading = myBoat.heading;
@@ -215,7 +215,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  function updateFromData() {
-   if (!mapGlobal.map || !mapGlobal.view || !mapGlobal.myBoatMarker) {
+   if (!mapGlobal.map || !mapGlobal.view) {
      return
    }
 
@@ -235,33 +235,37 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
    
    var sz = mapGlobal.map.getSize();
-   var pp = [myBoat.location[1], myBoat.location[0]];
-   mapGlobal.myBoatMarker.setGeometry(new Point(pp));
    
-   if (!mapInternalState.inPanMode && sz) {
-     mapGlobal.view.centerOn(pp, sz, [sz[0]/2,sz[1]/2]);
+   // Update my boat marker if myBoat is provided
+   if (myBoat && mapGlobal.myBoatMarker) {
+     var pp = [myBoat.location[1], myBoat.location[0]];
+     mapGlobal.myBoatMarker.setGeometry(new Point(pp));
      
-     // zoom of 10 is about 30 miles
-     // zoom of 16 is city level
-     var zoom = Math.pow(Math.floor(myBoat.speed),.41)
-     zoom = Math.floor(16-zoom) + (zoomModifier||0);
-     if ( zoom <= 0 ) {
-       zoom = 1;
+     if (!mapInternalState.inPanMode && sz) {
+       mapGlobal.view.centerOn(pp, sz, [sz[0]/2,sz[1]/2]);
+       
+       // zoom of 10 is about 30 miles
+       // zoom of 16 is city level
+       var zoom = Math.pow(Math.floor(myBoat.speed),.41)
+       zoom = Math.floor(16-zoom) + (zoomModifier||0);
+       if ( zoom <= 0 ) {
+         zoom = 1;
+       }
+       //console.log("speed: " + myBoat.speed + " zoom: " + zoom);
+       mapGlobal.view.setZoom(zoom);
+       
+       mapInternalState.lastZoom = zoom;
+       mapInternalState.lastCenter = pp;
      }
-     //console.log("speed: " + myBoat.speed + " zoom: " + zoom);
-     mapGlobal.view.setZoom(zoom);
      
-     mapInternalState.lastZoom = zoom;
-     mapInternalState.lastCenter = pp;
-   }
-   
-   if (pp[0] != 0) {
-     recordTrackPoint("myBoat", pp);
+     if (pp[0] != 0) {
+       recordTrackPoint("myBoat", pp);
+     }
    }
    
    // route stuff
    mapGlobal.routeFeatures.clear();
-   if (myBoat.route && myBoat.route.destinationLongitude && myBoat.route.destinationLatitude) {
+   if (myBoat?.route && myBoat.route.destinationLongitude && myBoat.route.destinationLatitude) {
      var dest = [myBoat.route.destinationLongitude, myBoat.route.destinationLatitude];
 
      var f = new Feature({
@@ -514,47 +518,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      }),
    })
 
-   // by boat setup
-   mapGlobal.myBoatMarker = new Feature({
-     type: 'geoMarker',
-     header: 0,
-     geometry: new Point([0,0]),
-   });
-   
-   var myBoatFeatures = new Collection<Feature<Geometry>>();
-   myBoatFeatures.push(mapGlobal.myBoatMarker);
-
-   var myBoatLayer = new Vector({
-     source: new VectorSource({
-       features: myBoatFeatures,
-     }),
-     style: function (feature) {
-       return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
-     },
-   });
-   mapGlobal.layerOptions.push({
-     name: "boat",
-     on: true,
-     layer : myBoatLayer,
-   });
-   
-   var aisLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.aisFeatures,
-     }),
-     style: function (feature) {
-       const heading = feature.get("heading") ?? 0;
-       const visible = feature.get("visible") ?? false;
-       return createBoatStyle(heading, 0.25, visible);
-     },
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "ais",
-     on: true,
-     layer : aisLayer,
-   });
-
+   // Track layer (added before boat layers so boats render on top)
    var trackLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
@@ -567,7 +531,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        return new Style({
          stroke: new Stroke({
            color: "blue",
-           width: 3
+           width: 2
          }),
          fill: new Fill({
            color: "rgba(0, 255, 0, 0.1)"
@@ -580,6 +544,49 @@ import type { BoatInfo } from './lib/BoatInfo';
      name: "track",
      on: true,
      layer : trackLayer,
+   });
+
+   // by boat setup (only if myBoat is provided)
+   if (myBoat) {
+     mapGlobal.myBoatMarker = new Feature({
+       type: 'geoMarker',
+       header: 0,
+       geometry: new Point([0,0]),
+     });
+     
+     var myBoatFeatures = new Collection<Feature<Geometry>>();
+     myBoatFeatures.push(mapGlobal.myBoatMarker);
+
+     var myBoatLayer = new Vector({
+       source: new VectorSource({
+         features: myBoatFeatures,
+       }),
+       style: function (feature) {
+         return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
+       },
+     });
+     mapGlobal.layerOptions.push({
+       name: "boat",
+       on: true,
+       layer : myBoatLayer,
+     });
+   }
+   
+   var aisLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.aisFeatures,
+     }),
+     style: function (feature) {
+       const heading = feature.get("heading") ?? 0;
+       const visible = feature.get("visible") ?? false;
+       return createBoatStyle(heading, 0.35, visible);
+     },
+   });
+
+   mapGlobal.layerOptions.push({
+     name: "ais",
+     on: true,
+     layer : aisLayer,
    });
    
    var routeLayer = new Vector({
@@ -721,7 +728,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        if (!geom) return;
        const coords = geom.getCoordinates();
 
-       if (type === "geoMarker") {
+       if (type === "geoMarker" && myBoat) {
          popupState.content = {
            name: "My Boat",
            mmsi: "",
@@ -731,7 +738,7 @@ import type { BoatInfo } from './lib/BoatInfo';
            lng: coords[0],
            isMyBoat: true,
          };
-       } else {
+       } else if (type === "ais") {
          popupState.content = {
            name: feature.get("name") || "Unknown",
            mmsi: feature.get("mmsi") || "",
@@ -839,12 +846,6 @@ import type { BoatInfo } from './lib/BoatInfo';
     <button class="popup-closer" onclick={closePopup}>✕</button>
     <div class="popup-content">
       <h3 class="popup-title">{popupState.content.name}</h3>
-      {#if !popupState.content.isMyBoat && popupState.content.mmsi}
-        <div class="popup-row">
-          <span class="popup-label">MMSI</span>
-          <span class="popup-value">{popupState.content.mmsi}</span>
-        </div>
-      {/if}
       <div class="popup-row">
         <span class="popup-label">SPD</span>
         <span class="popup-value">{popupState.content.speed.toFixed(1)} kn</span>
@@ -895,6 +896,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   <!-- Boats Panel (bottom-right, next to Layers) -->
   <div class="boats-panel">
     <div class="boats-list">
+      {#if myBoat}
       <label class="boat-item">
         <input 
           type="checkbox" 
@@ -903,6 +905,7 @@ import type { BoatInfo } from './lib/BoatInfo';
         >
         <span class="boat-name my-boat">My Boat</span>
       </label>
+      {/if}
       {#if boats}
         {#each boats as boat}
           {#if boat.mmsi}
