@@ -1193,7 +1193,7 @@ import type { BoatInfo } from './lib/BoatInfo';
       {/if}
     </div>
 
-    <div class="grow text-xs flex flex-col flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
+    <div class="grow text-xs flex flex-col-reverse text-gray-500 text-right">{globalData.numUpdates}</div>
   </aside>
 
   <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-dark p-1 ">
