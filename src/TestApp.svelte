@@ -146,21 +146,19 @@
 <main class="test-app">
   <header>
     <h1>MarineMap Test - Multi-Boat View</h1>
-    <p>Testing MarineMap component with {mockBoats.length} AIS boats + my boat (animated)</p>
+    <p>Testing MarineMap component with {mockBoats.length} AIS boats (animated)</p>
   </header>
   
   <div class="map-wrapper">
     <MarineMap 
-      myBoat={mockMyBoat} 
       boats={mockBoats} 
       zoomModifier={-8}
-      positionHistorical={mockPositionHistorical}
       enableBoatsPanel={true}
     />
   </div>
 
   <div class="boat-list">
-    <h2>Active Boats ({mockBoats.length + 1})</h2>
+    <h2>Active Boats ({mockBoats.length})</h2>
     <table>
       <thead>
         <tr>
@@ -172,13 +170,6 @@
         </tr>
       </thead>
       <tbody>
-        <tr class="my-boat">
-          <td><strong>{mockMyBoat.name}</strong></td>
-          <td>-</td>
-          <td>{mockMyBoat.speed.toFixed(1)}</td>
-          <td>{mockMyBoat.heading}°</td>
-          <td>{mockMyBoat.location[0].toFixed(4)}°N, {Math.abs(mockMyBoat.location[1]).toFixed(4)}°W</td>
-        </tr>
         {#each mockBoats as boat}
           <tr>
             <td>{boat.name}</td>
@@ -278,13 +269,5 @@
 
   tr:hover {
     background: #1f4068;
-  }
-
-  .my-boat {
-    background: #1a4d6e;
-  }
-
-  .my-boat:hover {
-    background: #236690;
   }
 </style>
