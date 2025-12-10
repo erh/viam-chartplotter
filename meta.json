@@ -10,7 +10,6 @@
             "model": "erh:viam-chartplotter:chartplotter"
         }
     ],
-    "applications": null,
     "first_run": "",
     "entrypoint": "./bin/viamchartplottermodule",
     "build": {
