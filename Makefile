@@ -10,7 +10,7 @@ module: bin/viamchartplottermodule dist/index.html
 run: dist/index.html  Makefile
 	go run cmd/run/cmd-run.go
 
-src/output.css: src/app.css
+src/output.css: node_modules src/app.css
 		npm run build:css
 
 dist/index.html: src/output.css *.json src/*.css src/*.ts src/*.svelte src/lib/*.ts node_modules
