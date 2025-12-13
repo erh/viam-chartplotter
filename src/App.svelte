@@ -1,7 +1,7 @@
 <script lang="ts">
  import { getCookie } from 'typescript-cookie'
  // import '@viamrobotics/prime-core/prime.css';
- import { onMount } from 'svelte';
+ import { onMount, onDestroy } from 'svelte';
  import { Icon as PrimeIcon } from '@viamrobotics/prime-core';
 
  
@@ -30,6 +30,11 @@ import type { BoatInfo } from './lib/BoatInfo';
  let globalClientCloudMetaData = null;
 
  let globalCloudClient: VIAM.ViamClient;
+ 
+ // Track timeout IDs and blob URLs for cleanup
+ let updateLoopTimeout: number | undefined;
+ let cloudLoopTimeout: number | undefined;
+ let cameraBlobUrls: Record<string, string> = {};
  
  let globalData = $state({
    pos : new Coordinate(0,0),
@@ -360,7 +365,13 @@ import type { BoatInfo } from './lib/BoatInfo';
          globalData.lastCameraTimes.push(ms);
          var i = document.getElementById(r.name);
          if (i) {
-           i.src = URL.createObjectURL(new Blob([img]));
+           // Revoke old blob URL before creating new one to prevent memory leak
+           if (cameraBlobUrls[r.name]) {
+             URL.revokeObjectURL(cameraBlobUrls[r.name]);
+           }
+           const newUrl = URL.createObjectURL(new Blob([img]));
+           cameraBlobUrls[r.name] = newUrl;
+           i.src = newUrl;
          }
      }).catch((e) => {
        removeCamera(r.name);
@@ -515,9 +526,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      doCameraLoop(globalData.numUpdates, client);
    }
 
-   setTimeout(updateAndLoop, 1000);
+   updateLoopTimeout = setTimeout(updateAndLoop, 1000);
    if (globalData.numUpdates == 1) {
-     setTimeout(updateCloudDataAndLoop, 1000);
+     cloudLoopTimeout = setTimeout(updateCloudDataAndLoop, 1000);
    }
  }
 
@@ -597,7 +608,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      }
    }
 
-   setTimeout(updateCloudDataAndLoop, 1000);
+   cloudLoopTimeout = setTimeout(updateCloudDataAndLoop, 1000);
  }
 
  async function updateMachineConfig(ac) {
@@ -812,6 +823,12 @@ import type { BoatInfo } from './lib/BoatInfo';
      return {lat: raw.pos.coordinate.latitude, lng: raw.pos.coordinate.longitude};
    });
 
+   // Limit position history to 7 days (prevents unbounded memory growth)
+   const MAX_HISTORY_POINTS = 7 * 24 * 60; // 7 days * 24 hours * 60 minutes = 10,080 points
+   if (data.length > MAX_HISTORY_POINTS) {
+     data = data.slice(-MAX_HISTORY_POINTS);
+   }
+
    globalData.posHistoryLastCheck = new Date();
    globalData.posHistory = data;
  }
@@ -889,6 +906,32 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  onMount(start);
+ 
+ onDestroy(() => {
+   // Clear timeout loops to prevent memory leaks
+   if (updateLoopTimeout !== undefined) {
+     clearTimeout(updateLoopTimeout);
+   }
+   if (cloudLoopTimeout !== undefined) {
+     clearTimeout(cloudLoopTimeout);
+   }
+   
+   // Revoke all blob URLs to free memory
+   Object.values(cameraBlobUrls).forEach(url => {
+     URL.revokeObjectURL(url);
+   });
+   cameraBlobUrls = {};
+   
+   // Disconnect client event listeners if present
+   if (globalClient) {
+     try {
+       // Remove any event listeners attached to the client
+       globalClient.removeAllListeners?.();
+     } catch (e) {
+       console.log("Error cleaning up client:", e);
+     }
+   }
+ });
 
  function moreThanOneFuelTank(gauges) {
    var found = false;

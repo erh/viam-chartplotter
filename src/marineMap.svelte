@@ -341,6 +341,28 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  }
 
+ // Prune old track features to prevent memory leaks
+ function pruneOldTrackFeatures() {
+   const maxFeatures = 1000; // Hardcoded limit
+   const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+   
+   // Remove oldest features if over limit
+   if (mapGlobal.trackFeatures.getLength() > maxFeatures) {
+     const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
+     for (let i = 0; i < toRemove; i++) {
+       mapGlobal.trackFeatures.removeAt(0);
+     }
+   }
+   
+   // Periodically clear trackFeatureIds to prevent dictionary memory leak
+   const now = new Date();
+   const timeSinceLastCheck = now.getTime() - mapGlobal.trackFeaturesLastCheck.getTime();
+   if (timeSinceLastCheck > maxAge) {
+     mapInternalState.trackFeatureIds = {};
+     mapGlobal.trackFeaturesLastCheck = now;
+   }
+ }
+
  function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat") {
    if (mapInternalState.trackFeatureIds[id] == true) {
      return;
@@ -354,6 +376,8 @@ import type { BoatInfo } from './lib/BoatInfo';
      "myid" : id,
      geometry: g,
    }));
+   
+   pruneOldTrackFeatures();
  }
 
  // Record a track point for any boat, updating lastPositions and adding feature if moved
@@ -385,6 +409,8 @@ import type { BoatInfo } from './lib/BoatInfo';
      } else {
        mapInternalState.lastPosition = position;
      }
+     
+     pruneOldTrackFeatures();
    }
  }
 
@@ -672,6 +698,10 @@ import type { BoatInfo } from './lib/BoatInfo';
    return Math.sqrt(c);
  }
 
+ // Store event handler references for cleanup (outside setupMap so they're accessible in onMount cleanup)
+ let mapClickHandler: any = null;
+ let mapPointerHandler: any = null;
+
  function setupMap() {
    useGeographic();
    setupLayers();
@@ -710,7 +740,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapGlobal.map.addOverlay(popupState.overlay);
 
    // Click handler for boat features
-   mapGlobal.map.on("click", function (evt) {
+   mapClickHandler = function (evt) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
@@ -754,10 +784,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      } else {
        closePopup();
      }
-   });
+   };
+   mapGlobal.map.on("click", mapClickHandler);
 
    // Change cursor on hover over boats
-   mapGlobal.map.on("pointermove", function (evt) {
+   mapPointerHandler = function (evt) {
      const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
          return (
@@ -771,7 +802,8 @@ import type { BoatInfo } from './lib/BoatInfo';
        },
      });
      mapGlobal.map!.getTargetElement()!.style.cursor = hit ? "pointer" : "";
-   });
+   };
+   mapGlobal.map.on("pointermove", mapPointerHandler);
 
    console.log("setupMap finished");
    
@@ -832,6 +864,16 @@ import type { BoatInfo } from './lib/BoatInfo';
    return () => {
      if (container) {
        container.removeEventListener('click', handleMapContainerClick as EventListener);
+     }
+     
+     // Remove OpenLayers map event listeners to prevent memory leaks
+     if (mapGlobal.map) {
+       if (mapClickHandler) {
+         mapGlobal.map.un("click", mapClickHandler);
+       }
+       if (mapPointerHandler) {
+         mapGlobal.map.un("pointermove", mapPointerHandler);
+       }
      }
    };
  });
