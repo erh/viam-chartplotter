@@ -85,19 +85,24 @@ import type { BoatInfo } from './lib/BoatInfo';
    visibleBoats = new Set(visibleBoats); // Trigger reactivity
  }
 
+ function isValidCoordinate(lat: number, lng: number): boolean {
+   return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && 
+          !(lat === 0 && lng === 0); // Exclude null island
+ }
+
  function fitToVisibleBoats() {
    if (!mapGlobal.map || !mapGlobal.view) return;
 
    const coords: number[][] = [];
 
-   // Add my boat if visible
-   if (myBoat && visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
+   // Add my boat if visible and has valid coordinates
+   if (myBoat && visibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
      coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
    }
 
-   // Add visible AIS boats
+   // Add visible AIS boats with valid coordinates
    boats?.forEach(boat => {
-     if (boat.mmsi && visibleBoats.has(boat.mmsi)) {
+     if (boat.mmsi && visibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
        coords.push([boat.location[1], boat.location[0]]);
      }
    });
@@ -108,7 +113,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      // Single boat - center on it with reasonable zoom
      mapGlobal.view.animate({
        center: coords[0],
-       zoom: 10,
+       zoom: Math.min(12, Math.max(8, mapGlobal.view.getZoom() ?? 10)),
        duration: 500
      });
    } else {
