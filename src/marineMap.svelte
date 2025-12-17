@@ -117,10 +117,17 @@ import type { BoatInfo } from './lib/BoatInfo';
        duration: 500
      });
    } else {
-     // Multiple boats - fit to extent with generous padding for popups
+     // Multiple boats - fit to extent with responsive padding
      const extent = boundingExtent(coords);
+     const mapSize = mapGlobal.map?.getSize() || [800, 600];
+     const [width, height] = mapSize;
+     // Use percentage-based padding that scales with viewport, minimum 80px
+     const horizontalPad = Math.max(80, width * 0.1);
+     const verticalPad = Math.max(80, height * 0.1);
+     const topPad = Math.max(120, height * 0.15); // Extra top padding for popups
+     
      mapGlobal.view.fit(extent, {
-       padding: [180, 80, 80, 80], // Extra top padding for popups
+       padding: [topPad, horizontalPad, verticalPad, horizontalPad],
        duration: 500,
        maxZoom: 12
      });
@@ -129,12 +136,13 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
   enableBoatsPanel?: boolean;
+  onReady?: (api: { fitToVisibleBoats: () => void }) => void;
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -814,9 +822,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    // Initial fit to show all boats with room for popups (only when boats panel enabled)
    setTimeout(() => {
+     mapGlobal.map?.updateSize(); // Ensure map has correct dimensions
      if (enableBoatsPanel && boats && boats.length > 0) {
        fitToVisibleBoats();
      }
+     // Expose API to parent component
+     onReady?.({ fitToVisibleBoats });
    }, 100);
  }
 
