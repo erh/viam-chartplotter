@@ -56,6 +56,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  let layersExpanded = $state(false);
  let boatsExpanded = $state(false);
+ let mapLoaded = $state(false);
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
  let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
@@ -500,10 +501,10 @@ import type { BoatInfo } from './lib/BoatInfo';
      on : true,
      layer : new TileLayer({
        opacity: 1,
-       preload: 4, // Preload tiles at lower zoom levels
+       preload: Infinity, // Preload all tiles at lower zoom levels
        source: new XYZ({
          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-         transition: 300, // Fade-in duration in ms
+         transition: 250, // Faster fade-in
        })
      }),
    })
@@ -875,6 +876,17 @@ import type { BoatInfo } from './lib/BoatInfo';
  onMount(() => {
    setupMap();
    
+   // Listen for initial render complete to fade in map
+   if (mapGlobal.map) {
+     mapGlobal.map.once('rendercomplete', () => {
+       mapLoaded = true;
+     });
+     // Fallback in case rendercomplete doesn't fire
+     setTimeout(() => {
+       mapLoaded = true;
+     }, 1000);
+   }
+   
    // Add click-outside handler for panels
    const container = document.getElementById('map-container');
    if (container) {
@@ -901,7 +913,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
 </script>
 
-<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded}>
+<div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded} class:map-loaded={mapLoaded}>
   <div id="map" class="w-full aspect-video bg-white"></div>
 
   <!-- Boat Info Popup -->
@@ -1004,6 +1016,16 @@ import type { BoatInfo } from './lib/BoatInfo';
 </div>
 
 <style>
+  /* Map loading styles */
+  #map-container {
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+  }
+  
+  #map-container.map-loaded {
+    opacity: 1;
+  }
+
   .boat-popup {
     position: absolute;
     background: rgba(15, 23, 42, 0.95);
