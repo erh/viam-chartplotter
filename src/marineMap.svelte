@@ -181,6 +181,23 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  });
 
+ // Close popup if the displayed boat gets hidden or removed
+ $effect(() => {
+   if (!popupState.visible) return;
+   
+   visibleBoatsKey; // Track visibility changes
+   boatsKey; // Track boats array changes
+   
+   const shouldClose = popupState.content.isMyBoat 
+     ? !visibleBoats.has('myBoat')
+     : popupState.content.mmsi && (
+         !boats?.some(b => b.mmsi === popupState.content.mmsi) || 
+         !visibleBoats.has(popupState.content.mmsi)
+       );
+   
+   if (shouldClose) closePopup();
+ });
+
  // Force track layer to re-render when visibility changes
  $effect(() => {
    const _visible = visibleBoatsKey;
