@@ -94,6 +94,14 @@
       heading: 350,
       positionHistory: generateTrack(25.1, -79.15, 25.5, -79.0, 24),
     },
+    {
+      name: "Pacific Wanderer",
+      mmsi: "999000111",
+      location: [35.6, 139.7], // Tokyo Bay, Japan
+      speed: 11.0,
+      heading: 225,
+      positionHistory: generateTrack(35.8, 139.9, 35.6, 139.7, 24),
+    },
   ]);
 
   // Mock historical track for my boat (24 hours)

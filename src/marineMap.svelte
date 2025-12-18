@@ -500,8 +500,10 @@ import type { BoatInfo } from './lib/BoatInfo';
      on : true,
      layer : new TileLayer({
        opacity: 1,
+       preload: 4, // Preload tiles at lower zoom levels
        source: new XYZ({
-         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+         transition: 300, // Fade-in duration in ms
        })
      }),
    })
@@ -512,11 +514,13 @@ import type { BoatInfo } from './lib/BoatInfo';
      on: false,
      layer: new TileLayer({
        opacity: .7,
+       preload: 2,
        source: new TileWMS({
          url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
          params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
          serverType: 'geoserver',
          hidpi: false,
+         transition: 300,
        }),
      }),
    })
@@ -528,10 +532,12 @@ import type { BoatInfo } from './lib/BoatInfo';
      layer : new TileLayer({
        visible: true,
        maxZoom: 19,
+       preload: 2,
        source: new XYZ({
          tileUrlFunction: function(coordinate) {
            return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
-   }
+         },
+         transition: 300,
        }),
        properties: {
          name: "seamarks",
@@ -547,12 +553,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      on: false,
      layer: new TileLayer({
        opacity: .7,
+       preload: 2,
        source: new TileWMS({
          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
          params: {},
-         //ratio: 1,
-         //serverType: 'geoserver',
-         //hidpi: false,
+         transition: 300,
        }),
      }),
    })
