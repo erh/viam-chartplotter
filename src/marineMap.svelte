@@ -85,19 +85,24 @@ import type { BoatInfo } from './lib/BoatInfo';
    visibleBoats = new Set(visibleBoats); // Trigger reactivity
  }
 
+ function isValidCoordinate(lat: number, lng: number): boolean {
+   return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && 
+          !(lat === 0 && lng === 0); // Exclude null island
+ }
+
  function fitToVisibleBoats() {
    if (!mapGlobal.map || !mapGlobal.view) return;
 
    const coords: number[][] = [];
 
-   // Add my boat if visible
-   if (myBoat && visibleBoats.has('myBoat') && (myBoat.location[0] !== 0 || myBoat.location[1] !== 0)) {
+   // Add my boat if visible and has valid coordinates
+   if (myBoat && visibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
      coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
    }
 
-   // Add visible AIS boats
+   // Add visible AIS boats with valid coordinates
    boats?.forEach(boat => {
-     if (boat.mmsi && visibleBoats.has(boat.mmsi)) {
+     if (boat.mmsi && visibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
        coords.push([boat.location[1], boat.location[0]]);
      }
    });
@@ -108,14 +113,21 @@ import type { BoatInfo } from './lib/BoatInfo';
      // Single boat - center on it with reasonable zoom
      mapGlobal.view.animate({
        center: coords[0],
-       zoom: 10,
+       zoom: Math.min(12, Math.max(8, mapGlobal.view.getZoom() ?? 10)),
        duration: 500
      });
    } else {
-     // Multiple boats - fit to extent with generous padding for popups
+     // Multiple boats - fit to extent with responsive padding
      const extent = boundingExtent(coords);
+     const mapSize = mapGlobal.map?.getSize() || [800, 600];
+     const [width, height] = mapSize;
+     // Use percentage-based padding that scales with viewport, minimum 80px
+     const horizontalPad = Math.max(80, width * 0.1);
+     const verticalPad = Math.max(80, height * 0.1);
+     const topPad = Math.max(120, height * 0.15); // Extra top padding for popups
+     
      mapGlobal.view.fit(extent, {
-       padding: [180, 80, 80, 80], // Extra top padding for popups
+       padding: [topPad, horizontalPad, verticalPad, horizontalPad],
        duration: 500,
        maxZoom: 12
      });
@@ -124,12 +136,13 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
   enableBoatsPanel?: boolean;
+  onReady?: (api: { fitToVisibleBoats: () => void }) => void;
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -487,8 +500,10 @@ import type { BoatInfo } from './lib/BoatInfo';
      on : true,
      layer : new TileLayer({
        opacity: 1,
+       preload: 4, // Preload tiles at lower zoom levels
        source: new XYZ({
-         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+         url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+         transition: 300, // Fade-in duration in ms
        })
      }),
    })
@@ -499,11 +514,13 @@ import type { BoatInfo } from './lib/BoatInfo';
      on: false,
      layer: new TileLayer({
        opacity: .7,
+       preload: 2,
        source: new TileWMS({
          url: 'https://geoserver.openseamap.org/geoserver/gwc/service/wms',
          params: {'LAYERS': 'gebco2021:gebco_2021', 'VERSION':'1.1.1'},
          serverType: 'geoserver',
          hidpi: false,
+         transition: 300,
        }),
      }),
    })
@@ -515,10 +532,12 @@ import type { BoatInfo } from './lib/BoatInfo';
      layer : new TileLayer({
        visible: true,
        maxZoom: 19,
+       preload: 2,
        source: new XYZ({
          tileUrlFunction: function(coordinate) {
            return getTileUrlFunction("https://tiles.openseamap.org/seamark/", 'png', coordinate);
-   }
+         },
+         transition: 300,
        }),
        properties: {
          name: "seamarks",
@@ -534,12 +553,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      on: false,
      layer: new TileLayer({
        opacity: .7,
+       preload: 2,
        source: new TileWMS({
          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
          params: {},
-         //ratio: 1,
-         //serverType: 'geoserver',
-         //hidpi: false,
+         transition: 300,
        }),
      }),
    })
@@ -809,9 +827,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    // Initial fit to show all boats with room for popups (only when boats panel enabled)
    setTimeout(() => {
+     mapGlobal.map?.updateSize(); // Ensure map has correct dimensions
      if (enableBoatsPanel && boats && boats.length > 0) {
        fitToVisibleBoats();
      }
+     // Expose API to parent component
+     onReady?.({ fitToVisibleBoats });
    }, 100);
  }
 

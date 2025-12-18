@@ -94,6 +94,14 @@
       heading: 350,
       positionHistory: generateTrack(25.1, -79.15, 25.5, -79.0, 24),
     },
+    {
+      name: "Pacific Wanderer",
+      mmsi: "999000111",
+      location: [35.6, 139.7], // Tokyo Bay, Japan
+      speed: 11.0,
+      heading: 225,
+      positionHistory: generateTrack(35.8, 139.9, 35.6, 139.7, 24),
+    },
   ]);
 
   // Mock historical track for my boat (24 hours)
@@ -143,85 +151,22 @@
   });
 </script>
 
-<main class="test-app">
-  <header>
-    <h1>MarineMap Test - Multi-Boat View</h1>
-    <p>Testing MarineMap component with {mockBoats.length} AIS boats (animated)</p>
-  </header>
-  
-  <div class="map-wrapper">
-    <MarineMap 
-      boats={mockBoats} 
-      zoomModifier={-8}
-      enableBoatsPanel={true}
-    />
-  </div>
-
-  <div class="boat-list">
-    <h2>Active Boats ({mockBoats.length})</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>MMSI</th>
-          <th>Speed (kn)</th>
-          <th>Heading</th>
-          <th>Position</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each mockBoats as boat}
-          <tr>
-            <td>{boat.name}</td>
-            <td>{boat.mmsi}</td>
-            <td>{boat.speed.toFixed(1)}</td>
-            <td>{boat.heading}°</td>
-            <td>{boat.location[0].toFixed(4)}°N, {Math.abs(boat.location[1]).toFixed(4)}°W</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
-</main>
+<div class="map-wrapper">
+  <MarineMap 
+    boats={mockBoats} 
+    zoomModifier={-8}
+    enableBoatsPanel={true}
+  />
+</div>
 
 <style>
-  .test-app {
-    padding: 16px;
-    font-family: system-ui, -apple-system, sans-serif;
-    background: #1a1a2e;
-    color: #e0e0e0;
-    min-height: 100vh;
-    max-width: 100%;
-    box-sizing: border-box;
-  }
-
-  header {
-    margin-bottom: 12px;
-  }
-
-  h1, h2 {
-    color: #fff;
-    margin-bottom: 4px;
-  }
-
-  h1 {
-    font-size: 1.5rem;
-  }
-
-  p {
-    color: #888;
-    margin-bottom: 0;
-    font-size: 0.9rem;
-  }
-
   .map-wrapper {
-    width: 100%;
-    aspect-ratio: 21 / 9;
-    border: 1px solid #333;
-    border-radius: 8px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
     overflow: hidden;
-    position: relative;
-    margin-bottom: 20px;
   }
 
   .map-wrapper :global(#map-container) {
@@ -232,42 +177,5 @@
   .map-wrapper :global(#map) {
     width: 100%;
     height: 100%;
-  }
-
-  .boat-list {
-    margin-top: 0;
-  }
-
-  .boat-list h2 {
-    margin-bottom: 12px;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    background: #16213e;
-    border: 1px solid #333;
-    border-radius: 4px;
-  }
-
-  th, td {
-    padding: 10px 14px;
-    text-align: left;
-    border-bottom: 1px solid #333;
-  }
-
-  th {
-    background: #0f3460;
-    font-weight: 600;
-    color: #e0e0e0;
-    border-bottom: 2px solid #444;
-  }
-
-  td {
-    color: #ccc;
-  }
-
-  tr:hover {
-    background: #1f4068;
   }
 </style>
