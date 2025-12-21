@@ -393,7 +393,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
 
- function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat") {
+ function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false) {
    if (mapInternalState.trackFeatureIds[id] == true) {
      return;
    }
@@ -405,6 +405,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      boatId: boatId,
      "myid" : id,
      geometry: g,
+     isGap: isGap,
    }));
    
    pruneOldTrackFeatures();
@@ -474,15 +475,15 @@ import type { BoatInfo } from './lib/BoatInfo';
        // Calculate distance between consecutive points
        const distanceNM = calculateDistanceNM(prevPoint.lat, prevPoint.lng, p.lat, p.lng);
        
-       // Only draw line if points are less than 10 nautical miles apart
-       // This handles data gaps from boats going offline or position reporting issues
-       if (distanceNM < 10) {
-         addTrackFeature(
-           `${idPrefix}-line-${p.lng}-${p.lat}`,
-           new LineString([prev, pp]),
-           boatId
-         );
-       }
+       // Mark as gap if points are more than 10 nautical miles apart
+       const isGap = distanceNM >= 10;
+       
+       addTrackFeature(
+         `${idPrefix}-line-${p.lng}-${p.lat}`,
+         new LineString([prev, pp]),
+         boatId,
+         isGap
+       );
      }
      
      prev = pp;
@@ -608,10 +609,15 @@ import type { BoatInfo } from './lib/BoatInfo';
        if (!visibleBoats.has(boatId)) {
          return new Style({}); // Hidden - return empty style
        }
+       
+       const isGap = feature.get("isGap");
+       const opacity = isGap ? 0.33 : 1.0;
+       
        return new Style({
          stroke: new Stroke({
-           color: "blue",
-           width: 2
+           color: `rgba(0, 0, 255, ${opacity})`,
+           width: 2,
+           lineDash: isGap ? [10, 10] : undefined
          }),
          fill: new Fill({
            color: "rgba(0, 255, 0, 0.1)"
