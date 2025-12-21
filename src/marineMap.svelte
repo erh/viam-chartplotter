@@ -617,7 +617,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          stroke: new Stroke({
            color: `rgba(0, 0, 255, ${opacity})`,
            width: 2,
-           lineDash: isGap ? [10, 10] : undefined
+           lineDash: isGap ? [2, 6] : undefined
          }),
          fill: new Fill({
            color: "rgba(0, 255, 0, 0.1)"
