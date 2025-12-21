@@ -459,7 +459,7 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
 
  // Render historical track from position history array
- // Skips drawing lines between points that are 10+ nautical miles apart
+ // Draws dotted 33% transparent lines between points that are 10+ nautical miles apart
  function renderHistoricalTrack(
    boatId: string, 
    history: { lat: number; lng: number }[], 
