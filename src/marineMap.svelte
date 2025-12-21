@@ -13,7 +13,6 @@ import type { BoatInfo } from './lib/BoatInfo';
  import View from 'ol/View';
  import TileLayer from 'ol/layer/Tile';
  import Point from 'ol/geom/Point.js';
- import Circle from 'ol/geom/Circle.js';
  import LineString from 'ol/geom/LineString.js';
  import TileWMS from 'ol/source/TileWMS.js';
  import Feature from 'ol/Feature.js';
@@ -432,7 +431,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      mapGlobal.trackFeatures.push(new Feature({
        type: "track",
        boatId: boatId,
-       geometry: new Circle(position),
+       geometry: new LineString([lastPos, position]),
      }));
      
      if (lastPosKey) {
@@ -445,30 +444,49 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
 
+ // Calculate distance between two points in nautical miles
+ // Using Haversine formula for great circle distance
+ function calculateDistanceNM(lat1: number, lng1: number, lat2: number, lng2: number): number {
+   const R = 3440.065; // Earth's radius in nautical miles
+   const dLat = (lat2 - lat1) * Math.PI / 180;
+   const dLng = (lng2 - lng1) * Math.PI / 180;
+   const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+             Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+             Math.sin(dLng / 2) * Math.sin(dLng / 2);
+   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+   return R * c;
+ }
+
  // Render historical track from position history array
+ // Skips drawing lines between points that are 10+ nautical miles apart
  function renderHistoricalTrack(
    boatId: string, 
    history: { lat: number; lng: number }[], 
    idPrefix: string
  ): void {
    let prev: number[] | null = null;
+   let prevPoint: { lat: number; lng: number } | null = null;
+   
    history.forEach((p) => {
      const pp = [p.lng, p.lat];
      
-     addTrackFeature(
-       `${idPrefix}-p-${p.lng}-${p.lat}`,
-       new Circle(pp),
-       boatId
-     );
-     
-     if (prev) {
-       addTrackFeature(
-         `${idPrefix}-line-${p.lng}-${p.lat}`,
-         new LineString([prev, pp]),
-         boatId
-       );
+     if (prev && prevPoint) {
+       // Calculate distance between consecutive points
+       const distanceNM = calculateDistanceNM(prevPoint.lat, prevPoint.lng, p.lat, p.lng);
+       
+       // Only draw line if points are less than 10 nautical miles apart
+       // This handles data gaps from boats going offline or position reporting issues
+       if (distanceNM < 10) {
+         addTrackFeature(
+           `${idPrefix}-line-${p.lng}-${p.lat}`,
+           new LineString([prev, pp]),
+           boatId
+         );
+       }
      }
+     
      prev = pp;
+     prevPoint = p;
    });
  }
 
