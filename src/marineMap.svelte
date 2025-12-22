@@ -50,6 +50,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      lat: 0,
      lng: 0,
      isMyBoat: false,
+     host: undefined as string | undefined,
+     partId: undefined as string | undefined,
+     isOnline: true,
    },
  });
 
@@ -136,13 +139,14 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
   enableBoatsPanel?: boolean;
   onReady?: (api: { fitToVisibleBoats: () => void }) => void;
+  boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -800,7 +804,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapGlobal.map.addOverlay(popupState.overlay);
 
    // Click handler for boat features
-   mapClickHandler = function (evt) {
+   mapClickHandler = function (evt: any) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
@@ -827,16 +831,24 @@ import type { BoatInfo } from './lib/BoatInfo';
            lat: coords[1],
            lng: coords[0],
            isMyBoat: true,
+           host: myBoat.host,
+           partId: myBoat.partId,
+           isOnline: myBoat.isOnline ?? true,
          };
        } else if (type === "ais") {
+         const mmsi = feature.get("mmsi") || "";
+         const boat = boats?.find(b => b.mmsi === mmsi);
          popupState.content = {
            name: feature.get("name") || "Unknown",
-           mmsi: feature.get("mmsi") || "",
+           mmsi,
            speed: feature.get("speed") || 0,
            heading: feature.get("heading") || 0,
            lat: coords[1],
            lng: coords[0],
            isMyBoat: false,
+           host: boat?.host,
+           partId: boat?.partId,
+           isOnline: boat?.isOnline ?? false,
          };
        }
        popupState.visible = true;
@@ -848,7 +860,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapGlobal.map.on("click", mapClickHandler);
 
    // Change cursor on hover over boats
-   mapPointerHandler = function (evt) {
+   mapPointerHandler = function (evt: any) {
      const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
          return (
@@ -960,23 +972,32 @@ import type { BoatInfo } from './lib/BoatInfo';
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
     <button class="popup-closer" onclick={closePopup}>✕</button>
-    <div class="popup-content">
+    <div class="popup-header">
       <h3 class="popup-title">{popupState.content.name}</h3>
-      <div class="popup-row">
-        <span class="popup-label">SPD</span>
-        <span class="popup-value">{popupState.content.speed.toFixed(1)} kn</span>
-      </div>
-      <div class="popup-row">
-        <span class="popup-label">HDG</span>
-        <span class="popup-value">{popupState.content.heading.toFixed(0)}°<span class="compass-arrow" style="transform: rotate({popupState.content.heading}deg)">↑</span></span>
-      </div>
-      <div class="popup-row">
-        <span class="popup-label">LAT</span>
-        <span class="popup-value">{formatCoord(popupState.content.lat, true)}</span>
-      </div>
-      <div class="popup-row">
-        <span class="popup-label">LNG</span>
-        <span class="popup-value">{formatCoord(popupState.content.lng, false)}</span>
+    </div>
+    <div class="popup-columns" class:single-column={!popupState.content.isOnline}>
+      {#if boatDetailSlot && popupState.content.host && popupState.content.partId && popupState.content.isOnline}
+        <div class="popup-detail-slot">
+          {@render boatDetailSlot({ host: popupState.content.host, partId: popupState.content.partId, name: popupState.content.name })}
+        </div>
+      {/if}
+      <div class="popup-content">
+        <div class="popup-row">
+          <span class="popup-label">SPD</span>
+          <span class="popup-value">{popupState.content.speed.toFixed(1)} kn</span>
+        </div>
+        <div class="popup-row">
+          <span class="popup-label">HDG</span>
+          <span class="popup-value">{popupState.content.heading.toFixed(0)}°<span class="compass-arrow" style="transform: rotate({popupState.content.heading}deg)">↑</span></span>
+        </div>
+        <div class="popup-row">
+          <span class="popup-label">LAT</span>
+          <span class="popup-value">{formatCoord(popupState.content.lat, true)}</span>
+        </div>
+        <div class="popup-row">
+          <span class="popup-label">LNG</span>
+          <span class="popup-value">{formatCoord(popupState.content.lng, false)}</span>
+        </div>
       </div>
     </div>
     <div class="popup-arrow"></div>
@@ -1073,8 +1094,8 @@ import type { BoatInfo } from './lib/BoatInfo';
     backdrop-filter: blur(8px);
     color: white;
     border-radius: 4px;
-    padding: 10px 12px;
-    min-width: 160px;
+    padding: 10px 12px 14px;
+    min-width: 130px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     border: 1px solid rgba(255, 255, 255, 0.08);
     font-family:
@@ -1083,7 +1104,6 @@ import type { BoatInfo } from './lib/BoatInfo';
       sans-serif;
     z-index: 1000;
     transform: translate(-50%, -100%);
-    margin-bottom: 50px;
   }
 
   .boat-popup.hidden {
@@ -1108,10 +1128,31 @@ import type { BoatInfo } from './lib/BoatInfo';
     color: white;
   }
 
+  .popup-header {
+    margin-bottom: 6px;
+  }
+
+  .popup-columns {
+    display: flex;
+    gap: 20px;
+    padding: 8px;
+  }
+
+  .popup-columns.single-column {
+    gap: 0;
+  }
+
+  .popup-detail-slot {
+    width: 200px;
+    flex-shrink: 0;
+  }
+
   .popup-content {
     display: flex;
     flex-direction: column;
     gap: 3px;
+    width: 110px;
+    flex-shrink: 0;
   }
 
   .popup-title {
@@ -1127,7 +1168,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    gap: 16px;
+    gap: 12px;
   }
 
   .popup-label {
@@ -1135,7 +1176,6 @@ import type { BoatInfo } from './lib/BoatInfo';
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    min-width: 28px;
   }
 
   .popup-value {
@@ -1144,6 +1184,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     text-align: right;
     font-variant-numeric: tabular-nums;
     font-family: ui-monospace, monospace;
+    text-wrap: nowrap;
   }
 
   .compass-arrow {
