@@ -4,6 +4,9 @@ export interface BoatInfo {
   speed: number;
   heading: number; // degrees (0-360)
   mmsi?: string; // MMSI identifier
+  host?: string; // Viam machine host
+  partId?: string; // Viam machine part ID
+  isOnline?: boolean; // Whether boat is currently online
   route?: {
     destinationLongitude?: number;
     destinationLatitude?: number;

@@ -3,32 +3,50 @@
   import type { BoatInfo } from "./lib/BoatInfo";
   import { onMount } from "svelte";
 
-  // Helper to generate 24-hour position history (hourly points)
+  // Map API reference
+  let mapApi = $state<{ fitToVisibleBoats: () => void }>();
+
+  // Helper to generate 30-day position history with realistic variation
+  // Generates tracks that show actual voyage patterns
   function generateTrack(
     startLat: number, startLng: number,
     endLat: number, endLng: number,
-    points: number = 24
+    points: number = 360
   ): { lat: number; lng: number }[] {
     const track = [];
+    
+    // Vector from start to end
+    const dLat = endLat - startLat;
+    const dLng = endLng - startLng;
+    
+    // Perpendicular vector for lateral movement
+    const perpLat = -dLng;
+    const perpLng = dLat;
+    
     for (let i = 0; i < points; i++) {
       const t = i / (points - 1);
+      
+      // Create a winding path using superposition of sine waves
+      // This creates a more natural "wandering" look than a single sine wave
+      const lateral = (Math.sin(t * Math.PI * 3) * 0.05 + Math.sin(t * Math.PI * 7) * 0.02);
+      
+      // Small random jitter (approx 0.002 degrees ~ 200m) to simulate GPS noise/minor corrections
+      const jitterLat = (Math.random() - 0.5) * 0.002;
+      const jitterLng = (Math.random() - 0.5) * 0.002;
+      
+      const currentLat = startLat + dLat * t + perpLat * lateral + jitterLat;
+      const currentLng = startLng + dLng * t + perpLng * lateral + jitterLng;
+      
       track.push({
-        lat: startLat + (endLat - startLat) * t,
-        lng: startLng + (endLng - startLng) * t,
+        lat: currentLat,
+        lng: currentLng,
       });
     }
     return track;
   }
 
-  // My boat - Florida coast
-  let mockMyBoat = $state<BoatInfo>({
-    name: "My Boat",
-    location: [26.7759, -80.0523], // Port of Palm Beach
-    speed: 8.5,
-    heading: 90,
-  });
-
-  // Mock AIS boats with realistic speeds and 24-hour tracks
+  // Mock AIS boats with realistic speeds and 30-day tracks showing actual voyage patterns
+  // Some boats have intentional gaps (>10nm) to demonstrate gap detection
   let mockBoats = $state<BoatInfo[]>([
     {
       name: "Gulf Runner",
@@ -36,7 +54,12 @@
       location: [26.0, -82.0], // Tampa Bay area
       speed: 8.5,
       heading: 270,
-      positionHistory: generateTrack(26.05, -81.65, 26.0, -82.0, 24),
+      // Voyage from East Florida coast to Tampa Bay with data gap offshore
+      positionHistory: [
+        ...generateTrack(27.8, -80.2, 27.0, -81.0, 100), // East coast to offshore
+        // Gap: boat went offline crossing to west coast
+        ...generateTrack(26.5, -82.2, 26.0, -82.0, 100), // Approaching Tampa
+      ],
     },
     {
       name: "Keys Cruiser",
@@ -44,7 +67,8 @@
       location: [24.5, -81.8], // Key West
       speed: 5.2,
       heading: 180,
-      positionHistory: generateTrack(24.7, -81.75, 24.5, -81.8, 24),
+      // Complete voyage down the Florida Keys (no gaps)
+      positionHistory: generateTrack(26.2, -80.1, 24.5, -81.8, 300),
     },
     {
       name: "Atlantic Voyager",
@@ -52,7 +76,12 @@
       location: [27.0, -78.0], // East of Palm Beach, Atlantic
       speed: 12.0,
       heading: 45,
-      positionHistory: generateTrack(26.6, -78.4, 27.0, -78.0, 24),
+      // Atlantic crossing with multiple offline periods
+      positionHistory: [
+        ...generateTrack(25.8, -80.1, 26.5, -79.5, 80), // Coastal departure
+        // Gap: offshore
+        ...generateTrack(26.8, -78.5, 27.0, -78.0, 80), // Mid-Atlantic
+      ],
     },
     {
       name: "Miami Express",
@@ -60,7 +89,8 @@
       location: [25.8, -80.1], // Miami
       speed: 6.0,
       heading: 135,
-      positionHistory: generateTrack(25.95, -80.25, 25.8, -80.1, 24),
+      // Coastal route from Fort Lauderdale to Miami (continuous track)
+      positionHistory: generateTrack(26.5, -80.05, 25.8, -80.1, 200),
     },
     {
       name: "Ocean Freighter",
@@ -68,7 +98,12 @@
       location: [26.5, -77.5], // Further east in Atlantic
       speed: 14.0,
       heading: 0,
-      positionHistory: generateTrack(25.9, -77.5, 26.5, -77.5, 24),
+      // Deep ocean voyage with significant data gaps
+      positionHistory: [
+        ...generateTrack(24.5, -78.5, 25.0, -78.0, 60),
+        // Large gap in deep ocean
+        ...generateTrack(26.0, -77.8, 26.5, -77.5, 60),
+      ],
     },
     {
       name: "Bermuda Runner",
@@ -76,7 +111,12 @@
       location: [28.0, -76.0], // Way out east toward Bermuda
       speed: 15.0,
       heading: 60,
-      positionHistory: generateTrack(27.5, -76.5, 28.0, -76.0, 24),
+      // Long voyage toward Bermuda with gaps
+      positionHistory: [
+        ...generateTrack(26.0, -80.0, 26.8, -78.5, 80),
+        // Gap crossing to Bermuda waters
+        ...generateTrack(27.5, -76.8, 28.0, -76.0, 80),
+      ],
     },
     {
       name: "Cape Canaveral",
@@ -84,7 +124,8 @@
       location: [28.4, -80.5], // Cape Canaveral
       speed: 3.5,
       heading: 0,
-      positionHistory: generateTrack(28.25, -80.52, 28.4, -80.5, 24),
+      // Local cruise around Cape Canaveral (continuous)
+      positionHistory: generateTrack(28.0, -80.6, 28.4, -80.5, 150),
     },
     {
       name: "Gulf Stream Rider",
@@ -92,20 +133,14 @@
       location: [25.5, -79.0], // In the Gulf Stream east of Miami
       speed: 10.0,
       heading: 350,
-      positionHistory: generateTrack(25.1, -79.15, 25.5, -79.0, 24),
-    },
-    {
-      name: "Pacific Wanderer",
-      mmsi: "999000111",
-      location: [35.6, 139.7], // Tokyo Bay, Japan
-      speed: 11.0,
-      heading: 225,
-      positionHistory: generateTrack(35.8, 139.9, 35.6, 139.7, 24),
+      // Riding north in Gulf Stream with brief gap
+      positionHistory: [
+        ...generateTrack(24.0, -79.5, 24.8, -79.3, 100),
+        // Brief gap
+        ...generateTrack(25.2, -79.1, 25.5, -79.0, 100),
+      ],
     },
   ]);
-
-  // Mock historical track for my boat (24 hours)
-  const mockPositionHistorical = generateTrack(26.72, -80.08, 26.7759, -80.0523, 24);
 
   // Animate boats - update positions every 2 seconds
   onMount(() => {
@@ -134,17 +169,6 @@
           speed: Math.max(0, boat.speed + speedVariation),
         };
       });
-
-      // Update my boat too
-      const mySpeedFactor = mockMyBoat.speed * 0.0001;
-      const myHeadingRad = (mockMyBoat.heading * Math.PI) / 180;
-      mockMyBoat = {
-        ...mockMyBoat,
-        location: [
-          mockMyBoat.location[0] + Math.cos(myHeadingRad) * mySpeedFactor,
-          mockMyBoat.location[1] + Math.sin(myHeadingRad) * mySpeedFactor,
-        ] as [number, number],
-      };
     }, 2000);
 
     return () => clearInterval(interval);
@@ -156,6 +180,7 @@
     boats={mockBoats} 
     zoomModifier={-8}
     enableBoatsPanel={true}
+    onReady={(api) => mapApi = api}
   />
 </div>
 
