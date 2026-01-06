@@ -881,6 +881,9 @@ import type { BoatInfo } from './lib/BoatInfo';
    globalClientCloudMetaData = await c.getCloudMetadata();
    console.log(globalClientCloudMetaData);
 
+   // Update page title with hostname
+   document.title = `Viam Chartplotter - ${host}`;
+
    return c;
  }
 
