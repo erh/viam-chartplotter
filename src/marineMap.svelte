@@ -377,13 +377,15 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  // Prune old track features to prevent memory leaks
  function pruneOldTrackFeatures() {
-   const maxFeatures = 1000; // Hardcoded limit
+   const maxFeatures = 20000; // Hardcoded limit
    const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
    
    // Remove oldest features if over limit
    if (mapGlobal.trackFeatures.getLength() > maxFeatures) {
      const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
      for (let i = 0; i < toRemove; i++) {
+       var x = mapGlobal.trackFeatures.item(0);
+       delete mapInternalState.trackFeatureIds[x["myid"]];
        mapGlobal.trackFeatures.removeAt(0);
      }
    }
