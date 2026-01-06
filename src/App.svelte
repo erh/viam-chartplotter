@@ -882,7 +882,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    console.log(globalClientCloudMetaData);
 
    // Update page title with hostname
-   document.title = `Viam Chartplotter - ${host}`;
+   document.title = `${host.split('.')[0]} - Viam Chartplotter`;
 
    return c;
  }
