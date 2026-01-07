@@ -324,9 +324,6 @@ import type { BoatInfo } from './lib/BoatInfo';
        
        const boatPos = [boat.location[1], boat.location[0]];
        
-       // Track AIS boat position history
-       recordTrackPoint(mmsi, boatPos);
-       
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
          var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
          if (v.get("mmsi") == mmsi) {
