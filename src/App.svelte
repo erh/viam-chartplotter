@@ -325,6 +325,16 @@ import type { BoatInfo } from './lib/BoatInfo';
    
  }
 
+ function filterFilteredCameras(all) {
+   return all.filter((r) => {
+     var lookFor = r.name + "-filtered";
+     var temp = all.filter( (r2) => {
+       return r2.name == lookFor;
+     })
+     return temp.length == 0;
+   });
+ }
+ 
  function doCameraLoop(loopNumber: int, client: VIAM.RobotClient) {
 
    while (globalData.lastCameraTimes.length > 20){
@@ -343,7 +353,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    var start = new Date();
    
-   filterResources(globalData.allResources, "component", "camera").forEach( (r) => {
+   filterFilteredCameras(filterResources(globalData.allResources, "component", "camera")).forEach( (r) => {
      var cc = findComponentConfig(r.name);
      var skip = cc && cc.attributes && cc.attributes["chartplotter-hide"];
 
