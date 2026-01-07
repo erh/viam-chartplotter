@@ -10,7 +10,7 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "eslint .",
-        "build:css" : "tailwindcss -i ./src/app.css -o ./src/output.css",
+		"build:css": "tailwindcss -i ./src/app.css -o ./src/output.css",
 		"build": "npm run build:css && vite build"
 	},
 	"devDependencies": {
@@ -37,7 +37,7 @@
 		"@ag-grid-community/styles": "^32.3.5",
 		"@sveltejs/vite-plugin-svelte": "^5.0.3",
 		"@tsconfig/svelte": "^5.0.4",
-		"@viamrobotics/sdk": "^0.52.2",
+		"@viamrobotics/sdk": "^0.60.0",
 		"@zag-js/dialog": "^1.26.3",
 		"bsonfy": "^1.0.2",
 		"ol": "^10.7.0",

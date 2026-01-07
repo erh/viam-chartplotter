@@ -359,8 +359,9 @@ import type { BoatInfo } from './lib/BoatInfo';
        globalData.cameraNames.sort();
      }
 
-     new VIAM.CameraClient(client, r.name).getImage().then(
-       function(img){
+     new VIAM.CameraClient(client, r.name).getImages().then(
+       function(images){
+         const img = images[0];
          var ms = (new Date()) - start;
          globalData.lastCameraTimes.push(ms);
          var i = document.getElementById(r.name);
