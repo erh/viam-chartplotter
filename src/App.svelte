@@ -361,7 +361,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
      new VIAM.CameraClient(client, r.name).getImages().then(
        function(images){
-         const img = images[0];
+         const img = images.images[0].image;
          var ms = (new Date()) - start;
          globalData.lastCameraTimes.push(ms);
          var i = document.getElementById(r.name);
