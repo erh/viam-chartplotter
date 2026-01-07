@@ -76,6 +76,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    partConfig : {},
    aisBoats : [] as BoatInfo[],
+   enlargedImage: null,
  });
 
  var globalConfig = $state({
@@ -919,7 +920,10 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
 
- onMount(start);
+ onMount(() => {
+  start();
+  window.addEventListener('keydown', handleKeydown);
+});
  
  onDestroy(() => {
    // Clear timeout loops to prevent memory leaks
@@ -935,6 +939,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      URL.revokeObjectURL(url);
    });
    cameraBlobUrls = {};
+   
+   // Remove keydown event listener
+   window.removeEventListener('keydown', handleKeydown);
    
    // Disconnect client event listeners if present
    if (globalClient) {
@@ -1028,6 +1035,26 @@ import type { BoatInfo } from './lib/BoatInfo';
    });
    
    return true;
+ }
+
+ function enlargeImage(cameraName) {
+   const img = document.getElementById(cameraName);
+   if (img && img.src) {
+     globalData.enlargedImage = {
+       name: cameraName,
+       src: img.src
+     };
+   }
+ }
+
+ function closeEnlargedImage() {
+   globalData.enlargedImage = null;
+ }
+
+ function handleKeydown(event) {
+   if (event.key === 'Escape' && globalData.enlargedImage) {
+     closeEnlargedImage();
+   }
  }
 </script>
 
@@ -1255,7 +1282,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
   <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-dark p-1 ">
     {#each globalData.cameraNames as name, index}
-      <img id="{name}" class="w-full lg:w-[250px]" alt="{name}" />
+      <img id="{name}" class="w-full lg:w-[250px] cursor-pointer hover:opacity-80 transition-opacity" alt="{name}" onclick={() => enlargeImage(name)} />
     {/each}
   </div>
 
@@ -1263,5 +1290,26 @@ import type { BoatInfo } from './lib/BoatInfo';
     <h3>Powered By</h3>
     <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
   </div>
+
+  {#if globalData.enlargedImage}
+    <div class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[9999]" onclick={closeEnlargedImage}>
+      <div class="relative max-w-[95vw] max-h-[95vh]" onclick={(e) => e.stopPropagation()}>
+        <button 
+          class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300" 
+          onclick={closeEnlargedImage}
+        >
+          ✕
+        </button>
+        <img 
+          src="{globalData.enlargedImage.src}" 
+          alt="{globalData.enlargedImage.name}" 
+          class="max-w-full max-h-full object-contain"
+        />
+        <div class="absolute bottom-0 left-0 bg-black bg-opacity-50 text-white px-2 py-1 text-sm">
+          {globalData.enlargedImage.name}
+        </div>
+      </div>
+    </div>
+  {/if}
 
 </main>
