@@ -1293,7 +1293,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
   {#if globalData.enlargedImage}
     <div class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[9999]" onclick={closeEnlargedImage}>
-      <div class="relative max-w-[95vw] max-h-[95vh]" onclick={(e) => e.stopPropagation()}>
+      <div class="relative w-[95vw] h-[95vh] flex items-center justify-center" onclick={(e) => e.stopPropagation()}>
         <button 
           class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300" 
           onclick={closeEnlargedImage}
