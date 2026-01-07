@@ -324,7 +324,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        
        const boatPos = [boat.location[1], boat.location[0]];
        
-       // Track live position with sanity check to prevent corrupt data from drawing cross-boat lines
+       // Track AIS boat position history
        recordTrackPoint(mmsi, boatPos);
        
        for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
@@ -435,16 +435,6 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    const diff = pointDiff(lastPos, position);
    if (diff > .0000001) {
-     // Sanity check: reject positions that are too far from the last position
-     // This prevents corrupt GPS data from drawing lines across hundreds of miles between boats
-     const distanceNM = calculateDistanceNM(lastPos[1], lastPos[0], position[1], position[0]);
-     const MAX_REASONABLE_DISTANCE_NM = 50; // Max distance a boat can move between updates
-     
-     if (distanceNM > MAX_REASONABLE_DISTANCE_NM) {
-       console.warn(`[${boatId}] Rejecting position update: ${distanceNM.toFixed(1)} NM from last position (${lastPos} -> ${position})`);
-       return; // Don't draw the line or update position
-     }
-     
      mapGlobal.trackFeatures.push(new Feature({
        type: "track",
        boatId: boatId,
