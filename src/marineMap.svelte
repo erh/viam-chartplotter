@@ -88,6 +88,19 @@ import type { BoatInfo } from './lib/BoatInfo';
    visibleBoats = new Set(visibleBoats); // Trigger reactivity
  }
 
+ function selectAllBoats() {
+   const allIds = new Set<string>();
+   if (myBoat) allIds.add('myBoat');
+   boats?.forEach(b => {
+     if (b.mmsi) allIds.add(b.mmsi);
+   });
+   visibleBoats = allIds;
+ }
+
+ function deselectAllBoats() {
+   visibleBoats = new Set();
+ }
+
  function isValidCoordinate(lat: number, lng: number): boolean {
    return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && 
           !(lat === 0 && lng === 0); // Exclude null island
@@ -124,13 +137,34 @@ import type { BoatInfo } from './lib/BoatInfo';
      const extent = boundingExtent(coords);
      const mapSize = mapGlobal.map?.getSize() || [800, 600];
      const [width, height] = mapSize;
-     // Use percentage-based padding that scales with viewport, minimum 80px
-     const horizontalPad = Math.max(80, width * 0.1);
-     const verticalPad = Math.max(80, height * 0.1);
-     const topPad = Math.max(120, height * 0.15); // Extra top padding for popups
+     
+     // Calculate default padding values
+     const defaultHorizontalPad = Math.max(80, width * 0.1);
+     const defaultVerticalPad = Math.max(80, height * 0.1);
+     const defaultTopPad = Math.max(250, height * 0.15); // Extra top padding for 223px popup height
+     
+     // Apply custom padding if provided, otherwise use defaults
+     let topPad: number, rightPad: number, bottomPad: number, leftPad: number;
+     
+     if (typeof fitBoundsPadding === 'number') {
+       // Single number applies to all edges
+       topPad = rightPad = bottomPad = leftPad = fitBoundsPadding;
+     } else if (fitBoundsPadding) {
+       // Object with individual edge overrides
+       topPad = fitBoundsPadding.top ?? defaultTopPad;
+       rightPad = fitBoundsPadding.right ?? defaultHorizontalPad;
+       bottomPad = fitBoundsPadding.bottom ?? defaultVerticalPad;
+       leftPad = fitBoundsPadding.left ?? defaultHorizontalPad;
+     } else {
+       // Use all defaults
+       topPad = defaultTopPad;
+       rightPad = defaultHorizontalPad;
+       bottomPad = defaultVerticalPad;
+       leftPad = defaultHorizontalPad;
+     }
      
      mapGlobal.view.fit(extent, {
-       padding: [topPad, horizontalPad, verticalPad, horizontalPad],
+       padding: [topPad, rightPad, bottomPad, leftPad],
        duration: 500,
        maxZoom: 12
      });
@@ -139,7 +173,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot, fitBoundsPadding }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -147,6 +181,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   enableBoatsPanel?: boolean;
   onReady?: (api: { fitToVisibleBoats: () => void }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
+  fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -1034,6 +1069,10 @@ import type { BoatInfo } from './lib/BoatInfo';
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
   <div class="boats-panel">
+    <div class="boats-controls">
+      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
+      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
+    </div>
     <div class="boats-list">
       {#if myBoat}
       <label class="boat-item">
@@ -1274,6 +1313,36 @@ import type { BoatInfo } from './lib/BoatInfo';
   }
 
   /* Boats panel (bottom-right, next to Layers) */
+  .boats-controls {
+    display: flex;
+    gap: 6px;
+    padding: 6px 6px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .select-btn {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 500;
+    background: rgba(232, 232, 232, 0.2);
+    color: #444;
+    border: 1px solid rgba(167, 167, 167, 0.3);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .select-btn:hover {
+    background: rgba(219, 219, 219, 0.3);
+    border: 1px solid rgba(167, 167, 167, 0.4);
+    color: #444;
+  }
+
+  .select-btn:active {
+    transform: scale(0.98);
+  }
+
   .boats-panel {
     position: absolute;
     bottom: 45px;
@@ -1300,7 +1369,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   .boats-list {
     flex: 1;
     overflow-y: auto;
-    padding: 10px 14px;
+    padding: 6px 14px;
     padding-bottom: 0;
     max-height: 200px;
     -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
