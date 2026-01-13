@@ -124,13 +124,34 @@ import type { BoatInfo } from './lib/BoatInfo';
      const extent = boundingExtent(coords);
      const mapSize = mapGlobal.map?.getSize() || [800, 600];
      const [width, height] = mapSize;
-     // Use percentage-based padding that scales with viewport, minimum 80px
-     const horizontalPad = Math.max(80, width * 0.1);
-     const verticalPad = Math.max(80, height * 0.1);
-     const topPad = Math.max(120, height * 0.15); // Extra top padding for popups
+     
+     // Calculate default padding values
+     const defaultHorizontalPad = Math.max(80, width * 0.1);
+     const defaultVerticalPad = Math.max(80, height * 0.1);
+     const defaultTopPad = Math.max(250, height * 0.15); // Extra top padding for 223px popup height
+     
+     // Apply custom padding if provided, otherwise use defaults
+     let topPad: number, rightPad: number, bottomPad: number, leftPad: number;
+     
+     if (typeof fitBoundsPadding === 'number') {
+       // Single number applies to all edges
+       topPad = rightPad = bottomPad = leftPad = fitBoundsPadding;
+     } else if (fitBoundsPadding) {
+       // Object with individual edge overrides
+       topPad = fitBoundsPadding.top ?? defaultTopPad;
+       rightPad = fitBoundsPadding.right ?? defaultHorizontalPad;
+       bottomPad = fitBoundsPadding.bottom ?? defaultVerticalPad;
+       leftPad = fitBoundsPadding.left ?? defaultHorizontalPad;
+     } else {
+       // Use all defaults
+       topPad = defaultTopPad;
+       rightPad = defaultHorizontalPad;
+       bottomPad = defaultVerticalPad;
+       leftPad = defaultHorizontalPad;
+     }
      
      mapGlobal.view.fit(extent, {
-       padding: [topPad, horizontalPad, verticalPad, horizontalPad],
+       padding: [topPad, rightPad, bottomPad, leftPad],
        duration: 500,
        maxZoom: 12
      });
@@ -139,7 +160,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot, fitBoundsPadding }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -147,6 +168,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   enableBoatsPanel?: boolean;
   onReady?: (api: { fitToVisibleBoats: () => void }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
+  fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
 } = $props();
 
  // Create derived values for reactivity tracking

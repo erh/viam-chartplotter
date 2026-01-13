@@ -181,6 +181,25 @@
     zoomModifier={-8}
     enableBoatsPanel={true}
     onReady={(api) => mapApi = api}
+    fitBoundsPadding={{ top: 250, right: 100, bottom: 100, left: 100 }}
+    boatDetailSlot={(boat) => {
+      return {
+        render: () => `
+          <div style="width: 200px; padding: 8px; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); border-radius: 4px; color: white;">
+            <div style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.9;">VESSEL INFO</div>
+            <div style="font-size: 10px; line-height: 1.6;">
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">MMSI:</span> <span style="font-family: monospace;">${boat.name?.includes('Runner') ? '369' : '367'}${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}</span></div>
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">Type:</span> ${boat.name?.includes('Freighter') ? 'Cargo' : 'Pleasure Craft'}</div>
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">Length:</span> ${Math.floor(Math.random() * 40) + 30}m</div>
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">Beam:</span> ${Math.floor(Math.random() * 10) + 8}m</div>
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">Draft:</span> ${(Math.random() * 3 + 2).toFixed(1)}m</div>
+              <div style="margin-bottom: 4px;"><span style="opacity: 0.7;">Destination:</span> ${['MIAMI', 'KEY WEST', 'TAMPA', 'NASSAU', 'FREEPORT'][Math.floor(Math.random() * 5)]}</div>
+              <div style="opacity: 0.7; font-size: 9px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.2);">Last Update: ${new Date().toLocaleTimeString()}</div>
+            </div>
+          </div>
+        `
+      }
+    }}
   />
 </div>
 
