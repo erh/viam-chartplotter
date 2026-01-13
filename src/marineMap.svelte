@@ -88,6 +88,19 @@ import type { BoatInfo } from './lib/BoatInfo';
    visibleBoats = new Set(visibleBoats); // Trigger reactivity
  }
 
+ function selectAllBoats() {
+   const allIds = new Set<string>();
+   if (myBoat) allIds.add('myBoat');
+   boats?.forEach(b => {
+     if (b.mmsi) allIds.add(b.mmsi);
+   });
+   visibleBoats = allIds;
+ }
+
+ function deselectAllBoats() {
+   visibleBoats = new Set();
+ }
+
  function isValidCoordinate(lat: number, lng: number): boolean {
    return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && 
           !(lat === 0 && lng === 0); // Exclude null island
@@ -1056,6 +1069,10 @@ import type { BoatInfo } from './lib/BoatInfo';
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
   <div class="boats-panel">
+    <div class="boats-controls">
+      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
+      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
+    </div>
     <div class="boats-list">
       {#if myBoat}
       <label class="boat-item">
@@ -1296,6 +1313,36 @@ import type { BoatInfo } from './lib/BoatInfo';
   }
 
   /* Boats panel (bottom-right, next to Layers) */
+  .boats-controls {
+    display: flex;
+    gap: 6px;
+    padding: 6px 6px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .select-btn {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 500;
+    background: rgba(232, 232, 232, 0.2);
+    color: #444;
+    border: 1px solid rgba(167, 167, 167, 0.3);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .select-btn:hover {
+    background: rgba(219, 219, 219, 0.3);
+    border: 1px solid rgba(167, 167, 167, 0.4);
+    color: #444;
+  }
+
+  .select-btn:active {
+    transform: scale(0.98);
+  }
+
   .boats-panel {
     position: absolute;
     bottom: 45px;
@@ -1322,7 +1369,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   .boats-list {
     flex: 1;
     overflow-y: auto;
-    padding: 10px 14px;
+    padding: 6px 14px;
     padding-bottom: 0;
     max-height: 200px;
     -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
