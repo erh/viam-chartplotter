@@ -96,7 +96,10 @@ import type { BoatInfo } from './lib/BoatInfo';
    const allIds = new Set<string>();
    if (myBoat) allIds.add('myBoat');
    boats?.forEach(b => {
-     if (b.mmsi) allIds.add(b.mmsi);
+     // Only add offline boats if showOfflineBoatsInPanel is true
+     if (b.mmsi && (b.isOnline !== false || showOfflineBoatsInPanel)) {
+       allIds.add(b.mmsi);
+     }
    });
    visibleBoats = allIds;
  }
