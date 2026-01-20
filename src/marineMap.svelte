@@ -65,20 +65,24 @@ import type { BoatInfo } from './lib/BoatInfo';
  let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
 
  // Initialize visibleBoats when boats prop changes (only when NOT using external control)
- let lastBoatsLength = $state(0);
+ // Use plain JS variable for tracking to avoid creating effect dependencies
+ let lastBoatsLength = 0;
  $effect(() => {
    // Skip auto-add when parent is controlling visibility externally
    if (externalVisibilityControl) return;
    
-   const currentLength = boats?.length ?? 0;
+   // Read boats to create dependency
+   const boatsList = boats;
+   const currentLength = boatsList?.length ?? 0;
+   
    if (currentLength !== lastBoatsLength) {
      // Add any new boats to visible set
-     boats?.forEach(b => {
+     boatsList?.forEach(b => {
        if (b.mmsi && !visibleBoats.has(b.mmsi)) {
          visibleBoats.add(b.mmsi);
        }
      });
-     lastBoatsLength = currentLength;
+     lastBoatsLength = currentLength; // Plain JS variable, won't re-trigger
      visibleBoats = new Set(visibleBoats); // Trigger reactivity
    }
  });
