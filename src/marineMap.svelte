@@ -446,7 +446,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
      for (let i = 0; i < toRemove; i++) {
        var x = mapGlobal.trackFeatures.item(0);
-       delete mapInternalState.trackFeatureIds[x["myid"]];
+       if (x) {
+         delete mapInternalState.trackFeatureIds[x.get("myid")];
+       }
        mapGlobal.trackFeatures.removeAt(0);
      }
    }
