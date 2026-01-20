@@ -61,20 +61,28 @@ import type { BoatInfo } from './lib/BoatInfo';
  let mapLoaded = $state(false);
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
+ // When externalVisibilityControl is true, start with empty set (parent will control)
  let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
 
- // Initialize visibleBoats when boats prop changes
- let lastBoatsLength = $state(0);
+ // Initialize visibleBoats when boats prop changes (only when NOT using external control)
+ // Use plain JS variable for tracking to avoid creating effect dependencies
+ let lastBoatsLength = 0;
  $effect(() => {
-   const currentLength = boats?.length ?? 0;
+   // Skip auto-add when parent is controlling visibility externally
+   if (externalVisibilityControl) return;
+   
+   // Read boats to create dependency
+   const boatsList = boats;
+   const currentLength = boatsList?.length ?? 0;
+   
    if (currentLength !== lastBoatsLength) {
      // Add any new boats to visible set
-     boats?.forEach(b => {
+     boatsList?.forEach(b => {
        if (b.mmsi && !visibleBoats.has(b.mmsi)) {
          visibleBoats.add(b.mmsi);
        }
      });
-     lastBoatsLength = currentLength;
+     lastBoatsLength = currentLength; // Plain JS variable, won't re-trigger
      visibleBoats = new Set(visibleBoats); // Trigger reactivity
    }
  });
@@ -92,13 +100,21 @@ import type { BoatInfo } from './lib/BoatInfo';
    const allIds = new Set<string>();
    if (myBoat) allIds.add('myBoat');
    boats?.forEach(b => {
-     if (b.mmsi) allIds.add(b.mmsi);
+     // Only add offline boats if showOfflineBoatsInPanel is true
+     if (b.mmsi && (b.isOnline !== false || showOfflineBoatsInPanel)) {
+       allIds.add(b.mmsi);
+     }
    });
    visibleBoats = allIds;
  }
 
  function deselectAllBoats() {
    visibleBoats = new Set();
+ }
+
+ // Set which boats are visible by Set of mmsi/ids (for external control)
+ function setVisibleBoats(ids: Set<string>) {
+   visibleBoats = ids;
  }
 
  function isValidCoordinate(lat: number, lng: number): boolean {
@@ -173,13 +189,23 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, onReady, boatDetailSlot, fitBoundsPadding }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, onReady, boatDetailSlot, fitBoundsPadding }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: { lat: number; lng: number }[];
   enableBoatsPanel?: boolean;
-  onReady?: (api: { fitToVisibleBoats: () => void }) => void;
+  /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
+  externalVisibilityControl?: boolean;
+  /** When false, offline boats are hidden from the boats panel (default: true) */
+  showOfflineBoatsInPanel?: boolean;
+  onReady?: (api: { 
+    fitToVisibleBoats: () => void;
+    selectAllBoats: () => void;
+    deselectAllBoats: () => void;
+    setVisibleBoats: (ids: Set<string>) => void;
+    getVisibleBoats: () => Set<string>;
+  }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
 } = $props();
@@ -420,7 +446,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
      for (let i = 0; i < toRemove; i++) {
        var x = mapGlobal.trackFeatures.item(0);
-       delete mapInternalState.trackFeatureIds[x["myid"]];
+       if (x) {
+         delete mapInternalState.trackFeatureIds[x.get("myid")];
+       }
        mapGlobal.trackFeatures.removeAt(0);
      }
    }
@@ -923,7 +951,13 @@ import type { BoatInfo } from './lib/BoatInfo';
        fitToVisibleBoats();
      }
      // Expose API to parent component
-     onReady?.({ fitToVisibleBoats });
+     onReady?.({ 
+       fitToVisibleBoats,
+       selectAllBoats,
+       deselectAllBoats,
+       setVisibleBoats,
+       getVisibleBoats: () => new Set(visibleBoats)
+     });
    }, 100);
  }
 
@@ -1085,18 +1119,31 @@ import type { BoatInfo } from './lib/BoatInfo';
       </label>
       {/if}
       {#if boats}
-        {#each boats as boat}
-          {#if boat.mmsi}
-            <label class="boat-item">
+        {@const onlineBoats = boats.filter(b => b.mmsi && b.isOnline !== false)}
+        {@const offlineBoats = boats.filter(b => b.mmsi && b.isOnline === false)}
+        {#each onlineBoats as boat}
+          <label class="boat-item">
+            <input 
+              type="checkbox" 
+              checked={visibleBoats.has(boat.mmsi!)}
+              onchange={() => toggleBoatVisibility(boat.mmsi!)}
+            >
+            <span class="boat-name">{boat.name}</span>
+          </label>
+        {/each}
+        {#if showOfflineBoatsInPanel && offlineBoats.length > 0}
+          <div class="boats-separator">Offline boats:</div>
+          {#each offlineBoats as boat}
+            <label class="boat-item offline">
               <input 
                 type="checkbox" 
-                checked={visibleBoats.has(boat.mmsi)}
+                checked={visibleBoats.has(boat.mmsi!)}
                 onchange={() => toggleBoatVisibility(boat.mmsi!)}
               >
               <span class="boat-name">{boat.name}</span>
             </label>
-          {/if}
-        {/each}
+          {/each}
+        {/if}
       {/if}
     </div>
     <button class="fit-all-btn" onclick={fitToVisibleBoats}>
@@ -1406,6 +1453,19 @@ import type { BoatInfo } from './lib/BoatInfo';
 
   .boat-name.my-boat {
     font-weight: 600;
+  }
+
+  .boats-separator {
+    font-size: 11px;
+    color: #666;
+    padding: 8px 0 4px 0;
+    margin-top: 4px;
+    border-top: 1px solid #ddd;
+    font-weight: 500;
+  }
+
+  .boat-item.offline .boat-name {
+    color: #888;
   }
 
   .fit-all-btn {
