@@ -7,42 +7,50 @@
   let mapApi = $state<{ fitToVisibleBoats: () => void }>();
 
   // Helper to generate position history with realistic variation
-  // Generates tracks that show actual voyage patterns
+  // Generates tracks that follow waypoints through water
+  function generateTrackWithWaypoints(
+    waypoints: { lat: number; lng: number }[],
+    pointsPerSegment: number = 50
+  ): { lat: number; lng: number }[] {
+    const track: { lat: number; lng: number }[] = [];
+    
+    for (let w = 0; w < waypoints.length - 1; w++) {
+      const start = waypoints[w];
+      const end = waypoints[w + 1];
+      const segmentPoints = w === waypoints.length - 2 ? pointsPerSegment : pointsPerSegment - 1;
+      
+      for (let i = 0; i < segmentPoints; i++) {
+        const t = i / (pointsPerSegment - 1);
+        
+        // Small lateral variation for realism
+        const lateral = Math.sin(t * Math.PI * 2) * 0.01 + Math.sin(t * Math.PI * 5) * 0.005;
+        
+        // GPS jitter
+        const jitterLat = (Math.random() - 0.5) * 0.001;
+        const jitterLng = (Math.random() - 0.5) * 0.001;
+        
+        const dLat = end.lat - start.lat;
+        const dLng = end.lng - start.lng;
+        
+        track.push({
+          lat: start.lat + dLat * t + (-dLng) * lateral + jitterLat,
+          lng: start.lng + dLng * t + dLat * lateral + jitterLng,
+        });
+      }
+    }
+    return track;
+  }
+
+  // Simple two-point track generator
   function generateTrack(
     startLat: number, startLng: number,
     endLat: number, endLng: number,
-    points: number = 360
+    points: number = 100
   ): { lat: number; lng: number }[] {
-    const track = [];
-    
-    // Vector from start to end
-    const dLat = endLat - startLat;
-    const dLng = endLng - startLng;
-    
-    // Perpendicular vector for lateral movement
-    const perpLat = -dLng;
-    const perpLng = dLat;
-    
-    for (let i = 0; i < points; i++) {
-      const t = i / (points - 1);
-      
-      // Create a winding path using superposition of sine waves
-      // This creates a more natural "wandering" look than a single sine wave
-      const lateral = (Math.sin(t * Math.PI * 3) * 0.05 + Math.sin(t * Math.PI * 7) * 0.02);
-      
-      // Small random jitter (approx 0.002 degrees ~ 200m) to simulate GPS noise/minor corrections
-      const jitterLat = (Math.random() - 0.5) * 0.002;
-      const jitterLng = (Math.random() - 0.5) * 0.002;
-      
-      const currentLat = startLat + dLat * t + perpLat * lateral + jitterLat;
-      const currentLng = startLng + dLng * t + perpLng * lateral + jitterLng;
-      
-      track.push({
-        lat: currentLat,
-        lng: currentLng,
-      });
-    }
-    return track;
+    return generateTrackWithWaypoints([
+      { lat: startLat, lng: startLng },
+      { lat: endLat, lng: endLng }
+    ], points);
   }
 
   // =============================================================
@@ -53,7 +61,7 @@
     name: "My Vessel",
     location: [25.77, -80.18], // Starting position: Miami
     speed: 7.5,
-    heading: 45,
+    heading: 90,
     host: "mock-host.viam.cloud",
     partId: "my-boat-part-id",
     isOnline: true,
@@ -65,8 +73,15 @@
   });
 
   // Historical track for my boat (simulates position history from movement sensor)
+  // Route: Coming down the ICW / offshore from Palm Beach area to Miami
   let myBoatHistory = $state<{ lat: number; lng: number }[]>(
-    generateTrack(26.1, -80.1, 25.77, -80.18, 150) // Fort Lauderdale to current position
+    generateTrackWithWaypoints([
+      { lat: 26.7, lng: -80.03 },  // Offshore Palm Beach
+      { lat: 26.35, lng: -80.05 }, // Offshore Boca Raton  
+      { lat: 26.1, lng: -80.08 },  // Offshore Fort Lauderdale
+      { lat: 25.9, lng: -80.1 },   // Offshore Hollywood
+      { lat: 25.77, lng: -80.13 }, // Current position near Miami
+    ], 40)
   );
 
   // =============================================================
@@ -78,73 +93,108 @@
     {
       name: "Gulf Runner",
       mmsi: "123456789",
-      location: [26.0, -82.0], // Tampa Bay area
+      location: [26.0, -82.5], // Tampa Bay area (in the Gulf)
       speed: 8.5,
       heading: 270,
       host: "gulf-runner.viam.cloud",
       partId: "gulf-runner-part",
       isOnline: true,
-      // Voyage from East Florida coast to Tampa Bay with data gap offshore
+      // Voyage around Florida Keys to Tampa Bay (stays in water)
       positionHistory: [
-        ...generateTrack(27.8, -80.2, 27.0, -81.0, 100), // East coast to offshore
-        // Gap: boat went offline crossing to west coast
-        ...generateTrack(26.5, -82.2, 26.0, -82.0, 100), // Approaching Tampa
+        ...generateTrackWithWaypoints([
+          { lat: 25.0, lng: -80.3 },   // South of Miami, offshore
+          { lat: 24.7, lng: -80.8 },   // Upper Keys
+          { lat: 24.55, lng: -81.5 },  // Middle Keys
+          { lat: 24.55, lng: -82.0 },  // Near Key West
+        ], 50),
+        // Gap: went around Florida
+        ...generateTrackWithWaypoints([
+          { lat: 25.5, lng: -83.0 },   // In the Gulf
+          { lat: 26.0, lng: -82.5 },   // Tampa Bay entrance
+        ], 50),
       ],
     },
     {
       name: "Keys Cruiser",
       mmsi: "987654321",
-      location: [24.5, -81.8], // Key West
+      location: [24.55, -81.78], // Key West
       speed: 5.2,
       heading: 180,
       host: "keys-cruiser.viam.cloud",
       partId: "keys-cruiser-part",
       isOnline: true,
-      // Complete voyage down the Florida Keys (no gaps)
-      positionHistory: generateTrack(26.2, -80.1, 24.5, -81.8, 300),
+      // Voyage down the Florida Keys (stays in the water, follows the Keys)
+      positionHistory: generateTrackWithWaypoints([
+        { lat: 25.85, lng: -80.12 },  // Miami offshore
+        { lat: 25.4, lng: -80.15 },   // South Miami offshore
+        { lat: 25.15, lng: -80.3 },   // Key Largo area
+        { lat: 24.95, lng: -80.5 },   // Upper Keys
+        { lat: 24.75, lng: -80.85 },  // Islamorada area
+        { lat: 24.65, lng: -81.2 },   // Marathon area
+        { lat: 24.55, lng: -81.78 },  // Key West
+      ], 50),
     },
     {
       name: "Atlantic Voyager",
       mmsi: "456789123",
-      location: [27.0, -78.0], // East of Palm Beach, Atlantic
+      location: [25.3, -77.8], // Bahamas (west of Nassau)
       speed: 12.0,
-      heading: 45,
+      heading: 120,
       host: "atlantic-voyager.viam.cloud",
       partId: "atlantic-voyager-part",
-      isOnline: false, // Offline boat - like kongsberg-apps handles
-      // Atlantic crossing with multiple offline periods
+      isOnline: false, // Offline boat
+      // Crossing from Miami to Bahamas
       positionHistory: [
-        ...generateTrack(25.8, -80.1, 26.5, -79.5, 80), // Coastal departure
-        // Gap: offshore
-        ...generateTrack(26.8, -78.5, 27.0, -78.0, 80), // Mid-Atlantic
+        ...generateTrackWithWaypoints([
+          { lat: 25.78, lng: -80.1 },  // Miami departure
+          { lat: 25.7, lng: -79.5 },   // Offshore heading east
+          { lat: 25.5, lng: -79.0 },   // Mid-crossing
+        ], 40),
+        // Gap: offshore communication lost
+        ...generateTrackWithWaypoints([
+          { lat: 25.35, lng: -78.2 },  // Approaching Bahamas
+          { lat: 25.3, lng: -77.8 },   // Current position
+        ], 40),
       ],
     },
     {
       name: "Miami Express",
       mmsi: "111222333",
-      location: [25.8, -80.1], // Miami
+      location: [25.78, -80.08], // Miami Port
       speed: 6.0,
       heading: 135,
       host: "miami-express.viam.cloud",
       partId: "miami-express-part",
       isOnline: true,
-      // Coastal route from Fort Lauderdale to Miami (continuous track)
-      positionHistory: generateTrack(26.5, -80.05, 25.8, -80.1, 200),
+      // Coastal route from Port Everglades to Miami (offshore)
+      positionHistory: generateTrackWithWaypoints([
+        { lat: 26.09, lng: -80.08 },   // Port Everglades
+        { lat: 25.95, lng: -80.1 },    // Hollywood offshore
+        { lat: 25.85, lng: -80.1 },    // Hallandale offshore
+        { lat: 25.78, lng: -80.08 },   // Miami Port
+      ], 60),
     },
     {
       name: "Ocean Freighter",
       mmsi: "444555666",
-      location: [26.5, -77.5], // Further east in Atlantic
+      location: [25.05, -77.3], // Near Nassau, Bahamas
       speed: 14.0,
-      heading: 0,
+      heading: 90,
       host: "ocean-freighter.viam.cloud",
       partId: "ocean-freighter-part",
       isOnline: true,
-      // Deep ocean voyage with significant data gaps
+      // Deep ocean voyage staying east of Bahamas islands
       positionHistory: [
-        ...generateTrack(24.5, -78.5, 25.0, -78.0, 60),
-        // Large gap in deep ocean
-        ...generateTrack(26.0, -77.8, 26.5, -77.5, 60),
+        ...generateTrackWithWaypoints([
+          { lat: 23.5, lng: -75.5 },   // South, in deep Atlantic
+          { lat: 24.0, lng: -76.0 },   // Heading northwest in open water
+          { lat: 24.5, lng: -76.5 },   // East of Exumas
+        ], 40),
+        // Gap in deep ocean
+        ...generateTrackWithWaypoints([
+          { lat: 24.9, lng: -77.0 },   // Approaching from east
+          { lat: 25.05, lng: -77.3 },  // Near Nassau (in the channel)
+        ], 40),
       ],
     },
   ]);
