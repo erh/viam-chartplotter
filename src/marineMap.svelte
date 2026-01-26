@@ -35,6 +35,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    name: string;
    on: boolean;
    layer: TileLayer<any> | Vector<any>;
+   parent?: string; // Parent layer name for hierarchical layers
  }
 
  let boatImage = "boat3.jpg";
@@ -801,6 +802,29 @@ import type { BoatInfo } from './lib/BoatInfo';
        on: true,
        layer : myBoatLayer,
      });
+     
+     // Route layer - child of boat, so only added when myBoat exists
+     var routeLayer = new Vector({
+       source: new VectorSource({
+         features: mapGlobal.routeFeatures,
+       }),
+       style: new Style({
+         stroke: new Stroke({
+           color: "green",
+           width: 3
+         }),
+         fill: new Fill({
+           color: "rgba(0, 255, 0, 0.1)"
+         })
+       }),
+     });
+
+     mapGlobal.layerOptions.push({
+       name: "route",
+       on: true,
+       layer : routeLayer,
+       parent: "boat", // Route is a child of boat layer
+     });
    }
    
    var aisLayer = new Vector({
@@ -818,27 +842,6 @@ import type { BoatInfo } from './lib/BoatInfo';
      name: "ais",
      on: true,
      layer : aisLayer,
-   });
-   
-   var routeLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.routeFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "green",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: "route",
-     on: true,
-     layer : routeLayer,
    });
 
  }
@@ -869,7 +872,15 @@ import type { BoatInfo } from './lib/BoatInfo';
  function updateOnLayers() {
    for( var l of mapGlobal.layerOptions) {
      var idx = findOnLayerIndexOfName(l.name);
-     if (l.on) {
+     
+     // Check if parent layer exists and is off
+     const parentLayer = l.parent ? mapGlobal.layerOptions.find(p => p.name === l.parent) : null;
+     const isParentOff = parentLayer && !parentLayer.on;
+     
+     // Layer should be visible only if it's on AND (has no parent OR parent is on)
+     const shouldBeVisible = l.on && !isParentOff;
+     
+     if (shouldBeVisible) {
        if ( idx < 0 ) {
          // Insert tile layers before vector layers to ensure proper z-ordering
          // Vector layers (boat, ais, track, route) should always be on top
@@ -1157,8 +1168,14 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
     {/if}
     {#each mapGlobal.layerOptions as l, idx}
-      <label>
-        <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
+      {@const parentLayer = l.parent ? mapGlobal.layerOptions.find(p => p.name === l.parent) : null}
+      {@const isParentOff = parentLayer && !parentLayer.on}
+      <label class:child-layer={l.parent} class:disabled={isParentOff}>
+        <input 
+          type="checkbox" 
+          bind:checked={mapGlobal.layerOptions[idx].on}
+          disabled={isParentOff}
+        >
         {l.name}
       </label>
     {/each}
@@ -1400,6 +1417,15 @@ import type { BoatInfo } from './lib/BoatInfo';
     padding: 3px 0;
     cursor: pointer;
     white-space: nowrap;
+  }
+  
+  .layer-controls > label.child-layer {
+    padding-left: 20px;
+  }
+  
+  .layer-controls > label.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .layer-controls > label:hover {
