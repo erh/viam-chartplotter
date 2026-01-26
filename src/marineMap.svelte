@@ -262,19 +262,38 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (shouldClose) closePopup();
  });
 
- // Force track layer to re-render when visibility changes
+ // Force track layers to re-render when visibility changes
  $effect(() => {
    const _visible = visibleBoatsKey;
-   // Trigger style recalculation by notifying the source
-   const trackLayer = mapGlobal.layerOptions.find(l => l.name === "track");
-   if (trackLayer?.layer) {
-     trackLayer.layer.changed();
+   // Trigger style recalculation by notifying the track layers
+   if (mapGlobal.trackLayer) {
+     mapGlobal.trackLayer.getSource()?.changed();
+   }
+   if (mapGlobal.aisTrackLayer) {
+     mapGlobal.aisTrackLayer.getSource()?.changed();
    }
  });
 
+ // Sync track layer visibility with boat/ais layer toggles
  $effect(() => {
-   mapGlobal.layerOptions.forEach((l) => l.on);
+   // Read all layer states to create dependencies
+   const layerStates = mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
+   
    updateOnLayers();
+   
+   // Find boat and ais layer states
+   const boatLayer = layerStates.find(l => l.name === "boat");
+   const aisLayer = layerStates.find(l => l.name === "ais");
+   
+   // Toggle track layer visibility based on boat layer
+   if (mapGlobal.trackLayer) {
+     mapGlobal.trackLayer.setVisible(boatLayer?.on ?? true);
+   }
+   
+   // Toggle AIS track layer visibility based on ais layer
+   if (mapGlobal.aisTrackLayer) {
+     mapGlobal.aisTrackLayer.setVisible(aisLayer?.on ?? true);
+   }
  });
 
  let mapGlobal = $state({
@@ -284,10 +303,14 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    aisFeatures: new Collection<Feature<Geometry>>(),
    trackFeatures: new Collection<Feature<Geometry>>(),
+   aisTrackFeatures: new Collection<Feature<Geometry>>(),
    routeFeatures: new Collection<Feature<Geometry>>(),
    trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null as Feature<Point> | null,
    
+   // Track layer references for refreshing styles
+   trackLayer: null as Vector<any> | null,
+   aisTrackLayer: null as Vector<any> | null,
 
    layerOptions: [] as LayerOption[],
    onLayers: new Collection<BaseLayer>(),
@@ -300,6 +323,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastPosition: number[];
    lastPositions: Record<string, number[]>;
    trackFeatureIds: Record<string, boolean>;
+   aisTrackFeatureIds: Record<string, boolean>;
  } = {
    inPanMode: false,
    lastZoom: 0,
@@ -307,6 +331,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastPosition: [0,0],
    lastPositions: {},
    trackFeatureIds: {},
+   aisTrackFeatureIds: {},
  }
 
  function updateFromData() {
@@ -441,7 +466,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    const maxFeatures = 20000; // Hardcoded limit
    const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
    
-   // Remove oldest features if over limit
+   // Remove oldest features if over limit (my boat track)
    if (mapGlobal.trackFeatures.getLength() > maxFeatures) {
      const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
      for (let i = 0; i < toRemove; i++) {
@@ -453,24 +478,42 @@ import type { BoatInfo } from './lib/BoatInfo';
      }
    }
    
+   // Remove oldest features if over limit (AIS track)
+   if (mapGlobal.aisTrackFeatures.getLength() > maxFeatures) {
+     const toRemove = mapGlobal.aisTrackFeatures.getLength() - maxFeatures;
+     for (let i = 0; i < toRemove; i++) {
+       var x = mapGlobal.aisTrackFeatures.item(0);
+       if (x) {
+         delete mapInternalState.aisTrackFeatureIds[x.get("myid")];
+       }
+       mapGlobal.aisTrackFeatures.removeAt(0);
+     }
+   }
+   
    // Periodically clear trackFeatureIds to prevent dictionary memory leak
    const now = new Date();
    const timeSinceLastCheck = now.getTime() - mapGlobal.trackFeaturesLastCheck.getTime();
    if (timeSinceLastCheck > maxAge) {
      mapInternalState.trackFeatureIds = {};
+     mapInternalState.aisTrackFeatureIds = {};
      mapGlobal.trackFeaturesLastCheck = now;
    }
  }
 
  function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false) {
-   if (mapInternalState.trackFeatureIds[id] == true) {
+   // Route to appropriate feature collection based on boatId
+   const isAisTrack = boatId !== "myBoat";
+   const featureIds = isAisTrack ? mapInternalState.aisTrackFeatureIds : mapInternalState.trackFeatureIds;
+   const features = isAisTrack ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures;
+   
+   if (featureIds[id] == true) {
      return;
    }
 
-   mapInternalState.trackFeatureIds[id] = true;
+   featureIds[id] = true;
    
-   mapGlobal.trackFeatures.push(new Feature({
-     type: "track",
+   features.push(new Feature({
+     type: isAisTrack ? "ais-track" : "track",
      boatId: boatId,
      "myid" : id,
      geometry: g,
@@ -498,8 +541,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    const diff = pointDiff(lastPos, position);
    if (diff > .0000001) {
-     mapGlobal.trackFeatures.push(new Feature({
-       type: "track",
+     // Route to appropriate feature collection based on boatId
+     const isAisTrack = boatId !== "myBoat";
+     const features = isAisTrack ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures;
+     
+     features.push(new Feature({
+       type: isAisTrack ? "ais-track" : "track",
        boatId: boatId,
        geometry: new LineString([lastPos, position]),
      }));
@@ -668,7 +715,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      }),
    })
 
-   // Track layer (added before boat layers so boats render on top)
+   // Track layer for myBoat (visibility controlled by "boat" layer toggle via setVisible)
    var trackLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
@@ -695,11 +742,40 @@ import type { BoatInfo } from './lib/BoatInfo';
      },
    });
 
-   mapGlobal.layerOptions.push({
-     name: "track",
-     on: true,
-     layer : trackLayer,
+   // Store reference and add track layer directly to map (not in layerOptions UI)
+   mapGlobal.trackLayer = trackLayer;
+   mapGlobal.onLayers.push(trackLayer);
+
+   // AIS Track layer (visibility controlled by "ais" layer toggle via setVisible)
+   var aisTrackLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.aisTrackFeatures,
+     }),
+     style: function(feature) {
+       const boatId = feature.get("boatId") || "";
+       if (!visibleBoats.has(boatId)) {
+         return new Style({}); // Hidden - return empty style
+       }
+       
+       const isGap = feature.get("isGap");
+       const opacity = isGap ? 0.33 : 1.0;
+       
+       return new Style({
+         stroke: new Stroke({
+           color: `rgba(0, 0, 255, ${opacity})`,
+           width: 2,
+           lineDash: isGap ? [2, 6] : undefined
+         }),
+         fill: new Fill({
+           color: "rgba(0, 0, 255, 0.1)"
+         })
+       });
+     },
    });
+
+   // Store reference and add AIS track layer directly to map (not in layerOptions UI)
+   mapGlobal.aisTrackLayer = aisTrackLayer;
+   mapGlobal.onLayers.push(aisTrackLayer);
 
    // by boat setup (only if myBoat is provided)
    if (myBoat) {
