@@ -33,6 +33,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  interface LayerOption {
    name: string;
+   displayName?: string; // Optional display name for UI (defaults to name)
    on: boolean;
    layer: TileLayer<any> | Vector<any>;
    parent?: string; // Parent layer name for hierarchical layers
@@ -275,26 +276,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  });
 
- // Sync track layer visibility with boat/ais layer toggles
+ // Sync layer visibility when layer options change
  $effect(() => {
    // Read all layer states to create dependencies
-   const layerStates = mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
+   mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
    
    updateOnLayers();
-   
-   // Find boat and ais layer states
-   const boatLayer = layerStates.find(l => l.name === "boat");
-   const aisLayer = layerStates.find(l => l.name === "ais");
-   
-   // Toggle track layer visibility based on boat layer
-   if (mapGlobal.trackLayer) {
-     mapGlobal.trackLayer.setVisible(boatLayer?.on ?? true);
-   }
-   
-   // Toggle AIS track layer visibility based on ais layer
-   if (mapGlobal.aisTrackLayer) {
-     mapGlobal.aisTrackLayer.setVisible(aisLayer?.on ?? true);
-   }
  });
 
  let mapGlobal = $state({
@@ -742,7 +729,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      }),
    })
 
-   // Track layer for myBoat (visibility controlled by "boat" layer toggle via setVisible)
+   // Track layer for myBoat (child of boat layer)
    var trackLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
@@ -750,11 +737,10 @@ import type { BoatInfo } from './lib/BoatInfo';
      style: createTrackStyleFunction("myBoat"),
    });
 
-   // Store reference and add track layer directly to map (not in layerOptions UI)
+   // Store reference for style refreshing
    mapGlobal.trackLayer = trackLayer;
-   mapGlobal.onLayers.push(trackLayer);
 
-   // AIS Track layer (visibility controlled by "ais" layer toggle via setVisible)
+   // AIS Track layer (child of ais layer)
    var aisTrackLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.aisTrackFeatures,
@@ -762,9 +748,8 @@ import type { BoatInfo } from './lib/BoatInfo';
      style: createTrackStyleFunction(""),
    });
 
-   // Store reference and add AIS track layer directly to map (not in layerOptions UI)
+   // Store reference for style refreshing
    mapGlobal.aisTrackLayer = aisTrackLayer;
-   mapGlobal.onLayers.push(aisTrackLayer);
 
    // by boat setup (only if myBoat is provided)
    if (myBoat) {
@@ -789,6 +774,14 @@ import type { BoatInfo } from './lib/BoatInfo';
        name: "boat",
        on: true,
        layer : myBoatLayer,
+     });
+     
+     // Track layer - child of boat
+     mapGlobal.layerOptions.push({
+       name: "track",
+       on: true,
+       layer: trackLayer,
+       parent: "boat",
      });
      
      // Route layer - child of boat, so only added when myBoat exists
@@ -830,6 +823,15 @@ import type { BoatInfo } from './lib/BoatInfo';
      name: "ais",
      on: true,
      layer : aisLayer,
+   });
+   
+   // AIS Track layer - child of ais
+   mapGlobal.layerOptions.push({
+     name: "ais-track",
+     displayName: "track",
+     on: true,
+     layer: aisTrackLayer,
+     parent: "ais",
    });
 
  }
@@ -1164,7 +1166,7 @@ import type { BoatInfo } from './lib/BoatInfo';
           bind:checked={mapGlobal.layerOptions[idx].on}
           disabled={isParentOff}
         >
-        {l.name}
+        {l.displayName || l.name}
       </label>
     {/each}
   </div>
