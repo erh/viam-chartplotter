@@ -33,8 +33,10 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  interface LayerOption {
    name: string;
+   displayName?: string; // Optional display name for UI (defaults to name)
    on: boolean;
    layer: TileLayer<any> | Vector<any>;
+   parent?: string; // Parent layer name for hierarchical layers
  }
 
  let boatImage = "boat3.jpg";
@@ -262,18 +264,23 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (shouldClose) closePopup();
  });
 
- // Force track layer to re-render when visibility changes
+ // Force track layers to re-render when visibility changes
  $effect(() => {
    const _visible = visibleBoatsKey;
-   // Trigger style recalculation by notifying the source
-   const trackLayer = mapGlobal.layerOptions.find(l => l.name === "track");
-   if (trackLayer?.layer) {
-     trackLayer.layer.changed();
+   // Trigger style recalculation by notifying the track layers
+   if (mapGlobal.trackLayer) {
+     mapGlobal.trackLayer.getSource()?.changed();
+   }
+   if (mapGlobal.aisTrackLayer) {
+     mapGlobal.aisTrackLayer.getSource()?.changed();
    }
  });
 
+ // Sync layer visibility when layer options change
  $effect(() => {
-   mapGlobal.layerOptions.forEach((l) => l.on);
+   // Read all layer states to create dependencies
+   mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
+   
    updateOnLayers();
  });
 
@@ -284,10 +291,14 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    aisFeatures: new Collection<Feature<Geometry>>(),
    trackFeatures: new Collection<Feature<Geometry>>(),
+   aisTrackFeatures: new Collection<Feature<Geometry>>(),
    routeFeatures: new Collection<Feature<Geometry>>(),
    trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null as Feature<Point> | null,
    
+   // Track layer references for refreshing styles
+   trackLayer: null as Vector<any> | null,
+   aisTrackLayer: null as Vector<any> | null,
 
    layerOptions: [] as LayerOption[],
    onLayers: new Collection<BaseLayer>(),
@@ -300,6 +311,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastPosition: number[];
    lastPositions: Record<string, number[]>;
    trackFeatureIds: Record<string, boolean>;
+   aisTrackFeatureIds: Record<string, boolean>;
  } = {
    inPanMode: false,
    lastZoom: 0,
@@ -307,6 +319,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    lastPosition: [0,0],
    lastPositions: {},
    trackFeatureIds: {},
+   aisTrackFeatureIds: {},
  }
 
  function updateFromData() {
@@ -441,7 +454,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    const maxFeatures = 20000; // Hardcoded limit
    const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
    
-   // Remove oldest features if over limit
+   // Remove oldest features if over limit (my boat track)
    if (mapGlobal.trackFeatures.getLength() > maxFeatures) {
      const toRemove = mapGlobal.trackFeatures.getLength() - maxFeatures;
      for (let i = 0; i < toRemove; i++) {
@@ -453,24 +466,70 @@ import type { BoatInfo } from './lib/BoatInfo';
      }
    }
    
+   // Remove oldest features if over limit (AIS track)
+   if (mapGlobal.aisTrackFeatures.getLength() > maxFeatures) {
+     const toRemove = mapGlobal.aisTrackFeatures.getLength() - maxFeatures;
+     for (let i = 0; i < toRemove; i++) {
+       var x = mapGlobal.aisTrackFeatures.item(0);
+       if (x) {
+         delete mapInternalState.aisTrackFeatureIds[x.get("myid")];
+       }
+       mapGlobal.aisTrackFeatures.removeAt(0);
+     }
+   }
+   
    // Periodically clear trackFeatureIds to prevent dictionary memory leak
    const now = new Date();
    const timeSinceLastCheck = now.getTime() - mapGlobal.trackFeaturesLastCheck.getTime();
    if (timeSinceLastCheck > maxAge) {
      mapInternalState.trackFeatureIds = {};
+     mapInternalState.aisTrackFeatureIds = {};
      mapGlobal.trackFeaturesLastCheck = now;
    }
  }
 
+ // Helper to get track collection info based on boat ID
+ function getTrackCollections(boatId: string) {
+   const isAis = boatId !== "myBoat";
+   return {
+     featureIds: isAis ? mapInternalState.aisTrackFeatureIds : mapInternalState.trackFeatureIds,
+     features: isAis ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures,
+     type: isAis ? "ais-track" : "track"
+   };
+ }
+
+ // Factory to create track style functions (DRY for myBoat and AIS tracks)
+ function createTrackStyleFunction(defaultBoatId: string) {
+   return function(feature: any) {
+     const boatId = feature.get("boatId") || defaultBoatId;
+     if (!visibleBoats.has(boatId)) {
+       return new Style({}); // Hidden - return empty style
+     }
+     
+     const isGap = feature.get("isGap");
+     const opacity = isGap ? 0.33 : 1.0;
+     
+     return new Style({
+       stroke: new Stroke({
+         color: `rgba(0, 0, 255, ${opacity})`,
+         width: 2,
+         lineDash: isGap ? [2, 6] : undefined
+       }),
+     });
+   };
+ }
+
  function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false) {
-   if (mapInternalState.trackFeatureIds[id] == true) {
+   const { featureIds, features, type } = getTrackCollections(boatId);
+   
+   if (featureIds[id] == true) {
      return;
    }
 
-   mapInternalState.trackFeatureIds[id] = true;
+   featureIds[id] = true;
    
-   mapGlobal.trackFeatures.push(new Feature({
-     type: "track",
+   features.push(new Feature({
+     type: type,
      boatId: boatId,
      "myid" : id,
      geometry: g,
@@ -498,8 +557,10 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    const diff = pointDiff(lastPos, position);
    if (diff > .0000001) {
-     mapGlobal.trackFeatures.push(new Feature({
-       type: "track",
+     const { features, type } = getTrackCollections(boatId);
+     
+     features.push(new Feature({
+       type: type,
        boatId: boatId,
        geometry: new LineString([lastPos, position]),
      }));
@@ -668,38 +729,27 @@ import type { BoatInfo } from './lib/BoatInfo';
      }),
    })
 
-   // Track layer (added before boat layers so boats render on top)
+   // Track layer for myBoat (child of boat layer)
    var trackLayer = new Vector({
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
      }),
-     style: function(feature) {
-       const boatId = feature.get("boatId") || "myBoat";
-       if (!visibleBoats.has(boatId)) {
-         return new Style({}); // Hidden - return empty style
-       }
-       
-       const isGap = feature.get("isGap");
-       const opacity = isGap ? 0.33 : 1.0;
-       
-       return new Style({
-         stroke: new Stroke({
-           color: `rgba(0, 0, 255, ${opacity})`,
-           width: 2,
-           lineDash: isGap ? [2, 6] : undefined
-         }),
-         fill: new Fill({
-           color: "rgba(0, 255, 0, 0.1)"
-         })
-       });
-     },
+     style: createTrackStyleFunction("myBoat"),
    });
 
-   mapGlobal.layerOptions.push({
-     name: "track",
-     on: true,
-     layer : trackLayer,
+   // Store reference for style refreshing
+   mapGlobal.trackLayer = trackLayer;
+
+   // AIS Track layer (child of ais layer)
+   var aisTrackLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.aisTrackFeatures,
+     }),
+     style: createTrackStyleFunction(""),
    });
+
+   // Store reference for style refreshing
+   mapGlobal.aisTrackLayer = aisTrackLayer;
 
    // by boat setup (only if myBoat is provided)
    if (myBoat) {
@@ -725,6 +775,37 @@ import type { BoatInfo } from './lib/BoatInfo';
        on: true,
        layer : myBoatLayer,
      });
+     
+     // Track layer - child of boat
+     mapGlobal.layerOptions.push({
+       name: "track",
+       on: true,
+       layer: trackLayer,
+       parent: "boat",
+     });
+     
+     // Route layer - child of boat, so only added when myBoat exists
+     var routeLayer = new Vector({
+       source: new VectorSource({
+         features: mapGlobal.routeFeatures,
+       }),
+       style: new Style({
+         stroke: new Stroke({
+           color: "green",
+           width: 3
+         }),
+         fill: new Fill({
+           color: "rgba(0, 255, 0, 0.1)"
+         })
+       }),
+     });
+
+     mapGlobal.layerOptions.push({
+       name: "route",
+       on: true,
+       layer : routeLayer,
+       parent: "boat", // Route is a child of boat layer
+     });
    }
    
    var aisLayer = new Vector({
@@ -744,25 +825,13 @@ import type { BoatInfo } from './lib/BoatInfo';
      layer : aisLayer,
    });
    
-   var routeLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.routeFeatures,
-     }),
-     style: new Style({
-       stroke: new Stroke({
-         color: "green",
-         width: 3
-       }),
-       fill: new Fill({
-         color: "rgba(0, 255, 0, 0.1)"
-       })
-     }),
-   });
-
+   // AIS Track layer - child of ais
    mapGlobal.layerOptions.push({
-     name: "route",
+     name: "ais-track",
+     displayName: "track",
      on: true,
-     layer : routeLayer,
+     layer: aisTrackLayer,
+     parent: "ais",
    });
 
  }
@@ -793,7 +862,15 @@ import type { BoatInfo } from './lib/BoatInfo';
  function updateOnLayers() {
    for( var l of mapGlobal.layerOptions) {
      var idx = findOnLayerIndexOfName(l.name);
-     if (l.on) {
+     
+     // Check if parent layer exists and is off
+     const parentLayer = l.parent ? mapGlobal.layerOptions.find(p => p.name === l.parent) : null;
+     const isParentOff = parentLayer && !parentLayer.on;
+     
+     // Layer should be visible only if it's on AND (has no parent OR parent is on)
+     const shouldBeVisible = l.on && !isParentOff;
+     
+     if (shouldBeVisible) {
        if ( idx < 0 ) {
          // Insert tile layers before vector layers to ensure proper z-ordering
          // Vector layers (boat, ais, track, route) should always be on top
@@ -1081,9 +1158,15 @@ import type { BoatInfo } from './lib/BoatInfo';
       </div>
     {/if}
     {#each mapGlobal.layerOptions as l, idx}
-      <label>
-        <input type="checkbox" bind:checked={mapGlobal.layerOptions[idx].on}>
-        {l.name}
+      {@const parentLayer = l.parent ? mapGlobal.layerOptions.find(p => p.name === l.parent) : null}
+      {@const isParentOff = parentLayer && !parentLayer.on}
+      <label class:child-layer={l.parent} class:disabled={isParentOff}>
+        <input 
+          type="checkbox" 
+          bind:checked={mapGlobal.layerOptions[idx].on}
+          disabled={isParentOff}
+        >
+        {l.displayName || l.name}
       </label>
     {/each}
   </div>
@@ -1324,6 +1407,15 @@ import type { BoatInfo } from './lib/BoatInfo';
     padding: 3px 0;
     cursor: pointer;
     white-space: nowrap;
+  }
+  
+  .layer-controls > label.child-layer {
+    padding-left: 20px;
+  }
+  
+  .layer-controls > label.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .layer-controls > label:hover {
