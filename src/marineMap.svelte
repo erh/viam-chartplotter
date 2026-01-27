@@ -501,11 +501,39 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
 
+ // Helper to get track collection info based on boat ID
+ function getTrackCollections(boatId: string) {
+   const isAis = boatId !== "myBoat";
+   return {
+     featureIds: isAis ? mapInternalState.aisTrackFeatureIds : mapInternalState.trackFeatureIds,
+     features: isAis ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures,
+     type: isAis ? "ais-track" : "track"
+   };
+ }
+
+ // Factory to create track style functions (DRY for myBoat and AIS tracks)
+ function createTrackStyleFunction(defaultBoatId: string) {
+   return function(feature: any) {
+     const boatId = feature.get("boatId") || defaultBoatId;
+     if (!visibleBoats.has(boatId)) {
+       return new Style({}); // Hidden - return empty style
+     }
+     
+     const isGap = feature.get("isGap");
+     const opacity = isGap ? 0.33 : 1.0;
+     
+     return new Style({
+       stroke: new Stroke({
+         color: `rgba(0, 0, 255, ${opacity})`,
+         width: 2,
+         lineDash: isGap ? [2, 6] : undefined
+       }),
+     });
+   };
+ }
+
  function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false) {
-   // Route to appropriate feature collection based on boatId
-   const isAisTrack = boatId !== "myBoat";
-   const featureIds = isAisTrack ? mapInternalState.aisTrackFeatureIds : mapInternalState.trackFeatureIds;
-   const features = isAisTrack ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures;
+   const { featureIds, features, type } = getTrackCollections(boatId);
    
    if (featureIds[id] == true) {
      return;
@@ -514,7 +542,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    featureIds[id] = true;
    
    features.push(new Feature({
-     type: isAisTrack ? "ais-track" : "track",
+     type: type,
      boatId: boatId,
      "myid" : id,
      geometry: g,
@@ -542,12 +570,10 @@ import type { BoatInfo } from './lib/BoatInfo';
    
    const diff = pointDiff(lastPos, position);
    if (diff > .0000001) {
-     // Route to appropriate feature collection based on boatId
-     const isAisTrack = boatId !== "myBoat";
-     const features = isAisTrack ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures;
+     const { features, type } = getTrackCollections(boatId);
      
      features.push(new Feature({
-       type: isAisTrack ? "ais-track" : "track",
+       type: type,
        boatId: boatId,
        geometry: new LineString([lastPos, position]),
      }));
@@ -721,26 +747,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      source: new VectorSource({
        features: mapGlobal.trackFeatures,
      }),
-     style: function(feature) {
-       const boatId = feature.get("boatId") || "myBoat";
-       if (!visibleBoats.has(boatId)) {
-         return new Style({}); // Hidden - return empty style
-       }
-       
-       const isGap = feature.get("isGap");
-       const opacity = isGap ? 0.33 : 1.0;
-       
-       return new Style({
-         stroke: new Stroke({
-           color: `rgba(0, 0, 255, ${opacity})`,
-           width: 2,
-           lineDash: isGap ? [2, 6] : undefined
-         }),
-         fill: new Fill({
-           color: "rgba(0, 255, 0, 0.1)"
-         })
-       });
-     },
+     style: createTrackStyleFunction("myBoat"),
    });
 
    // Store reference and add track layer directly to map (not in layerOptions UI)
@@ -752,26 +759,7 @@ import type { BoatInfo } from './lib/BoatInfo';
      source: new VectorSource({
        features: mapGlobal.aisTrackFeatures,
      }),
-     style: function(feature) {
-       const boatId = feature.get("boatId") || "";
-       if (!visibleBoats.has(boatId)) {
-         return new Style({}); // Hidden - return empty style
-       }
-       
-       const isGap = feature.get("isGap");
-       const opacity = isGap ? 0.33 : 1.0;
-       
-       return new Style({
-         stroke: new Stroke({
-           color: `rgba(0, 0, 255, ${opacity})`,
-           width: 2,
-           lineDash: isGap ? [2, 6] : undefined
-         }),
-         fill: new Fill({
-           color: "rgba(0, 0, 255, 0.1)"
-         })
-       });
-     },
+     style: createTrackStyleFunction(""),
    });
 
    // Store reference and add AIS track layer directly to map (not in layerOptions UI)

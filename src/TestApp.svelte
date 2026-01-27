@@ -41,18 +41,6 @@
     return track;
   }
 
-  // Simple two-point track generator
-  function generateTrack(
-    startLat: number, startLng: number,
-    endLat: number, endLng: number,
-    points: number = 100
-  ): { lat: number; lng: number }[] {
-    return generateTrackWithWaypoints([
-      { lat: startLat, lng: startLng },
-      { lat: endLat, lng: endLng }
-    ], points);
-  }
-
   // =============================================================
   // MY BOAT - Simulates what viam-chartplotter's App.svelte does:
   // A single connected machine with GPS, sensors, and live tracking
