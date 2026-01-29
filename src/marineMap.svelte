@@ -63,6 +63,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
  let boatsExpanded = $state(false);
  let mapLoaded = $state(false);
  let showDetections = $state(false);
+ let boatSearchTerm = $state('');
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
  // When externalVisibilityControl is true, start with empty set (parent will control)
@@ -1376,15 +1377,11 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
   <div class="boats-panel">
-    <div class="boats-controls">
-      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
-      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
-    </div>
     <div class="boats-list">
       {#if myBoat}
       <label class="boat-item">
-        <input 
-          type="checkbox" 
+        <input
+          type="checkbox"
           checked={visibleBoats.has('myBoat')}
           onchange={() => toggleBoatVisibility('myBoat')}
         >
@@ -1392,12 +1389,13 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
       </label>
       {/if}
       {#if boats}
-        {@const onlineBoats = boats.filter(b => b.mmsi && b.isOnline !== false)}
-        {@const offlineBoats = boats.filter(b => b.mmsi && b.isOnline === false)}
+        {@const searchLower = boatSearchTerm.toLowerCase()}
+        {@const onlineBoats = boats.filter(b => b.mmsi && b.isOnline !== false && (!boatSearchTerm.trim() || b.name.toLowerCase().includes(searchLower) || b.mmsi?.toLowerCase().includes(searchLower)))}
+        {@const offlineBoats = boats.filter(b => b.mmsi && b.isOnline === false && (!boatSearchTerm.trim() || b.name.toLowerCase().includes(searchLower) || b.mmsi?.toLowerCase().includes(searchLower)))}
         {#each onlineBoats as boat}
           <label class="boat-item">
-            <input 
-              type="checkbox" 
+            <input
+              type="checkbox"
               checked={visibleBoats.has(boat.mmsi!)}
               onchange={() => toggleBoatVisibility(boat.mmsi!)}
             >
@@ -1408,8 +1406,8 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
           <div class="boats-separator">Offline boats:</div>
           {#each offlineBoats as boat}
             <label class="boat-item offline">
-              <input 
-                type="checkbox" 
+              <input
+                type="checkbox"
                 checked={visibleBoats.has(boat.mmsi!)}
                 onchange={() => toggleBoatVisibility(boat.mmsi!)}
               >
@@ -1419,6 +1417,16 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
         {/if}
       {/if}
     </div>
+    <div class="boats-controls">
+      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
+      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
+    </div>
+    <input
+      type="text"
+      class="boat-search-input"
+      placeholder="Search boats..."
+      bind:value={boatSearchTerm}
+    />
     <button class="fit-all-btn" onclick={fitToVisibleBoats}>
       Fit All Visible
     </button>
@@ -1645,8 +1653,9 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   .boats-controls {
     display: flex;
     gap: 6px;
-    padding: 6px 6px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    padding: 8px 14px;
+    border-top: 1px solid #ddd;
+    border-bottom: 1px solid #ddd;
   }
 
   .select-btn {
@@ -1686,7 +1695,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     border: 1px solid #ccc;
     display: none;
-    max-height: 280px;
+    max-height: 520px;
     width: 200px;
     flex-direction: column;
   }
@@ -1695,14 +1704,30 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
     display: flex;
   }
 
+  .boat-search-input {
+    width: calc(100% - 28px);
+    margin: 8px 14px 0;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    outline: none;
+    background: white;
+    box-sizing: border-box;
+  }
+
+  .boat-search-input:focus {
+    border-color: #0066cc;
+    box-shadow: 0 0 0 1px rgba(0, 102, 204, 0.2);
+  }
+
   .boats-list {
     flex: 1;
     overflow-y: auto;
     padding: 6px 14px;
-    padding-bottom: 0;
-    max-height: 200px;
+    max-height: 380px;
     -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-    border-bottom: 1px solid #ddd;
   }
 
   .boat-item {
@@ -1752,7 +1777,8 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
 
   .fit-all-btn {
     padding: 6px 12px;
-    margin: 10px 14px;
+    margin: 8px 14px;
+    margin-top: 16px;
     background: #0066cc;
     color: white;
     border: none;
@@ -1762,6 +1788,17 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
     font-family: system-ui, -apple-system, sans-serif;
     flex-shrink: 0;
     -webkit-tap-highlight-color: transparent;
+    position: relative;
+  }
+
+  .fit-all-btn::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: -14px;
+    right: -14px;
+    height: 1px;
+    background: #ddd;
   }
 
   .fit-all-btn:hover {
