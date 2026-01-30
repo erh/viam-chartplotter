@@ -823,7 +823,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    mapGlobal.layerOptions.push({
      name: "ais",
-     on: defaultAisVisible,
+     on: true,
      layer : aisLayer,
    });
    
