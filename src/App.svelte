@@ -1072,7 +1072,7 @@ import type { BoatInfo } from './lib/BoatInfo';
       distanceToWaypoint: globalData.route["Distance to Waypoint"],
       waypointClosingVelocity: globalData.route["Waypoint Closing Velocity"]
     } : undefined
-  }} zoomModifier={globalConfig.zoomModifier} boats={globalData.aisBoats} positionHistorical={globalData.posHistory}>
+  }} zoomModifier={globalConfig.zoomModifier} boats={globalData.aisBoats} positionHistorical={globalData.posHistory} defaultAisVisible={false}>
   </MarineMap>
     
   
