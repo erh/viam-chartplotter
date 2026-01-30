@@ -7,7 +7,7 @@ export interface PositionPoint {
 export interface Detection {
   id: string;
   timestamp: Date;
-  boatId?: string;
+  boatId: string;
   metadata?: Record<string, any>;
 }
 

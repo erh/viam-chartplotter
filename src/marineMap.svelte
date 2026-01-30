@@ -578,28 +578,21 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    const features: Feature<Point>[] = [];
 
    detections.forEach((detection) => {
-     let position: { lat: number; lng: number } | null = null;
+    const history = allHistories[detection.boatId];
+    if (!history) return;
+    
+    const position = getPositionAtTime(history, detection.timestamp);
+    if (!position) return;
+    
+    const feature = new Feature({
+      type: 'detection',
+      detectionId: detection.id,
+      timestamp: detection.timestamp,
+      detectionData: detection,
+      geometry: new Point([position.lng, position.lat]),
+    });
 
-     if (detection.boatId && allHistories[detection.boatId]) {
-       position = getPositionAtTime(allHistories[detection.boatId], detection.timestamp);
-     } else {
-       for (const boatId of Object.keys(allHistories)) {
-         position = getPositionAtTime(allHistories[boatId], detection.timestamp);
-         if (position) break;
-       }
-     }
-
-     if (position) {
-       const feature = new Feature({
-         type: 'detection',
-         detectionId: detection.id,
-         timestamp: detection.timestamp,
-         detectionData: detection,
-         geometry: new Point([position.lng, position.lat]),
-       });
-
-       features.push(feature);
-     }
+    features.push(feature);
    });
 
    source.addFeatures(features);
