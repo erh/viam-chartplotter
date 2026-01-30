@@ -92,9 +92,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    }
  });
 
- // Effect to notify parent when detections checkbox is toggled
  $effect(() => {
-   // Pass the current boat's partId so the parent can filter by boat
    const boatPartId = popupState.content.partId || popupState.content.mmsi;
    onShowDetections?.(showDetections, boatPartId);
  });
@@ -220,21 +218,13 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
-  /** Callback when detections checkbox is toggled */
   onShowDetections?: (enabled: boolean, boatPartId?: string) => void;
-  /** Callback when a boat popup is opened */
   onBoatPopupOpen?: (boatPartId?: string) => void;
-  /** Detections to display on the map */
   detections?: Detection[];
-  /** Label for detections checkbox in popup (default: "Show Detections") */
   detectionsLabel?: string;
-  /** Internal layer name for detections (default: "detections") */
   detectionsLayerName?: string;
-  /** Display name for detections layer in layer controls (default: "detections") */
   detectionsLayerDisplayName?: string;
-  /** Loading state for detections (default: false) */
   detectionsLoading?: boolean;
-  /** Callback when a detection marker is clicked */
   onDetectionClick?: (detection: Detection) => void;
 } = $props();
 
@@ -310,9 +300,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    updateOnLayers();
  });
 
- // Render detections when the prop changes
  $effect(() => {
-   // Only render if map is loaded and we have detections
    if (mapLoaded) {
      renderDetections(detections);
    }
@@ -533,11 +521,10 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    };
  }
 
- // Create style for detection markers
  function createDetectionStyle(): Style {
    return new Style({
      image: new RegularShape({
-       fill: new Fill({ color: 'rgba(255, 255, 255, 0)' }), // Transparent fill for click detection
+       fill: new Fill({ color: 'rgba(255, 255, 255, 0)' }),
        stroke: new Stroke({ color: 'white', width: 2 }),
        points: 3,
        radius: 10,
@@ -547,14 +534,12 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    });
  }
 
- // Find the interpolated position on a track at a given timestamp
  function interpolatePositionAtTime(
    history: PositionPoint[],
    targetTime: Date
  ): { lat: number; lng: number } | null {
    if (!history || history.length === 0) return null;
 
-   // Filter points that have timestamps
    const timedPoints = history.filter((p) => p.ts !== undefined);
    if (timedPoints.length === 0) {
      console.warn(`No timed points in history of ${history.length} points`);
@@ -563,7 +548,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
 
    const targetMs = targetTime.getTime();
 
-   // Find the two points that bracket the target time
    let before: PositionPoint | null = null;
    let after: PositionPoint | null = null;
 
@@ -579,28 +563,23 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      }
    }
 
-   // If target is before all points, use the first point
    if (before === null && after !== null) {
      return { lat: after.lat, lng: after.lng };
    }
 
-   // If target is after all points, use the last point
    if (after === null && before !== null) {
      return { lat: before.lat, lng: before.lng };
    }
 
-   // Both null? shouldn't happen
    if (before === null || after === null) {
      console.error(`Failed to find bracketing points for ${targetTime.toISOString()}`);
      return null;
    }
 
-   // If exact match (both same point)
    if (before === after) {
      return { lat: before.lat, lng: before.lng };
    }
 
-   // Interpolate between the two points
    const beforeMs = before.ts!.getTime();
    const afterMs = after.ts!.getTime();
    const fraction = (targetMs - beforeMs) / (afterMs - beforeMs);
@@ -611,9 +590,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    return { lat, lng };
  }
 
- // Render detection markers on the map
  function renderDetections(detections: Detection[] | undefined) {
-   // Get the layer's source directly to bypass Svelte proxy issues
    const detectionLayer = findLayerByName(detectionsLayerName)?.layer as Vector<any> | undefined;
    const source = detectionLayer?.getSource();
 
@@ -622,20 +599,16 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      return;
    }
 
-   // Clear existing features
    source.clear();
 
    if (!detections || detections.length === 0) return;
 
-   // Collect all position histories from all boats (use plain object to avoid Svelte proxy issues)
    const allHistories: Record<string, PositionPoint[]> = {};
 
-   // Add my boat's history
    if (positionHistorical && positionHistorical.length > 0) {
      allHistories['myBoat'] = positionHistorical;
    }
 
-   // Add each AIS boat's history
    boats?.forEach((boat) => {
      if (boat.positionHistory && boat.positionHistory.length > 0) {
        const key = boat.mmsi || boat.partId || 'unknown';
@@ -643,18 +616,14 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      }
    });
 
-   // Collect all features first, then add in batch
    const features: Feature<Point>[] = [];
 
-   // For each detection, find its position and create a marker
    detections.forEach((detection) => {
      let position: { lat: number; lng: number } | null = null;
 
-     // If detection has a specific boat ID, use that boat's history
      if (detection.boatId && allHistories[detection.boatId]) {
        position = interpolatePositionAtTime(allHistories[detection.boatId], detection.timestamp);
      } else {
-       // Try all boat histories and use the first one that returns a valid position
        for (const boatId of Object.keys(allHistories)) {
          position = interpolatePositionAtTime(allHistories[boatId], detection.timestamp);
          if (position) break;
@@ -666,7 +635,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
          type: 'detection',
          detectionId: detection.id,
          timestamp: detection.timestamp,
-         detectionData: detection, // Store full detection object for click handling
+         detectionData: detection,
          geometry: new Point([position.lng, position.lat]),
        });
 
@@ -674,7 +643,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      }
    });
 
-   // Add all features at once to the source
    source.addFeatures(features);
  }
 
@@ -1014,7 +982,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      parent: "ais",
    });
 
-   // Detections layer
    var detectionLayerVar = new Vector({
      source: new VectorSource({
        features: mapGlobal.detectionFeatures,
@@ -1140,7 +1107,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    });
    mapGlobal.map.addOverlay(popupState.overlay);
 
-   // Click handler for boat features and detections
    mapClickHandler = function (evt: any) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
@@ -1156,16 +1122,14 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      if (feature) {
        const type = feature.get("type");
 
-       // Handle detection clicks
        if (type === "detection") {
          const detectionData = feature.get("detectionData");
          if (detectionData && onDetectionClick) {
            onDetectionClick(detectionData);
          }
-         return; // Don't show popup for detections
+         return;
        }
 
-       // Handle boat clicks
        const geom = feature.getGeometry() as Point | undefined;
        if (!geom) return;
        const coords = geom.getCoordinates();
@@ -1202,7 +1166,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
        popupState.visible = true;
        popupState.overlay?.setPosition(coords);
 
-       // Notify parent that popup opened for this boat
        const boatPartId = popupState.content.partId || popupState.content.mmsi;
        onBoatPopupOpen?.(boatPartId);
      } else {
@@ -1211,7 +1174,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    };
    mapGlobal.map.on("click", mapClickHandler);
 
-   // Change cursor on hover over boats and detections
+   // Change cursor on hover over boats
    mapPointerHandler = function (evt: any) {
      const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
