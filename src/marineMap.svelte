@@ -534,60 +534,19 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    });
  }
 
- function interpolatePositionAtTime(
+ function getPositionAtTime(
    history: PositionPoint[],
    targetTime: Date
  ): { lat: number; lng: number } | null {
-   if (!history || history.length === 0) return null;
-
    const timedPoints = history.filter((p) => p.ts !== undefined);
-   if (timedPoints.length === 0) {
-     console.warn(`No timed points in history of ${history.length} points`);
-     return null;
-   }
+   if (timedPoints.length === 0) return null;
 
    const targetMs = targetTime.getTime();
+   const closest = timedPoints.reduce((a, b) =>
+     Math.abs(a.ts.getTime() - targetMs) <= Math.abs(b.ts.getTime() - targetMs) ? a : b
+   );
 
-   let before: PositionPoint | null = null;
-   let after: PositionPoint | null = null;
-
-   for (let i = 0; i < timedPoints.length; i++) {
-     const pointTime = timedPoints[i].ts!.getTime();
-
-     if (pointTime <= targetMs) {
-       before = timedPoints[i];
-     }
-     if (pointTime >= targetMs && after === null) {
-       after = timedPoints[i];
-       break;
-     }
-   }
-
-   if (before === null && after !== null) {
-     return { lat: after.lat, lng: after.lng };
-   }
-
-   if (after === null && before !== null) {
-     return { lat: before.lat, lng: before.lng };
-   }
-
-   if (before === null || after === null) {
-     console.error(`Failed to find bracketing points for ${targetTime.toISOString()}`);
-     return null;
-   }
-
-   if (before === after) {
-     return { lat: before.lat, lng: before.lng };
-   }
-
-   const beforeMs = before.ts!.getTime();
-   const afterMs = after.ts!.getTime();
-   const fraction = (targetMs - beforeMs) / (afterMs - beforeMs);
-
-   const lat = before.lat + (after.lat - before.lat) * fraction;
-   const lng = before.lng + (after.lng - before.lng) * fraction;
-
-   return { lat, lng };
+   return { lat: closest.lat, lng: closest.lng };
  }
 
  function renderDetections(detections: Detection[] | undefined) {
@@ -622,10 +581,10 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
      let position: { lat: number; lng: number } | null = null;
 
      if (detection.boatId && allHistories[detection.boatId]) {
-       position = interpolatePositionAtTime(allHistories[detection.boatId], detection.timestamp);
+       position = getPositionAtTime(allHistories[detection.boatId], detection.timestamp);
      } else {
        for (const boatId of Object.keys(allHistories)) {
-         position = interpolatePositionAtTime(allHistories[boatId], detection.timestamp);
+         position = getPositionAtTime(allHistories[boatId], detection.timestamp);
          if (position) break;
        }
      }
@@ -1283,8 +1242,8 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
        }
      }
    };
- });
 
+ });
 </script>
 
 <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded} class:map-loaded={mapLoaded}>
