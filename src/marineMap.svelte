@@ -201,7 +201,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, detections, detectionsLabel = "Show Detections", detectionsLayerName = "detections", detectionsLayerDisplayName = "detections" }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, detectionsLabel = "Show Detections", detectionsLayerName = "detections", detectionsLayerDisplayName = "detections", detectionsLoading = false, onDetectionClick }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -222,6 +222,8 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
   /** Callback when detections checkbox is toggled */
   onShowDetections?: (enabled: boolean, boatPartId?: string) => void;
+  /** Callback when a boat popup is opened */
+  onBoatPopupOpen?: (boatPartId?: string) => void;
   /** Detections to display on the map */
   detections?: Detection[];
   /** Label for detections checkbox in popup (default: "Show Detections") */
@@ -230,6 +232,10 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   detectionsLayerName?: string;
   /** Display name for detections layer in layer controls (default: "detections") */
   detectionsLayerDisplayName?: string;
+  /** Loading state for detections (default: false) */
+  detectionsLoading?: boolean;
+  /** Callback when a detection marker is clicked */
+  onDetectionClick?: (detection: Detection) => void;
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -531,6 +537,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
  function createDetectionStyle(): Style {
    return new Style({
      image: new RegularShape({
+       fill: new Fill({ color: 'rgba(255, 255, 255, 0)' }), // Transparent fill for click detection
        stroke: new Stroke({ color: 'white', width: 2 }),
        points: 3,
        radius: 10,
@@ -659,6 +666,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
          type: 'detection',
          detectionId: detection.id,
          timestamp: detection.timestamp,
+         detectionData: detection, // Store full detection object for click handling
          geometry: new Point([position.lng, position.lat]),
        });
 
@@ -1132,13 +1140,13 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
    });
    mapGlobal.map.addOverlay(popupState.overlay);
 
-   // Click handler for boat features
+   // Click handler for boat features and detections
    mapClickHandler = function (evt: any) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
          const type = f.get("type");
-         if (type === "ais" || type === "geoMarker") {
+         if (type === "ais" || type === "geoMarker" || type === "detection") {
            return f;
          }
          return null;
@@ -1147,6 +1155,17 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
 
      if (feature) {
        const type = feature.get("type");
+
+       // Handle detection clicks
+       if (type === "detection") {
+         const detectionData = feature.get("detectionData");
+         if (detectionData && onDetectionClick) {
+           onDetectionClick(detectionData);
+         }
+         return; // Don't show popup for detections
+       }
+
+       // Handle boat clicks
        const geom = feature.getGeometry() as Point | undefined;
        if (!geom) return;
        const coords = geom.getCoordinates();
@@ -1182,13 +1201,17 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
        }
        popupState.visible = true;
        popupState.overlay?.setPosition(coords);
+
+       // Notify parent that popup opened for this boat
+       const boatPartId = popupState.content.partId || popupState.content.mmsi;
+       onBoatPopupOpen?.(boatPartId);
      } else {
        closePopup();
      }
    };
    mapGlobal.map.on("click", mapClickHandler);
 
-   // Change cursor on hover over boats
+   // Change cursor on hover over boats and detections
    mapPointerHandler = function (evt: any) {
      const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
@@ -1197,7 +1220,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
              .getSource()
              ?.getFeatures?.()
              ?.some?.(
-               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker"
+               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker" || f.get("type") === "detection"
              ) ?? false
          );
        },
@@ -1311,7 +1334,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
       <h3 class="popup-title">{popupState.content.name}</h3>
     </div>
     <div class="popup-columns" class:single-column={!popupState.content.isOnline}>
-      {#if boatDetailSlot && popupState.content.host && popupState.content.partId && popupState.content.isOnline}
+      {#if boatDetailSlot && popupState.content.host && popupState.content.partId}
         <div class="popup-detail-slot">
           {@render boatDetailSlot({ host: popupState.content.host, partId: popupState.content.partId, name: popupState.content.name })}
         </div>
@@ -1338,6 +1361,9 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
     <label class="popup-checkbox">
       <input type="checkbox" bind:checked={showDetections} />
       {detectionsLabel}
+      {#if detectionsLoading}
+        <span class="loading-spinner"></span>
+      {/if}
     </label>
     <div class="popup-arrow"></div>
   </div>
@@ -1508,7 +1534,7 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   }
 
   .popup-columns.single-column {
-    gap: 0;
+    gap: 12px;
   }
 
   .popup-detail-slot {
@@ -1574,6 +1600,31 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
     border-left: 5px solid transparent;
     border-right: 5px solid transparent;
     border-top: 5px solid rgba(15, 23, 42, 0.95);
+  }
+
+  .popup-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    margin-top: 6px;
+    cursor: pointer;
+  }
+
+  .loading-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: rgba(255, 255, 255, 0.9);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* Layer controls panel - hidden by default */
