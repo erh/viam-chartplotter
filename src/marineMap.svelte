@@ -191,7 +191,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, onReady, boatDetailSlot, fitBoundsPadding }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -201,6 +201,8 @@ import type { BoatInfo } from './lib/BoatInfo';
   externalVisibilityControl?: boolean;
   /** When false, offline boats are hidden from the boats panel (default: true) */
   showOfflineBoatsInPanel?: boolean;
+  /** Controls default visibility of AIS layer (default: true) */
+  defaultAisVisible?: boolean;
   onReady?: (api: { 
     fitToVisibleBoats: () => void;
     selectAllBoats: () => void;
@@ -821,7 +823,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    mapGlobal.layerOptions.push({
      name: "ais",
-     on: true,
+     on: defaultAisVisible,
      layer : aisLayer,
    });
    
@@ -829,7 +831,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapGlobal.layerOptions.push({
      name: "ais-track",
      displayName: "track",
-     on: true,
+     on: defaultAisVisible,
      layer: aisTrackLayer,
      parent: "ais",
    });
