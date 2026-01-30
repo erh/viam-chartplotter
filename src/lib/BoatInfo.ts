@@ -1,3 +1,18 @@
+/** A single position point with optional timestamp */
+export interface PositionPoint {
+  lat: number;
+  lng: number;
+  ts?: Date; // Timestamp for this position
+}
+
+/** A detection event to be displayed on the map */
+export interface Detection {
+  id: string; // Unique identifier for this detection
+  timestamp: Date; // When the detection occurred
+  boatId?: string; // The boat/partId associated with this detection
+  metadata?: Record<string, any>; // Application-specific metadata
+}
+
 export interface BoatInfo {
   name: string;
   location: [number, number]; // [latitude, longitude]
@@ -13,5 +28,5 @@ export interface BoatInfo {
     distanceToWaypoint?: number;
     waypointClosingVelocity?: number;
   };
-  positionHistory?: { lat: number; lng: number }[]; // Historical track positions
+  positionHistory?: PositionPoint[]; // Historical track positions with optional timestamps
 }
