@@ -1318,6 +1318,10 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
   <div class="boats-panel">
+    <div class="boats-controls">
+      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
+      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
+    </div>
     <div class="boats-list">
       {#if myBoat}
       <label class="boat-item">
@@ -1357,10 +1361,6 @@ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
           {/each}
         {/if}
       {/if}
-    </div>
-    <div class="boats-controls">
-      <button class="select-btn" onclick={selectAllBoats} title="Select all boats">Select all</button>
-      <button class="select-btn" onclick={deselectAllBoats} title="Deselect all boats">Deselect all</button>
     </div>
     <input
       type="text"
