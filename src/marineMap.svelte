@@ -1,7 +1,7 @@
 <script lang="ts">
 
  import { onMount } from 'svelte';
-import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
+ import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
  import RegularShape from 'ol/style/RegularShape.js';
 
  import Collection from 'ol/Collection.js';
