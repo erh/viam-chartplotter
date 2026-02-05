@@ -239,7 +239,6 @@
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
   onBoatPopupOpen?: (boatPartId?: string) => void;
-  /** Configuration for detection markers on the map */
   detectionConfig?: DetectionConfig;
 } = $props();
 
@@ -296,7 +295,6 @@
    if (shouldClose) closePopup();
  });
 
- // Force track layers to re-render when effective visibility changes (includes search filter)
  $effect(() => {
    const _visible = effectiveVisibleKey;
    // Trigger style recalculation by notifying the track layers
