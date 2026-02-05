@@ -1,3 +1,24 @@
+export interface PositionPoint {
+  lat: number;
+  lng: number;
+  ts: Date;
+}
+
+export interface Detection {
+  id: string;
+  timestamp: Date;
+  boatId: string;
+  metadata?: Record<string, any>;
+}
+
+export interface DetectionConfig {
+  detections?: Detection[];
+  enabled?: boolean;
+  loading?: boolean;
+  onToggle?: (enabled: boolean, boatPartId?: string) => void;
+  onClick?: (detection: Detection) => void;
+}
+
 export interface BoatInfo {
   name: string;
   location: [number, number]; // [latitude, longitude]
@@ -13,5 +34,5 @@ export interface BoatInfo {
     distanceToWaypoint?: number;
     waypointClosingVelocity?: number;
   };
-  positionHistory?: { lat: number; lng: number }[]; // Historical track positions
+  positionHistory?: PositionPoint[];
 }

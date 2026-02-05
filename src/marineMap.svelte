@@ -1,8 +1,9 @@
 <script lang="ts">
 
  import { onMount } from 'svelte';
-import type { BoatInfo } from './lib/BoatInfo';
- 
+ import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from './lib/BoatInfo';
+ import RegularShape from 'ol/style/RegularShape.js';
+
  import Collection from 'ol/Collection.js';
  import {useGeographic} from 'ol/proj.js';
  import {boundingExtent} from 'ol/extent.js';
@@ -61,10 +62,31 @@ import type { BoatInfo } from './lib/BoatInfo';
  let layersExpanded = $state(false);
  let boatsExpanded = $state(false);
  let mapLoaded = $state(false);
+ let showDetections = $state(false);
+ let boatSearchTerm = $state('');
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
  // When externalVisibilityControl is true, start with empty set (parent will control)
  let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
+
+ // Effective visible boats: filters visibleBoats by search term
+ // Boats not matching search are hidden on map AND their tracking layers
+ const effectiveVisibleBoats = $derived.by(() => {
+   if (!boatSearchTerm.trim()) return visibleBoats;
+   const searchLower = boatSearchTerm.toLowerCase();
+   const filtered = new Set<string>();
+   visibleBoats.forEach(id => {
+     if (id === 'myBoat') {
+       filtered.add(id); // Always show myBoat if checked
+       return;
+     }
+     const boat = boats?.find(b => b.mmsi === id);
+     if (boat && (boat.name.toLowerCase().includes(searchLower) || boat.mmsi?.toLowerCase().includes(searchLower))) {
+       filtered.add(id);
+     }
+   });
+   return filtered;
+ });
 
  // Initialize visibleBoats when boats prop changes (only when NOT using external control)
  // Use plain JS variable for tracking to avoid creating effect dependencies
@@ -87,6 +109,11 @@ import type { BoatInfo } from './lib/BoatInfo';
      lastBoatsLength = currentLength; // Plain JS variable, won't re-trigger
      visibleBoats = new Set(visibleBoats); // Trigger reactivity
    }
+ });
+
+ $effect(() => {
+   const boatPartId = popupState.content.partId || popupState.content.mmsi;
+   detectionConfig?.onToggle?.(showDetections, boatPartId);
  });
 
  function toggleBoatVisibility(id: string) {
@@ -130,13 +157,13 @@ import type { BoatInfo } from './lib/BoatInfo';
    const coords: number[][] = [];
 
    // Add my boat if visible and has valid coordinates
-   if (myBoat && visibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
+   if (myBoat && effectiveVisibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
      coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
    }
 
    // Add visible AIS boats with valid coordinates
    boats?.forEach(boat => {
-     if (boat.mmsi && visibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
+     if (boat.mmsi && effectiveVisibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
        coords.push([boat.location[1], boat.location[0]]);
      }
    });
@@ -191,17 +218,16 @@ import type { BoatInfo } from './lib/BoatInfo';
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onBoatPopupOpen, detectionConfig }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
-  positionHistorical?: { lat: number; lng: number }[];
+  positionHistorical?: PositionPoint[];
   enableBoatsPanel?: boolean;
   /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
   externalVisibilityControl?: boolean;
   /** When false, offline boats are hidden from the boats panel (default: true) */
   showOfflineBoatsInPanel?: boolean;
-  /** Controls default visibility of AIS layer (default: true) */
   defaultAisVisible?: boolean;
   onReady?: (api: { 
     fitToVisibleBoats: () => void;
@@ -212,12 +238,15 @@ import type { BoatInfo } from './lib/BoatInfo';
   }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
+  onBoatPopupOpen?: (boatPartId?: string) => void;
+  detectionConfig?: DetectionConfig;
 } = $props();
 
  // Create derived values for reactivity tracking
  let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading, b.positionHistory?.length])));
  let myBoatKey = $derived(myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null);
  let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
+ let effectiveVisibleKey = $derived(JSON.stringify([...effectiveVisibleBoats]));
 
  $effect( () => {
    // Read derived keys to create dependencies
@@ -266,9 +295,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    if (shouldClose) closePopup();
  });
 
- // Force track layers to re-render when visibility changes
  $effect(() => {
-   const _visible = visibleBoatsKey;
+   const _visible = effectiveVisibleKey;
    // Trigger style recalculation by notifying the track layers
    if (mapGlobal.trackLayer) {
      mapGlobal.trackLayer.getSource()?.changed();
@@ -282,8 +310,14 @@ import type { BoatInfo } from './lib/BoatInfo';
  $effect(() => {
    // Read all layer states to create dependencies
    mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
-   
+
    updateOnLayers();
+ });
+
+ $effect(() => {
+   if (mapLoaded) {
+     renderDetections(detectionConfig?.detections);
+   }
  });
 
  let mapGlobal = $state({
@@ -396,7 +430,7 @@ import type { BoatInfo } from './lib/BoatInfo';
          return;
        }
        seen[mmsi] = true;
-       const isVisible = visibleBoats.has(mmsi);
+       const isVisible = effectiveVisibleBoats.has(mmsi);
        
        const boatPos = [boat.location[1], boat.location[0]];
        
@@ -500,12 +534,87 @@ import type { BoatInfo } from './lib/BoatInfo';
    };
  }
 
+ function createDetectionStyle(): Style {
+   return new Style({
+     image: new RegularShape({
+       fill: new Fill({ color: 'rgba(0, 220, 140, 0.35)' }),
+       stroke: new Stroke({ color: 'white', width: 2 }),
+       points: 3,
+       radius: 10,
+       rotation: 0,
+       angle: 0,
+     }),
+   });
+ }
+
+ function getPositionAtTime(
+   history: PositionPoint[],
+   targetTime: Date
+ ): { lat: number; lng: number } | null {
+   if (history.length === 0) return null;
+
+   const targetMs = targetTime.getTime();
+   const closest = history.reduce((a, b) =>
+     Math.abs(a.ts.getTime() - targetMs) <= Math.abs(b.ts.getTime() - targetMs) ? a : b
+   );
+
+   return { lat: closest.lat, lng: closest.lng };
+ }
+
+ function renderDetections(detections: Detection[] | undefined) {
+   // Remove old detection features from aisTrackFeatures
+   const toRemove: Feature<Geometry>[] = [];
+   mapGlobal.aisTrackFeatures.forEach(f => {
+     if (f.get('type') === 'detection') toRemove.push(f);
+   });
+   toRemove.forEach(f => mapGlobal.aisTrackFeatures.remove(f));
+
+   if (!detections || detections.length === 0) return;
+
+   const allHistories: Record<string, PositionPoint[]> = {};
+
+   if (positionHistorical && positionHistorical.length > 0) {
+     allHistories['myBoat'] = positionHistorical;
+   }
+
+   boats?.forEach((boat) => {
+     if (boat.positionHistory && boat.positionHistory.length > 0) {
+       const key = boat.mmsi || boat.partId || 'unknown';
+       allHistories[key] = boat.positionHistory;
+     }
+   });
+
+   detections.forEach((detection) => {
+    const history = allHistories[detection.boatId];
+    if (!history) return;
+    
+    const position = getPositionAtTime(history, detection.timestamp);
+    if (!position) return;
+    
+    const feature = new Feature({
+      type: 'detection',
+      boatId: detection.boatId,
+      detectionId: detection.id,
+      timestamp: detection.timestamp,
+      detectionData: detection,
+      geometry: new Point([position.lng, position.lat]),
+    });
+
+    mapGlobal.aisTrackFeatures.push(feature);
+   });
+ }
+
  // Factory to create track style functions (DRY for myBoat and AIS tracks)
  function createTrackStyleFunction(defaultBoatId: string) {
    return function(feature: any) {
      const boatId = feature.get("boatId") || defaultBoatId;
-     if (!visibleBoats.has(boatId)) {
+     if (!effectiveVisibleBoats.has(boatId)) {
        return new Style({}); // Hidden - return empty style
+     }
+
+     // Detection features get triangle style
+     if (feature.get('type') === 'detection') {
+       return createDetectionStyle();
      }
      
      const isGap = feature.get("isGap");
@@ -737,6 +846,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: mapGlobal.trackFeatures,
      }),
      style: createTrackStyleFunction("myBoat"),
+     zIndex: 10,
    });
 
    // Store reference for style refreshing
@@ -748,6 +858,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        features: mapGlobal.aisTrackFeatures,
      }),
      style: createTrackStyleFunction(""),
+     zIndex: 10,
    });
 
    // Store reference for style refreshing
@@ -769,8 +880,9 @@ import type { BoatInfo } from './lib/BoatInfo';
          features: myBoatFeatures,
        }),
        style: function (feature) {
-         return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
+         return createBoatStyle(myBoat.heading, 0.6, effectiveVisibleBoats.has('myBoat'));
        },
+       zIndex: 100,
      });
      mapGlobal.layerOptions.push({
        name: "boat",
@@ -800,6 +912,7 @@ import type { BoatInfo } from './lib/BoatInfo';
            color: "rgba(0, 255, 0, 0.1)"
          })
        }),
+       zIndex: 20,
      });
 
      mapGlobal.layerOptions.push({
@@ -819,6 +932,7 @@ import type { BoatInfo } from './lib/BoatInfo';
        const visible = feature.get("visible") ?? false;
        return createBoatStyle(heading, 0.35, visible);
      },
+     zIndex: 100,
    });
 
    mapGlobal.layerOptions.push({
@@ -835,7 +949,6 @@ import type { BoatInfo } from './lib/BoatInfo';
      layer: aisTrackLayer,
      parent: "ais",
    });
-
  }
 
  function findLayerByName(name: string): LayerOption | null {
@@ -947,13 +1060,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    });
    mapGlobal.map.addOverlay(popupState.overlay);
 
-   // Click handler for boat features
    mapClickHandler = function (evt: any) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
          const type = f.get("type");
-         if (type === "ais" || type === "geoMarker") {
+         if (type === "ais" || type === "geoMarker" || type === "detection") {
            return f;
          }
          return null;
@@ -962,6 +1074,15 @@ import type { BoatInfo } from './lib/BoatInfo';
 
      if (feature) {
        const type = feature.get("type");
+
+       if (type === "detection") {
+         const detectionData = feature.get("detectionData");
+         if (detectionData && detectionConfig?.onClick) {
+           detectionConfig.onClick(detectionData);
+         }
+         return;
+       }
+
        const geom = feature.getGeometry() as Point | undefined;
        if (!geom) return;
        const coords = geom.getCoordinates();
@@ -997,6 +1118,9 @@ import type { BoatInfo } from './lib/BoatInfo';
        }
        popupState.visible = true;
        popupState.overlay?.setPosition(coords);
+
+       const boatPartId = popupState.content.partId || popupState.content.mmsi;
+       onBoatPopupOpen?.(boatPartId);
      } else {
        closePopup();
      }
@@ -1012,7 +1136,7 @@ import type { BoatInfo } from './lib/BoatInfo';
              .getSource()
              ?.getFeatures?.()
              ?.some?.(
-               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker"
+               (f: Feature) => f.get("type") === "ais" || f.get("type") === "geoMarker" || f.get("type") === "detection"
              ) ?? false
          );
        },
@@ -1112,8 +1236,8 @@ import type { BoatInfo } from './lib/BoatInfo';
        }
      }
    };
- });
 
+ });
 </script>
 
 <div id="map-container" class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark" class:layers-expanded={layersExpanded} class:boats-expanded={boatsExpanded} class:map-loaded={mapLoaded}>
@@ -1126,7 +1250,7 @@ import type { BoatInfo } from './lib/BoatInfo';
       <h3 class="popup-title">{popupState.content.name}</h3>
     </div>
     <div class="popup-columns" class:single-column={!popupState.content.isOnline}>
-      {#if boatDetailSlot && popupState.content.host && popupState.content.partId && popupState.content.isOnline}
+      {#if boatDetailSlot && popupState.content.host && popupState.content.partId}
         <div class="popup-detail-slot">
           {@render boatDetailSlot({ host: popupState.content.host, partId: popupState.content.partId, name: popupState.content.name })}
         </div>
@@ -1150,6 +1274,15 @@ import type { BoatInfo } from './lib/BoatInfo';
         </div>
       </div>
     </div>
+    {#if detectionConfig?.enabled}
+      <label class="popup-checkbox">
+        <input type="checkbox" bind:checked={showDetections} />
+        Show Detections
+        {#if detectionConfig?.loading}
+          <span class="loading-spinner"></span>
+        {/if}
+      </label>
+    {/if}
     <div class="popup-arrow"></div>
   </div>
 
@@ -1195,8 +1328,8 @@ import type { BoatInfo } from './lib/BoatInfo';
     <div class="boats-list">
       {#if myBoat}
       <label class="boat-item">
-        <input 
-          type="checkbox" 
+        <input
+          type="checkbox"
           checked={visibleBoats.has('myBoat')}
           onchange={() => toggleBoatVisibility('myBoat')}
         >
@@ -1204,12 +1337,13 @@ import type { BoatInfo } from './lib/BoatInfo';
       </label>
       {/if}
       {#if boats}
-        {@const onlineBoats = boats.filter(b => b.mmsi && b.isOnline !== false)}
-        {@const offlineBoats = boats.filter(b => b.mmsi && b.isOnline === false)}
+        {@const searchLower = boatSearchTerm.toLowerCase()}
+        {@const onlineBoats = boats.filter(b => b.mmsi && b.isOnline !== false && (!boatSearchTerm.trim() || b.name.toLowerCase().includes(searchLower) || b.mmsi?.toLowerCase().includes(searchLower)))}
+        {@const offlineBoats = boats.filter(b => b.mmsi && b.isOnline === false && (!boatSearchTerm.trim() || b.name.toLowerCase().includes(searchLower) || b.mmsi?.toLowerCase().includes(searchLower)))}
         {#each onlineBoats as boat}
           <label class="boat-item">
-            <input 
-              type="checkbox" 
+            <input
+              type="checkbox"
               checked={visibleBoats.has(boat.mmsi!)}
               onchange={() => toggleBoatVisibility(boat.mmsi!)}
             >
@@ -1220,8 +1354,8 @@ import type { BoatInfo } from './lib/BoatInfo';
           <div class="boats-separator">Offline boats:</div>
           {#each offlineBoats as boat}
             <label class="boat-item offline">
-              <input 
-                type="checkbox" 
+              <input
+                type="checkbox"
                 checked={visibleBoats.has(boat.mmsi!)}
                 onchange={() => toggleBoatVisibility(boat.mmsi!)}
               >
@@ -1231,6 +1365,12 @@ import type { BoatInfo } from './lib/BoatInfo';
         {/if}
       {/if}
     </div>
+    <input
+      type="text"
+      class="boat-search-input"
+      placeholder="Search boats..."
+      bind:value={boatSearchTerm}
+    />
     <button class="fit-all-btn" onclick={fitToVisibleBoats}>
       Fit All Visible
     </button>
@@ -1312,7 +1452,7 @@ import type { BoatInfo } from './lib/BoatInfo';
   }
 
   .popup-columns.single-column {
-    gap: 0;
+    gap: 12px;
   }
 
   .popup-detail-slot {
@@ -1378,6 +1518,31 @@ import type { BoatInfo } from './lib/BoatInfo';
     border-left: 5px solid transparent;
     border-right: 5px solid transparent;
     border-top: 5px solid rgba(15, 23, 42, 0.95);
+  }
+
+  .popup-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    margin-top: 6px;
+    cursor: pointer;
+  }
+
+  .loading-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: rgba(255, 255, 255, 0.9);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* Layer controls panel - hidden by default */
@@ -1457,8 +1622,9 @@ import type { BoatInfo } from './lib/BoatInfo';
   .boats-controls {
     display: flex;
     gap: 6px;
-    padding: 6px 6px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    padding: 8px 14px;
+    border-top: 1px solid #ddd;
+    border-bottom: 1px solid #ddd;
   }
 
   .select-btn {
@@ -1498,7 +1664,7 @@ import type { BoatInfo } from './lib/BoatInfo';
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     border: 1px solid #ccc;
     display: none;
-    max-height: 280px;
+    max-height: 520px;
     width: 200px;
     flex-direction: column;
   }
@@ -1507,14 +1673,30 @@ import type { BoatInfo } from './lib/BoatInfo';
     display: flex;
   }
 
+  .boat-search-input {
+    width: calc(100% - 28px);
+    margin: 8px 14px 0;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    outline: none;
+    background: white;
+    box-sizing: border-box;
+  }
+
+  .boat-search-input:focus {
+    border-color: #0066cc;
+    box-shadow: 0 0 0 1px rgba(0, 102, 204, 0.2);
+  }
+
   .boats-list {
     flex: 1;
     overflow-y: auto;
     padding: 6px 14px;
-    padding-bottom: 0;
-    max-height: 200px;
+    max-height: 380px;
     -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-    border-bottom: 1px solid #ddd;
   }
 
   .boat-item {
@@ -1564,7 +1746,8 @@ import type { BoatInfo } from './lib/BoatInfo';
 
   .fit-all-btn {
     padding: 6px 12px;
-    margin: 10px 14px;
+    margin: 8px 14px;
+    margin-top: 16px;
     background: #0066cc;
     color: white;
     border: none;
@@ -1574,6 +1757,17 @@ import type { BoatInfo } from './lib/BoatInfo';
     font-family: system-ui, -apple-system, sans-serif;
     flex-shrink: 0;
     -webkit-tap-highlight-color: transparent;
+    position: relative;
+  }
+
+  .fit-all-btn::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: -14px;
+    right: -14px;
+    height: 1px;
+    background: #ddd;
   }
 
   .fit-all-btn:hover {
