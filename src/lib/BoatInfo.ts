@@ -1,7 +1,7 @@
 export interface PositionPoint {
   lat: number;
   lng: number;
-  ts: Date;
+  ts?: Date;
 }
 
 export interface Detection {

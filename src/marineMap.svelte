@@ -323,6 +323,7 @@
    // Track layer references for refreshing styles
    trackLayer: null as Vector<any> | null,
    aisTrackLayer: null as Vector<any> | null,
+   detectionLayer: null as Vector<any> | null,
 
    layerOptions: [] as LayerOption[],
    onLayers: new Collection<BaseLayer>(),
@@ -525,7 +526,7 @@
  function createDetectionStyle(): Style {
    return new Style({
      image: new RegularShape({
-       fill: new Fill({ color: 'rgba(255, 255, 255, 0)' }),
+       fill: new Fill({ color: 'rgba(0, 220, 140, 0.35)' }),
        stroke: new Stroke({ color: 'white', width: 2 }),
        points: 3,
        radius: 10,
@@ -544,15 +545,14 @@
 
    const targetMs = targetTime.getTime();
    const closest = timedPoints.reduce((a, b) =>
-     Math.abs(a.ts.getTime() - targetMs) <= Math.abs(b.ts.getTime() - targetMs) ? a : b
+     Math.abs(a.ts!.getTime() - targetMs) <= Math.abs(b.ts!.getTime() - targetMs) ? a : b
    );
 
    return { lat: closest.lat, lng: closest.lng };
  }
 
  function renderDetections(detections: Detection[] | undefined) {
-   const detectionLayer = findLayerByName(detectionsLayerName)?.layer as Vector<any> | undefined;
-   const source = detectionLayer?.getSource();
+   const source = mapGlobal.detectionLayer?.getSource();
 
    if (!source) {
      console.warn('Detection layer source not found');
@@ -836,6 +836,7 @@
        features: mapGlobal.trackFeatures,
      }),
      style: createTrackStyleFunction("myBoat"),
+     zIndex: 10,
    });
 
    // Store reference for style refreshing
@@ -847,6 +848,7 @@
        features: mapGlobal.aisTrackFeatures,
      }),
      style: createTrackStyleFunction(""),
+     zIndex: 10,
    });
 
    // Store reference for style refreshing
@@ -870,6 +872,7 @@
        style: function (feature) {
          return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
        },
+       zIndex: 100,
      });
      mapGlobal.layerOptions.push({
        name: "boat",
@@ -899,6 +902,7 @@
            color: "rgba(0, 255, 0, 0.1)"
          })
        }),
+       zIndex: 20,
      });
 
      mapGlobal.layerOptions.push({
@@ -918,6 +922,7 @@
        const visible = feature.get("visible") ?? false;
        return createBoatStyle(heading, 0.35, visible);
      },
+     zIndex: 100,
    });
 
    mapGlobal.layerOptions.push({
@@ -934,21 +939,6 @@
      layer: aisTrackLayer,
      parent: "ais",
    });
-
-   var detectionLayerVar = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.detectionFeatures,
-     }),
-     style: createDetectionStyle(),
-   });
-
-   mapGlobal.layerOptions.push({
-     name: detectionsLayerName,
-     displayName: detectionsLayerDisplayName,
-     on: true,
-     layer: detectionLayerVar,
-   });
-
  }
 
  function findLayerByName(name: string): LayerOption | null {
@@ -1034,6 +1024,16 @@
 
    updateOnLayers();
    updateOnLayers();
+
+   // Create detection layer
+   mapGlobal.detectionLayer = new Vector({
+     source: new VectorSource({
+       features: mapGlobal.detectionFeatures,
+     }),
+     style: createDetectionStyle(),
+     zIndex: 50,
+   });
+   mapGlobal.onLayers.push(mapGlobal.detectionLayer);
 
    var scaleThing = new ScaleLine({
      units: "nautical",
