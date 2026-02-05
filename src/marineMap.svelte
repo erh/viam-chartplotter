@@ -551,12 +551,11 @@
    history: PositionPoint[],
    targetTime: Date
  ): { lat: number; lng: number } | null {
-   const timedPoints = history.filter((p) => p.ts !== undefined);
-   if (timedPoints.length === 0) return null;
+   if (history.length === 0) return null;
 
    const targetMs = targetTime.getTime();
-   const closest = timedPoints.reduce((a, b) =>
-     Math.abs(a.ts!.getTime() - targetMs) <= Math.abs(b.ts!.getTime() - targetMs) ? a : b
+   const closest = history.reduce((a, b) =>
+     Math.abs(a.ts.getTime() - targetMs) <= Math.abs(b.ts.getTime() - targetMs) ? a : b
    );
 
    return { lat: closest.lat, lng: closest.lng };
