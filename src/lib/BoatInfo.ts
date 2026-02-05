@@ -11,6 +11,14 @@ export interface Detection {
   metadata?: Record<string, any>;
 }
 
+export interface DetectionConfig {
+  detections?: Detection[];
+  enabled?: boolean;
+  loading?: boolean;
+  onToggle?: (enabled: boolean, boatPartId?: string) => void;
+  onClick?: (detection: Detection) => void;
+}
+
 export interface BoatInfo {
   name: string;
   location: [number, number]; // [latitude, longitude]

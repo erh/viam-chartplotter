@@ -1,7 +1,7 @@
 <script lang="ts">
 
  import { onMount } from 'svelte';
- import type { BoatInfo, PositionPoint, Detection } from './lib/BoatInfo';
+ import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from './lib/BoatInfo';
  import RegularShape from 'ol/style/RegularShape.js';
 
  import Collection from 'ol/Collection.js';
@@ -113,7 +113,7 @@
 
  $effect(() => {
    const boatPartId = popupState.content.partId || popupState.content.mmsi;
-   onShowDetections?.(showDetections, boatPartId);
+   detectionConfig?.onToggle?.(showDetections, boatPartId);
  });
 
  function toggleBoatVisibility(id: string) {
@@ -218,7 +218,7 @@
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, enableDetectionsCheckbox = false, detectionsLoading = false, onDetectionClick }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onBoatPopupOpen, detectionConfig }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -238,13 +238,9 @@
   }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
-  onShowDetections?: (enabled: boolean, boatPartId?: string) => void;
   onBoatPopupOpen?: (boatPartId?: string) => void;
-  detections?: Detection[];
-  /** When true, shows the detections checkbox in boat popups (default: false) */
-  enableDetectionsCheckbox?: boolean;
-  detectionsLoading?: boolean;
-  onDetectionClick?: (detection: Detection) => void;
+  /** Configuration for detection markers on the map */
+  detectionConfig?: DetectionConfig;
 } = $props();
 
  // Create derived values for reactivity tracking
@@ -322,7 +318,7 @@
 
  $effect(() => {
    if (mapLoaded) {
-     renderDetections(detections);
+     renderDetections(detectionConfig?.detections);
    }
  });
 
@@ -1084,8 +1080,8 @@
 
        if (type === "detection") {
          const detectionData = feature.get("detectionData");
-         if (detectionData && onDetectionClick) {
-           onDetectionClick(detectionData);
+         if (detectionData && detectionConfig?.onClick) {
+           detectionConfig.onClick(detectionData);
          }
          return;
        }
@@ -1281,11 +1277,11 @@
         </div>
       </div>
     </div>
-    {#if enableDetectionsCheckbox}
+    {#if detectionConfig?.enabled}
       <label class="popup-checkbox">
         <input type="checkbox" bind:checked={showDetections} />
         Show Detections
-        {#if detectionsLoading}
+        {#if detectionConfig?.loading}
           <span class="loading-spinner"></span>
         {/if}
       </label>
