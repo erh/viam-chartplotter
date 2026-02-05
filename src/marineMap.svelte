@@ -218,7 +218,7 @@
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, detectionsLabel = "Show Detections", enableDetectionsCheckbox = false, detectionsLoading = false, onDetectionClick }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, enableDetectionsCheckbox = false, detectionsLoading = false, onDetectionClick }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -241,7 +241,6 @@
   onShowDetections?: (enabled: boolean, boatPartId?: string) => void;
   onBoatPopupOpen?: (boatPartId?: string) => void;
   detections?: Detection[];
-  detectionsLabel?: string;
   /** When true, shows the detections checkbox in boat popups (default: false) */
   enableDetectionsCheckbox?: boolean;
   detectionsLoading?: boolean;
@@ -1285,7 +1284,7 @@
     {#if enableDetectionsCheckbox}
       <label class="popup-checkbox">
         <input type="checkbox" bind:checked={showDetections} />
-        {detectionsLabel}
+        Show Detections
         {#if detectionsLoading}
           <span class="loading-spinner"></span>
         {/if}
