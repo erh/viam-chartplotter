@@ -69,6 +69,25 @@
  // When externalVisibilityControl is true, start with empty set (parent will control)
  let visibleBoats = $state<Set<string>>(new Set(['myBoat']));
 
+ // Effective visible boats: filters visibleBoats by search term
+ // Boats not matching search are hidden on map AND their tracking layers
+ const effectiveVisibleBoats = $derived.by(() => {
+   if (!boatSearchTerm.trim()) return visibleBoats;
+   const searchLower = boatSearchTerm.toLowerCase();
+   const filtered = new Set<string>();
+   visibleBoats.forEach(id => {
+     if (id === 'myBoat') {
+       filtered.add(id); // Always show myBoat if checked
+       return;
+     }
+     const boat = boats?.find(b => b.mmsi === id);
+     if (boat && (boat.name.toLowerCase().includes(searchLower) || boat.mmsi?.toLowerCase().includes(searchLower))) {
+       filtered.add(id);
+     }
+   });
+   return filtered;
+ });
+
  // Initialize visibleBoats when boats prop changes (only when NOT using external control)
  // Use plain JS variable for tracking to avoid creating effect dependencies
  let lastBoatsLength = 0;
@@ -138,13 +157,13 @@
    const coords: number[][] = [];
 
    // Add my boat if visible and has valid coordinates
-   if (myBoat && visibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
+   if (myBoat && effectiveVisibleBoats.has('myBoat') && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
      coords.push([myBoat.location[1], myBoat.location[0]]); // [lng, lat]
    }
 
    // Add visible AIS boats with valid coordinates
    boats?.forEach(boat => {
-     if (boat.mmsi && visibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
+     if (boat.mmsi && effectiveVisibleBoats.has(boat.mmsi) && isValidCoordinate(boat.location[0], boat.location[1])) {
        coords.push([boat.location[1], boat.location[0]]);
      }
    });
@@ -199,7 +218,7 @@
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, detectionsLabel = "Show Detections", detectionsLayerName = "detections", detectionsLayerDisplayName = "detections", detectionsLoading = false, onDetectionClick }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onShowDetections, onBoatPopupOpen, detections, detectionsLabel = "Show Detections", enableDetectionsCheckbox = false, detectionsLoading = false, onDetectionClick }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
@@ -223,8 +242,8 @@
   onBoatPopupOpen?: (boatPartId?: string) => void;
   detections?: Detection[];
   detectionsLabel?: string;
-  detectionsLayerName?: string;
-  detectionsLayerDisplayName?: string;
+  /** When true, shows the detections checkbox in boat popups (default: false) */
+  enableDetectionsCheckbox?: boolean;
   detectionsLoading?: boolean;
   onDetectionClick?: (detection: Detection) => void;
 } = $props();
@@ -233,6 +252,7 @@
  let boatsKey = $derived(JSON.stringify(boats?.map(b => [b.location, b.speed, b.heading, b.positionHistory?.length])));
  let myBoatKey = $derived(myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null);
  let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
+ let effectiveVisibleKey = $derived(JSON.stringify([...effectiveVisibleBoats]));
 
  $effect( () => {
    // Read derived keys to create dependencies
@@ -281,9 +301,9 @@
    if (shouldClose) closePopup();
  });
 
- // Force track layers to re-render when visibility changes
+ // Force track layers to re-render when effective visibility changes (includes search filter)
  $effect(() => {
-   const _visible = visibleBoatsKey;
+   const _visible = effectiveVisibleKey;
    // Trigger style recalculation by notifying the track layers
    if (mapGlobal.trackLayer) {
      mapGlobal.trackLayer.getSource()?.changed();
@@ -316,14 +336,12 @@
    trackFeatures: new Collection<Feature<Geometry>>(),
    aisTrackFeatures: new Collection<Feature<Geometry>>(),
    routeFeatures: new Collection<Feature<Geometry>>(),
-   detectionFeatures: new Collection<Feature<Geometry>>(),
    trackFeaturesLastCheck : new Date(0),
    myBoatMarker: null as Feature<Point> | null,
    
    // Track layer references for refreshing styles
    trackLayer: null as Vector<any> | null,
    aisTrackLayer: null as Vector<any> | null,
-   detectionLayer: null as Vector<any> | null,
 
    layerOptions: [] as LayerOption[],
    onLayers: new Collection<BaseLayer>(),
@@ -419,7 +437,7 @@
          return;
        }
        seen[mmsi] = true;
-       const isVisible = visibleBoats.has(mmsi);
+       const isVisible = effectiveVisibleBoats.has(mmsi);
        
        const boatPos = [boat.location[1], boat.location[0]];
        
@@ -552,14 +570,12 @@
  }
 
  function renderDetections(detections: Detection[] | undefined) {
-   const source = mapGlobal.detectionLayer?.getSource();
-
-   if (!source) {
-     console.warn('Detection layer source not found');
-     return;
-   }
-
-   source.clear();
+   // Remove old detection features from aisTrackFeatures
+   const toRemove: Feature<Geometry>[] = [];
+   mapGlobal.aisTrackFeatures.forEach(f => {
+     if (f.get('type') === 'detection') toRemove.push(f);
+   });
+   toRemove.forEach(f => mapGlobal.aisTrackFeatures.remove(f));
 
    if (!detections || detections.length === 0) return;
 
@@ -576,8 +592,6 @@
      }
    });
 
-   const features: Feature<Point>[] = [];
-
    detections.forEach((detection) => {
     const history = allHistories[detection.boatId];
     if (!history) return;
@@ -587,24 +601,28 @@
     
     const feature = new Feature({
       type: 'detection',
+      boatId: detection.boatId,
       detectionId: detection.id,
       timestamp: detection.timestamp,
       detectionData: detection,
       geometry: new Point([position.lng, position.lat]),
     });
 
-    features.push(feature);
+    mapGlobal.aisTrackFeatures.push(feature);
    });
-
-   source.addFeatures(features);
  }
 
  // Factory to create track style functions (DRY for myBoat and AIS tracks)
  function createTrackStyleFunction(defaultBoatId: string) {
    return function(feature: any) {
      const boatId = feature.get("boatId") || defaultBoatId;
-     if (!visibleBoats.has(boatId)) {
+     if (!effectiveVisibleBoats.has(boatId)) {
        return new Style({}); // Hidden - return empty style
+     }
+
+     // Detection features get triangle style
+     if (feature.get('type') === 'detection') {
+       return createDetectionStyle();
      }
      
      const isGap = feature.get("isGap");
@@ -870,7 +888,7 @@
          features: myBoatFeatures,
        }),
        style: function (feature) {
-         return createBoatStyle(myBoat.heading, 0.6, visibleBoats.has('myBoat'));
+         return createBoatStyle(myBoat.heading, 0.6, effectiveVisibleBoats.has('myBoat'));
        },
        zIndex: 100,
      });
@@ -1024,16 +1042,6 @@
 
    updateOnLayers();
    updateOnLayers();
-
-   // Create detection layer
-   mapGlobal.detectionLayer = new Vector({
-     source: new VectorSource({
-       features: mapGlobal.detectionFeatures,
-     }),
-     style: createDetectionStyle(),
-     zIndex: 50,
-   });
-   mapGlobal.onLayers.push(mapGlobal.detectionLayer);
 
    var scaleThing = new ScaleLine({
      units: "nautical",
@@ -1274,13 +1282,15 @@
         </div>
       </div>
     </div>
-    <label class="popup-checkbox">
-      <input type="checkbox" bind:checked={showDetections} />
-      {detectionsLabel}
-      {#if detectionsLoading}
-        <span class="loading-spinner"></span>
-      {/if}
-    </label>
+    {#if enableDetectionsCheckbox}
+      <label class="popup-checkbox">
+        <input type="checkbox" bind:checked={showDetections} />
+        {detectionsLabel}
+        {#if detectionsLoading}
+          <span class="loading-spinner"></span>
+        {/if}
+      </label>
+    {/if}
     <div class="popup-arrow"></div>
   </div>
 
