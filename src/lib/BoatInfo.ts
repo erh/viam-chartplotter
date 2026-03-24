@@ -12,10 +12,6 @@ export interface Detection {
 }
 
 export interface DetectionConfig {
-  detections?: Detection[];
-  enabled?: boolean;
-  loading?: boolean;
-  onToggle?: (enabled: boolean, boatPartId?: string) => void;
   onClick?: (detection: Detection) => void;
 }
 

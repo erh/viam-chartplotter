@@ -62,7 +62,7 @@
  let layersExpanded = $state(false);
  let boatsExpanded = $state(false);
  let mapLoaded = $state(false);
- let showDetections = $state(false);
+ let currentDetections = $state<Detection[] | undefined>(undefined);
  let boatSearchTerm = $state('');
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
@@ -109,11 +109,6 @@
      lastBoatsLength = currentLength; // Plain JS variable, won't re-trigger
      visibleBoats = new Set(visibleBoats); // Trigger reactivity
    }
- });
-
- $effect(() => {
-   const boatPartId = popupState.content.partId || popupState.content.mmsi;
-   detectionConfig?.onToggle?.(showDetections, boatPartId);
  });
 
  function toggleBoatVisibility(id: string) {
@@ -235,6 +230,7 @@
     deselectAllBoats: () => void;
     setVisibleBoats: (ids: Set<string>) => void;
     getVisibleBoats: () => Set<string>;
+    setDetections: (detections: Detection[] | undefined) => void;
   }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
@@ -316,7 +312,7 @@
 
  $effect(() => {
    if (mapLoaded) {
-     renderDetections(detectionConfig?.detections);
+     renderDetections(currentDetections);
    }
  });
 
@@ -1159,7 +1155,8 @@
        selectAllBoats,
        deselectAllBoats,
        setVisibleBoats,
-       getVisibleBoats: () => new Set(visibleBoats)
+       getVisibleBoats: () => new Set(visibleBoats),
+       setDetections: (detections: Detection[] | undefined) => { currentDetections = detections; },
      });
    }, 100);
  }
@@ -1274,15 +1271,6 @@
         </div>
       </div>
     </div>
-    {#if detectionConfig?.enabled}
-      <label class="popup-checkbox">
-        <input type="checkbox" bind:checked={showDetections} />
-        Show Detections
-        {#if detectionConfig?.loading}
-          <span class="loading-spinner"></span>
-        {/if}
-      </label>
-    {/if}
     <div class="popup-arrow"></div>
   </div>
 
