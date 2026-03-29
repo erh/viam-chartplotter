@@ -2,6 +2,7 @@ export interface PositionPoint {
   lat: number;
   lng: number;
   ts: Date;
+  depth?: number;
 }
 
 export interface Detection {

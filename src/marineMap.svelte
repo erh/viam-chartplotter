@@ -213,11 +213,12 @@
    mapInternalState.inPanMode = true; // Prevent auto-centering
  }
 
- let { myBoat, zoomModifier, boats, positionHistorical, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onBoatPopupOpen, detectionConfig }: {
+ let { myBoat, zoomModifier, boats, positionHistorical, depthColorTrack = false, enableBoatsPanel = false, externalVisibilityControl = false, showOfflineBoatsInPanel = true, defaultAisVisible = true, onReady, boatDetailSlot, fitBoundsPadding, onBoatPopupOpen, detectionConfig }: {
   myBoat?: BoatInfo;
   zoomModifier?: number;
   boats?: BoatInfo[];
   positionHistorical?: PositionPoint[];
+  depthColorTrack?: boolean;
   enableBoatsPanel?: boolean;
   /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
   externalVisibilityControl?: boolean;
@@ -293,6 +294,7 @@
 
  $effect(() => {
    const _visible = effectiveVisibleKey;
+   const _depthColor = depthColorTrack;
    // Trigger style recalculation by notifying the track layers
    if (mapGlobal.trackLayer) {
      mapGlobal.trackLayer.getSource()?.changed();
@@ -344,6 +346,7 @@
    lastPositions: Record<string, number[]>;
    trackFeatureIds: Record<string, boolean>;
    aisTrackFeatureIds: Record<string, boolean>;
+   lastPosHistoricalKey: string;
  } = {
    inPanMode: false,
    lastZoom: 0,
@@ -352,6 +355,7 @@
    lastPositions: {},
    trackFeatureIds: {},
    aisTrackFeatureIds: {},
+   lastPosHistoricalKey: "",
  }
 
  function updateFromData() {
@@ -466,8 +470,13 @@
      }
    }
 
-   // Render historical tracks
+   // Render historical tracks (clear and re-render when data changes to pick up depth)
    if (positionHistorical) {
+     const posKey = positionHistorical.length + "-" + (positionHistorical.length > 0 ? (positionHistorical[0].depth ?? "n") : "");
+     if (mapInternalState.lastPosHistoricalKey !== posKey) {
+       clearHistoricalTrackFeatures("myBoat");
+       mapInternalState.lastPosHistoricalKey = posKey;
+     }
      renderHistoricalTrack("myBoat", positionHistorical, "myBoat");
    }
 
@@ -601,6 +610,14 @@
  }
 
  // Factory to create track style functions (DRY for myBoat and AIS tracks)
+ function depthToColor(depth: number, opacity: number): string {
+   // 0ft = red, 10ft+ = green, linear scale
+   const t = Math.min(Math.max(depth / 10, 0), 1);
+   const r = Math.round(255 * (1 - t));
+   const g = Math.round(255 * t);
+   return `rgba(${r}, ${g}, 0, ${opacity})`;
+ }
+
  function createTrackStyleFunction(defaultBoatId: string) {
    return function(feature: any) {
      const boatId = feature.get("boatId") || defaultBoatId;
@@ -612,13 +629,21 @@
      if (feature.get('type') === 'detection') {
        return createDetectionStyle();
      }
-     
+
      const isGap = feature.get("isGap");
      const opacity = isGap ? 0.33 : 1.0;
-     
+     const depth = feature.get("depth");
+
+     let color;
+     if (depthColorTrack && depth !== undefined && depth !== null) {
+       color = depthToColor(depth, opacity);
+     } else {
+       color = `rgba(0, 0, 255, ${opacity})`;
+     }
+
      return new Style({
        stroke: new Stroke({
-         color: `rgba(0, 0, 255, ${opacity})`,
+         color: color,
          width: 2,
          lineDash: isGap ? [2, 6] : undefined
        }),
@@ -626,21 +651,37 @@
    };
  }
 
- function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false) {
+ function clearHistoricalTrackFeatures(boatId: string): void {
+   const { featureIds, features } = getTrackCollections(boatId);
+   // Remove features that have a "myid" (historical) — keep live track features
+   const toRemove: Feature<Geometry>[] = [];
+   for (let i = 0; i < features.getLength(); i++) {
+     const f = features.item(i);
+     const myid = f.get("myid");
+     if (myid) {
+       toRemove.push(f);
+       delete featureIds[myid];
+     }
+   }
+   toRemove.forEach(f => features.remove(f));
+ }
+
+ function addTrackFeature(id: string, g: Geometry, boatId: string = "myBoat", isGap: boolean = false, depth?: number) {
    const { featureIds, features, type } = getTrackCollections(boatId);
-   
+
    if (featureIds[id] == true) {
      return;
    }
 
    featureIds[id] = true;
-   
+
    features.push(new Feature({
      type: type,
      boatId: boatId,
      "myid" : id,
      geometry: g,
      isGap: isGap,
+     depth: depth,
    }));
    
    pruneOldTrackFeatures();
@@ -698,31 +739,32 @@
  // Render historical track from position history array
  // Draws dotted 33% transparent lines between points that are 10+ nautical miles apart
  function renderHistoricalTrack(
-   boatId: string, 
-   history: { lat: number; lng: number }[], 
+   boatId: string,
+   history: { lat: number; lng: number; depth?: number }[],
    idPrefix: string
  ): void {
    let prev: number[] | null = null;
-   let prevPoint: { lat: number; lng: number } | null = null;
-   
+   let prevPoint: { lat: number; lng: number; depth?: number } | null = null;
+
    history.forEach((p) => {
      const pp = [p.lng, p.lat];
-     
+
      if (prev && prevPoint) {
        // Calculate distance between consecutive points
        const distanceNM = calculateDistanceNM(prevPoint.lat, prevPoint.lng, p.lat, p.lng);
-       
+
        // Mark as gap if points are more than 10 nautical miles apart
        const isGap = distanceNM >= 10;
-       
+
        addTrackFeature(
          `${idPrefix}-line-${p.lng}-${p.lat}`,
          new LineString([prev, pp]),
          boatId,
-         isGap
+         isGap,
+         p.depth
        );
      }
-     
+
      prev = pp;
      prevPoint = p;
    });

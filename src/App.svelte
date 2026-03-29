@@ -44,6 +44,7 @@ import type { BoatInfo } from './lib/BoatInfo';
    speed : 0.0,
    temp : 0.0,
    depth : 0.0,
+   showDepthOnTrack : false,
    heading: 0.0,
    windSpeed: 0.0,
    windAngle: 0.0,
@@ -632,7 +633,9 @@ import type { BoatInfo } from './lib/BoatInfo';
      throw new Error('Failed to get robot part: part or part.part is undefined')
    }
    
-   globalData.partConfig = JSON.parse(part.configJson);
+   if (part.configJson) {
+     globalData.partConfig = JSON.parse(part.configJson);
+   }
  }
 
  function findComponentConfig(n) {
@@ -811,6 +814,44 @@ import type { BoatInfo } from './lib/BoatInfo';
    return data;
  }
 
+ async function depthHistoryMQL(dc, startTime) {
+   var name = globalConfig.depthSensorName.split(":");
+
+   var match = {
+     "location_id" : globalClientCloudMetaData.locationId,
+     "robot_id" : globalClientCloudMetaData.machineId,
+     "component_name" : name[name.length-1],
+     "time_received": { $gte: startTime }
+   };
+
+   var group = {
+     "_id": { "$concat" : [
+                                      { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
+                                      "-",
+                                      { "$toString" : { "$month": "$time_received" } },
+                                      "-",
+                                      { "$toString" : { "$dayOfMonth": "$time_received" } },
+                                      " ",
+                                      { "$toString" : { "$hour": "$time_received" } },
+                                      ":",
+                                      { "$toString" : { "$minute": "$time_received"} },
+                                      ] },
+     "ts" : { "$min" : "$time_received" },
+     "depth" : { "$first" : "$data.readings.Depth" },
+   };
+
+   var query = [
+     BSON.serialize( { "$match" : match } ),
+     BSON.serialize( { "$sort" : { time_received : -1 } } ),
+     BSON.serialize( { "$group" : group } ),
+     BSON.serialize( { "$sort" : { ts : -1 } } ),
+   ];
+
+   var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, false);
+   console.log("got " + data.length + " depth history points from: " + globalConfig.depthSensorName + " component_name: " + name[name.length-1]);
+   return data;
+ }
+
  async function updatePositionHistory(dc, robotName, startTime) {
    if (!globalConfig.movementSensorName) {
      return;
@@ -825,14 +866,35 @@ import type { BoatInfo } from './lib/BoatInfo';
    var data = [];
    if (urlParams.get("host") == "boat-main.0pdb3dyxqg.viam.cloud" && urlParams.get("authEntity")[0] == "a") {
      var foo = await fetch("https://us-central1-eliothorowitz.cloudfunctions.net/albertboat?d=" + startTime, { method : 'GET' });
-     var bar = await foo.json();
+     var text = await foo.text();
+     if (!text) {
+       return;
+     }
+     var bar = JSON.parse(text);
      data = bar.data;
    } else {
      data = await positionHistoryMQL(dc, startTime);
    }
 
+   // Try to get depth history to color-code track
+   var depthLookup = {};
+   if (globalConfig.depthSensorName != "" && globalData.showDepthOnTrack) {
+     try {
+       var depthData = await depthHistoryMQL(dc, startTime);
+       depthData.forEach((d) => {
+         depthLookup[d._id] = d.depth * 3.28084; // convert to feet
+       });
+     } catch (e) {
+       console.log("failed to get depth history", e);
+     }
+   }
+
    data = data.map( (raw) => {
-     return {lat: raw.pos.coordinate.latitude, lng: raw.pos.coordinate.longitude};
+     var point = {lat: raw.pos.coordinate.latitude, lng: raw.pos.coordinate.longitude};
+     if (raw._id && depthLookup[raw._id] !== undefined) {
+       point.depth = depthLookup[raw._id];
+     }
+     return point;
    });
 
    // Limit position history to 7 days (prevents unbounded memory growth)
@@ -1094,7 +1156,7 @@ import type { BoatInfo } from './lib/BoatInfo';
       distanceToWaypoint: globalData.route["Distance to Waypoint"],
       waypointClosingVelocity: globalData.route["Waypoint Closing Velocity"]
     } : undefined
-  }} zoomModifier={globalConfig.zoomModifier} boats={globalData.aisBoats} positionHistorical={globalData.posHistory} defaultAisVisible={false}>
+  }} zoomModifier={globalConfig.zoomModifier} boats={globalData.aisBoats} positionHistorical={globalData.posHistory} depthColorTrack={globalData.showDepthOnTrack} defaultAisVisible={false}>
   </MarineMap>
     
   
@@ -1132,9 +1194,16 @@ import type { BoatInfo } from './lib/BoatInfo';
           <div class="min-w-32">Depth</div>
           <div>
             <span class="font-bold">{globalData.depth.toFixed(2)}</span>
-            <sup>ft</sup> 
+            <sup>ft</sup>
           </div>
         </div>
+        <label class="flex items-center gap-2 px-2 pb-2 text-sm cursor-pointer">
+          <input type="checkbox" bind:checked={globalData.showDepthOnTrack}
+            onchange={() => { globalData.posHistoryLastCheck = 0; }} />
+          Color track by depth
+          <span style="background: linear-gradient(to right, red, green); width: 60px; height: 10px; display: inline-block; border-radius: 2px;"></span>
+          <span class="text-xs text-gray-400">0ft — 10ft+</span>
+        </label>
       {/if}
       {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
         <div class="flex gap-2 p-2 text-lg">
