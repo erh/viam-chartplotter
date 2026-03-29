@@ -940,6 +940,12 @@ import type { BoatInfo } from './lib/BoatInfo';
    });
    cameraBlobUrls = {};
    
+   // Clear enlarged image interval
+   if (enlargedImageInterval) {
+     clearInterval(enlargedImageInterval);
+     enlargedImageInterval = null;
+   }
+
    // Remove keydown event listener
    window.removeEventListener('keydown', handleKeydown);
    
@@ -1037,6 +1043,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    return true;
  }
 
+ let enlargedImageInterval = null;
+
  function enlargeImage(cameraName) {
    const img = document.getElementById(cameraName);
    if (img && img.src) {
@@ -1044,10 +1052,24 @@ import type { BoatInfo } from './lib/BoatInfo';
        name: cameraName,
        src: img.src
      };
+     if (enlargedImageInterval) clearInterval(enlargedImageInterval);
+     enlargedImageInterval = setInterval(() => {
+       const img = document.getElementById(cameraName);
+       if (img && img.src && globalData.enlargedImage) {
+         globalData.enlargedImage = {
+           name: cameraName,
+           src: img.src
+         };
+       }
+     }, 1000);
    }
  }
 
  function closeEnlargedImage() {
+   if (enlargedImageInterval) {
+     clearInterval(enlargedImageInterval);
+     enlargedImageInterval = null;
+   }
    globalData.enlargedImage = null;
  }
 
