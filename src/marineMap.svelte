@@ -1098,6 +1098,15 @@
    });
    mapGlobal.map.addOverlay(popupState.overlay);
 
+   // Setup depth tooltip overlay
+   const depthTooltipElement = document.getElementById("depth-tooltip");
+   const depthTooltipOverlay = new Overlay({
+     element: depthTooltipElement || undefined,
+     positioning: "bottom-center",
+     offset: [0, -10],
+   });
+   mapGlobal.map.addOverlay(depthTooltipOverlay);
+
    mapClickHandler = function (evt: any) {
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
@@ -1165,7 +1174,7 @@
    };
    mapGlobal.map.on("click", mapClickHandler);
 
-   // Change cursor on hover over boats
+   // Change cursor on hover over boats + show depth tooltip on track hover
    mapPointerHandler = function (evt: any) {
      const hit = mapGlobal.map!.hasFeatureAtPixel(evt.pixel, {
        layerFilter: (layer) => {
@@ -1180,6 +1189,24 @@
        },
      });
      mapGlobal.map!.getTargetElement()!.style.cursor = hit ? "pointer" : "";
+
+     // Depth tooltip on track hover
+     let depthFound = false;
+     if (depthColorTrack) {
+       mapGlobal.map!.forEachFeatureAtPixel(evt.pixel, (feature) => {
+         const depth = feature.get("depth");
+         if (depth !== undefined && depth !== null && !depthFound) {
+           depthFound = true;
+           if (depthTooltipElement) {
+             depthTooltipElement.textContent = depth.toFixed(1) + " ft";
+           }
+           depthTooltipOverlay.setPosition(evt.coordinate);
+         }
+       }, { hitTolerance: 3 });
+     }
+     if (!depthFound) {
+       depthTooltipOverlay.setPosition(undefined);
+     }
    };
    mapGlobal.map.on("pointermove", mapPointerHandler);
 
@@ -1316,6 +1343,9 @@
     <div class="popup-arrow"></div>
   </div>
 
+  <!-- Depth Tooltip -->
+  <div id="depth-tooltip" class="depth-tooltip"></div>
+
   <div class="layer-controls">
     {#if mapInternalState.inPanMode}
       <div>
@@ -1421,6 +1451,16 @@
 </div>
 
 <style>
+  .depth-tooltip {
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
   /* Map loading styles */
   #map-container {
     opacity: 0;
