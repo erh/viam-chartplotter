@@ -625,7 +625,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  async function updateMachineConfig(ac) {
    const part = await ac.getRobotPart(
-     globalClientCloudMetaData.robotPartId
+     globalClientCloudMetaData.machinePartId
    )
 
    if (!part || !part.part) {
