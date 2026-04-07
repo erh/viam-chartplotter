@@ -28,6 +28,7 @@
    Style,
  } from 'ol/style.js';
  import Overlay from "ol/Overlay.js";
+ import {getDistance} from 'ol/sphere.js';
  import type { Geometry } from 'ol/geom';
  import type BaseLayer from 'ol/layer/Base';
  import type { TileCoord } from 'ol/tilecoord';
@@ -64,6 +65,11 @@
  let mapLoaded = $state(false);
  let currentDetections = $state<Detection[] | undefined>(undefined);
  let boatSearchTerm = $state('');
+
+ let measureActive = $state(false);
+ let measurePoints = $state<number[][]>([]);
+ let measureDistance = $state<number | null>(null);
+ let measureSource: VectorSource | null = null;
 
  // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
  // When externalVisibilityControl is true, start with empty set (parent will control)
@@ -802,6 +808,60 @@
    }
  }
 
+ function toggleMeasure() {
+   if (measureActive) {
+     stopMeasure();
+   } else {
+     measureActive = true;
+     measurePoints = [];
+     measureDistance = null;
+     if (measureSource) measureSource.clear();
+     closePopup();
+   }
+ }
+
+ function stopMeasure() {
+   measureActive = false;
+   measurePoints = [];
+   measureDistance = null;
+   if (measureSource) measureSource.clear();
+ }
+
+ function handleMeasureClick(evt: any) {
+   const coord = evt.coordinate;
+
+   if (measurePoints.length >= 2) {
+     measurePoints = [coord];
+     measureDistance = null;
+     if (measureSource) measureSource.clear();
+     const pointFeature = new Feature({ geometry: new Point(coord), type: 'measure' });
+     pointFeature.setStyle(new Style({
+       image: new CircleStyle({ radius: 6, fill: new Fill({ color: '#ff4444' }), stroke: new Stroke({ color: 'white', width: 2 }) })
+     }));
+     measureSource?.addFeature(pointFeature);
+     return;
+   }
+
+   measurePoints = [...measurePoints, coord];
+
+   const pointFeature = new Feature({ geometry: new Point(coord), type: 'measure' });
+   pointFeature.setStyle(new Style({
+     image: new CircleStyle({ radius: 6, fill: new Fill({ color: '#ff4444' }), stroke: new Stroke({ color: 'white', width: 2 }) })
+   }));
+   measureSource?.addFeature(pointFeature);
+
+   if (measurePoints.length === 2) {
+     const line = new Feature({ geometry: new LineString(measurePoints), type: 'measure' });
+     line.setStyle(new Style({
+       stroke: new Stroke({ color: '#ff4444', width: 2, lineDash: [8, 4] })
+     }));
+     measureSource?.addFeature(line);
+
+     const meters = getDistance(measurePoints[0], measurePoints[1]);
+     measureDistance = meters / 1852;
+   }
+ }
+
  function stopPanning() {
    mapInternalState.lastZoom = 0;
    mapInternalState.lastCenter = [0,0];
@@ -1107,7 +1167,19 @@
    });
    mapGlobal.map.addOverlay(depthTooltipOverlay);
 
+   // Setup measure layer
+   measureSource = new VectorSource();
+   const measureLayer = new Vector({
+     source: measureSource,
+     zIndex: 9999,
+   });
+   mapGlobal.map.addLayer(measureLayer);
+
    mapClickHandler = function (evt: any) {
+     if (measureActive) {
+       handleMeasureClick(evt);
+       return;
+     }
      const feature = mapGlobal.map!.forEachFeatureAtPixel(
        evt.pixel,
        function (f) {
@@ -1188,7 +1260,7 @@
          );
        },
      });
-     mapGlobal.map!.getTargetElement()!.style.cursor = hit ? "pointer" : "";
+     mapGlobal.map!.getTargetElement()!.style.cursor = measureActive ? "crosshair" : hit ? "pointer" : "";
 
      // Depth tooltip on track hover
      let depthFound = false;
@@ -1377,6 +1449,25 @@
       ▲ Layers
     {/if}
   </button>
+
+  <button
+    class="measure-toggle"
+    class:active={measureActive}
+    onclick={toggleMeasure}
+    aria-label="Measure distance"
+  >
+    {#if measureActive}
+      ✕ Measure
+    {:else}
+      Measure
+    {/if}
+  </button>
+
+  {#if measureActive && measureDistance !== null}
+    <div class="measure-result">
+      {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
+    </div>
+  {/if}
 
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
@@ -1688,6 +1779,53 @@
     border-color: #999;
   }
 
+  /* Measure toggle button (to the left of Layers) */
+  .measure-toggle {
+    position: absolute;
+    bottom: 10px;
+    right: calc(10px + 70px + 0.5rem);
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .measure-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .measure-toggle.active {
+    background: #ff4444;
+    color: white;
+    border-color: #cc0000;
+  }
+
+  .measure-toggle.active:hover {
+    background: #ee3333;
+  }
+
+  .measure-result {
+    position: absolute;
+    bottom: 45px;
+    right: calc(10px + 70px + 0.5rem);
+    padding: 8px 12px;
+    background: rgba(15, 23, 42, 0.95);
+    color: white;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: system-ui, -apple-system, sans-serif;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    white-space: nowrap;
+  }
+
   /* Boats panel (bottom-right, next to Layers) */
   .boats-controls {
     display: flex;
@@ -1723,7 +1861,7 @@
   .boats-panel {
     position: absolute;
     bottom: 45px;
-    right: calc(10px + 70px + 1rem); /* Match boats-toggle position */
+    right: calc(10px + 70px + 0.5rem + 85px + 1rem); /* Match boats-toggle position */
     background: rgba(255, 255, 255, 0.95);
     padding: 0;
     border-radius: 4px;
@@ -1852,7 +1990,7 @@
   .boats-toggle {
     position: absolute;
     bottom: 10px;
-    right: calc(10px + 70px + 1rem); /* 10px margin + ~70px layers button + 1rem gap */
+    right: calc(10px + 70px + 0.5rem + 85px + 1rem); /* 10px margin + layers + measure + gaps */
     padding: 6px 12px;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
