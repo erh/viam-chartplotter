@@ -33,13 +33,7 @@ function tankSort(names) {
     var sa = score(a);
     var sb = score(b);
     if (sa == sb) {
-      if (sa < sb) {
-        return -1;
-      }
-      if (sa > sb) {
-        return 1;
-      }
-      return 0;
+      return a.localeCompare(b, undefined, { numeric: true });
     }
     return sa - sb;
   }

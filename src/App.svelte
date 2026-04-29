@@ -1295,7 +1295,7 @@ import type { BoatInfo } from './lib/BoatInfo';
                 <div>{(value.Capacity * value.Level * 0.264172 / 100).toFixed(0)}</div>
                 <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
               </div>
-              {#if globalData.gaugesToHistorical[key]}
+              {#if globalData.gaugesToHistorical[key] && globalData.gaugesToHistorical[key].data.length > 0}
               <div class="relative">
                 <div role="article" tabindex="-1" class="peer bg-dark hover:cursor-pointer">
                   <LinkedChart
