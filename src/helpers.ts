@@ -1,12 +1,8 @@
-
-
 function tankSort(names) {
-
-  var compareFunction = function(a, b) {
-  
-    var score = function(n) {
+  var compareFunction = function (a, b) {
+    var score = function (n) {
       var num = 0;
-      
+
       if (n.indexOf("freshwater") >= 0) {
         num -= 10000;
       }
@@ -18,7 +14,7 @@ function tankSort(names) {
       if (n.indexOf("mid") >= 0) {
         num -= 500;
       }
-      
+
       if (n.indexOf("aft") >= 0) {
         num -= 250;
       }
@@ -26,9 +22,9 @@ function tankSort(names) {
       if (n.indexOf("main") >= 0) {
         num += 50;
       }
-      
+
       return num;
-    }
+    };
 
     var sa = score(a);
     var sb = score(b);
@@ -36,9 +32,9 @@ function tankSort(names) {
       return a.localeCompare(b, undefined, { numeric: true });
     }
     return sa - sb;
-  }
+  };
   names.sort(compareFunction);
   return names;
 }
 
-export { tankSort }
+export { tankSort };
