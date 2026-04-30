@@ -78,6 +78,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    partConfig : {},
    aisBoats : [] as BoatInfo[],
    enlargedImage: null,
+
+   shortGraphRange: (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("shortGraph") === "1"),
  });
 
  var globalConfig = $state({
@@ -686,14 +688,24 @@ import type { BoatInfo } from './lib/BoatInfo';
    return false;
  }
  
- async function getDataViaMQL(dc, g, startTime) {
+ async function getDataViaMQL(dc, g, startTime, shortRange) {
    var match = {
      "location_id" : globalClientCloudMetaData.locationId,
      "robot_id" : globalClientCloudMetaData.machineId,
      "component_name" : g,
      time_received: { $gte: startTime }
    };
-   
+
+   var minuteExpr;
+   var limit;
+   if (shortRange) {
+     minuteExpr = { "$toString" : { "$minute": "$time_received"} };
+     limit = 4 * 60;
+   } else {
+     minuteExpr = { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } };
+     limit = 24 * 4;
+   }
+
    var group = {
      "_id": { "$concat" : [
                                       { "$toString": { "$substr" : [ { "$year": "$time_received" } , 2, -1 ] } },
@@ -704,18 +716,18 @@ import type { BoatInfo } from './lib/BoatInfo';
                                       " ",
                                       { "$toString" : { "$hour": "$time_received" } },
                                       ":",
-                                      { "$toString" : { "$multiply" : [ 15, { "$floor" : { "$divide": [ { "$minute": "$time_received"}, 15] } } ] } }
+                                      minuteExpr
                                       ] },
      "ts" : { "$min" : "$time_received" },
      "min" : { "$min" : "$data.readings.Level" },
      "max" : { "$max" : "$data.readings.Level" }
    };
-   
+
    var query = [
      BSON.serialize( { "$match" : match } ),
      BSON.serialize( { "$group" : group } ),
      BSON.serialize( { "$sort" : { ts : -1 } } ),
-     BSON.serialize( { "$limit" : (24 * 4) } ),
+     BSON.serialize( { "$limit" : limit } ),
      BSON.serialize( { "$sort" : { ts : 1 } } ),
    ];
 
@@ -908,10 +920,11 @@ import type { BoatInfo } from './lib/BoatInfo';
  }
  
  async function updateGaugeGraphs(dc, robotName) {
-   var startTime = new Date(new Date() - 86400 * 1000);
+   var positionStartTime = new Date(new Date() - 86400 * 1000);
+   updatePositionHistory(dc, robotName, positionStartTime);
 
-   updatePositionHistory(dc, robotName, startTime);
-
+   var gaugeWindowMs = globalData.shortGraphRange ? (4 * 3600 * 1000) : (86400 * 1000);
+   var gaugeStartTime = new Date(new Date() - gaugeWindowMs);
 
    for ( var g in globalData.gauges ) {
      var h = globalData.gaugesToHistorical[g];
@@ -921,15 +934,27 @@ import type { BoatInfo } from './lib/BoatInfo';
 
 
      var timeStart = new Date();
-     var data = await getDataViaMQL(dc, g, startTime);
+     var data = await getDataViaMQL(dc, g, gaugeStartTime, globalData.shortGraphRange);
      var getDataTime = (new Date()).getTime() - timeStart.getTime();
-     
+
      console.log("time to get graph data for " + g + " took " + getDataTime + " and had " + data.length + " points");
-     
+
      h = { ts : new Date(), data : data };
      globalData.gaugesToHistorical[g] = h;
    }
 
+ }
+
+ function toggleShortGraphRange() {
+   globalData.shortGraphRange = !globalData.shortGraphRange;
+   var url = new URL(window.location.href);
+   if (globalData.shortGraphRange) {
+     url.searchParams.set("shortGraph", "1");
+   } else {
+     url.searchParams.delete("shortGraph");
+   }
+   window.history.replaceState({}, "", url);
+   globalData.gaugesToHistorical = {};
  }
  
  async function connect(): VIAM.RobotClient {
@@ -1380,6 +1405,14 @@ import type { BoatInfo } from './lib/BoatInfo';
   <div>
     <h3>Powered By</h3>
     <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
+    <label class="flex items-center gap-2 mt-2 text-white text-sm cursor-pointer">
+      <input
+        type="checkbox"
+        checked={globalData.shortGraphRange}
+        onchange={toggleShortGraphRange}
+      />
+      <span>show last 4 hours in graphs</span>
+    </label>
   </div>
 
   {#if globalData.enlargedImage}
