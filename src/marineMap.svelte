@@ -238,6 +238,8 @@
     setVisibleBoats: (ids: Set<string>) => void;
     getVisibleBoats: () => Set<string>;
     setDetections: (detections: Detection[] | undefined) => void;
+    /** Focus a boat by mmsi/partId: make it visible (even if offline), fly to it, and open its popup. */
+    focusBoat: (mmsi: string) => void;
   }) => void;
   boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
   fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
@@ -1298,6 +1300,7 @@
        setVisibleBoats,
        getVisibleBoats: () => new Set(visibleBoats),
        setDetections: (detections: Detection[] | undefined) => { currentDetections = detections; },
+       focusBoat,
      });
    }, 100);
  }
@@ -1307,6 +1310,45 @@
    if (popupState.overlay) {
      popupState.overlay.setPosition(undefined);
    }
+ }
+
+ // Focus a boat by mmsi/partId: make it visible even if offline, fly to it, open popup.
+ function focusBoat(mmsi: string) {
+   // Ensure the boat is in the visible set
+   if (!visibleBoats.has(mmsi)) {
+     visibleBoats = new Set([...visibleBoats, mmsi]);
+   }
+
+   const boat = boats?.find(b => b.mmsi === mmsi);
+   if (!boat) return;
+
+   const coords: [number, number] = [boat.location[1], boat.location[0]];
+
+   if (mapGlobal.view) {
+     mapGlobal.view.animate({
+       center: coords,
+       zoom: Math.max(10, mapGlobal.view.getZoom() ?? 10),
+       duration: 500,
+     });
+     mapInternalState.inPanMode = true;
+   }
+
+   popupState.content = {
+     name: boat.name,
+     mmsi,
+     speed: boat.speed,
+     heading: boat.heading,
+     lat: boat.location[0],
+     lng: boat.location[1],
+     isMyBoat: false,
+     host: boat.host,
+     partId: boat.partId,
+     isOnline: boat.isOnline ?? false,
+   };
+   popupState.visible = true;
+   popupState.overlay?.setPosition(coords);
+
+   onBoatPopupOpen?.(boat.partId || mmsi);
  }
 
  function formatCoord(val: number, isLat: boolean): string {
@@ -1438,6 +1480,7 @@
     {/each}
   </div>
 
+  <div class="bottom-controls">
   <button 
     class="layers-toggle"
     onclick={() => layersExpanded = !layersExpanded}
@@ -1449,25 +1492,6 @@
       ▲ Layers
     {/if}
   </button>
-
-  <button
-    class="measure-toggle"
-    class:active={measureActive}
-    onclick={toggleMeasure}
-    aria-label="Measure distance"
-  >
-    {#if measureActive}
-      ✕ Measure
-    {:else}
-      Measure
-    {/if}
-  </button>
-
-  {#if measureActive && measureDistance !== null}
-    <div class="measure-result">
-      {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
-    </div>
-  {/if}
 
   {#if enableBoatsPanel}
   <!-- Boats Panel (bottom-right, next to Layers) -->
@@ -1538,6 +1562,24 @@
       ▲ Boats
     {/if}
   </button>
+  {/if}
+  </div>
+
+  <button
+    class="measure-toggle"
+    class:active={measureActive}
+    onclick={toggleMeasure}
+    aria-pressed={measureActive}
+    title="Measure distance"
+    aria-label="Measure distance"
+  >
+    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg>
+  </button>
+
+  {#if measureActive && measureDistance !== null}
+    <div class="measure-result">
+      {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
+    </div>
   {/if}
 </div>
 
@@ -1758,6 +1800,11 @@
   }
 
   /* Layers toggle button */
+  .bottom-controls {
+    /* desktop: no layout change, children remain absolutely positioned */
+    position: static;
+  }
+
   .layers-toggle {
     position: absolute;
     bottom: 10px;
@@ -1779,21 +1826,25 @@
     border-color: #999;
   }
 
-  /* Measure toggle button (to the left of Layers) */
+  /* Measure toggle button (top-right, all screen sizes) */
   .measure-toggle {
     position: absolute;
-    bottom: 10px;
-    right: calc(10px + 70px + 0.5rem);
-    padding: 6px 12px;
+    top: 10px;
+    right: 10px;
+    bottom: auto;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 12px;
-    font-family: system-ui, -apple-system, sans-serif;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .measure-toggle:hover {
@@ -1813,8 +1864,9 @@
 
   .measure-result {
     position: absolute;
-    bottom: 45px;
-    right: calc(10px + 70px + 0.5rem);
+    top: calc(10px + 32px + 6px);
+    right: 10px;
+    bottom: auto;
     padding: 8px 12px;
     background: rgba(15, 23, 42, 0.95);
     color: white;
@@ -1861,7 +1913,7 @@
   .boats-panel {
     position: absolute;
     bottom: 45px;
-    right: calc(10px + 70px + 0.5rem + 85px + 1rem); /* Match boats-toggle position */
+    right: calc(10px + 70px + 0.5rem); /* Match boats-toggle position */
     background: rgba(255, 255, 255, 0.95);
     padding: 0;
     border-radius: 4px;
@@ -1986,11 +2038,11 @@
     background: #004080;
   }
 
-  /* Boats toggle button (bottom-right, 1rem gap from Layers) */
+  /* Boats toggle button (bottom-right, next to Layers) */
   .boats-toggle {
     position: absolute;
     bottom: 10px;
-    right: calc(10px + 70px + 0.5rem + 85px + 1rem); /* 10px margin + layers + measure + gaps */
+    right: calc(10px + 70px + 0.5rem); /* 10px margin + layers button + gap */
     padding: 6px 12px;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
@@ -2006,5 +2058,31 @@
   .boats-toggle:hover {
     background: white;
     border-color: #999;
+  }
+
+  @media (max-width: 639px) {
+    .bottom-controls {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      left: auto;
+      display: flex;
+      gap: 8px;
+      z-index: 1001;
+      align-items: center;
+    }
+
+    .bottom-controls .layers-toggle,
+    .bottom-controls .boats-toggle {
+      position: static;
+    }
+
+    .boats-panel {
+      right: 10px;
+      left: auto;
+      width: calc(100vw - 20px);
+      max-width: 320px;
+      max-height: 60vh;
+    }
   }
 </style>
