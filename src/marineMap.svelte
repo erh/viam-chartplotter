@@ -1569,13 +1569,10 @@
     class="measure-toggle"
     class:active={measureActive}
     onclick={toggleMeasure}
+    title="Measure distance"
     aria-label="Measure distance"
   >
-    {#if measureActive}
-      ✕ Measure
-    {:else}
-      Measure
-    {/if}
+    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg>
   </button>
 
   {#if measureActive && measureDistance !== null}
@@ -1834,16 +1831,19 @@
     top: 10px;
     right: 10px;
     bottom: auto;
-    padding: 6px 12px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 12px;
-    font-family: system-ui, -apple-system, sans-serif;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .measure-toggle:hover {
