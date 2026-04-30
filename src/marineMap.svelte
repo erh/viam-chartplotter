@@ -1569,6 +1569,7 @@
     class="measure-toggle"
     class:active={measureActive}
     onclick={toggleMeasure}
+    aria-pressed={measureActive}
     title="Measure distance"
     aria-label="Measure distance"
   >
