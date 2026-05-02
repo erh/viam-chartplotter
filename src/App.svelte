@@ -246,16 +246,18 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    });
 
-   globalConfig.vicPowerNames.forEach( (powerName) => {
-     new VIAM.SensorClient(client, powerName).getReadings().then((d) => {
-       globalData.vicPowers[powerName] = d;
-     }).catch( errorHandlerMaker(powerName));
-   });
+   if (loopNumber % 15 == 0) {
+     globalConfig.vicPowerNames.forEach( (powerName) => {
+       new VIAM.SensorClient(client, powerName).getReadings().then((d) => {
+         globalData.vicPowers[powerName] = d;
+       }).catch( errorHandlerMaker(powerName));
+     });
 
-   if (globalConfig.vicDoorsSensorName != "") {
-     new VIAM.SensorClient(client, globalConfig.vicDoorsSensorName).getReadings().then((d) => {
-       globalData.vicDoors = d;
-     }).catch( errorHandlerMaker(globalConfig.vicDoorsSensorName));
+     if (globalConfig.vicDoorsSensorName != "") {
+       new VIAM.SensorClient(client, globalConfig.vicDoorsSensorName).getReadings().then((d) => {
+         globalData.vicDoors = d;
+       }).catch( errorHandlerMaker(globalConfig.vicDoorsSensorName));
+     }
    }
 
    if (globalConfig.routeSensorName != "") {
