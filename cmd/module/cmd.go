@@ -8,7 +8,6 @@ import (
 	"github.com/erh/viam-chartplotter"
 )
 
-
 func main() {
 	module.ModularMain(
 		resource.APIModel{generic.API, vc.Model},

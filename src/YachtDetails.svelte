@@ -1,35 +1,43 @@
 <script lang="ts">
-  let { vicPowers, vicPowerNames, vicDoors }: { vicPowers: Record<string, any>; vicPowerNames: string[]; vicDoors: Record<string, boolean> } = $props();
+  let {
+    vicPowers,
+    vicPowerNames,
+    vicDoors,
+  }: {
+    vicPowers: Record<string, any>;
+    vicPowerNames: string[];
+    vicDoors: Record<string, boolean>;
+  } = $props();
 
   function getDisplayValue(key: string, value: any): { label: string; value: string } {
     const lookup: Record<string, string> = {
-      'freq': 'Frequency',
-      'kw': 'Kilowatts',
-      'l1a': 'L1A Current (A)',
-      'l1b': 'L1B Current (A)',
-      'l1c': 'L1C Current (A)',
-      'vl-l': 'Line-to-Line Voltage',
-      'vl-n': 'Line-to-Neutral Voltage'
+      freq: "Frequency",
+      kw: "Kilowatts",
+      l1a: "L1A Current (A)",
+      l1b: "L1B Current (A)",
+      l1c: "L1C Current (A)",
+      "vl-l": "Line-to-Line Voltage",
+      "vl-n": "Line-to-Neutral Voltage",
     };
 
     const labels: Record<string, string> = {
-      'freq': 'Hz',
-      'kw': 'kW',
-      'l1a': 'A',
-      'l1b': 'A',
-      'l1c': 'A',
-      'vl-l': 'V',
-      'vl-n': 'V'
+      freq: "Hz",
+      kw: "kW",
+      l1a: "A",
+      l1b: "A",
+      l1c: "A",
+      "vl-l": "V",
+      "vl-n": "V",
     };
 
     const label = lookup[key] || key;
-    const unit = labels[key] || '';
-    const dividedValue = typeof value === 'number' ? (value / 10) : value;
+    const unit = labels[key] || "";
+    const dividedValue = typeof value === "number" ? value / 10 : value;
 
     return {
       label,
-      value: typeof dividedValue === 'number' ? dividedValue.toFixed(2) : String(dividedValue),
-      unit
+      value: typeof dividedValue === "number" ? dividedValue.toFixed(2) : String(dividedValue),
+      unit,
     };
   }
 </script>
@@ -46,11 +54,11 @@
         {#if vicPowers[powerName]}
           <div class="bg-gray-900 rounded-lg p-4 border border-gray-700">
             <h3 class="text-lg font-semibold mb-3 capitalize text-blue-400">
-              {powerName.replace('vic-power-', '').replace('-', ' ')}
+              {powerName.replace("vic-power-", "").replace("-", " ")}
             </h3>
-            
+
             <div class="grid grid-cols-2 gap-y-2 gap-x-4 text-sm">
-              {#each Object.entries(vicPowers[powerName]).sort((a, b) => a[0].localeCompare(b[0])) as [key, value]}
+              {#each Object.entries(vicPowers[powerName]).sort( (a, b) => a[0].localeCompare(b[0]) ) as [key, value]}
                 <div class="flex justify-between items-center border-b border-gray-800 pb-1">
                   <span class="text-gray-400">{getDisplayValue(key, value).label}</span>
                   <span class="font-mono font-bold text-right">
@@ -63,7 +71,7 @@
         {:else}
           <div class="bg-gray-900 rounded-lg p-4 border border-gray-700 opacity-50">
             <h3 class="text-lg font-semibold mb-3 capitalize">
-              {powerName.replace('vic-power-', '').replace('-', ' ')}
+              {powerName.replace("vic-power-", "").replace("-", " ")}
             </h3>
             <div class="text-gray-500">No data available</div>
           </div>
@@ -78,9 +86,9 @@
       <div class="grid grid-cols-2 gap-y-2 gap-x-4 text-sm">
         {#each Object.entries(vicDoors).sort((a, b) => a[0].localeCompare(b[0])) as [name, isOpen]}
           <div class="flex justify-between items-center border-b border-gray-800 pb-1">
-            <span class="text-gray-400 capitalize">{name.replaceAll('-', ' ')}</span>
+            <span class="text-gray-400 capitalize">{name.replaceAll("-", " ")}</span>
             <span class="font-mono font-bold {isOpen ? 'text-red-400' : 'text-green-400'}">
-              {isOpen ? 'Open' : 'Closed'}
+              {isOpen ? "Open" : "Closed"}
             </span>
           </div>
         {/each}

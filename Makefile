@@ -16,8 +16,11 @@ src/output.css: node_modules src/app.css
 dist/index.html: src/output.css *.json src/*.css src/*.ts src/*.svelte src/lib/*.ts node_modules
 	NODE_ENV=development npm run build
 
-lint:
+lint: node_modules
 	gofmt -w .
+	npm run format
+	npm run lint-fix
+	npx svelte-check --tsconfig ./tsconfig.json
 
 bin/viamchartplottermodule: bin *.go cmd/module/*.go *.mod Makefile dist/index.html
 	go build -o bin/viamchartplottermodule cmd/module/cmd.go

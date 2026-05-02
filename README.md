@@ -1,17 +1,17 @@
 ## Viam Chartplotter
 
 ## ToDo
-* display for what data old and restart
-* maps
-** option for ais tracks and prediction
-** COG / Heading for boat + ais
-* Camera - make streaming when fixed
-* History
-* Configuration
-* Multiple tabs
-* Later Cool Stuff
-** tides
 
+- display for what data old and restart
+- maps
+  ** option for ais tracks and prediction
+  ** COG / Heading for boat + ais
+- Camera - make streaming when fixed
+- History
+- Configuration
+- Multiple tabs
+- Later Cool Stuff
+  \*\* tides
 
 ## Developing
 

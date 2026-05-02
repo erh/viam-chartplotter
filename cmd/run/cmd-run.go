@@ -3,15 +3,14 @@ package main
 import (
 	"context"
 	"time"
-	
+
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
-	
+
 	"github.com/erh/vmodutils"
 
 	"github.com/erh/viam-chartplotter"
 )
-
 
 func main() {
 	err := realMain()
@@ -19,7 +18,6 @@ func main() {
 		panic(err)
 	}
 }
-
 
 func realMain() error {
 	ctx := context.Background()
@@ -35,7 +33,7 @@ func realMain() error {
 		return err
 	}
 	defer ws.Close(ctx)
-	
+
 	time.Sleep(time.Minute)
 
 	return nil
