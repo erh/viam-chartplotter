@@ -23,6 +23,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
  import { tankSort } from "./helpers.ts"
  import MarineMap from "./marineMap.svelte"
+ import YachtDetails from "./YachtDetails.svelte"
  
  const globalLogger = new Logger({ name: "global" });
  let globalClient: VIAM.RobotClient;
@@ -59,6 +60,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    },
    gauges : {},
    acPowers : {},
+   vicPowers : {},
+   vicDoors : {},
    acPowerData : false,
    gaugesToHistorical : {},
    
@@ -78,7 +81,6 @@ import type { BoatInfo } from './lib/BoatInfo';
    partConfig : {},
    aisBoats : [] as BoatInfo[],
    enlargedImage: null,
-
    shortGraphRange: (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("shortGraph") === "1"),
  });
 
@@ -97,7 +99,9 @@ import type { BoatInfo } from './lib/BoatInfo';
    spotZeroSWSensorName : "",
    seakeeperSensorName : "",
    acPowers : [],
-   
+   vicPowerNames : [],
+   vicDoorsSensorName : "",
+
    zoomModifier : 0,
  });
 
@@ -239,8 +243,20 @@ import type { BoatInfo } from './lib/BoatInfo';
        globalData.acPowers[n] = d;
        globalData.acPowerData = true;
      }).catch( errorHandlerMaker(acPowerName));
-     
+
    });
+
+   globalConfig.vicPowerNames.forEach( (powerName) => {
+     new VIAM.SensorClient(client, powerName).getReadings().then((d) => {
+       globalData.vicPowers[powerName] = d;
+     }).catch( errorHandlerMaker(powerName));
+   });
+
+   if (globalConfig.vicDoorsSensorName != "") {
+     new VIAM.SensorClient(client, globalConfig.vicDoorsSensorName).getReadings().then((d) => {
+       globalData.vicDoors = d;
+     }).catch( errorHandlerMaker(globalConfig.vicDoorsSensorName));
+   }
 
    if (globalConfig.routeSensorName != "") {
      new VIAM.SensorClient(client, globalConfig.routeSensorName).getReadings().then((raw) => {
@@ -466,6 +482,8 @@ import type { BoatInfo } from './lib/BoatInfo';
    globalConfig.spotZeroSWSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /spotzero-sw/);
    globalConfig.seakeeperSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /seakeeper/);
    globalConfig.acPowers = filterResourcesAllMatchingNames(resources, "component", "sensor", /\bac-\d-\d$/);
+   globalConfig.vicPowerNames = filterResourcesAllMatchingNames(resources, "component", "sensor", /vic-power/);
+   globalConfig.vicDoorsSensorName = filterResourcesFirstMatchingName(resources, "component", "sensor", /vic-doors/);
 
    console.log("globalConfig", $state.snapshot(globalConfig));
 
@@ -1007,9 +1025,15 @@ import type { BoatInfo } from './lib/BoatInfo';
    }
  }
 
+ function syncFromHash() {
+   globalData.showYachtDetails = window.location.hash === '#yacht-details';
+ }
+
  onMount(() => {
   start();
   window.addEventListener('keydown', handleKeydown);
+  window.addEventListener('hashchange', syncFromHash);
+  syncFromHash();
 });
  
  onDestroy(() => {
@@ -1035,6 +1059,7 @@ import type { BoatInfo } from './lib/BoatInfo';
 
    // Remove keydown event listener
    window.removeEventListener('keydown', handleKeydown);
+   window.removeEventListener('hashchange', syncFromHash);
    
    // Disconnect client event listeners if present
    if (globalClient) {
@@ -1168,6 +1193,12 @@ import type { BoatInfo } from './lib/BoatInfo';
 </script>
 
 
+{#if globalData.showYachtDetails}
+  <div class="w-dvw min-h-dvh p-2 bg-black text-white">
+    <a href="#" class="text-blue-400 hover:underline">← Back to Dashboard</a>
+    <YachtDetails vicPowers={globalData.vicPowers} vicPowerNames={globalConfig.vicPowerNames} vicDoors={globalData.vicDoors} />
+  </div>
+{:else}
 <main class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black">
 
   <MarineMap myBoat={{
@@ -1402,6 +1433,12 @@ import type { BoatInfo } from './lib/BoatInfo';
     {/each}
   </div>
 
+  {#if globalConfig.vicPowerNames.length > 0}
+    <a href="#yacht-details" class="text-blue-400 hover:underline w-fit">
+      Yacht Details →
+    </a>
+  {/if}
+
   <div>
     <h3>Powered By</h3>
     <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
@@ -1437,3 +1474,4 @@ import type { BoatInfo } from './lib/BoatInfo';
   {/if}
 
 </main>
+{/if}
