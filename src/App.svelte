@@ -269,7 +269,7 @@
         .catch(errorHandlerMaker(acPowerName));
     });
 
-    if (loopNumber % 15 == 0) {
+    if (loopNumber % 15 == 3) {
       globalConfig.vicPowerNames.forEach((powerName) => {
         new VIAM.SensorClient(client, powerName)
           .getReadings()
