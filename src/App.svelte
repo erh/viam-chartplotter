@@ -1433,23 +1433,24 @@ import type { BoatInfo } from './lib/BoatInfo';
     {/each}
   </div>
 
-  {#if globalConfig.vicPowerNames.length > 0}
-    <a href="#yacht-details" class="text-blue-400 hover:underline w-fit">
-      Yacht Details →
-    </a>
-  {/if}
-
-  <div>
-    <h3>Powered By</h3>
-    <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
-    <label class="flex items-center gap-2 mt-2 text-white text-sm cursor-pointer">
-      <input
-        type="checkbox"
-        checked={globalData.shortGraphRange}
-        onchange={toggleShortGraphRange}
-      />
-      <span>show last 4 hours in graphs</span>
-    </label>
+  <div class="flex flex-col gap-3 text-white text-sm">
+    <div>
+      <h3>Powered By</h3>
+      <img src="https://app.viam.com/static/images/viam-logo.png" width="250" height="49" alt="viam logo" style="filter: invert(1);" />
+    </div>
+    <div class="flex items-center gap-6 flex-wrap">
+      {#if globalConfig.vicPowerNames.length > 0}
+        <a href="#yacht-details" class="text-blue-400 hover:underline">Yacht Details →</a>
+      {/if}
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={globalData.shortGraphRange}
+          onchange={toggleShortGraphRange}
+        />
+        <span>show last 4 hours in graphs</span>
+      </label>
+    </div>
   </div>
 
   {#if globalData.enlargedImage}
