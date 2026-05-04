@@ -262,7 +262,7 @@
       });
     }
 
-    mapInternalState.inPanMode = true; // Prevent auto-centering
+    inPanMode = true; // Prevent auto-centering
   }
 
   let {
@@ -410,19 +410,21 @@
     onLayers: new Collection<BaseLayer>(),
   });
 
+  let inPanMode = $state(false);
+
   let mapInternalState: {
-    inPanMode: boolean;
     lastZoom: number;
     lastCenter: number[] | null;
+    lockedZoom: number | null;
     lastPosition: number[];
     lastPositions: Record<string, number[]>;
     trackFeatureIds: Record<string, boolean>;
     aisTrackFeatureIds: Record<string, boolean>;
     lastPosHistoricalKey: string;
   } = {
-    inPanMode: false,
     lastZoom: 0,
     lastCenter: null,
+    lockedZoom: null,
     lastPosition: [0, 0],
     lastPositions: {},
     trackFeatureIds: {},
@@ -442,14 +444,14 @@
     ) {
       var z = mapGlobal.view.getZoom();
       if (z != mapInternalState.lastZoom) {
-        mapInternalState.inPanMode = true;
+        inPanMode = true;
       }
 
       var c = mapGlobal.view.getCenter();
       if (c) {
         var diff = pointDiff(c, mapInternalState.lastCenter);
         if (diff > 0.003) {
-          mapInternalState.inPanMode = true;
+          inPanMode = true;
         }
       }
     }
@@ -461,17 +463,21 @@
       var pp = [myBoat.location[1], myBoat.location[0]];
       mapGlobal.myBoatMarker.setGeometry(new Point(pp));
 
-      if (!mapInternalState.inPanMode && sz) {
+      if (!inPanMode && sz) {
         mapGlobal.view.centerOn(pp, sz, [sz[0] / 2, sz[1] / 2]);
 
-        // zoom of 10 is about 30 miles
-        // zoom of 16 is city level
-        var zoom = Math.pow(Math.floor(myBoat.speed), 0.41);
-        zoom = Math.floor(16 - zoom) + (zoomModifier || 0);
-        if (zoom <= 0) {
-          zoom = 1;
+        var zoom: number;
+        if (mapInternalState.lockedZoom != null) {
+          zoom = mapInternalState.lockedZoom;
+        } else {
+          // zoom of 10 is about 30 miles
+          // zoom of 16 is city level
+          zoom = Math.pow(Math.floor(myBoat.speed), 0.41);
+          zoom = Math.floor(16 - zoom) + (zoomModifier || 0);
+          if (zoom <= 0) {
+            zoom = 1;
+          }
         }
-        //console.log("speed: " + myBoat.speed + " zoom: " + zoom);
         mapGlobal.view.setZoom(zoom);
 
         mapInternalState.lastZoom = zoom;
@@ -1030,9 +1036,11 @@
   }
 
   function stopPanning() {
+    const z = mapGlobal.view?.getZoom();
+    mapInternalState.lockedZoom = typeof z === "number" ? z : null;
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
-    mapInternalState.inPanMode = false;
+    inPanMode = false;
   }
 
   function setupLayers() {
@@ -1484,7 +1492,7 @@
     mapGlobal.map.on("pointermove", mapPointerHandler);
 
     mapPointerDragHandler = function () {
-      mapInternalState.inPanMode = true;
+      inPanMode = true;
     };
     mapGlobal.map.on("pointerdrag", mapPointerDragHandler);
 
@@ -1546,7 +1554,7 @@
         zoom: Math.max(10, mapGlobal.view.getZoom() ?? 10),
         duration: 500,
       });
-      mapInternalState.inPanMode = true;
+      inPanMode = true;
     }
 
     popupState.content = {
@@ -1693,7 +1701,7 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
-  {#if mapInternalState.inPanMode}
+  {#if inPanMode}
     <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
   {/if}
 
