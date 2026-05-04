@@ -1116,6 +1116,10 @@
       }),
     });
 
+    // The local NOAA caching proxy only exists when this app is served by our Go
+    // module (port 8888) or the Vite dev server (5173). Anywhere else (e.g. proxied
+    // through the Viam app), bypass the cache and talk to NOAA directly.
+    const noaaCacheAvailable = noaaCacheReachable();
     mapGlobal.layerOptions.push({
       name: "noaa",
       on: false,
@@ -1123,9 +1127,9 @@
         opacity: 0.7,
         preload: 2,
         source: new TileWMS({
-          // Routes through the local NOAA WMS caching proxy (see noaa_cache.go)
-          // so tiles are cached on disk and served locally on subsequent loads.
-          url: "/noaa-wms/proxy",
+          url: noaaCacheAvailable
+            ? "/noaa-wms/proxy"
+            : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
           params: {},
           transition: 300,
         }),
@@ -1279,11 +1283,22 @@
     return null;
   }
 
+  // The Go caching proxy is only mounted on the module's own HTTP server (default port
+  // 8888) and is also reachable through the Vite dev server (5173) via its proxy. When
+  // the page is served from anywhere else we skip both the proxy URL and the prefetch
+  // calls and let OpenLayers hit NOAA directly.
+  function noaaCacheReachable(): boolean {
+    if (typeof window === "undefined") return false;
+    const port = window.location.port;
+    return port === "5173" || port === "8888";
+  }
+
   // Tracks the last bbox/zoom range we asked the cache to prefetch so panning by a single
   // tile doesn't spam the server with overlapping prefetch jobs.
   let lastNoaaPrefetchKey = "";
 
   function maybePrefetchNoaaTiles() {
+    if (!noaaCacheReachable()) return;
     const noaa = findLayerByName("noaa");
     if (!noaa || !noaa.on) return;
     if (!mapGlobal.map || !mapGlobal.view) return;

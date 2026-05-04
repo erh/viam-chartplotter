@@ -7,4 +7,10 @@ export default defineConfig({
   css: {
     postcss: false,
   },
+  server: {
+    proxy: {
+      // Forward NOAA caching proxy requests to the Go module (run via `make run`).
+      "/noaa-wms": "http://localhost:8888",
+    },
+  },
 });
