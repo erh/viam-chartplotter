@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCookie, setCookie } from "typescript-cookie";
   import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from "./lib/BoatInfo";
   import RegularShape from "ol/style/RegularShape.js";
 
@@ -64,7 +65,30 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
-  let headsUpActive = $state(false);
+  const COOKIE_HEADS_UP = "mapHeadsUp";
+  const COOKIE_LAYERS = "mapLayers";
+  const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
+
+  let headsUpActive = $state(getCookie(COOKIE_HEADS_UP) === "1");
+
+  function loadSavedLayerStates(): Record<string, boolean> {
+    var raw = getCookie(COOKIE_LAYERS);
+    if (!raw) return {};
+    try {
+      var parsed = JSON.parse(raw);
+      return typeof parsed === "object" && parsed !== null ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveLayerStates() {
+    var states: Record<string, boolean> = {};
+    for (var l of mapGlobal.layerOptions) {
+      states[l.name] = l.on;
+    }
+    setCookie(COOKIE_LAYERS, JSON.stringify(states), COOKIE_OPTS);
+  }
 
   // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
   // When externalVisibilityControl is true, start with empty set (parent will control)
@@ -883,6 +907,7 @@
 
   function toggleHeadsUp() {
     headsUpActive = !headsUpActive;
+    setCookie(COOKIE_HEADS_UP, headsUpActive ? "1" : "0", COOKIE_OPTS);
     applyHeadsUpRotation();
   }
 
@@ -1446,6 +1471,16 @@
     // Initial fit to show all boats with room for popups (only when boats panel enabled)
     setTimeout(() => {
       mapGlobal.map?.updateSize(); // Ensure map has correct dimensions
+
+      // Restore saved on/off state for known layers from cookie
+      var savedLayers = loadSavedLayerStates();
+      for (var i = 0; i < mapGlobal.layerOptions.length; i++) {
+        var name = mapGlobal.layerOptions[i].name;
+        if (Object.prototype.hasOwnProperty.call(savedLayers, name)) {
+          mapGlobal.layerOptions[i].on = !!savedLayers[name];
+        }
+      }
+
       if (enableBoatsPanel && boats && boats.length > 0) {
         fitToVisibleBoats();
       }
@@ -1648,6 +1683,7 @@
         <input
           type="checkbox"
           bind:checked={mapGlobal.layerOptions[idx].on}
+          onchange={saveLayerStates}
           disabled={isParentOff}
         />
         {l.displayName || l.name}
