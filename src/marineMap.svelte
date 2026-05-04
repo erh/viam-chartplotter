@@ -67,9 +67,25 @@
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
+  const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
+  const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
+
   let headsUpActive = $state(getCookie(COOKIE_HEADS_UP) === "1");
+
+  function loadHeadingLineLength(): number {
+    var raw = getCookie(COOKIE_HEADING_LINE_LENGTH);
+    var parsed = raw ? Number(raw) : NaN;
+    return HEADING_LINE_LENGTH_OPTIONS.includes(parsed) ? parsed : 5;
+  }
+  let headingLineLengthNm = $state(loadHeadingLineLength());
+
+  function setHeadingLineLength(nm: number) {
+    headingLineLengthNm = nm;
+    setCookie(COOKIE_HEADING_LINE_LENGTH, String(nm), COOKIE_OPTS);
+    updateHeadingLine();
+  }
 
   function loadSavedLayerStates(): Record<string, boolean> {
     var raw = getCookie(COOKIE_LAYERS);
@@ -921,7 +937,7 @@
     const start: [number, number] = [myBoat.location[1], myBoat.location[0]];
     const headingRad = (myBoat.heading * Math.PI) / 180;
     const nmInMeters = 1852;
-    const lengthNm = 5;
+    const lengthNm = headingLineLengthNm;
 
     const end = sphereOffset(start, lengthNm * nmInMeters, headingRad) as [number, number];
     mapGlobal.headingLineFeatures.push(
@@ -1297,6 +1313,7 @@
   // Store event handler references for cleanup (outside setupMap so they're accessible in onMount cleanup)
   let mapClickHandler: any = null;
   let mapPointerHandler: any = null;
+  let mapPointerDragHandler: any = null;
 
   function setupMap() {
     useGeographic();
@@ -1466,6 +1483,11 @@
     };
     mapGlobal.map.on("pointermove", mapPointerHandler);
 
+    mapPointerDragHandler = function () {
+      mapInternalState.inPanMode = true;
+    };
+    mapGlobal.map.on("pointerdrag", mapPointerDragHandler);
+
     console.log("setupMap finished");
 
     // Initial fit to show all boats with room for popups (only when boats panel enabled)
@@ -1608,6 +1630,9 @@
         if (mapPointerHandler) {
           mapGlobal.map.un("pointermove", mapPointerHandler);
         }
+        if (mapPointerDragHandler) {
+          mapGlobal.map.un("pointerdrag", mapPointerDragHandler);
+        }
       }
     };
   });
@@ -1687,6 +1712,20 @@
           disabled={isParentOff}
         />
         {l.displayName || l.name}
+        {#if l.name === "heading-line"}
+          <select
+            class="heading-line-length"
+            value={headingLineLengthNm}
+            onchange={(e) => setHeadingLineLength(Number(e.currentTarget.value))}
+            disabled={isParentOff || !l.on}
+            onclick={(e) => e.stopPropagation()}
+            aria-label="heading line length"
+          >
+            {#each HEADING_LINE_LENGTH_OPTIONS as nm}
+              <option value={nm}>{nm} nm</option>
+            {/each}
+          </select>
+        {/if}
       </label>
     {/each}
   </div>
@@ -2044,6 +2083,12 @@
     width: 14px;
     height: 14px;
     cursor: pointer;
+  }
+
+  .layer-controls .heading-line-length {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 2px;
   }
 
   /* Layers toggle button */
