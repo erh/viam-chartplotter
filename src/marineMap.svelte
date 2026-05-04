@@ -1116,25 +1116,25 @@
       }),
     });
 
-    // The local NOAA caching proxy only exists when this app is served by our Go
-    // module (port 8888) or the Vite dev server (5173). Anywhere else (e.g. proxied
-    // through the Viam app), bypass the cache and talk to NOAA directly.
-    const noaaCacheAvailable = noaaCacheReachable();
-    mapGlobal.layerOptions.push({
-      name: "noaa",
-      on: false,
-      layer: new TileLayer({
-        opacity: 0.7,
-        preload: 2,
-        source: new TileWMS({
-          url: noaaCacheAvailable
-            ? "/noaa-wms/proxy"
-            : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-          params: {},
-          transition: 300,
+    // The NOAA layer is served by our local ENC pipeline. The data layer (catalog
+    // + zip download/extract) is live; the renderer is the next milestone, so until
+    // it lands /noaa-enc/tile/{z}/{x}/{y}.png will return 501 and the layer simply
+    // won't show tiles. We deliberately no longer talk to NOAA's WMS — that
+    // endpoint is too slow for live use.
+    if (noaaCacheReachable()) {
+      mapGlobal.layerOptions.push({
+        name: "noaa",
+        on: false,
+        layer: new TileLayer({
+          opacity: 0.7,
+          preload: 2,
+          source: new XYZ({
+            url: "/noaa-enc/tile/{z}/{x}/{y}.png",
+            transition: 300,
+          }),
         }),
-      }),
-    });
+      });
+    }
 
     // Track layer for myBoat (child of boat layer)
     var trackLayer = new Vector({
@@ -1293,8 +1293,8 @@
     return port === "5173" || port === "8888";
   }
 
-  // Tracks the last bbox/zoom range we asked the cache to prefetch so panning by a single
-  // tile doesn't spam the server with overlapping prefetch jobs.
+  // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
+  // spam the backend with overlapping cell-download jobs.
   let lastNoaaPrefetchKey = "";
 
   function maybePrefetchNoaaTiles() {
@@ -1306,25 +1306,22 @@
     const size = mapGlobal.map.getSize();
     if (!size) return;
     const extent = mapGlobal.view.calculateExtent(size);
-    const z = Math.round(mapGlobal.view.getZoom() ?? 12);
-    // Round bbox to ~1 tile of slop so trivial pans share a key
+    // Round bbox to ~0.01 deg so trivial pans share a key.
     const round = (n: number) => Math.round(n * 100) / 100;
     const minLon = round(extent[0]);
     const minLat = round(extent[1]);
     const maxLon = round(extent[2]);
     const maxLat = round(extent[3]);
-    const minZoom = Math.max(8, z - 1);
-    const maxZoom = Math.min(15, z + 1);
-    const key = `${minLon},${minLat},${maxLon},${maxLat}/${minZoom}-${maxZoom}`;
+    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
     if (key === lastNoaaPrefetchKey) return;
     lastNoaaPrefetchKey = key;
 
-    fetch("/noaa-wms/prefetch", {
+    fetch("/noaa-enc/prefetch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ minLon, minLat, maxLon, maxLat, minZoom, maxZoom, layers: "" }),
+      body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
     }).catch(() => {
-      // Best-effort: prefetch failures shouldn't disrupt the UI
+      // Best-effort: prefetch failures shouldn't disrupt the UI.
     });
   }
 
