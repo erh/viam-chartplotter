@@ -9,8 +9,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // Forward NOAA caching proxy requests to the Go module (run via `make run`).
+      // Forward NOAA cache + ENC requests to the Go module (run via `make run`).
       "/noaa-wms": "http://localhost:8888",
+      "/noaa-enc": "http://localhost:8888",
     },
   },
 });
