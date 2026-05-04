@@ -53,11 +53,7 @@ type NoaaCache struct {
 
 func NewNoaaCache(cacheDir string, maxBytes int64, logger logging.Logger) (*NoaaCache, error) {
 	if cacheDir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			base = os.TempDir()
-		}
-		cacheDir = filepath.Join(base, "viam-chartplotter", "noaa-wms")
+		return nil, fmt.Errorf("noaa cache: cacheDir must be set")
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("noaa cache: mkdir %q: %w", cacheDir, err)

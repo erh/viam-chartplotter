@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -43,20 +45,56 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes)
 }
 
-// StartChartplotterServer wires the static frontend together with the NOAA WMS caching
-// proxy and starts an HTTP server on the given port.
-func StartChartplotterServer(name resource.Name, dist fs.FS, logger logging.Logger, port int, cacheDir string, cacheMaxBytes int64) (resource.Resource, error) {
+// resolveCacheRoot picks the parent directory under which both the WMS proxy cache
+// (noaa-wms/) and the ENC store (noaa-enc/) live. An explicit path wins; otherwise
+// we use the OS user cache dir, falling back to the temp dir if HOME is unset.
+func resolveCacheRoot(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "viam-chartplotter")
+}
+
+// StartChartplotterServer wires the static frontend, the NOAA WMS caching proxy, and
+// the ENC catalog/store handlers, and starts an HTTP server on the given port.
+func StartChartplotterServer(
+	name resource.Name,
+	dist fs.FS,
+	logger logging.Logger,
+	port int,
+	cacheRoot string,
+	cacheMaxBytes int64,
+) (resource.Resource, error) {
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
 		return nil, err
 	}
 
-	cache, err := NewNoaaCache(cacheDir, cacheMaxBytes, logger.Sublogger("noaaCache"))
+	root := resolveCacheRoot(cacheRoot)
+
+	wmsCache, err := NewNoaaCache(filepath.Join(root, "noaa-wms"), cacheMaxBytes, logger.Sublogger("noaaCache"))
 	if err != nil {
 		return nil, err
 	}
-	cache.Register(mux)
-	logger.Infof("noaa cache dir: %s (max %d bytes, stale after %s)", cache.cacheDir, cache.maxBytes, cache.staleAfter)
+	wmsCache.Register(mux)
+	logger.Infof("noaa wms cache: %s (max %d bytes, stale after %s)",
+		wmsCache.cacheDir, wmsCache.maxBytes, wmsCache.staleAfter)
+
+	encDir := filepath.Join(root, "noaa-enc")
+	catalog, err := NewENCCatalog(encDir, logger.Sublogger("encCatalog"))
+	if err != nil {
+		return nil, err
+	}
+	encStore, err := NewENCStore(encDir, catalog, logger.Sublogger("encStore"))
+	if err != nil {
+		return nil, err
+	}
+	NewENCHandlers(catalog, encStore).Register(mux)
+	logger.Infof("noaa enc store: %s", encDir)
 
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)
