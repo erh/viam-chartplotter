@@ -7,8 +7,6 @@ import (
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
 
-	"github.com/erh/vmodutils"
-
 	"github.com/erh/viam-chartplotter"
 )
 
@@ -28,7 +26,7 @@ func realMain() error {
 		return err
 	}
 
-	ws, err := vmodutils.NewWebModuleAndStart(generic.Named("foo"), fs, logger, 8888)
+	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "")
 	if err != nil {
 		return err
 	}

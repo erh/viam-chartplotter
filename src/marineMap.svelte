@@ -1123,7 +1123,9 @@
         opacity: 0.7,
         preload: 2,
         source: new TileWMS({
-          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
+          // Routes through the local NOAA WMS caching proxy (see noaa_cache.go)
+          // so tiles are cached on disk and served locally on subsequent loads.
+          url: "/noaa-wms/proxy",
           params: {},
           transition: 300,
         }),
@@ -1277,6 +1279,40 @@
     return null;
   }
 
+  // Tracks the last bbox/zoom range we asked the cache to prefetch so panning by a single
+  // tile doesn't spam the server with overlapping prefetch jobs.
+  let lastNoaaPrefetchKey = "";
+
+  function maybePrefetchNoaaTiles() {
+    const noaa = findLayerByName("noaa");
+    if (!noaa || !noaa.on) return;
+    if (!mapGlobal.map || !mapGlobal.view) return;
+
+    const size = mapGlobal.map.getSize();
+    if (!size) return;
+    const extent = mapGlobal.view.calculateExtent(size);
+    const z = Math.round(mapGlobal.view.getZoom() ?? 12);
+    // Round bbox to ~1 tile of slop so trivial pans share a key
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const minLon = round(extent[0]);
+    const minLat = round(extent[1]);
+    const maxLon = round(extent[2]);
+    const maxLat = round(extent[3]);
+    const minZoom = Math.max(8, z - 1);
+    const maxZoom = Math.min(15, z + 1);
+    const key = `${minLon},${minLat},${maxLon},${maxLat}/${minZoom}-${maxZoom}`;
+    if (key === lastNoaaPrefetchKey) return;
+    lastNoaaPrefetchKey = key;
+
+    fetch("/noaa-wms/prefetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minLon, minLat, maxLon, maxLat, minZoom, maxZoom, layers: "" }),
+    }).catch(() => {
+      // Best-effort: prefetch failures shouldn't disrupt the UI
+    });
+  }
+
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
     if (l == null) {
@@ -1327,6 +1363,7 @@
         }
       }
     }
+    maybePrefetchNoaaTiles();
   }
 
   function pointDiff(x: number[], y: number[]): number {
@@ -1365,6 +1402,12 @@
       layers: mapGlobal.onLayers as Collection<BaseLayer>,
       view: mapGlobal.view,
       controls: defaultControls().extend([scaleThing]),
+    });
+
+    // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
+    // current viewport. The handler is a no-op when the noaa layer is off.
+    mapGlobal.map.on("moveend", () => {
+      maybePrefetchNoaaTiles();
     });
 
     // Setup popup overlay
