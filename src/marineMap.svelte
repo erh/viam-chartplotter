@@ -1693,12 +1693,11 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
+  {#if mapInternalState.inPanMode}
+    <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
+  {/if}
+
   <div class="layer-controls">
-    {#if mapInternalState.inPanMode}
-      <div>
-        <button onclick={stopPanning}>Stop Panning</button>
-      </div>
-    {/if}
     {#each mapGlobal.layerOptions as l, idx}
       {@const parentLayer = l.parent
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
@@ -2089,6 +2088,34 @@
     margin-left: auto;
     font-size: 11px;
     padding: 1px 2px;
+  }
+
+  .stop-panning-btn {
+    position: absolute;
+    bottom: 45px;
+    right: 10px;
+    z-index: 1001;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+  }
+
+  .stop-panning-btn:hover {
+    color: #0066cc;
+  }
+
+  .layers-expanded .stop-panning-btn {
+    bottom: auto;
+    top: 10px;
   }
 
   /* Layers toggle button */
