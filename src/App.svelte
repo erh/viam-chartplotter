@@ -42,6 +42,7 @@
     depth: 0.0,
     showDepthOnTrack: false,
     heading: 0.0,
+    cog: null as number | null,
     windSpeed: 0.0,
     windAngle: 0.0,
     spotZeroFW: 0.0,
@@ -183,6 +184,21 @@
         globalData.heading = ch;
       })
       .catch(errorHandlerMaker("compass"));
+
+    msClient
+      .getReadings()
+      .then((r) => {
+        var cog =
+          r["Course Over Ground"] ??
+          r["course_over_ground"] ??
+          r["CourseOverGround"] ??
+          r["cog"] ??
+          r["COG"];
+        if (typeof cog === "number" && !isNaN(cog)) {
+          globalData.cog = cog;
+        }
+      })
+      .catch(errorHandlerMaker("cog"));
 
     if (globalConfig.seatempSensorName != "") {
       new VIAM.SensorClient(client, globalConfig.seatempSensorName)
@@ -1345,7 +1361,7 @@
         name: "me",
         location: [globalData.pos.getLat(), globalData.pos.getLng()],
         speed: globalData.speed,
-        heading: globalData.heading,
+        heading: globalData.cog ?? globalData.heading,
         route: globalData.route
           ? {
               destinationLongitude: globalData.route["Destination Longitude"],
@@ -1458,9 +1474,12 @@
         </div>
         {#if globalConfig.movementSensorProps.compassHeadingSupported}
           <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Heading</div>
+            <div class="min-w-32">Heading / COG</div>
             <div>
-              <span class="font-bold">{@html globalData.heading.toFixed(2)}</span>
+              <span class="font-bold">{globalData.heading.toFixed(2)}</span> /
+              <span class="font-bold"
+                >{globalData.cog !== null ? globalData.cog.toFixed(2) : "—"}</span
+              >
             </div>
           </div>
         {/if}
