@@ -7,6 +7,7 @@ require (
 	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
 	github.com/fogleman/gg v1.3.0
 	go.viam.com/rdk v0.73.1-0.20250505140427-608c7b61f924
+	golang.org/x/image v0.19.0
 )
 
 require (
@@ -136,7 +137,6 @@ require (
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
-	golang.org/x/image v0.19.0 // indirect
 	golang.org/x/mod v0.26.0 // indirect
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/oauth2 v0.28.0 // indirect

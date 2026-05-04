@@ -42,7 +42,8 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	port := config.Attributes.Int("port", 8888)
 	cacheDir := config.Attributes.String("noaa_cache_dir")
 	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes)
+	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 8)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt)
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -61,6 +62,8 @@ func resolveCacheRoot(configured string) string {
 
 // StartChartplotterServer wires the static frontend, the NOAA WMS caching proxy, and
 // the ENC catalog/store handlers, and starts an HTTP server on the given port.
+// safeDepthFt is the default safety contour (feet) for tile rendering; the
+// per-request `?sd=` query param overrides it.
 func StartChartplotterServer(
 	name resource.Name,
 	dist fs.FS,
@@ -68,6 +71,7 @@ func StartChartplotterServer(
 	port int,
 	cacheRoot string,
 	cacheMaxBytes int64,
+	safeDepthFt float64,
 ) (resource.Resource, error) {
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
@@ -94,8 +98,12 @@ func StartChartplotterServer(
 		return nil, err
 	}
 	encRenderer := NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
-	NewENCHandlers(catalog, encStore, encRenderer).Register(mux)
-	logger.Infof("noaa enc store: %s", encDir)
+	encTileCache, err := NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
+	if err != nil {
+		return nil, err
+	}
+	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, safeDepthFt).Register(mux)
+	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
 
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)
@@ -121,6 +129,6 @@ func (r *chartplotterResource) Close(ctx context.Context) error {
 	return r.server.Close()
 }
 
-func (r *chartplotterResource) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (r *chartplotterResource) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	return nil, nil
 }

@@ -36,6 +36,14 @@ type ENCStore struct {
 
 	mu       sync.Mutex
 	manifest map[string]CellManifestEntry
+
+	// cellLocks serialises downloadAndExtract calls per cell so two concurrent
+	// SyncBBox requests that both want the same cell don't race on RemoveAll →
+	// MkdirAll → file extraction. Without this, worker A's RemoveAll(target)
+	// can run between worker B's MkdirAll and B's first extractFlat, and B
+	// then fails with "no such file or directory" on a dir that did exist
+	// moments earlier.
+	cellLocks sync.Map // map[string]*sync.Mutex
 }
 
 func NewENCStore(rootDir string, catalog *ENCCatalog, logger logging.Logger) (*ENCStore, error) {
@@ -51,6 +59,13 @@ func NewENCStore(rootDir string, catalog *ENCCatalog, logger logging.Logger) (*E
 	}
 	s.loadManifest()
 	return s, nil
+}
+
+// lockCell returns a per-cell mutex (lazily created). Hold it for the duration
+// of any download / extract / manifest update for that cell.
+func (s *ENCStore) lockCell(name string) *sync.Mutex {
+	v, _ := s.cellLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func (s *ENCStore) manifestPath() string { return filepath.Join(s.rootDir, "cells.json") }
@@ -119,6 +134,7 @@ func (s *ENCStore) SyncBBox(
 	minLon, minLat, maxLon, maxLat float64,
 	minScale, maxScale, parallel int,
 ) (downloaded, skipped int, err error) {
+	start := time.Now()
 	if err := s.catalog.EnsureFresh(ctx); err != nil {
 		s.logger.Warnf("enc catalog refresh failed: %v", err)
 	}
@@ -127,15 +143,32 @@ func (s *ENCStore) SyncBBox(
 		parallel = 4
 	}
 
+	// Count needed up-front so the start log is informative even before any
+	// individual cell fetches finish.
+	var toDownload []ENCCell
+	for _, c := range cells {
+		if s.needsDownload(c) {
+			toDownload = append(toDownload, c)
+		}
+	}
+	skipped = len(cells) - len(toDownload)
+
+	s.logger.Infof("enc sync bbox=[%.4f,%.4f,%.4f,%.4f]: %d cells overlap, %d already current, %d to download (parallel=%d)",
+		minLon, minLat, maxLon, maxLat,
+		len(cells), skipped, len(toDownload), parallel)
+
+	if len(toDownload) == 0 {
+		s.logger.Infof("enc sync bbox=[%.4f,%.4f,%.4f,%.4f]: nothing to fetch (took %s)",
+			minLon, minLat, maxLon, maxLat, time.Since(start).Round(time.Millisecond))
+		return 0, skipped, nil
+	}
+
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var failed int
 
-	for _, c := range cells {
-		if !s.needsDownload(c) {
-			skipped++
-			continue
-		}
+	for _, c := range toDownload {
 		c := c
 		sem <- struct{}{}
 		wg.Add(1)
@@ -144,6 +177,9 @@ func (s *ENCStore) SyncBBox(
 			defer func() { <-sem }()
 			if dlErr := s.downloadAndExtract(ctx, c); dlErr != nil {
 				s.logger.Warnf("enc cell %s: %v", c.Name, dlErr)
+				mu.Lock()
+				failed++
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -152,14 +188,32 @@ func (s *ENCStore) SyncBBox(
 		}()
 	}
 	wg.Wait()
+
+	s.logger.Infof("enc sync bbox=[%.4f,%.4f,%.4f,%.4f]: done — %d downloaded, %d skipped, %d failed (%s)",
+		minLon, minLat, maxLon, maxLat,
+		downloaded, skipped, failed, time.Since(start).Round(time.Millisecond))
 	return downloaded, skipped, nil
 }
 
 func (s *ENCStore) downloadAndExtract(ctx context.Context, c ENCCell) error {
+	// Serialise per-cell so concurrent SyncBBox callers don't race on
+	// RemoveAll/MkdirAll for the same target directory.
+	cellLock := s.lockCell(c.Name)
+	cellLock.Lock()
+	defer cellLock.Unlock()
+
+	// Re-check after taking the lock — another goroutine may have just pulled
+	// the same cell while we were waiting.
+	if !s.needsDownload(c) {
+		return nil
+	}
+
 	url := c.ZipFile
 	if !strings.HasPrefix(url, "http") {
 		url = encDownloadBase + strings.TrimPrefix(url, "ENCs/")
 	}
+	start := time.Now()
+	s.logger.Infof("enc cell %s: downloading edition %d update %d (%s)", c.Name, c.Edition, c.Update, url)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -219,6 +273,9 @@ func (s *ENCStore) downloadAndExtract(ctx context.Context, c ENCCell) error {
 	}
 	saveErr := s.saveManifestLocked()
 	s.mu.Unlock()
+
+	s.logger.Infof("enc cell %s: ok (edition %d update %d, %.1f KB, %s)",
+		c.Name, c.Edition, c.Update, float64(n)/1024, time.Since(start).Round(time.Millisecond))
 	return saveErr
 }
 

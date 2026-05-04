@@ -73,6 +73,34 @@
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
 
+  // Cache-busting tile version. Appended as a `v=` query param on every tile
+  // URL. Bump it via `?tilev=2` (or any new value) in the page URL to force
+  // OpenLayers / browser HTTP cache / our local on-disk tile cache to be
+  // bypassed without having to clear them manually.
+  const tileGenVersion: string = (() => {
+    if (typeof window === "undefined") return "1";
+    try {
+      const v = new URLSearchParams(window.location.search).get("tilev");
+      return v && v !== "" ? v : "1";
+    } catch {
+      return "1";
+    }
+  })();
+
+  // Boat safety depth (feet). Drives the DEPARE gradient on local NOAA-ENC
+  // tiles: solid coral below this, gradient to white at 2× this. Override per
+  // page load via `?safeDepth=N`; otherwise the server uses its module default
+  // (`safe_depth_ft` config attribute).
+  const safeDepthParam: string = (() => {
+    if (typeof window === "undefined") return "";
+    try {
+      const v = new URLSearchParams(window.location.search).get("safeDepth");
+      return v && v !== "" ? v : "";
+    } catch {
+      return "";
+    }
+  })();
+
   let headsUpActive = $state(getCookie(COOKIE_HEADS_UP) === "1");
   // boat position on screen: "center" or "bottom" (~80% down from top)
   let boatPositionMode = $state<"center" | "bottom">(
@@ -1116,20 +1144,40 @@
       }),
     });
 
-    // The NOAA layer is served by our local ENC pipeline. The data layer (catalog
-    // + zip download/extract) is live; the renderer is the next milestone, so until
-    // it lands /noaa-enc/tile/{z}/{x}/{y}.png will return 501 and the layer simply
-    // won't show tiles. We deliberately no longer talk to NOAA's WMS — that
-    // endpoint is too slow for live use.
+    // NOAA's public WMS chart service. Authoritative but slow — kept as a
+    // fallback / comparison reference. Always available regardless of where the
+    // page is being served from. The `_v` param is ignored by the WMS but
+    // changes the browser cache key when tileGenVersion is bumped.
+    mapGlobal.layerOptions.push({
+      name: "noaa",
+      on: false,
+      layer: new TileLayer({
+        opacity: 0.7,
+        preload: 2,
+        source: new TileWMS({
+          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
+          params: { _v: tileGenVersion },
+          transition: 300,
+        }),
+      }),
+    });
+
+    // Local ENC renderer — fast, lives at /noaa-enc/tile/{z}/{x}/{y}.png served
+    // by the Go module on :8888 (and proxied through Vite on :5173). Only
+    // registered when we're being served from one of those ports; elsewhere
+    // the path doesn't exist.
     if (noaaCacheReachable()) {
+      const params = new URLSearchParams();
+      params.set("v", tileGenVersion);
+      if (safeDepthParam) params.set("sd", safeDepthParam);
       mapGlobal.layerOptions.push({
-        name: "noaa",
+        name: "noaa-local",
         on: false,
         layer: new TileLayer({
           opacity: 0.7,
           preload: 2,
           source: new XYZ({
-            url: "/noaa-enc/tile/{z}/{x}/{y}.png",
+            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${params.toString()}`,
             transition: 300,
           }),
         }),
@@ -1299,7 +1347,7 @@
 
   function maybePrefetchNoaaTiles() {
     if (!noaaCacheReachable()) return;
-    const noaa = findLayerByName("noaa");
+    const noaa = findLayerByName("noaa-local");
     if (!noaa || !noaa.on) return;
     if (!mapGlobal.map || !mapGlobal.view) return;
 

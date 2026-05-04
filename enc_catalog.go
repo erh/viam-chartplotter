@@ -54,7 +54,7 @@ type encPanel struct {
 
 type encVertex struct {
 	Lat float64 `xml:"lat"`
-	Lon float64 `xml:"lon"`
+	Lon float64 `xml:"long"`
 }
 
 type encProductCatalog struct {
