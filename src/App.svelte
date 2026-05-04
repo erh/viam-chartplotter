@@ -1315,6 +1315,16 @@
       closeEnlargedImage();
     }
   }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((e) => {
+        errorHandler(e, "fullscreen");
+      });
+    } else {
+      document.exitFullscreen();
+    }
+  }
 </script>
 
 {#if globalData.showYachtDetails}
@@ -1621,6 +1631,14 @@
         </label>
       </div>
     </div>
+
+    <button
+      onclick={toggleFullscreen}
+      class="fixed top-2 right-2 z-[10000] px-3 py-1 bg-black bg-opacity-60 border border-gray-500 hover:bg-gray-700 text-white rounded text-sm"
+      title="Toggle fullscreen"
+    >
+      ⛶
+    </button>
 
     {#if globalData.enlargedImage}
       <div
