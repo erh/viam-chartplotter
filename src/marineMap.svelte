@@ -64,6 +64,8 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
+  let headsUpActive = $state(false);
+
   // Track which boats are visible (by mmsi, plus 'myBoat' for own boat)
   // When externalVisibilityControl is true, start with empty set (parent will control)
   let visibleBoats = $state<Set<string>>(new Set(["myBoat"]));
@@ -832,6 +834,7 @@
         src: boatImage,
         scale: scale,
         rotation: rotation,
+        rotateWithView: true,
       }),
     });
   }
@@ -873,6 +876,27 @@
     measureDistance = null;
     if (measureSource) measureSource.clear();
   }
+
+  function toggleHeadsUp() {
+    headsUpActive = !headsUpActive;
+    applyHeadsUpRotation();
+  }
+
+  function applyHeadsUpRotation() {
+    if (!mapGlobal.view) return;
+    if (headsUpActive && myBoat) {
+      mapGlobal.view.setRotation(-(myBoat.heading * Math.PI) / 180);
+    } else {
+      mapGlobal.view.setRotation(0);
+    }
+  }
+
+  $effect(() => {
+    // Re-apply rotation when boat heading changes while heads-up is active
+    if (!headsUpActive) return;
+    const _heading = myBoat?.heading;
+    applyHeadsUpRotation();
+  });
 
   function handleMeasureClick(evt: any) {
     const coord = evt.coordinate;
@@ -1691,6 +1715,32 @@
     >
   </button>
 
+  <button
+    class="heads-up-toggle"
+    class:active={headsUpActive}
+    onclick={toggleHeadsUp}
+    aria-pressed={headsUpActive}
+    disabled={!myBoat}
+    title={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
+    aria-label="Toggle heads-up orientation"
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      ><circle cx="12" cy="12" r="10" /><polygon
+        points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
+      /></svg
+    >
+  </button>
+
   {#if measureActive && measureDistance !== null}
     <div class="measure-result">
       {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
@@ -1956,6 +2006,45 @@
 
   .measure-toggle.active:hover {
     background: #ee3333;
+  }
+
+  .heads-up-toggle {
+    position: absolute;
+    top: 10px;
+    right: calc(10px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .heads-up-toggle:hover:not(:disabled) {
+    background: white;
+    border-color: #999;
+  }
+
+  .heads-up-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .heads-up-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .heads-up-toggle.active:hover {
+    background: #1d4ed8;
   }
 
   .measure-result {
