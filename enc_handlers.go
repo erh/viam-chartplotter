@@ -7,15 +7,15 @@ import (
 	"strings"
 )
 
-// ENCHandlers exposes the ENC catalog/store via HTTP under /noaa-enc/. The tile
-// renderer is a stub; rendering S-57 to PNG is the next task.
+// ENCHandlers exposes the ENC catalog/store/renderer via HTTP under /noaa-enc/.
 type ENCHandlers struct {
-	catalog *ENCCatalog
-	store   *ENCStore
+	catalog  *ENCCatalog
+	store    *ENCStore
+	renderer *ENCRenderer
 }
 
-func NewENCHandlers(catalog *ENCCatalog, store *ENCStore) *ENCHandlers {
-	return &ENCHandlers{catalog: catalog, store: store}
+func NewENCHandlers(catalog *ENCCatalog, store *ENCStore, renderer *ENCRenderer) *ENCHandlers {
+	return &ENCHandlers{catalog: catalog, store: store, renderer: renderer}
 }
 
 func (h *ENCHandlers) Register(mux *http.ServeMux) {
@@ -73,9 +73,9 @@ func (h *ENCHandlers) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTile is intentionally a stub: rendering S-57 to PNG requires GDAL/MapServer
-// integration, which is the next milestone. Returning 501 keeps the URL shape stable
-// so the frontend can be wired ahead of time.
+// handleTile renders a 256x256 PNG for the given XYZ tile from any ENC cells we
+// have on disk that overlap. Tiles outside our coverage come back as transparent
+// PNGs so the layer composes cleanly with the basemap.
 func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/noaa-enc/tile/")
 	parts := strings.Split(rest, "/")
@@ -84,19 +84,19 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	yp := strings.TrimSuffix(parts[2], ".png")
-	if _, err := strconv.Atoi(parts[0]); err != nil {
-		http.Error(w, "bad z", http.StatusBadRequest)
+	z, errZ := strconv.Atoi(parts[0])
+	x, errX := strconv.Atoi(parts[1])
+	y, errY := strconv.Atoi(yp)
+	if errZ != nil || errX != nil || errY != nil {
+		http.Error(w, "bad coords", http.StatusBadRequest)
 		return
 	}
-	if _, err := strconv.Atoi(parts[1]); err != nil {
-		http.Error(w, "bad x", http.StatusBadRequest)
+	png, err := h.renderer.RenderTile(z, x, y)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := strconv.Atoi(yp); err != nil {
-		http.Error(w, "bad y", http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusNotImplemented)
-	_, _ = w.Write([]byte("noaa-enc renderer not yet implemented"))
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(png)
 }

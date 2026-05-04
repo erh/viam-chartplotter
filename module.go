@@ -93,7 +93,8 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	NewENCHandlers(catalog, encStore).Register(mux)
+	encRenderer := NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
+	NewENCHandlers(catalog, encStore, encRenderer).Register(mux)
 	logger.Infof("noaa enc store: %s", encDir)
 
 	server.Addr = fmt.Sprintf(":%d", port)
