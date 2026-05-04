@@ -39,23 +39,24 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	}
 	port := config.Attributes.Int("port", 8888)
 	cacheDir := config.Attributes.String("noaa_cache_dir")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir)
+	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes)
 }
 
 // StartChartplotterServer wires the static frontend together with the NOAA WMS caching
 // proxy and starts an HTTP server on the given port.
-func StartChartplotterServer(name resource.Name, dist fs.FS, logger logging.Logger, port int, cacheDir string) (resource.Resource, error) {
+func StartChartplotterServer(name resource.Name, dist fs.FS, logger logging.Logger, port int, cacheDir string, cacheMaxBytes int64) (resource.Resource, error) {
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
 		return nil, err
 	}
 
-	cache, err := NewNoaaCache(cacheDir, logger.Sublogger("noaaCache"))
+	cache, err := NewNoaaCache(cacheDir, cacheMaxBytes, logger.Sublogger("noaaCache"))
 	if err != nil {
 		return nil, err
 	}
 	cache.Register(mux)
-	logger.Infof("noaa cache dir: %s", cache.cacheDir)
+	logger.Infof("noaa cache dir: %s (max %d bytes, stale after %s)", cache.cacheDir, cache.maxBytes, cache.staleAfter)
 
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)

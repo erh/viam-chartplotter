@@ -26,23 +26,32 @@ const (
 	mercatorMax = 20037508.342789244
 
 	prefetchConcurrency = 4
+
+	defaultMaxCacheBytes int64 = 20 * 1024 * 1024 * 1024 // 20 GiB
+	defaultStaleAfter          = 14 * 24 * time.Hour     // 2 weeks
 )
 
 // NoaaCache is a caching reverse proxy for the NOAA Maritime Chart Service WMS endpoint.
 // Tile responses are stored on disk keyed by the canonicalized query string so subsequent
 // requests for the same tile are served locally without hitting NOAA.
 type NoaaCache struct {
-	cacheDir string
-	upstream string
-	client   *http.Client
-	logger   logging.Logger
+	cacheDir   string
+	upstream   string
+	client     *http.Client
+	logger     logging.Logger
+	maxBytes   int64
+	staleAfter time.Duration
 
 	// in-flight de-duplication so concurrent requests for the same tile only fetch once
 	mu       sync.Mutex
 	inflight map[string]*sync.WaitGroup
+
+	// evictMu serializes eviction passes; TryLock means a write that arrives mid-pass
+	// just skips kicking off another pass rather than queuing.
+	evictMu sync.Mutex
 }
 
-func NewNoaaCache(cacheDir string, logger logging.Logger) (*NoaaCache, error) {
+func NewNoaaCache(cacheDir string, maxBytes int64, logger logging.Logger) (*NoaaCache, error) {
 	if cacheDir == "" {
 		base, err := os.UserCacheDir()
 		if err != nil {
@@ -53,12 +62,17 @@ func NewNoaaCache(cacheDir string, logger logging.Logger) (*NoaaCache, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("noaa cache: mkdir %q: %w", cacheDir, err)
 	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxCacheBytes
+	}
 	return &NoaaCache{
-		cacheDir: cacheDir,
-		upstream: defaultUpstreamWMS,
-		client:   &http.Client{Timeout: 30 * time.Second},
-		logger:   logger,
-		inflight: map[string]*sync.WaitGroup{},
+		cacheDir:   cacheDir,
+		upstream:   defaultUpstreamWMS,
+		client:     &http.Client{Timeout: 30 * time.Second},
+		logger:     logger,
+		maxBytes:   maxBytes,
+		staleAfter: defaultStaleAfter,
+		inflight:   map[string]*sync.WaitGroup{},
 	}, nil
 }
 
@@ -115,11 +129,16 @@ func (c *NoaaCache) cachePath(canonical string) string {
 }
 
 // fetch returns the cached bytes and content-type for the given canonical query, fetching
-// from upstream and persisting if not yet cached.
+// from upstream and persisting if not yet cached. Cache entries older than staleAfter are
+// treated as misses and refetched.
 func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte, string, error) {
 	path := c.cachePath(canonical)
-	if data, err := os.ReadFile(path); err == nil {
-		return data, format, nil
+	if info, err := os.Stat(path); err == nil {
+		if c.staleAfter <= 0 || time.Since(info.ModTime()) < c.staleAfter {
+			if data, err := os.ReadFile(path); err == nil {
+				return data, format, nil
+			}
+		}
 	}
 
 	c.mu.Lock()
@@ -172,7 +191,57 @@ func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte
 		}
 	}
 
+	go c.maybeEvict()
+
 	return body, ct, nil
+}
+
+// maybeEvict trims the cache directory to maxBytes by removing the least-recently-modified
+// files first. It targets 90% of the limit so we don't run another pass for every write.
+func (c *NoaaCache) maybeEvict() {
+	if !c.evictMu.TryLock() {
+		return
+	}
+	defer c.evictMu.Unlock()
+
+	type entry struct {
+		path  string
+		size  int64
+		mtime time.Time
+	}
+	var entries []entry
+	var total int64
+	_ = filepath.Walk(c.cacheDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		entries = append(entries, entry{p, info.Size(), info.ModTime()})
+		total += info.Size()
+		return nil
+	})
+
+	if total <= c.maxBytes {
+		return
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mtime.Before(entries[j].mtime) })
+
+	target := c.maxBytes - c.maxBytes/10 // evict down to 90% of the limit
+	removed := 0
+	var freed int64
+	for _, e := range entries {
+		if total <= target {
+			break
+		}
+		if err := os.Remove(e.path); err == nil {
+			total -= e.size
+			freed += e.size
+			removed++
+		}
+	}
+	if removed > 0 {
+		c.logger.Infof("noaa cache evicted %d files, freed %d bytes (now %d/%d)", removed, freed, total, c.maxBytes)
+	}
 }
 
 func (c *NoaaCache) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -264,9 +333,11 @@ func (c *NoaaCache) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"files":    files,
-		"bytes":    bytes,
-		"cacheDir": c.cacheDir,
+		"files":      files,
+		"bytes":      bytes,
+		"maxBytes":   c.maxBytes,
+		"staleAfter": c.staleAfter.String(),
+		"cacheDir":   c.cacheDir,
 	})
 }
 
