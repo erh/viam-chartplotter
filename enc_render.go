@@ -253,20 +253,18 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
 	scale := zoomSymbolScale(z)
 
-	// Collect soundings + a water mask up-front. The polygon pass paints
-	// LNDARE/BUAARE underneath; bathymetry then composites on top, masked
-	// by DEPARE polygon coverage so it shows only where the chart data
-	// itself says there's water. True inland (no DEPARE) keeps its tan land
-	// fill from the polygon pass.
+	// Collect soundings up-front so we can build the bathymetry layer once.
+	// The polygon pass runs DEPARE included — DEPARE polygons paint their
+	// own DRVAL1-based depth colour so dredged channels render as safe water
+	// (e.g. a 14 m DRVAL1 → light blue) instead of being washed out by the
+	// IDW blending in adjacent shallow soundings. Bathymetry then composites
+	// on top with reduced opacity to soften polygon edges into a gradient.
 	soundings := r.gatherSoundings(cells, bbox, project)
 	hasBath := len(soundings) >= 12
 
 	drawCell := func(chart *s57.Chart, pass drawPass) {
 		for _, f := range chart.FeaturesInBounds(bbox) {
-			if hasBath && pass == passAreas && f.ObjectClass() == "DEPARE" {
-				continue
-			}
-			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox)
+			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z)
 		}
 	}
 
@@ -283,7 +281,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 			drawCell(chart, pass)
 		}
 		if pass == passAreas && hasBath {
-			r.compositeBathymetry(dc, cells, bbox, project, soundings, safeDepthM)
+			r.compositeBathymetry(dc, cells, bbox, project, soundings, safeDepthM, z)
 		}
 	}
 
@@ -297,11 +295,14 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 // soundingPx is a SOUNDG point projected into tile pixel space.
 type soundingPx struct{ px, py, depthM float64 }
 
-// gatherSoundings collects every SOUNDG vertex from the supplied cells whose
-// position lands within (or just outside) the tile, projected into tile-pixel
-// space. The padding ensures soundings just outside the tile still influence
-// pixels near the tile edge, so the IDW field doesn't have hard tile-boundary
-// seams.
+// gatherSoundings collects every SOUNDG vertex AND every DEPARE polygon's
+// centroid from the supplied cells, projected into tile-pixel space. SOUNDG
+// gives the spot-depth measurements; DEPARE centroids encode the polygon's
+// DRVAL1 directly into the IDW field so dredged channels carry their
+// canonical "this is N metres deep" reading even without any soundings.
+//
+// Padding ensures features just outside the tile still influence pixels near
+// the tile edge so the IDW field has no hard tile-boundary seams.
 func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64)) []soundingPx {
 	padLon := (bbox.MaxLon - bbox.MinLon) * 0.5
 	padLat := (bbox.MaxLat - bbox.MinLat) * 0.5
@@ -318,22 +319,108 @@ func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project 
 			continue
 		}
 		for _, f := range chart.FeaturesInBounds(queryBox) {
-			if f.ObjectClass() != "SOUNDG" {
-				continue
-			}
-			for _, c := range f.Geometry().Coordinates {
-				if len(c) < 3 {
+			switch f.ObjectClass() {
+			case "SOUNDG":
+				for _, c := range f.Geometry().Coordinates {
+					if len(c) < 3 {
+						continue
+					}
+					if math.IsNaN(c[2]) || c[2] < 0 {
+						continue
+					}
+					px, py := project(c[0], c[1])
+					points = append(points, soundingPx{px: px, py: py, depthM: c[2]})
+				}
+			case "DEPARE":
+				geom := f.Geometry()
+				if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
 					continue
 				}
-				if math.IsNaN(c[2]) || c[2] < 0 {
+				if isOversizedPolygon(geom.Coordinates, bbox, 50) {
 					continue
 				}
-				px, py := project(c[0], c[1])
-				points = append(points, soundingPx{px: px, py: py, depthM: c[2]})
+				if isDegeneratePixelPolygon(geom.Coordinates, project) {
+					continue
+				}
+				min, max := depthRange(&f)
+				switch {
+				case math.IsNaN(min) && math.IsNaN(max):
+					continue
+				case math.IsNaN(min):
+					min = max
+				case min == 0 && !math.IsNaN(max) && max > 5:
+					// DRVAL1=0 with meaningful DRVAL2 is a range indicator;
+					// use the deeper edge so the polygon doesn't seed the
+					// IDW field as a drying flat.
+					min = max
+				}
+				// Sample several control points across the polygon: centroid
+				// + a handful of vertices. A single centroid wouldn't pull
+				// the IDW field across a long, narrow channel polygon.
+				cx, cy := polygonCentroid(geom.Coordinates)
+				ppx, ppy := project(cx, cy)
+				points = append(points, soundingPx{px: ppx, py: ppy, depthM: min})
+				// Stride-sample vertices so we get coverage along the ring
+				// without pushing in thousands of points per polygon.
+				stride := len(geom.Coordinates) / 8
+				if stride < 1 {
+					stride = 1
+				}
+				for i := 0; i < len(geom.Coordinates); i += stride {
+					c := geom.Coordinates[i]
+					if len(c) < 2 {
+						continue
+					}
+					vpx, vpy := project(c[0], c[1])
+					points = append(points, soundingPx{px: vpx, py: vpy, depthM: min})
+				}
 			}
 		}
 	}
 	return points
+}
+
+// polygonCentroid returns the area-weighted centroid of the polygon ring.
+// Falls back to the simple coordinate mean if the polygon is degenerate.
+func polygonCentroid(coords [][]float64) (float64, float64) {
+	if len(coords) == 0 {
+		return 0, 0
+	}
+	var sumX, sumY, sumA float64
+	for i := range coords {
+		if len(coords[i]) < 2 {
+			continue
+		}
+		j := (i + 1) % len(coords)
+		if len(coords[j]) < 2 {
+			continue
+		}
+		x0, y0 := coords[i][0], coords[i][1]
+		x1, y1 := coords[j][0], coords[j][1]
+		cross := x0*y1 - x1*y0
+		sumA += cross
+		sumX += (x0 + x1) * cross
+		sumY += (y0 + y1) * cross
+	}
+	if math.Abs(sumA) < 1e-12 {
+		// Degenerate ring; fall back to vertex mean.
+		var mx, my float64
+		var n int
+		for _, c := range coords {
+			if len(c) < 2 {
+				continue
+			}
+			mx += c[0]
+			my += c[1]
+			n++
+		}
+		if n == 0 {
+			return 0, 0
+		}
+		return mx / float64(n), my / float64(n)
+	}
+	a := sumA / 2
+	return sumX / (6 * a), sumY / (6 * a)
 }
 
 // compositeBathymetry composites a smooth depth-shaded layer on top of `dc`,
@@ -344,7 +431,7 @@ func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project 
 // Render at quarter resolution (64x64) and bilinear-upsample for speed and
 // to blend adjacent IDW samples into a smoother gradient. The mask is built
 // at full 256x256 resolution so polygon edges stay crisp.
-func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64), points []soundingPx, safeDepthM float64) {
+func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64), points []soundingPx, safeDepthM float64, z int) {
 	const downscale = 4
 	const lowW, lowH = 256 / downscale, 256 / downscale
 
@@ -408,12 +495,14 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 				if dsq < 0.5 {
 					dsq = 0.5
 				}
-				w := 1.0 / (dsq * dsq) // power-4 IDW
+				// Power-3 IDW (1 / d^3): smoother than power-4 across
+				// medium distances, sharper than power-2 at close range.
+				w := 1.0 / (dsq * math.Sqrt(dsq))
 				sumW += w
 				sumD += w * p.depthM
 			}
 			depthM := sumD / sumW
-			c := depthFill(depthM, safeDepthM)
+			c := depthFill(depthM, safeDepthM, z)
 			rgba, ok := c.(color.RGBA)
 			if !ok {
 				r0, g0, b0, a0 := c.RGBA()
@@ -427,8 +516,12 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 	high := image.NewRGBA(image.Rect(0, 0, 256, 256))
 	draw.BiLinear.Scale(high, high.Bounds(), low, low.Bounds(), draw.Over, nil)
 
-	// 4. Apply DEPARE mask: each pixel's alpha is multiplied by the mask
-	// alpha, so bathymetry only shows inside DEPARE polygons.
+	// 4. Apply DEPARE mask + reduced opacity. The mask multiplier limits
+	// bathymetry to actual water; the opacity multiplier lets the underlying
+	// DEPARE polygon colour (which carries the canonical "channel = safe"
+	// information from DRVAL1) bleed through. The result reads as the
+	// polygon depth-band coloring softened by the smooth IDW gradient.
+	const bathOpacity = 0.8
 	for y := range 256 {
 		for x := range 256 {
 			ma := maskImg.RGBAAt(x, y).A
@@ -437,7 +530,8 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 				continue
 			}
 			c := high.RGBAAt(x, y)
-			c.A = uint8(uint16(c.A) * uint16(ma) / 255)
+			a := float64(c.A) * float64(ma) / 255 * bathOpacity
+			c.A = uint8(a)
 			high.SetRGBA(x, y, c)
 		}
 	}
@@ -554,7 +648,7 @@ func zoomSymbolScale(z int) float64 {
 // zoom-derived multiplier applied to stroke widths and symbol sizes.
 // `safeDepthM` controls DEPARE depth-band colouring. `tileBbox` is used to
 // reject polygons that are way larger than the tile (overview-cell rings).
-func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, tileBbox s57.Bounds) {
+func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, tileBbox s57.Bounds, z int) {
 	geom := f.Geometry()
 	if len(geom.Coordinates) == 0 {
 		return
@@ -568,7 +662,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// boundary is what charts actually show, so stroke the ring whenever
 		// lineStroke has an entry. This also covers fill+stroke on classes
 		// where both are styled.
-		fill := areaFill(class, f, safeDepthM)
+		fill := areaFill(class, f, safeDepthM, z)
 		stroke, width := lineStroke(class, f)
 
 		// Drop polygons whose projected pixel bbox is degenerate (< 3 px in
@@ -670,7 +764,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 // translucent colours composites badly over depth banding and produces the
 // muddy olive/grey overlays we kept hitting. Leave their boundaries to
 // `lineStroke`.
-func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
+func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Color {
 	switch class {
 	case "LNDARE": // land area
 		return color.RGBA{0xF4, 0xE5, 0xBC, 0xFF}
@@ -694,7 +788,7 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
 			// gradient lands somewhere reasonable instead.
 			min = max
 		}
-		return depthFill(min, safeDepthM)
+		return depthFill(min, safeDepthM, z)
 	case "DRGARE": // dredged area — slightly bluer than ambient water
 		return color.RGBA{0xCC, 0xE0, 0xF2, 0xFF}
 	case "LOKBSN": // lock basin
@@ -709,38 +803,65 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
 
 // Depth-shading band scheme (feet, anchor positions on the right):
 //
-//   - drying / 0 ft ............................. black
-//   - 0 ......... < safe                         smooth gradient black → dark navy
-//   - safe ...... < safe × depthDeepMultiplier   smooth gradient light blue → white
-//   - >= safe × depthDeepMultiplier ............. white
+//   - drying / 0 ft ........................... black
+//   - 0 ......... < safe                       smooth gradient black → dark navy
+//   - safe ...... < safe × midFraction × deep  smooth gradient depthLight → depthMid
+//   - safe × m × deep .. < safe × deep         smooth gradient depthMid → white
+//   - >= safe × deep ........................... white
 //
-// Two smooth gradients with a hard colour break at safe_depth: below safe is
-// dark-navy family (warning), at-or-above safe jumps to light blue and fades
-// to white over a wide depth range. The wide range matters because most
-// navigable water sits well past 2× safe (safe=6 ft means 12 ft+, but typical
-// coastal water is 30..100 ft); without it, the entire ocean paints flat
-// white and you can't see the IDW-interpolated gradient at all.
+// Two smooth gradients in the safe-water zone, joined by a saturated mid
+// anchor. The mid anchor gives the gradient a non-linear colour path so
+// adjacent depths show visibly more variation than a flat pale→white lerp
+// would produce.
+//
+// `deep` is the multiplier on safeDepth at which the colour fully reaches
+// white. It scales with zoom: at chart-detail zoom (≥14) we want a wide
+// gradient so coastal depths (30–100 ft) show visible variation; at overview
+// zoom we compress so deeper water snaps to white quickly.
 const (
-	depthDeepMultiplier = 20.0 // light-blue → white fade ends at safe × this
+	depthMidFraction = 0.30 // depthMid lands at safe + (deepEnd-safe) × this
 )
 
 var (
 	depthBlack    = color.RGBA{0x00, 0x00, 0x00, 0xFF}
 	depthDarkNavy = color.RGBA{0x0E, 0x29, 0x52, 0xFF} // approached from black just below safe
 	depthLight    = color.RGBA{0xB5, 0xDA, 0xEE, 0xFF} // at safe — stark step up from dark navy
-	depthWhite    = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // at and beyond safe × depthDenseMultiplier
+	depthMid      = color.RGBA{0x7A, 0xBE, 0xDC, 0xFF} // saturated mid anchor in the gradient
+	depthWhite    = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // at and beyond safe × deepMultiplier
 )
 
+// depthDeepMultiplierFor returns the safe-multiple at which the depth
+// gradient saturates to white for a given map zoom. Higher zooms get a
+// wider gradient so coastal depths show variation; lower zooms compress so
+// open ocean is mostly white.
+func depthDeepMultiplierFor(z int) float64 {
+	switch {
+	case z >= 16:
+		return 30
+	case z >= 14:
+		return 20
+	case z >= 13:
+		return 12
+	case z >= 12:
+		return 8
+	case z >= 11:
+		return 5
+	default:
+		return 4
+	}
+}
+
 // depthFill returns the water fill for a DEPARE keyed off the boat's safety
-// depth. Shading uses discrete bands so depth changes are visible as steps
-// rather than a smooth wash, and band widths grow with depth so the visually
-// significant region (shallow water near safe_depth) gets the most resolution.
-func depthFill(minDepthM, safeDepthM float64) color.Color {
+// depth and the current map zoom. The zoom controls how far the gradient
+// extends before hitting white (overview zooms snap to white sooner than
+// chart-detail zooms).
+func depthFill(minDepthM, safeDepthM float64, z int) color.Color {
 	if safeDepthM <= 0 {
 		safeDepthM = 1
 	}
 	minFt := minDepthM * feetPerMetre
 	safeFt := safeDepthM * feetPerMetre
+	deepEnd := safeFt * depthDeepMultiplierFor(z)
 
 	// Drying area / above MLLW: solid black.
 	if minFt <= 0 {
@@ -752,15 +873,19 @@ func depthFill(minDepthM, safeDepthM float64) color.Color {
 		return lerpRGBA(depthBlack, depthDarkNavy, minFt/safeFt)
 	}
 
-	// At or above safe: hard step to light blue, then smooth gradient to white
-	// at safe × depthDeepMultiplier. The discontinuity at safe is the whole
-	// point — it makes the danger boundary visually unmistakable.
-	deepEnd := safeFt * depthDeepMultiplier
+	// At or above safe: hard step to light blue, then a two-part gradient
+	// through a saturated mid blue (depthMid) on the way to white. The mid
+	// anchor gives adjacent depths visibly more chromatic variation than a
+	// flat pale→white lerp.
 	if minFt < deepEnd {
-		return lerpRGBA(depthLight, depthWhite, (minFt-safeFt)/(deepEnd-safeFt))
+		midFt := safeFt + (deepEnd-safeFt)*depthMidFraction
+		if minFt < midFt {
+			return lerpRGBA(depthLight, depthMid, (minFt-safeFt)/(midFt-safeFt))
+		}
+		return lerpRGBA(depthMid, depthWhite, (minFt-midFt)/(deepEnd-midFt))
 	}
 
-	// Beyond safe × depthDeepMultiplier: solid white.
+	// Beyond safe × deep multiplier: solid white.
 	return depthWhite
 }
 
