@@ -170,7 +170,14 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if h.tileCache != nil {
+	// Don't cache visually-empty tiles. A fully-transparent 256x256 PNG is
+	// ~768 bytes; anything that small means the renderer had nothing to draw,
+	// most likely because the underlying cells haven't been downloaded yet.
+	// Caching that empty result would make it the permanent answer for these
+	// coords even after a later prefetch fills in the cells. Re-rendering an
+	// empty tile is cheap, so it's safe to skip caching them.
+	const minCacheableTileBytes = 1024
+	if h.tileCache != nil && len(png) >= minCacheableTileBytes {
 		if err := h.tileCache.Put(bucket, z, x, y, png); err != nil {
 			// Cache write failures shouldn't fail the request; the next render
 			// will just have to redo the work.

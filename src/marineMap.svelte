@@ -1839,7 +1839,16 @@
         <input
           type="checkbox"
           bind:checked={mapGlobal.layerOptions[idx].on}
-          onchange={saveLayerStates}
+          onchange={() => {
+            saveLayerStates();
+            // When the local-NOAA layer is enabled, force a prefetch for the
+            // current viewport — otherwise the user has to pan before any
+            // cells are downloaded.
+            if (l.name === "noaa-local" && mapGlobal.layerOptions[idx].on) {
+              lastNoaaPrefetchKey = "";
+              maybePrefetchNoaaTiles();
+            }
+          }}
           disabled={isParentOff}
         />
         {l.displayName || l.name}
