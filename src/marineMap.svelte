@@ -73,6 +73,36 @@
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
 
+  // Cache-busting tile version. Appended as a `v=` query param on every tile
+  // URL. Default is the build-time git short hash (injected by Vite via the
+  // __GIT_HASH__ define) so every new build auto-busts OpenLayers and the
+  // browser HTTP cache without manual intervention. Override per page load
+  // via `?tilev=foo` to force a one-off bust.
+  const tileGenVersion: string = (() => {
+    const fallback = typeof __GIT_HASH__ === "string" ? __GIT_HASH__ : "dev";
+    if (typeof window === "undefined") return fallback;
+    try {
+      const v = new URLSearchParams(window.location.search).get("tilev");
+      return v && v !== "" ? v : fallback;
+    } catch {
+      return fallback;
+    }
+  })();
+
+  // Boat safety depth (feet). Drives the DEPARE gradient on local NOAA-ENC
+  // tiles: solid coral below this, gradient to white at 2× this. Override per
+  // page load via `?safeDepth=N`; otherwise the server uses its module default
+  // (`safe_depth_ft` config attribute).
+  const safeDepthParam: string = (() => {
+    if (typeof window === "undefined") return "";
+    try {
+      const v = new URLSearchParams(window.location.search).get("safeDepth");
+      return v && v !== "" ? v : "";
+    } catch {
+      return "";
+    }
+  })();
+
   let headsUpActive = $state(getCookie(COOKIE_HEADS_UP) === "1");
   // boat position on screen: "center" or "bottom" (~80% down from top)
   let boatPositionMode = $state<"center" | "bottom">(
@@ -1116,6 +1146,10 @@
       }),
     });
 
+    // NOAA's public WMS chart service. Authoritative but slow — kept as a
+    // fallback / comparison reference. Always available regardless of where the
+    // page is being served from. The `_v` param is ignored by the WMS but
+    // changes the browser cache key when tileGenVersion is bumped.
     mapGlobal.layerOptions.push({
       name: "noaa",
       on: false,
@@ -1124,11 +1158,33 @@
         preload: 2,
         source: new TileWMS({
           url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-          params: {},
+          params: { _v: tileGenVersion },
           transition: 300,
         }),
       }),
     });
+
+    // Local ENC renderer — fast, lives at /noaa-enc/tile/{z}/{x}/{y}.png served
+    // by the Go module on :8888 (and proxied through Vite on :5173). Only
+    // registered when we're being served from one of those ports; elsewhere
+    // the path doesn't exist.
+    if (noaaCacheReachable()) {
+      const params = new URLSearchParams();
+      params.set("v", tileGenVersion);
+      if (safeDepthParam) params.set("sd", safeDepthParam);
+      mapGlobal.layerOptions.push({
+        name: "noaa-local",
+        on: false,
+        layer: new TileLayer({
+          opacity: 0.7,
+          preload: 2,
+          source: new XYZ({
+            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${params.toString()}`,
+            transition: 300,
+          }),
+        }),
+      });
+    }
 
     // Track layer for myBoat (child of boat layer)
     var trackLayer = new Vector({
@@ -1277,6 +1333,48 @@
     return null;
   }
 
+  // The Go caching proxy is only mounted on the module's own HTTP server (default port
+  // 8888) and is also reachable through the Vite dev server (5173) via its proxy. When
+  // the page is served from anywhere else we skip both the proxy URL and the prefetch
+  // calls and let OpenLayers hit NOAA directly.
+  function noaaCacheReachable(): boolean {
+    if (typeof window === "undefined") return false;
+    const port = window.location.port;
+    return port === "5173" || port === "8888";
+  }
+
+  // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
+  // spam the backend with overlapping cell-download jobs.
+  let lastNoaaPrefetchKey = "";
+
+  function maybePrefetchNoaaTiles() {
+    if (!noaaCacheReachable()) return;
+    const noaa = findLayerByName("noaa-local");
+    if (!noaa || !noaa.on) return;
+    if (!mapGlobal.map || !mapGlobal.view) return;
+
+    const size = mapGlobal.map.getSize();
+    if (!size) return;
+    const extent = mapGlobal.view.calculateExtent(size);
+    // Round bbox to ~0.01 deg so trivial pans share a key.
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const minLon = round(extent[0]);
+    const minLat = round(extent[1]);
+    const maxLon = round(extent[2]);
+    const maxLat = round(extent[3]);
+    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
+    if (key === lastNoaaPrefetchKey) return;
+    lastNoaaPrefetchKey = key;
+
+    fetch("/noaa-enc/prefetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
+    }).catch(() => {
+      // Best-effort: prefetch failures shouldn't disrupt the UI.
+    });
+  }
+
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
     if (l == null) {
@@ -1327,6 +1425,7 @@
         }
       }
     }
+    maybePrefetchNoaaTiles();
   }
 
   function pointDiff(x: number[], y: number[]): number {
@@ -1365,6 +1464,12 @@
       layers: mapGlobal.onLayers as Collection<BaseLayer>,
       view: mapGlobal.view,
       controls: defaultControls().extend([scaleThing]),
+    });
+
+    // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
+    // current viewport. The handler is a no-op when the noaa layer is off.
+    mapGlobal.map.on("moveend", () => {
+      maybePrefetchNoaaTiles();
     });
 
     // Setup popup overlay
@@ -1734,7 +1839,16 @@
         <input
           type="checkbox"
           bind:checked={mapGlobal.layerOptions[idx].on}
-          onchange={saveLayerStates}
+          onchange={() => {
+            saveLayerStates();
+            // When the local-NOAA layer is enabled, force a prefetch for the
+            // current viewport — otherwise the user has to pan before any
+            // cells are downloaded.
+            if (l.name === "noaa-local" && mapGlobal.layerOptions[idx].on) {
+              lastNoaaPrefetchKey = "";
+              maybePrefetchNoaaTiles();
+            }
+          }}
           disabled={isParentOff}
         />
         {l.displayName || l.name}

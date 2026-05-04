@@ -1,10 +1,13 @@
 module github.com/erh/viam-chartplotter
 
-go 1.23.8
+go 1.24.7
 
 require (
+	github.com/beetlebugorg/s57 v0.100.0
 	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
+	github.com/fogleman/gg v1.3.0
 	go.viam.com/rdk v0.73.1-0.20250505140427-608c7b61f924
+	golang.org/x/image v0.19.0
 )
 
 require (
@@ -17,6 +20,7 @@ require (
 	git.sr.ht/~sbinet/gg v0.3.1 // indirect
 	github.com/a8m/envsubst v1.4.2 // indirect
 	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b // indirect
+	github.com/beetlebugorg/iso8211 v0.100.0 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/bluenviron/gortsplib/v4 v4.8.0 // indirect
 	github.com/bufbuild/protocompile v0.9.0 // indirect
@@ -30,6 +34,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
 	github.com/desertbit/timer v0.0.0-20180107155436-c41aec40b27f // indirect
 	github.com/dgottlieb/smarty-assertions v1.2.6 // indirect
+	github.com/dhconnelly/rtreego v1.2.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/edaniels/golog v0.0.0-20230215213219-28954395e8d0 // indirect
 	github.com/edaniels/lidario v0.0.0-20220607182921-5879aa7b96dd // indirect
@@ -99,6 +104,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/sergi/go-diff v1.3.1 // indirect
+	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/srikrsna/protoc-gen-gotag v0.6.2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
@@ -129,17 +135,16 @@ require (
 	go.viam.com/test v1.2.4 // indirect
 	go.viam.com/utils v0.1.142 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/crypto v0.36.0 // indirect
+	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
-	golang.org/x/image v0.19.0 // indirect
-	golang.org/x/mod v0.21.0 // indirect
-	golang.org/x/net v0.37.0 // indirect
+	golang.org/x/mod v0.26.0 // indirect
+	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/oauth2 v0.28.0 // indirect
-	golang.org/x/sync v0.12.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/sync v0.16.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/time v0.6.0 // indirect
-	golang.org/x/tools v0.24.0 // indirect
+	golang.org/x/tools v0.35.0 // indirect
 	gonum.org/v1/gonum v0.12.0 // indirect
 	gonum.org/v1/plot v0.12.0 // indirect
 	google.golang.org/api v0.196.0 // indirect

@@ -3,7 +3,11 @@ package vc
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -31,10 +35,100 @@ func init() {
 }
 
 func newServer(ctx context.Context, deps resource.Dependencies, config resource.Config, logger logging.Logger) (resource.Resource, error) {
-	fs, err := DistFS()
+	dist, err := DistFS()
+	if err != nil {
+		return nil, err
+	}
+	port := config.Attributes.Int("port", 8888)
+	cacheDir := config.Attributes.String("noaa_cache_dir")
+	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
+	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 6)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt)
+}
+
+// resolveCacheRoot picks the parent directory under which both the WMS proxy cache
+// (noaa-wms/) and the ENC store (noaa-enc/) live. An explicit path wins; otherwise
+// we use the OS user cache dir, falling back to the temp dir if HOME is unset.
+func resolveCacheRoot(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "viam-chartplotter")
+}
+
+// StartChartplotterServer wires the static frontend, the NOAA WMS caching proxy, and
+// the ENC catalog/store handlers, and starts an HTTP server on the given port.
+// safeDepthFt is the default safety contour (feet) for tile rendering; the
+// per-request `?sd=` query param overrides it.
+func StartChartplotterServer(
+	name resource.Name,
+	dist fs.FS,
+	logger logging.Logger,
+	port int,
+	cacheRoot string,
+	cacheMaxBytes int64,
+	safeDepthFt float64,
+) (resource.Resource, error) {
+	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
 		return nil, err
 	}
 
-	return vmodutils.NewWebModuleAndStart(config.ResourceName(), fs, logger, config.Attributes.Int("port", 8888))
+	root := resolveCacheRoot(cacheRoot)
+
+	wmsCache, err := NewNoaaCache(filepath.Join(root, "noaa-wms"), cacheMaxBytes, logger.Sublogger("noaaCache"))
+	if err != nil {
+		return nil, err
+	}
+	wmsCache.Register(mux)
+	logger.Infof("noaa wms cache: %s (max %d bytes, stale after %s)",
+		wmsCache.cacheDir, wmsCache.maxBytes, wmsCache.staleAfter)
+
+	encDir := filepath.Join(root, "noaa-enc")
+	catalog, err := NewENCCatalog(encDir, logger.Sublogger("encCatalog"))
+	if err != nil {
+		return nil, err
+	}
+	encStore, err := NewENCStore(encDir, catalog, logger.Sublogger("encStore"))
+	if err != nil {
+		return nil, err
+	}
+	encRenderer := NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
+	encTileCache, err := NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
+	if err != nil {
+		return nil, err
+	}
+	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, safeDepthFt).Register(mux)
+	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
+
+	server.Addr = fmt.Sprintf(":%d", port)
+	logger.Infof("going to listen on %v", server.Addr)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("error ListenAndServe: %v", err)
+		}
+	}()
+
+	return &chartplotterResource{name: name, server: server}, nil
+}
+
+type chartplotterResource struct {
+	resource.AlwaysRebuild
+
+	name   resource.Name
+	server *http.Server
+}
+
+func (r *chartplotterResource) Name() resource.Name { return r.name }
+
+func (r *chartplotterResource) Close(ctx context.Context) error {
+	return r.server.Close()
+}
+
+func (r *chartplotterResource) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
+	return nil, nil
 }
