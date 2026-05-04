@@ -42,7 +42,7 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	port := config.Attributes.Int("port", 8888)
 	cacheDir := config.Attributes.String("noaa_cache_dir")
 	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
-	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 8)
+	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 6)
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt)
 }
 

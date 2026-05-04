@@ -74,16 +74,18 @@
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
 
   // Cache-busting tile version. Appended as a `v=` query param on every tile
-  // URL. Bump it via `?tilev=2` (or any new value) in the page URL to force
-  // OpenLayers / browser HTTP cache / our local on-disk tile cache to be
-  // bypassed without having to clear them manually.
+  // URL. Default is the build-time git short hash (injected by Vite via the
+  // __GIT_HASH__ define) so every new build auto-busts OpenLayers and the
+  // browser HTTP cache without manual intervention. Override per page load
+  // via `?tilev=foo` to force a one-off bust.
   const tileGenVersion: string = (() => {
-    if (typeof window === "undefined") return "1";
+    const fallback = typeof __GIT_HASH__ === "string" ? __GIT_HASH__ : "dev";
+    if (typeof window === "undefined") return fallback;
     try {
       const v = new URLSearchParams(window.location.search).get("tilev");
-      return v && v !== "" ? v : "1";
+      return v && v !== "" ? v : fallback;
     } catch {
-      return "1";
+      return fallback;
     }
   })();
 

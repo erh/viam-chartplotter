@@ -18,7 +18,7 @@ type ENCHandlers struct {
 
 func NewENCHandlers(catalog *ENCCatalog, store *ENCStore, renderer *ENCRenderer, tileCache *ENCTileCache, defaultSafeDepthFt float64) *ENCHandlers {
 	if defaultSafeDepthFt <= 0 {
-		defaultSafeDepthFt = 8
+		defaultSafeDepthFt = 6
 	}
 	return &ENCHandlers{
 		catalog:          catalog,
