@@ -21,7 +21,7 @@
   import XYZ from "ol/source/XYZ";
   import { Circle as CircleStyle, Fill, Icon, Stroke, Style } from "ol/style.js";
   import Overlay from "ol/Overlay.js";
-  import { getDistance } from "ol/sphere.js";
+  import { getDistance, offset as sphereOffset } from "ol/sphere.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
   import type { TileCoord } from "ol/tilecoord";
@@ -358,6 +358,7 @@
     trackFeatures: new Collection<Feature<Geometry>>(),
     aisTrackFeatures: new Collection<Feature<Geometry>>(),
     routeFeatures: new Collection<Feature<Geometry>>(),
+    headingLineFeatures: new Collection<Feature<Geometry>>(),
     trackFeaturesLastCheck: new Date(0),
     myBoatMarker: null as Feature<Point> | null,
 
@@ -441,6 +442,9 @@
         recordTrackPoint("myBoat", pp);
       }
     }
+
+    // heading line stuff
+    updateHeadingLine();
 
     // route stuff
     mapGlobal.routeFeatures.clear();
@@ -882,6 +886,43 @@
     applyHeadsUpRotation();
   }
 
+  function updateHeadingLine() {
+    mapGlobal.headingLineFeatures.clear();
+
+    if (!myBoat) return;
+    if (!isValidCoordinate(myBoat.location[0], myBoat.location[1])) return;
+    if ((myBoat.speed ?? 0) <= 5) return;
+
+    const start: [number, number] = [myBoat.location[1], myBoat.location[0]];
+    const headingRad = (myBoat.heading * Math.PI) / 180;
+    const nmInMeters = 1852;
+    const lengthNm = 5;
+
+    const end = sphereOffset(start, lengthNm * nmInMeters, headingRad) as [number, number];
+    mapGlobal.headingLineFeatures.push(
+      new Feature({
+        kind: "line",
+        geometry: new LineString([start, end]),
+      })
+    );
+
+    // Cross ticks every 1nm, perpendicular to the heading line.
+    const tickHalfMeters = 75;
+    const leftBearing = headingRad - Math.PI / 2;
+    const rightBearing = headingRad + Math.PI / 2;
+    for (let nm = 1; nm <= lengthNm; nm++) {
+      const center = sphereOffset(start, nm * nmInMeters, headingRad) as [number, number];
+      const left = sphereOffset(center, tickHalfMeters, leftBearing) as [number, number];
+      const right = sphereOffset(center, tickHalfMeters, rightBearing) as [number, number];
+      mapGlobal.headingLineFeatures.push(
+        new Feature({
+          kind: "tick",
+          geometry: new LineString([left, right]),
+        })
+      );
+    }
+  }
+
   function applyHeadsUpRotation() {
     if (!mapGlobal.view) return;
     if (headsUpActive && myBoat) {
@@ -1077,6 +1118,33 @@
         name: "track",
         on: true,
         layer: trackLayer,
+        parent: "boat",
+      });
+
+      // Heading line layer - child of boat, default on when sog > 5 kt
+      var headingLineLayer = new Vector({
+        source: new VectorSource({
+          features: mapGlobal.headingLineFeatures,
+        }),
+        style: function (feature) {
+          const kind = feature.get("kind");
+          if (kind === "tick") {
+            return new Style({
+              stroke: new Stroke({ color: "#000", width: 2 }),
+            });
+          }
+          return new Style({
+            stroke: new Stroke({ color: "#000", width: 2 }),
+          });
+        },
+        zIndex: 25,
+      });
+
+      mapGlobal.layerOptions.push({
+        name: "heading-line",
+        displayName: "heading line",
+        on: true,
+        layer: headingLineLayer,
         parent: "boat",
       });
 
