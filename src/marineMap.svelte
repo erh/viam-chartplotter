@@ -68,11 +68,16 @@
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
+  const COOKIE_BOAT_POSITION = "mapBoatPosition";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
 
   let headsUpActive = $state(getCookie(COOKIE_HEADS_UP) === "1");
+  // boat position on screen: "center" or "bottom" (~80% down from top)
+  let boatPositionMode = $state<"center" | "bottom">(
+    getCookie(COOKIE_BOAT_POSITION) === "bottom" ? "bottom" : "center"
+  );
 
   function loadHeadingLineLength(): number {
     var raw = getCookie(COOKIE_HEADING_LINE_LENGTH);
@@ -275,6 +280,7 @@
     externalVisibilityControl = false,
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
+    fullWidth = false,
     onReady,
     boatDetailSlot,
     fitBoundsPadding,
@@ -287,6 +293,7 @@
     positionHistorical?: PositionPoint[];
     depthColorTrack?: boolean;
     enableBoatsPanel?: boolean;
+    fullWidth?: boolean;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
     externalVisibilityControl?: boolean;
     /** When false, offline boats are hidden from the boats panel (default: true) */
@@ -464,7 +471,9 @@
       mapGlobal.myBoatMarker.setGeometry(new Point(pp));
 
       if (!inPanMode && sz) {
-        mapGlobal.view.centerOn(pp, sz, [sz[0] / 2, sz[1] / 2]);
+        var boatPx: [number, number] =
+          boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
+        mapGlobal.view.centerOn(pp, sz, boatPx);
 
         var zoom: number;
         if (mapInternalState.lockedZoom != null) {
@@ -931,6 +940,15 @@
     headsUpActive = !headsUpActive;
     setCookie(COOKIE_HEADS_UP, headsUpActive ? "1" : "0", COOKIE_OPTS);
     applyHeadsUpRotation();
+  }
+
+  function toggleBoatPosition() {
+    boatPositionMode = boatPositionMode === "center" ? "bottom" : "center";
+    setCookie(COOKIE_BOAT_POSITION, boatPositionMode, COOKIE_OPTS);
+    // Force re-center on next update by exiting pan mode and clearing locked state.
+    mapInternalState.lastZoom = 0;
+    mapInternalState.lastCenter = [0, 0];
+    inPanMode = false;
   }
 
   function updateHeadingLine() {
@@ -1648,10 +1666,11 @@
 
 <div
   id="map-container"
-  class="relative lg:col-span-3 row-span-3 lg:row-span-5 border border-dark"
+  class="relative {fullWidth ? 'lg:col-span-4 lg:row-span-6' : 'lg:col-span-3 lg:row-span-5'} row-span-3 border border-dark"
   class:layers-expanded={layersExpanded}
   class:boats-expanded={boatsExpanded}
   class:map-loaded={mapLoaded}
+  class:full-width={fullWidth}
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
@@ -1889,6 +1908,38 @@
         points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
       /></svg
     >
+  </button>
+
+  <button
+    class="boat-position-toggle"
+    class:active={boatPositionMode === "bottom"}
+    onclick={toggleBoatPosition}
+    aria-pressed={boatPositionMode === "bottom"}
+    disabled={!myBoat}
+    title={boatPositionMode === "bottom"
+      ? "Boat position: bottom 20% (click for centered)"
+      : "Boat position: centered (click for bottom 20%)"}
+    aria-label="Toggle boat position on screen"
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      {#if boatPositionMode === "bottom"}
+        <circle cx="12" cy="18" r="2" fill="currentColor" />
+      {:else}
+        <circle cx="12" cy="12" r="2" fill="currentColor" />
+      {/if}
+    </svg>
   </button>
 
   {#if measureActive && measureDistance !== null}
@@ -2229,6 +2280,61 @@
 
   .heads-up-toggle.active:hover {
     background: #1d4ed8;
+  }
+
+  .boat-position-toggle {
+    position: absolute;
+    top: 10px;
+    right: calc(10px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .boat-position-toggle:hover:not(:disabled) {
+    background: white;
+    border-color: #999;
+  }
+
+  .boat-position-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .boat-position-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .boat-position-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
+  /* When the data panel is hidden, the map is full-width and its top-right
+     buttons collide with the page-level fullscreen / drawer-toggle buttons.
+     Shift the map's top-right cluster left to clear them. */
+  #map-container.full-width .measure-toggle {
+    right: calc(10px + 85px);
+  }
+  #map-container.full-width .heads-up-toggle {
+    right: calc(10px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .boat-position-toggle {
+    right: calc(10px + 30px + 6px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .measure-result {
+    right: calc(10px + 85px);
   }
 
   .measure-result {

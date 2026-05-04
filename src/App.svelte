@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getCookie } from "typescript-cookie";
+  import { getCookie, setCookie } from "typescript-cookie";
   // import '@viamrobotics/prime-core/prime.css';
   import { onMount, onDestroy } from "svelte";
   import { Icon as PrimeIcon } from "@viamrobotics/prime-core";
@@ -80,7 +80,15 @@
     shortGraphRange:
       typeof window !== "undefined" &&
       new URLSearchParams(window.location.search).get("shortGraph") === "1",
+    hideDataPanel: getCookie("hideDataPanel") === "1",
   });
+
+  const SETTINGS_COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
+
+  function toggleHideDataPanel() {
+    globalData.hideDataPanel = !globalData.hideDataPanel;
+    setCookie("hideDataPanel", globalData.hideDataPanel ? "1" : "0", SETTINGS_COOKIE_OPTS);
+  }
 
   var globalConfig = $state({
     movementSensorName: "",
@@ -1376,8 +1384,10 @@
       positionHistorical={globalData.posHistory}
       depthColorTrack={globalData.showDepthOnTrack}
       defaultAisVisible={false}
+      fullWidth={globalData.hideDataPanel}
     ></MarineMap>
 
+    {#if !globalData.hideDataPanel}
     <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
       {#if globalData.status === "Connected"}
         <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
@@ -1613,17 +1623,20 @@
         {globalData.numUpdates}
       </div>
     </aside>
+    {/if}
 
-    <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-dark p-1">
-      {#each globalData.cameraNames as name}
-        <img
-          id={name}
-          class="w-full lg:w-[250px] cursor-pointer hover:opacity-80 transition-opacity"
-          alt={name}
-          onclick={() => enlargeImage(name)}
-        />
-      {/each}
-    </div>
+    {#if !globalData.hideDataPanel}
+      <div class="h-[50dvh] lg:h-[auto] overflow-x-auto flex lg:col-span-3 border border-dark p-1">
+        {#each globalData.cameraNames as name}
+          <img
+            id={name}
+            class="w-full lg:w-[250px] cursor-pointer hover:opacity-80 transition-opacity"
+            alt={name}
+            onclick={() => enlargeImage(name)}
+          />
+        {/each}
+      </div>
+    {/if}
 
     <div class="flex flex-col gap-3 text-white text-sm">
       <div>
@@ -1658,6 +1671,41 @@
     >
       ⛶
     </button>
+
+    <button
+      onclick={toggleHideDataPanel}
+      class="fixed top-2 right-12 z-[10000] px-3 py-1 bg-black bg-opacity-60 border border-gray-500 hover:bg-gray-700 text-white rounded text-sm"
+      title={globalData.hideDataPanel ? "Show data panel" : "Hide data panel"}
+    >
+      {globalData.hideDataPanel ? "◀" : "▶"}
+    </button>
+
+    {#if globalData.hideDataPanel}
+      <div
+        class="fixed top-12 right-2 z-[9998] flex flex-col gap-1 items-end px-3 py-2 bg-black bg-opacity-60 border border-gray-500 text-white rounded text-sm pointer-events-none"
+      >
+        {#if globalConfig.movementSensorProps.linearVelocitySupported}
+          <div>
+            SOG <span class="font-bold">{globalData.speed.toFixed(2)}</span>
+            <sup>kn</sup>
+          </div>
+        {/if}
+        {#if globalConfig.movementSensorProps.compassHeadingSupported}
+          <div>
+            HDG/COG <span class="font-bold">{globalData.heading.toFixed(0)}</span> /
+            <span class="font-bold"
+              >{globalData.cog !== null ? globalData.cog.toFixed(0) : "—"}</span
+            >
+          </div>
+        {/if}
+        {#if globalConfig.depthSensorName != ""}
+          <div>
+            Depth <span class="font-bold">{globalData.depth.toFixed(2)}</span>
+            <sup>ft</sup>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if globalData.enlargedImage}
       <div
