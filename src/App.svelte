@@ -1333,16 +1333,6 @@
     }
   }
 
-  async function addNavWaypointFromCurrentPosition() {
-    var lat = globalData.pos.getLat();
-    var lng = globalData.pos.getLng();
-    if (lat === 0 && lng === 0) {
-      globalLogger.warn("no valid current position; cannot add waypoint");
-      return;
-    }
-    await addNavWaypoint(lat, lng);
-  }
-
   async function moveNavWaypoint(id: string, lat: number, lng: number) {
     if (!globalClient || !globalConfig.navServiceName) return;
     if (!id || id.startsWith("pending-")) return;
@@ -1479,15 +1469,6 @@
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
-    {#if globalConfig.navServiceName}
-      <button
-        class="fixed top-2 right-[10rem] z-[10000] px-3 py-1 bg-black bg-opacity-60 border border-amber-500 hover:bg-amber-700 text-amber-300 rounded text-sm"
-        onclick={addNavWaypointFromCurrentPosition}
-        title="Add a waypoint at the current boat position"
-      >
-        + Route From Here
-      </button>
-    {/if}
 
     {#if !globalData.hideDataPanel}
     <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
