@@ -1447,6 +1447,7 @@
     mapGlobal.view = new View({
       center: [0, 0],
       zoom: 15,
+      maxZoom: 19,
     });
 
     updateOnLayers();

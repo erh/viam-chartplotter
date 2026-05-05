@@ -380,30 +380,100 @@ func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project 
 	return points
 }
 
-// polygonCentroid returns the area-weighted centroid of the polygon ring.
-// Falls back to the simple coordinate mean if the polygon is degenerate.
+// splitRings reconstructs ring boundaries in an S-57 polygon coordinate array.
+// The s57 library concatenates every ring (outer + holes, or multiple disjoint
+// outer rings) into one flat [][]float64 with no separator — see
+// internal/parser/geometry.go in beetlebugorg/s57 — and each constituent ring
+// is self-closed (first vertex == last vertex). Callers that don't split end
+// up drawing a stray diagonal LineTo from one ring's last vertex to the next
+// ring's first vertex, which paints as a triangular wedge inside the polygon.
+//
+// We detect a ring boundary by watching for a vertex equal to the current
+// ring's start: that's the closing vertex, and the next vertex begins a new
+// ring. A trailing fragment with no closure (malformed input) is returned as
+// its own ring rather than dropped, so we still paint something.
+func splitRings(coords [][]float64) [][][]float64 {
+	var rings [][][]float64
+	if len(coords) == 0 {
+		return rings
+	}
+	start := 0
+	for i := 1; i < len(coords); i++ {
+		if len(coords[i]) < 2 || len(coords[start]) < 2 {
+			continue
+		}
+		if coords[i][0] == coords[start][0] && coords[i][1] == coords[start][1] {
+			rings = append(rings, coords[start:i+1])
+			start = i + 1
+			i = start // loop's i++ will advance past the new ring's start vertex
+		}
+	}
+	if start < len(coords) {
+		rings = append(rings, coords[start:])
+	}
+	return rings
+}
+
+// ringSignedArea returns the signed shoelace area of a single ring (positive
+// for CCW, negative for CW under image y-down). Used to pick the dominant ring
+// for centroid seeding.
+func ringSignedArea(ring [][]float64) float64 {
+	var sum float64
+	for i := range ring {
+		if len(ring[i]) < 2 {
+			continue
+		}
+		j := (i + 1) % len(ring)
+		if len(ring[j]) < 2 {
+			continue
+		}
+		sum += ring[i][0]*ring[j][1] - ring[j][0]*ring[i][1]
+	}
+	return sum / 2
+}
+
+// polygonCentroid returns the area-weighted centroid of a polygon. For
+// multi-ring polygons it returns the centroid of the largest-area ring, which
+// is what we want when seeding a single representative point (e.g. for IDW).
+// Falls back to the simple coordinate mean if all rings are degenerate.
 func polygonCentroid(coords [][]float64) (float64, float64) {
 	if len(coords) == 0 {
 		return 0, 0
 	}
+	rings := splitRings(coords)
+	if len(rings) == 0 {
+		rings = [][][]float64{coords}
+	}
+	var best [][]float64
+	bestArea := -1.0
+	for _, ring := range rings {
+		a := math.Abs(ringSignedArea(ring))
+		if a > bestArea {
+			bestArea = a
+			best = ring
+		}
+	}
+	if best == nil {
+		best = coords
+	}
 	var sumX, sumY, sumA float64
-	for i := range coords {
-		if len(coords[i]) < 2 {
+	for i := range best {
+		if len(best[i]) < 2 {
 			continue
 		}
-		j := (i + 1) % len(coords)
-		if len(coords[j]) < 2 {
+		j := (i + 1) % len(best)
+		if len(best[j]) < 2 {
 			continue
 		}
-		x0, y0 := coords[i][0], coords[i][1]
-		x1, y1 := coords[j][0], coords[j][1]
+		x0, y0 := best[i][0], best[i][1]
+		x1, y1 := best[j][0], best[j][1]
 		cross := x0*y1 - x1*y0
 		sumA += cross
 		sumX += (x0 + x1) * cross
 		sumY += (y0 + y1) * cross
 	}
 	if math.Abs(sumA) < 1e-12 {
-		// Degenerate ring; fall back to vertex mean.
+		// Degenerate ring; fall back to vertex mean over all coords.
 		var mx, my float64
 		var n int
 		for _, c := range coords {
@@ -421,6 +491,33 @@ func polygonCentroid(coords [][]float64) (float64, float64) {
 	}
 	a := sumA / 2
 	return sumX / (6 * a), sumY / (6 * a)
+}
+
+// tracePolygonPath walks every ring of a flattened multi-ring polygon onto dc,
+// emitting each ring as its own subpath so the renderer never draws a stray
+// connecting edge between rings. Caller is responsible for Fill/Stroke.
+func tracePolygonPath(dc *gg.Context, coords [][]float64, project func(lon, lat float64) (float64, float64)) {
+	rings := splitRings(coords)
+	if len(rings) == 0 {
+		return
+	}
+	for _, ring := range rings {
+		started := false
+		dc.NewSubPath()
+		for _, c := range ring {
+			if len(c) < 2 {
+				continue
+			}
+			px, py := project(c[0], c[1])
+			if !started {
+				dc.MoveTo(px, py)
+				started = true
+			} else {
+				dc.LineTo(px, py)
+			}
+		}
+		dc.ClosePath()
+	}
 }
 
 // compositeBathymetry composites a smooth depth-shaded layer on top of `dc`,
@@ -460,20 +557,11 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 			if isDegeneratePixelPolygon(geom.Coordinates, project) {
 				continue
 			}
-			maskCtx.NewSubPath()
-			for i, c := range geom.Coordinates {
-				if len(c) < 2 {
-					continue
-				}
-				px, py := project(c[0], c[1])
-				if i == 0 {
-					maskCtx.MoveTo(px, py)
-				} else {
-					maskCtx.LineTo(px, py)
-				}
-			}
-			maskCtx.ClosePath()
+			tracePolygonPath(maskCtx, geom.Coordinates, project)
+			maskCtx.Push()
+			maskCtx.SetFillRuleEvenOdd()
 			maskCtx.Fill()
+			maskCtx.Pop()
 		}
 	}
 	maskImg, ok := maskCtx.Image().(*image.RGBA)
@@ -684,38 +772,17 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 			if fill == nil {
 				return
 			}
-			dc.NewSubPath()
-			for i, c := range geom.Coordinates {
-				if len(c) < 2 {
-					continue
-				}
-				px, py := project(c[0], c[1])
-				if i == 0 {
-					dc.MoveTo(px, py)
-				} else {
-					dc.LineTo(px, py)
-				}
-			}
-			dc.ClosePath()
+			tracePolygonPath(dc, geom.Coordinates, project)
+			dc.Push()
+			dc.SetFillRuleEvenOdd()
 			dc.SetColor(fill)
 			dc.Fill()
+			dc.Pop()
 		case passLines:
 			if stroke == nil {
 				return
 			}
-			dc.NewSubPath()
-			for i, c := range geom.Coordinates {
-				if len(c) < 2 {
-					continue
-				}
-				px, py := project(c[0], c[1])
-				if i == 0 {
-					dc.MoveTo(px, py)
-				} else {
-					dc.LineTo(px, py)
-				}
-			}
-			dc.ClosePath()
+			tracePolygonPath(dc, geom.Coordinates, project)
 			dc.SetColor(stroke)
 			dc.SetLineWidth(width * scale)
 			dc.Stroke()
