@@ -52,7 +52,7 @@
   // narrow (tall thin silhouette) and the height-ratio remap can leave
   // them only a few pixels wide on screen — too small to spot on a busy
   // chart. Bump scale up to guarantee at least this many pixels of width.
-  const MYBOAT_MIN_RENDERED_WIDTH_PX = 30;
+  const MYBOAT_MIN_RENDERED_WIDTH_PX = 20;
   let myBoatImageNaturalWidth = $state<number | null>(null);
   let myBoatImageNaturalHeight = $state<number | null>(null);
 
