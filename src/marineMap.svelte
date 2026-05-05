@@ -65,6 +65,8 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
+  let addWaypointActive = $state(false);
+
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
@@ -311,6 +313,9 @@
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
     fullWidth = false,
+    navWaypoints,
+    onAddWaypoint,
+    onClearWaypoints,
     onReady,
     boatDetailSlot,
     fitBoundsPadding,
@@ -324,6 +329,13 @@
     depthColorTrack?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    /** Ordered waypoints from a navigation service. The route is drawn from the boat's
+     *  current position through each waypoint in order. */
+    navWaypoints?: { id: string; lat: number; lng: number }[];
+    /** Called when the user clicks the map while "add waypoint" mode is active. */
+    onAddWaypoint?: (lat: number, lng: number) => void;
+    /** Called when the user clicks the clear-route button. */
+    onClearWaypoints?: () => void;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
     externalVisibilityControl?: boolean;
     /** When false, offline boats are hidden from the boats panel (default: true) */
@@ -352,6 +364,7 @@
   let myBoatKey = $derived(
     myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null
   );
+  let navWaypointsKey = $derived(JSON.stringify(navWaypoints ?? []));
   let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
   let effectiveVisibleKey = $derived(JSON.stringify([...effectiveVisibleBoats]));
 
@@ -360,6 +373,7 @@
     const _boats = boatsKey;
     const _myBoat = myBoatKey;
     const _visible = visibleBoatsKey;
+    const _wps = navWaypointsKey;
     updateFromData();
   });
 
@@ -435,6 +449,7 @@
     trackFeatures: new Collection<Feature<Geometry>>(),
     aisTrackFeatures: new Collection<Feature<Geometry>>(),
     routeFeatures: new Collection<Feature<Geometry>>(),
+    navRouteFeatures: new Collection<Feature<Geometry>>(),
     headingLineFeatures: new Collection<Feature<Geometry>>(),
     trackFeaturesLastCheck: new Date(0),
     myBoatMarker: null as Feature<Point> | null,
@@ -541,6 +556,35 @@
         geometry: new LineString([mapInternalState.lastPosition, dest]),
       });
       mapGlobal.routeFeatures.push(f);
+    }
+
+    // navigation-service route: draws a polyline from the boat through each
+    // waypoint in order, plus a circle marker at every waypoint.
+    mapGlobal.navRouteFeatures.clear();
+    if (navWaypoints && navWaypoints.length > 0) {
+      const wpCoords: number[][] = navWaypoints.map((wp) => [wp.lng, wp.lat]);
+
+      const startCoord =
+        myBoat && isValidCoordinate(myBoat.location[0], myBoat.location[1])
+          ? [myBoat.location[1], myBoat.location[0]]
+          : null;
+      const lineCoords = startCoord ? [startCoord, ...wpCoords] : wpCoords;
+
+      if (lineCoords.length >= 2) {
+        mapGlobal.navRouteFeatures.push(
+          new Feature({ type: "navRoute", geometry: new LineString(lineCoords) })
+        );
+      }
+      navWaypoints.forEach((wp, idx) => {
+        mapGlobal.navRouteFeatures.push(
+          new Feature({
+            type: "navWaypoint",
+            waypointId: wp.id,
+            waypointIndex: idx,
+            geometry: new Point([wp.lng, wp.lat]),
+          })
+        );
+      });
     }
 
     if (boats == null) {
@@ -955,6 +999,7 @@
       measurePoints = [];
       measureDistance = null;
       if (measureSource) measureSource.clear();
+      addWaypointActive = false;
       closePopup();
     }
   }
@@ -964,6 +1009,21 @@
     measurePoints = [];
     measureDistance = null;
     if (measureSource) measureSource.clear();
+  }
+
+  function toggleAddWaypoint() {
+    if (!onAddWaypoint) return;
+    addWaypointActive = !addWaypointActive;
+    if (addWaypointActive) {
+      // Mutually exclusive with measure mode.
+      if (measureActive) stopMeasure();
+      closePopup();
+    }
+  }
+
+  function clearWaypoints() {
+    addWaypointActive = false;
+    onClearWaypoints?.();
   }
 
   function toggleHeadsUp() {
@@ -1303,6 +1363,40 @@
         layer: routeLayer,
         parent: "boat", // Route is a child of boat layer
       });
+
+      // Nav-service route: line + waypoint markers driven by `navWaypoints`.
+      var navRouteLayer = new Vector({
+        source: new VectorSource({
+          features: mapGlobal.navRouteFeatures,
+        }),
+        style: function (feature) {
+          if (feature.get("type") === "navWaypoint") {
+            return new Style({
+              image: new CircleStyle({
+                radius: 7,
+                fill: new Fill({ color: "#f59e0b" }),
+                stroke: new Stroke({ color: "white", width: 2 }),
+              }),
+            });
+          }
+          return new Style({
+            stroke: new Stroke({
+              color: "#f59e0b",
+              width: 3,
+              lineDash: [10, 6],
+            }),
+          });
+        },
+        zIndex: 21,
+      });
+
+      mapGlobal.layerOptions.push({
+        name: "nav-route",
+        displayName: "nav route",
+        on: true,
+        layer: navRouteLayer,
+        parent: "boat",
+      });
     }
 
     var aisLayer = new Vector({
@@ -1524,6 +1618,11 @@
         handleMeasureClick(evt);
         return;
       }
+      if (addWaypointActive && onAddWaypoint) {
+        const [lng, lat] = evt.coordinate;
+        onAddWaypoint(lat, lng);
+        return;
+      }
       const feature = mapGlobal.map!.forEachFeatureAtPixel(evt.pixel, function (f) {
         const type = f.get("type");
         if (type === "ais" || type === "geoMarker" || type === "detection") {
@@ -1604,11 +1703,8 @@
           );
         },
       });
-      mapGlobal.map!.getTargetElement()!.style.cursor = measureActive
-        ? "crosshair"
-        : hit
-          ? "pointer"
-          : "";
+      mapGlobal.map!.getTargetElement()!.style.cursor =
+        measureActive || addWaypointActive ? "crosshair" : hit ? "pointer" : "";
 
       // Depth tooltip on track hover
       let depthFound = false;
@@ -2021,6 +2117,45 @@
       /></svg
     >
   </button>
+
+  {#if onAddWaypoint}
+    <button
+      class="add-waypoint-toggle"
+      class:active={addWaypointActive}
+      onclick={toggleAddWaypoint}
+      aria-pressed={addWaypointActive}
+      title={addWaypointActive
+        ? "Click on the chart to add a waypoint (active)"
+        : "Add a route waypoint from current position"}
+      aria-label="Add waypoint"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
+        <circle cx="12" cy="9" r="2.5" />
+      </svg>
+    </button>
+    {#if navWaypoints && navWaypoints.length > 0}
+      <button
+        class="clear-waypoints-btn"
+        onclick={clearWaypoints}
+        title="Clear all route waypoints"
+        aria-label="Clear route"
+      >
+        ✕
+      </button>
+    {/if}
+  {/if}
 
   <button
     class="heads-up-toggle"
@@ -2459,6 +2594,68 @@
     background: #1d4ed8;
   }
 
+  /* Add-waypoint toggle: sits to the left of the boat-position toggle. */
+  .add-waypoint-toggle {
+    position: absolute;
+    top: 10px;
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .add-waypoint-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .add-waypoint-toggle.active {
+    background: #f59e0b;
+    color: white;
+    border-color: #b45309;
+  }
+
+  .add-waypoint-toggle.active:hover {
+    background: #d97706;
+  }
+
+  /* Sits directly below the add-waypoint toggle when waypoints exist. */
+  .clear-waypoints-btn {
+    position: absolute;
+    top: calc(10px + 30px + 6px);
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #b45309;
+    font-size: 14px;
+    font-weight: bold;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .clear-waypoints-btn:hover {
+    background: #fef3c7;
+    border-color: #b45309;
+  }
+
   /* When the data panel is hidden, the map is full-width and its top-right
      buttons collide with the page-level fullscreen / drawer-toggle buttons.
      Shift the map's top-right cluster left to clear them. */
@@ -2470,6 +2667,12 @@
   }
   #map-container.full-width .boat-position-toggle {
     right: calc(10px + 30px + 6px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .add-waypoint-toggle {
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .clear-waypoints-btn {
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
   }
   #map-container.full-width .measure-result {
     right: calc(10px + 85px);

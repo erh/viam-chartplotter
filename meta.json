@@ -8,6 +8,10 @@
     {
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:chartplotter"
+    },
+    {
+      "api": "rdk:service:navigation",
+      "model": "erh:viam-chartplotter:nav"
     }
   ],
   "first_run": "",

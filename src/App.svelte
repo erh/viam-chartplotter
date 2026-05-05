@@ -69,6 +69,8 @@
     cameraNames: [],
     lastCameraTimes: [],
 
+    navWaypoints: [] as { id: string; lat: number; lng: number }[],
+
     numUpdates: 0,
     status: "Not connected yet",
     statusLastError: new Date(),
@@ -97,6 +99,7 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    navServiceName: "",
     routeSensorName: "",
     seatempSensorName: "",
     depthSensorName: "",
@@ -324,6 +327,24 @@
         });
     }
 
+    if (globalConfig.navServiceName != "") {
+      new VIAM.NavigationClient(client, globalConfig.navServiceName)
+        .getWayPoints()
+        .then((wps) => {
+          globalData.navWaypoints = (wps ?? [])
+            .filter((wp) => wp.location != null)
+            .map((wp) => ({
+              id: wp.id,
+              lat: wp.location!.latitude,
+              lng: wp.location!.longitude,
+            }));
+        })
+        .catch((e) => {
+          globalData.navWaypoints = [];
+          errorHandler(e, "navigation");
+        });
+    }
+
     if (loopNumber % 30 == 2) {
       globalData.allResources.forEach((r) => {
         if (r.subtype != "sensor") {
@@ -543,6 +564,12 @@
       "component",
       "sensor",
       /\bais$/
+    );
+    globalConfig.navServiceName = filterResourcesFirstMatchingName(
+      resources,
+      "service",
+      "navigation",
+      null
     );
     globalConfig.routeSensorName = filterResourcesFirstMatchingName(
       resources,
@@ -1286,6 +1313,52 @@
     return res;
   }
 
+  async function addNavWaypoint(lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) {
+      globalLogger.warn("no navigation service configured; cannot add waypoint");
+      return;
+    }
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).addWayPoint({
+        latitude: lat,
+        longitude: lng,
+      });
+      // Optimistically append; the next poll will reconcile with the service.
+      globalData.navWaypoints = [
+        ...globalData.navWaypoints,
+        { id: `pending-${Date.now()}`, lat, lng },
+      ];
+    } catch (e) {
+      errorHandler(e, "addWayPoint");
+    }
+  }
+
+  async function addNavWaypointFromCurrentPosition() {
+    var lat = globalData.pos.getLat();
+    var lng = globalData.pos.getLng();
+    if (lat === 0 && lng === 0) {
+      globalLogger.warn("no valid current position; cannot add waypoint");
+      return;
+    }
+    await addNavWaypoint(lat, lng);
+  }
+
+  async function clearNavWaypoints() {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    var nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
+    var existing = [...globalData.navWaypoints];
+    // Snap the local state immediately so the UI feels responsive.
+    globalData.navWaypoints = [];
+    for (var wp of existing) {
+      if (!wp.id || wp.id.startsWith("pending-")) continue;
+      try {
+        await nav.removeWayPoint(wp.id);
+      } catch (e) {
+        errorHandler(e, "removeWayPoint");
+      }
+    }
+  }
+
   function seakeeper(name, value) {
     var cmd = {};
     cmd[name] = value;
@@ -1385,7 +1458,19 @@
       depthColorTrack={globalData.showDepthOnTrack}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
+      navWaypoints={globalData.navWaypoints}
+      onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
+      onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
+    {#if globalConfig.navServiceName}
+      <button
+        class="fixed top-2 right-[10rem] z-[10000] px-3 py-1 bg-black bg-opacity-60 border border-amber-500 hover:bg-amber-700 text-amber-300 rounded text-sm"
+        onclick={addNavWaypointFromCurrentPosition}
+        title="Add a waypoint at the current boat position"
+      >
+        + Route From Here
+      </button>
+    {/if}
 
     {#if !globalData.hideDataPanel}
     <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">

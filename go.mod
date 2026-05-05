@@ -6,6 +6,9 @@ require (
 	github.com/beetlebugorg/s57 v0.100.0
 	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
 	github.com/fogleman/gg v1.3.0
+	github.com/kellydunn/golang-geo v0.7.0
+	github.com/pkg/errors v0.9.1
+	go.mongodb.org/mongo-driver v1.17.1
 	go.viam.com/rdk v0.73.1-0.20250505140427-608c7b61f924
 	golang.org/x/image v0.19.0
 )
@@ -21,6 +24,7 @@ require (
 	github.com/a8m/envsubst v1.4.2 // indirect
 	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b // indirect
 	github.com/beetlebugorg/iso8211 v0.100.0 // indirect
+	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/bluenviron/gortsplib/v4 v4.8.0 // indirect
 	github.com/bufbuild/protocompile v0.9.0 // indirect
@@ -69,7 +73,6 @@ require (
 	github.com/improbable-eng/grpc-web v0.15.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.4.6 // indirect
 	github.com/jhump/protoreflect v1.15.6 // indirect
-	github.com/kellydunn/golang-geo v0.7.0 // indirect
 	github.com/klauspost/compress v1.17.7 // indirect
 	github.com/kylelemons/go-gypsy v1.0.0 // indirect
 	github.com/lestrrat-go/backoff/v2 v2.0.8 // indirect
@@ -81,6 +84,7 @@ require (
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/miekg/dns v1.1.53 // indirect
 	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/muhlemmer/gu v0.3.1 // indirect
@@ -99,7 +103,6 @@ require (
 	github.com/pion/stun v0.6.1 // indirect
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/turn/v2 v2.1.6 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
@@ -120,7 +123,6 @@ require (
 	github.com/zitadel/schema v1.3.1 // indirect
 	github.com/ziutek/mymysql v1.5.4 // indirect
 	go-hep.org/x/hep v0.32.1 // indirect
-	go.mongodb.org/mongo-driver v1.17.1 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.54.0 // indirect

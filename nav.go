@@ -1,0 +1,164 @@
+package vc
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+
+	geo "github.com/kellydunn/golang-geo"
+	"github.com/pkg/errors"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"go.viam.com/rdk/components/movementsensor"
+	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/navigation"
+	"go.viam.com/rdk/spatialmath"
+)
+
+var NavModel = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("nav")
+
+func init() {
+	resource.RegisterService(
+		navigation.API,
+		NavModel,
+		resource.Registration[navigation.Service, *NavConfig]{
+			Constructor: newNav,
+		})
+}
+
+// NavConfig is the config for the chartplotter navigation service.
+// MovementSensor is optional; when set, Location() reports the live
+// position/heading of that movement sensor.
+type NavConfig struct {
+	MovementSensor string `json:"movement_sensor,omitempty"`
+}
+
+// Validate ensures all parts of the config are valid and returns the
+// implicit dependencies required by the service.
+func (cfg *NavConfig) Validate(path string) ([]string, error) {
+	var deps []string
+	if cfg.MovementSensor != "" {
+		deps = append(deps, cfg.MovementSensor)
+	}
+	return deps, nil
+}
+
+func newNav(
+	ctx context.Context,
+	deps resource.Dependencies,
+	conf resource.Config,
+	logger logging.Logger,
+) (navigation.Service, error) {
+	cfg, err := resource.NativeConfig[*NavConfig](conf)
+	if err != nil {
+		return nil, err
+	}
+
+	svc := &navService{
+		name:   conf.ResourceName(),
+		logger: logger,
+		store:  navigation.NewMemoryNavigationStore(),
+	}
+	svc.mode.Store(uint32(navigation.ModeManual))
+
+	if cfg.MovementSensor != "" {
+		ms, err := movementsensor.FromDependencies(deps, cfg.MovementSensor)
+		if err != nil {
+			return nil, errors.Wrapf(err, "could not get movement_sensor %q", cfg.MovementSensor)
+		}
+		svc.ms = ms
+	}
+
+	return svc, nil
+}
+
+type navService struct {
+	resource.AlwaysRebuild
+
+	name   resource.Name
+	logger logging.Logger
+
+	mu    sync.Mutex
+	store navigation.NavStore
+	ms    movementsensor.MovementSensor
+
+	// mode is held atomically so reads don't need to take the mutex.
+	mode atomic.Uint32
+}
+
+func (s *navService) Name() resource.Name { return s.name }
+
+func (s *navService) Mode(ctx context.Context, extra map[string]interface{}) (navigation.Mode, error) {
+	return navigation.Mode(s.mode.Load()), nil
+}
+
+func (s *navService) SetMode(ctx context.Context, mode navigation.Mode, extra map[string]interface{}) error {
+	switch mode {
+	case navigation.ModeManual, navigation.ModeWaypoint, navigation.ModeExplore:
+	default:
+		return errors.Errorf("unknown navigation mode %v", mode)
+	}
+	s.mode.Store(uint32(mode))
+	return nil
+}
+
+func (s *navService) Location(ctx context.Context, extra map[string]interface{}) (*spatialmath.GeoPose, error) {
+	if s.ms == nil {
+		return spatialmath.NewGeoPose(geo.NewPoint(0, 0), 0), nil
+	}
+	pt, _, err := s.ms.Position(ctx, extra)
+	if err != nil {
+		return nil, err
+	}
+	heading, err := s.ms.CompassHeading(ctx, extra)
+	if err != nil {
+		// Heading may not be supported on every movement_sensor; fall back to 0.
+		heading = 0
+	}
+	return spatialmath.NewGeoPose(pt, heading), nil
+}
+
+func (s *navService) Waypoints(ctx context.Context, extra map[string]interface{}) ([]navigation.Waypoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.Waypoints(ctx)
+}
+
+func (s *navService) AddWaypoint(ctx context.Context, point *geo.Point, extra map[string]interface{}) error {
+	if point == nil {
+		return errors.New("waypoint location is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.store.AddWaypoint(ctx, point)
+	return err
+}
+
+func (s *navService) RemoveWaypoint(ctx context.Context, id primitive.ObjectID, extra map[string]interface{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.RemoveWaypoint(ctx, id)
+}
+
+func (s *navService) Obstacles(ctx context.Context, extra map[string]interface{}) ([]*spatialmath.GeoGeometry, error) {
+	return nil, nil
+}
+
+func (s *navService) Paths(ctx context.Context, extra map[string]interface{}) ([]*navigation.Path, error) {
+	return nil, nil
+}
+
+func (s *navService) Properties(ctx context.Context) (navigation.Properties, error) {
+	return navigation.Properties{MapType: navigation.GPSMap}, nil
+}
+
+func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	return nil, resource.ErrDoUnimplemented
+}
+
+func (s *navService) Close(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.Close(ctx)
+}
