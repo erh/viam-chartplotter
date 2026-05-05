@@ -169,6 +169,36 @@ func (s *diskNavStore) RemoveWaypoint(ctx context.Context, id primitive.ObjectID
 	return nil
 }
 
+// MoveWaypoint updates the lat/long of an existing waypoint in place,
+// preserving its ID and order. It is not part of the upstream NavStore
+// interface; the chartplotter UI uses it (via DoCommand) to support
+// drag-to-edit on the map.
+func (s *diskNavStore) MoveWaypoint(ctx context.Context, id primitive.ObjectID, point *geo.Point) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if point == nil {
+		return errors.New("waypoint location is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, wp := range s.waypoints {
+		if wp.ID != id {
+			continue
+		}
+		oldLat, oldLong := wp.Lat, wp.Long
+		wp.Lat = point.Lat()
+		wp.Long = point.Lng()
+		if err := s.save(); err != nil {
+			wp.Lat = oldLat
+			wp.Long = oldLong
+			return err
+		}
+		return nil
+	}
+	return errors.Errorf("no waypoint with id %s", id.Hex())
+}
+
 func (s *diskNavStore) NextWaypoint(ctx context.Context) (navigation.Waypoint, error) {
 	if err := ctx.Err(); err != nil {
 		return navigation.Waypoint{}, err

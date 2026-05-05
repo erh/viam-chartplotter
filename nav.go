@@ -169,8 +169,46 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 	return navigation.Properties{MapType: navigation.GPSMap}, nil
 }
 
+// DoCommand exposes service-specific commands that don't have a first-class
+// gRPC method on the navigation API. Currently:
+//
+//	{"move_waypoint": {"id": "<hex>", "lat": <float>, "lng": <float>}}
+//
+// updates an existing waypoint in place (preserving its ID and order).
 func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, resource.ErrDoUnimplemented
+	raw, ok := cmd["move_waypoint"]
+	if !ok {
+		return nil, resource.ErrDoUnimplemented
+	}
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("move_waypoint payload must be an object")
+	}
+	idStr, _ := m["id"].(string)
+	if idStr == "" {
+		return nil, errors.New("move_waypoint.id is required")
+	}
+	id, err := primitive.ObjectIDFromHex(idStr)
+	if err != nil {
+		return nil, errors.Wrapf(err, "invalid move_waypoint.id %q", idStr)
+	}
+	lat, latOK := m["lat"].(float64)
+	lng, lngOK := m["lng"].(float64)
+	if !latOK || !lngOK {
+		return nil, errors.New("move_waypoint.lat and move_waypoint.lng are required numbers")
+	}
+	mover, ok := s.store.(interface {
+		MoveWaypoint(ctx context.Context, id primitive.ObjectID, point *geo.Point) error
+	})
+	if !ok {
+		return nil, errors.New("waypoint store does not support move")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := mover.MoveWaypoint(ctx, id, geo.NewPoint(lat, lng)); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"ok": true}, nil
 }
 
 func (s *navService) Close(ctx context.Context) error {

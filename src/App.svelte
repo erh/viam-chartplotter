@@ -1343,6 +1343,22 @@
     await addNavWaypoint(lat, lng);
   }
 
+  async function moveNavWaypoint(id: string, lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    if (!id || id.startsWith("pending-")) return;
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
+        VIAM.Struct.fromJson({ move_waypoint: { id, lat, lng } })
+      );
+      // Optimistic local update; the next poll will reconcile.
+      globalData.navWaypoints = globalData.navWaypoints.map((wp) =>
+        wp.id === id ? { ...wp, lat, lng } : wp
+      );
+    } catch (e) {
+      errorHandler(e, "moveWayPoint");
+    }
+  }
+
   async function clearNavWaypoints() {
     if (!globalClient || !globalConfig.navServiceName) return;
     var nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
@@ -1460,6 +1476,7 @@
       fullWidth={globalData.hideDataPanel}
       navWaypoints={globalData.navWaypoints}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
+      onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
     {#if globalConfig.navServiceName}
