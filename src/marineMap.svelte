@@ -633,7 +633,12 @@
         mapGlobal.view.setZoom(zoom);
 
         mapInternalState.lastZoom = zoom;
-        mapInternalState.lastCenter = pp;
+        // Record the actual view center, not the boat position — in
+        // "bottom" mode centerOn offsets the view so the boat sits at
+        // 80% down. Storing pp here would make the next tick's diff
+        // check think the user panned and re-enter pan mode.
+        const vc = mapGlobal.view.getCenter();
+        mapInternalState.lastCenter = vc ? [vc[0], vc[1]] : pp;
       }
 
       if (pp[0] != 0) {
