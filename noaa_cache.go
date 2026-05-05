@@ -64,7 +64,7 @@ func NewNoaaCache(cacheDir string, maxBytes int64, logger logging.Logger) (*Noaa
 	return &NoaaCache{
 		cacheDir:   cacheDir,
 		upstream:   defaultUpstreamWMS,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: 15 * time.Second},
 		logger:     logger,
 		maxBytes:   maxBytes,
 		staleAfter: defaultStaleAfter,
@@ -170,7 +170,7 @@ func (c *NoaaCache) refreshAsync(canonical, format string) {
 	// Detached from any request context: a client closing its socket must not
 	// abort an in-progress refresh, since the *next* request still wants the
 	// fresh bytes on disk.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, _, err := c.fetchAndStore(ctx, canonical, format); err != nil {
 		c.logger.Debugf("noaa cache bg refresh: %v", err)
