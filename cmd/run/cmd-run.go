@@ -28,7 +28,7 @@ func realMain() error {
 		return err
 	}
 
-	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6)
+	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6, "")
 	if err != nil {
 		return err
 	}

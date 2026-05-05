@@ -46,7 +46,8 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	cacheDir := config.Attributes.String("noaa_cache_dir")
 	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
 	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 6)
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt)
+	myBoatIcon := config.Attributes.String("myboat_icon_path")
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt, myBoatIcon)
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -75,6 +76,7 @@ func StartChartplotterServer(
 	cacheRoot string,
 	cacheMaxBytes int64,
 	safeDepthFt float64,
+	myBoatIconPath string,
 ) (resource.Resource, error) {
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
@@ -116,6 +118,27 @@ func StartChartplotterServer(
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]string{"instance": instanceID})
 	})
+
+	// Optional override for the user's-own-boat marker icon. Resolved once at
+	// startup; if the file is missing or unreadable we log and fall back to the
+	// frontend's bundled default. AIS markers are unaffected.
+	if myBoatIconPath != "" {
+		abs, err := filepath.Abs(myBoatIconPath)
+		if err != nil {
+			logger.Warnf("myboat_icon_path %q: %v — falling back to default", myBoatIconPath, err)
+		} else if info, err := os.Stat(abs); err != nil || info.IsDir() {
+			logger.Warnf("myboat_icon_path %q not a readable file — falling back to default", abs)
+		} else {
+			mux.HandleFunc("/myboat-icon", func(w http.ResponseWriter, r *http.Request) {
+				// Match the file's mtime in the ETag/If-Modified-Since flow that
+				// http.ServeFile already implements, but no long-lived cache —
+				// the user can swap the file and a reload picks it up.
+				w.Header().Set("Cache-Control", "no-cache")
+				http.ServeFile(w, r, abs)
+			})
+			logger.Infof("myboat icon: %s", abs)
+		}
+	}
 
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)

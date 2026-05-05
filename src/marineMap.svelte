@@ -38,6 +38,12 @@
 
   let boatImage = "boat3.jpg";
 
+  // myBoat-only icon override. The Go module exposes /myboat-icon when the
+  // operator sets `myboat_icon_path` in config; we probe once on mount and
+  // swap in that URL just for the user's-own-boat marker. AIS markers keep
+  // using the bundled boatImage above.
+  let myBoatImage = $state<string>(boatImage);
+
   let popupState = $state({
     overlay: null as Overlay | null,
     visible: false,
@@ -1073,8 +1079,29 @@
     });
   }
 
-  // Create boat icon style
-  function createBoatStyle(heading: number, scale: number, visible: boolean): Style {
+  async function probeMyBoatIcon() {
+    try {
+      const resp = await fetch("/myboat-icon", { method: "HEAD" });
+      if (!resp.ok) return;
+      // Cache-bust against tileGenVersion so a new build picks up an icon
+      // swap on the server even if the browser cached the old bytes.
+      myBoatImage = "/myboat-icon?v=" + tileGenVersion;
+      // Force the layer to re-evaluate its style with the new src.
+      mapGlobal.myBoatMarker?.changed();
+    } catch {
+      // Endpoint not present (no override configured) — keep boatImage.
+    }
+  }
+
+  // Create boat icon style. `src` defaults to the bundled boat image; pass
+  // `myBoatImage` for the user's own boat so a configured override doesn't
+  // bleed into AIS markers.
+  function createBoatStyle(
+    heading: number,
+    scale: number,
+    visible: boolean,
+    src: string = boatImage
+  ): Style {
     if (!visible) {
       return new Style({}); // Empty style = hidden
     }
@@ -1083,7 +1110,7 @@
 
     return new Style({
       image: new Icon({
-        src: boatImage,
+        src: src,
         scale: scale,
         rotation: rotation,
         rotateWithView: true,
@@ -1596,7 +1623,12 @@
           features: myBoatFeatures,
         }),
         style: function (_feature) {
-          return createBoatStyle(myBoat.heading, 0.6, effectiveVisibleBoats.has("myBoat"));
+          return createBoatStyle(
+            myBoat.heading,
+            0.6,
+            effectiveVisibleBoats.has("myBoat"),
+            myBoatImage
+          );
         },
         zIndex: 100,
       });
@@ -2218,6 +2250,7 @@
 
   onMount(() => {
     setupMap();
+    probeMyBoatIcon();
 
     // Listen for initial render complete to fade in map
     if (mapGlobal.map) {
