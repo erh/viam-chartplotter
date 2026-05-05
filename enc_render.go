@@ -831,10 +831,15 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 // translucent colours composites badly over depth banding and produces the
 // muddy olive/grey overlays we kept hitting. Leave their boundaries to
 // `lineStroke`.
+//
+// Land-side classes (LNDARE, BUAARE) are intentionally not filled here: the
+// noaa-local layer is composited over OSM, which already provides high-quality
+// land detail (roads, buildings, marinas). Painting NOAA's tan over OSM would
+// hide that detail. NOAA contributes only the marine layer — depth shading,
+// dredged areas, and the lines/symbols handled elsewhere (COALNE, DEPCNT,
+// buoys, soundings, wrecks).
 func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Color {
 	switch class {
-	case "LNDARE": // land area
-		return color.RGBA{0xF4, 0xE5, 0xBC, 0xFF}
 	case "DEPARE": // depth area — gradient driven by the boat's safety contour
 		min, max := depthRange(f)
 		if math.IsNaN(min) {
@@ -862,8 +867,6 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 		return color.RGBA{0xC8, 0xD0, 0xE0, 0xFF}
 	case "UNSARE": // unsurveyed area
 		return color.RGBA{0xE0, 0xE0, 0xE0, 0x80}
-	case "BUAARE": // built-up area
-		return color.RGBA{0xE5, 0xC8, 0xA8, 0xFF}
 	}
 	return nil
 }

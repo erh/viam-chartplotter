@@ -1092,6 +1092,10 @@
   }
 
   function setupLayers() {
+    // Explicit zIndex per tile layer so OpenLayers renders in declaration
+    // order regardless of toggle/insert sequence. Without this, toggling a
+    // layer off and back on can land it on top of layers that should sit
+    // above it (e.g. OSM ending up above noaa-local after a reload).
     // core open street maps
     mapGlobal.layerOptions.push({
       name: "open street map",
@@ -1099,6 +1103,7 @@
       layer: new TileLayer({
         opacity: 1,
         preload: Infinity, // Preload all tiles at lower zoom levels
+        zIndex: 1,
         source: new XYZ({
           url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
           transition: 250, // Faster fade-in
@@ -1113,6 +1118,7 @@
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
+        zIndex: 2,
         source: new TileWMS({
           url: "https://geoserver.openseamap.org/geoserver/gwc/service/wms",
           params: { LAYERS: "gebco2021:gebco_2021", VERSION: "1.1.1" },
@@ -1131,6 +1137,7 @@
         visible: true,
         maxZoom: 19,
         preload: 2,
+        zIndex: 3,
         source: new XYZ({
           tileUrlFunction: function (coordinate) {
             return getTileUrlFunction("https://tiles.openseamap.org/seamark/", "png", coordinate);
@@ -1156,6 +1163,7 @@
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
+        zIndex: 4,
         source: new TileWMS({
           url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
           params: { _v: tileGenVersion },
@@ -1178,6 +1186,7 @@
         layer: new TileLayer({
           opacity: 0.7,
           preload: 2,
+          zIndex: 5,
           source: new XYZ({
             url: `/noaa-enc/tile/{z}/{x}/{y}.png?${params.toString()}`,
             transition: 300,
@@ -1390,6 +1399,13 @@
   }
 
   function updateOnLayers() {
+    // The marine chart layer skips painting land features (LNDARE/BUAARE) so
+    // OSM's land/road/marina detail can show through. That only works if OSM
+    // is actually visible, so force OSM on whenever noaa-local is on, even if
+    // the user has unchecked the OSM box.
+    const noaaLocalLayer = mapGlobal.layerOptions.find((p) => p.name === "noaa-local");
+    const noaaLocalOn = !!(noaaLocalLayer && noaaLocalLayer.on);
+
     for (var l of mapGlobal.layerOptions) {
       var idx = findOnLayerIndexOfName(l.name);
 
@@ -1398,7 +1414,10 @@
       const isParentOff = parentLayer && !parentLayer.on;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      const shouldBeVisible = l.on && !isParentOff;
+      let shouldBeVisible = l.on && !isParentOff;
+      if (l.name === "open street map" && noaaLocalOn) {
+        shouldBeVisible = true;
+      }
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -1836,11 +1855,15 @@
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      <label class:child-layer={l.parent} class:disabled={isParentOff}>
+      {@const isOsmForcedByNoaaLocal =
+        l.name === "open street map" &&
+        !!mapGlobal.layerOptions.find((p) => p.name === "noaa-local")?.on}
+      <label class:child-layer={l.parent} class:disabled={isParentOff || isOsmForcedByNoaaLocal}>
         <input
           type="checkbox"
-          bind:checked={mapGlobal.layerOptions[idx].on}
-          onchange={() => {
+          checked={isOsmForcedByNoaaLocal ? true : mapGlobal.layerOptions[idx].on}
+          onchange={(e) => {
+            mapGlobal.layerOptions[idx].on = (e.currentTarget as HTMLInputElement).checked;
             saveLayerStates();
             // When the local-NOAA layer is enabled, force a prefetch for the
             // current viewport — otherwise the user has to pan before any
@@ -1850,7 +1873,7 @@
               maybePrefetchNoaaTiles();
             }
           }}
-          disabled={isParentOff}
+          disabled={isParentOff || isOsmForcedByNoaaLocal}
         />
         {l.displayName || l.name}
         {#if l.name === "heading-line"}
