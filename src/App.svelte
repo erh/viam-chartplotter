@@ -1374,6 +1374,18 @@
     }
   }
 
+  async function removeNavWaypoint(id: string) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    if (!id || id.startsWith("pending-")) return;
+    // Drop locally first so the marker disappears immediately.
+    globalData.navWaypoints = globalData.navWaypoints.filter((wp) => wp.id !== id);
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).removeWayPoint(id);
+    } catch (e) {
+      errorHandler(e, "removeWayPoint");
+    }
+  }
+
   async function clearNavWaypoints() {
     if (!globalClient || !globalConfig.navServiceName) return;
     var nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
@@ -1493,6 +1505,7 @@
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
       onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
+      onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
 

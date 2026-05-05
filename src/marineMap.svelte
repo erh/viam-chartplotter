@@ -55,15 +55,18 @@
     },
   });
 
-  // Popup shown when the user clicks a route segment in edit mode. Offers a
-  // single "add waypoint here" action that inserts a new waypoint between the
-  // segment's two endpoints.
-  let insertPopupState = $state({
+  // Popup shown when the user clicks a waypoint or a route segment in edit
+  // mode. Mode "insert" offers "add waypoint here" between two existing
+  // waypoints; mode "delete" offers "delete this waypoint" for the clicked
+  // marker.
+  let editPopupState = $state({
     overlay: null as Overlay | null,
     visible: false,
+    mode: "insert" as "insert" | "delete",
     lat: 0,
     lng: 0,
-    beforeId: "",
+    // For "insert": the waypoint to slot before. For "delete": the waypoint to remove.
+    waypointId: "",
   });
 
   let layersExpanded = $state(false);
@@ -400,6 +403,7 @@
     onAddWaypoint,
     onMoveWaypoint,
     onInsertWaypoint,
+    onRemoveWaypoint,
     onClearWaypoints,
     onReady,
     boatDetailSlot,
@@ -425,6 +429,8 @@
      *  beforeId is the ID of the waypoint the new one should sort before;
      *  empty string means "append to the end of the route". */
     onInsertWaypoint?: (beforeId: string, lat: number, lng: number) => void;
+    /** Called when the user picks "delete this waypoint" on an existing marker. */
+    onRemoveWaypoint?: (id: string) => void;
     /** Called when the user clicks the clear-route button. */
     onClearWaypoints?: () => void;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
@@ -1189,8 +1195,8 @@
     } else if ((!addWaypointActive || !onMoveWaypoint) && waypointModifyInteraction) {
       uninstallWaypointModify();
     }
-    if (!addWaypointActive && insertPopupState.visible) {
-      closeInsertPopup();
+    if (!addWaypointActive && editPopupState.visible) {
+      closeEditPopup();
     }
   });
 
@@ -1257,23 +1263,31 @@
     return Math.sqrt(ex * ex + ey * ey);
   }
 
-  function showInsertPopup(coord: number[], beforeId: string) {
-    insertPopupState.lng = coord[0];
-    insertPopupState.lat = coord[1];
-    insertPopupState.beforeId = beforeId;
-    insertPopupState.visible = true;
-    insertPopupState.overlay?.setPosition(coord);
+  function showEditPopup(
+    mode: "insert" | "delete",
+    coord: number[],
+    waypointId: string
+  ) {
+    editPopupState.mode = mode;
+    editPopupState.lng = coord[0];
+    editPopupState.lat = coord[1];
+    editPopupState.waypointId = waypointId;
+    editPopupState.visible = true;
+    editPopupState.overlay?.setPosition(coord);
   }
 
-  function closeInsertPopup() {
-    insertPopupState.visible = false;
-    insertPopupState.overlay?.setPosition(undefined);
+  function closeEditPopup() {
+    editPopupState.visible = false;
+    editPopupState.overlay?.setPosition(undefined);
   }
 
-  function confirmInsertWaypoint() {
-    if (!onInsertWaypoint) return;
-    onInsertWaypoint(insertPopupState.beforeId, insertPopupState.lat, insertPopupState.lng);
-    closeInsertPopup();
+  function confirmEditPopup() {
+    if (editPopupState.mode === "insert") {
+      onInsertWaypoint?.(editPopupState.waypointId, editPopupState.lat, editPopupState.lng);
+    } else {
+      onRemoveWaypoint?.(editPopupState.waypointId);
+    }
+    closeEditPopup();
   }
 
   function toggleHeadsUp() {
@@ -1859,17 +1873,17 @@
     });
     mapGlobal.map.addOverlay(popupState.overlay);
 
-    // Setup insert-waypoint popup overlay (single button, anchored above the
-    // clicked spot on the route line).
-    const insertEl = document.getElementById("insert-waypoint-popup");
-    insertPopupState.overlay = new Overlay({
-      element: insertEl || undefined,
+    // Setup edit popup overlay (single popup, anchored above the clicked
+    // spot on the route line or a waypoint marker).
+    const editPopupEl = document.getElementById("edit-waypoint-popup");
+    editPopupState.overlay = new Overlay({
+      element: editPopupEl || undefined,
       autoPan: false,
       positioning: "bottom-center",
-      offset: [0, -10],
+      offset: [0, -14],
       stopEvent: true,
     });
-    mapGlobal.map.addOverlay(insertPopupState.overlay);
+    mapGlobal.map.addOverlay(editPopupState.overlay);
 
     // Setup depth tooltip overlay
     const depthTooltipElement = document.getElementById("depth-tooltip");
@@ -1894,32 +1908,56 @@
         return;
       }
       if (addWaypointActive && onAddWaypoint) {
-        // Prefer "insert between two waypoints" if the user clicked on the
-        // route line; otherwise fall through to the append behaviour.
-        if (onInsertWaypoint && navWaypoints && navWaypoints.length > 0) {
-          const lineFeature = mapGlobal.map!.forEachFeatureAtPixel(
-            evt.pixel,
-            (f) => (f.get("type") === "navRoute" ? (f as Feature<LineString>) : null),
-            { hitTolerance: 8 }
-          ) as Feature<LineString> | undefined;
-          if (lineFeature) {
-            const geom = lineFeature.getGeometry();
-            const segIds = lineFeature.get("segmentBeforeIds") as string[] | undefined;
-            if (geom && segIds && segIds.length > 0) {
-              const segIdx = closestSegmentIndex(geom.getCoordinates(), evt.coordinate);
-              const beforeId = segIds[Math.max(0, Math.min(segIds.length - 1, segIdx))];
-              showInsertPopup(evt.coordinate, beforeId);
-              return;
+        // Hit-test in priority order: existing waypoint marker → route line →
+        // empty water. Iterate features ourselves so we can find the *first*
+        // marker AND the *first* line under the pixel without re-querying.
+        let waypointFeature: Feature<Point> | null = null;
+        let lineFeature: Feature<LineString> | null = null;
+        mapGlobal.map!.forEachFeatureAtPixel(
+          evt.pixel,
+          (f) => {
+            const t = f.get("type");
+            if (!waypointFeature && t === "navWaypoint") {
+              waypointFeature = f as Feature<Point>;
+            } else if (!lineFeature && t === "navRoute") {
+              lineFeature = f as Feature<LineString>;
             }
+            // Stop early once we have both potential candidates.
+            return waypointFeature && lineFeature ? true : undefined;
+          },
+          { hitTolerance: 8 }
+        );
+
+        if (waypointFeature && onRemoveWaypoint) {
+          const wpFeat = waypointFeature as Feature<Point>;
+          const id = wpFeat.get("waypointId") as string;
+          const geom = wpFeat.getGeometry();
+          if (id && geom) {
+            showEditPopup("delete", geom.getCoordinates(), id);
+            return;
           }
         }
+
+        if (lineFeature && onInsertWaypoint && navWaypoints && navWaypoints.length > 0) {
+          const lineFeat = lineFeature as Feature<LineString>;
+          const geom = lineFeat.getGeometry();
+          const segIds = lineFeat.get("segmentBeforeIds") as string[] | undefined;
+          if (geom && segIds && segIds.length > 0) {
+            const segIdx = closestSegmentIndex(geom.getCoordinates(), evt.coordinate);
+            const beforeId = segIds[Math.max(0, Math.min(segIds.length - 1, segIdx))];
+            showEditPopup("insert", evt.coordinate, beforeId);
+            return;
+          }
+        }
+
+        // Empty water in edit mode: append to the end of the route.
         const [lng, lat] = evt.coordinate;
         onAddWaypoint(lat, lng);
         return;
       }
-      // Clicking outside any feature dismisses the insert popup if it's open.
-      if (insertPopupState.visible) {
-        closeInsertPopup();
+      // Clicking outside any feature dismisses the edit popup if it's open.
+      if (editPopupState.visible) {
+        closeEditPopup();
       }
       const feature = mapGlobal.map!.forEachFeatureAtPixel(evt.pixel, function (f) {
         const type = f.get("type");
@@ -2239,16 +2277,27 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
-  <!-- Insert-waypoint popup. Shown when the user clicks on a route segment in
-       edit mode. The element must always exist for OL's Overlay to bind to;
-       visibility is driven by class="hidden". -->
+  <!-- Edit popup. Shown when the user clicks a waypoint or a route segment
+       in edit mode. The element must always exist for OL's Overlay to bind
+       to; visibility is driven by class="hidden". -->
   <div
-    id="insert-waypoint-popup"
-    class="insert-waypoint-popup"
-    class:hidden={!insertPopupState.visible}
+    id="edit-waypoint-popup"
+    class="edit-waypoint-popup"
+    class:hidden={!editPopupState.visible}
+    class:delete={editPopupState.mode === "delete"}
   >
-    <button class="insert-waypoint-btn" onclick={confirmInsertWaypoint}>+ Add waypoint here</button>
-    <button class="insert-waypoint-close" onclick={closeInsertPopup} aria-label="Cancel">✕</button>
+    <button
+      class="edit-waypoint-btn"
+      class:delete={editPopupState.mode === "delete"}
+      onclick={confirmEditPopup}
+    >
+      {#if editPopupState.mode === "delete"}
+        Delete this waypoint
+      {:else}
+        + Add waypoint here
+      {/if}
+    </button>
+    <button class="edit-waypoint-close" onclick={closeEditPopup} aria-label="Cancel">✕</button>
   </div>
 
   {#if inPanMode}
@@ -3031,7 +3080,7 @@
     white-space: nowrap;
   }
 
-  .insert-waypoint-popup {
+  .edit-waypoint-popup {
     display: flex;
     gap: 4px;
     align-items: center;
@@ -3048,11 +3097,15 @@
       sans-serif;
   }
 
-  .insert-waypoint-popup.hidden {
+  .edit-waypoint-popup.delete {
+    border-color: #dc2626;
+  }
+
+  .edit-waypoint-popup.hidden {
     display: none;
   }
 
-  .insert-waypoint-btn {
+  .edit-waypoint-btn {
     background: #f59e0b;
     color: #1f2937;
     border: none;
@@ -3063,11 +3116,20 @@
     cursor: pointer;
   }
 
-  .insert-waypoint-btn:hover {
+  .edit-waypoint-btn:hover {
     background: #d97706;
   }
 
-  .insert-waypoint-close {
+  .edit-waypoint-btn.delete {
+    background: #dc2626;
+    color: white;
+  }
+
+  .edit-waypoint-btn.delete:hover {
+    background: #b91c1c;
+  }
+
+  .edit-waypoint-close {
     background: transparent;
     color: #fde68a;
     border: none;
@@ -3076,7 +3138,7 @@
     font-size: 12px;
   }
 
-  .insert-waypoint-close:hover {
+  .edit-waypoint-close:hover {
     color: white;
   }
 
