@@ -25,10 +25,11 @@ whole route.
 
 ### Configuration attributes
 
-| Name              | Type   | Required | Description                                                                                                                                                  |
-| ----------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `movement_sensor` | string | no       | Name of a movement sensor on the same machine. When set, the service's `Location` method reports that sensor's live position and compass heading.            |
-| `data_path`       | string | no       | Absolute path to the JSON file used to persist waypoints. Defaults to `<user-cache-dir>/viam-chartplotter/nav/<service-name>.json`.                          |
+| Name                | Type   | Required | Description                                                                                                                                                                                                                                  |
+| ------------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `movement_sensor`   | string | no       | Name of a movement sensor on the same machine. When set, the service's `Location` method reports that sensor's live position and compass heading, and the auto-arrival poller uses it to detect waypoint arrivals.                           |
+| `data_path`         | string | no       | Absolute path to the JSON file used to persist waypoints. Defaults to `<user-cache-dir>/viam-chartplotter/nav/<service-name>.json`.                                                                                                          |
+| `arrival_radius_m`  | number | no       | When `movement_sensor` is set, the next waypoint is automatically marked visited (and disappears from the route) once the boat is within this many meters of it. Defaults to `200`. Set to a negative number to disable, or omit to use the default. |
 
 ### Sample config
 
@@ -40,7 +41,8 @@ whole route.
   "model": "erh:viam-chartplotter:nav",
   "attributes": {
     "movement_sensor": "gps",
-    "data_path": "/var/lib/viam-chartplotter/nav.json"
+    "data_path": "/var/lib/viam-chartplotter/nav.json",
+    "arrival_radius_m": 200
   }
 }
 ```

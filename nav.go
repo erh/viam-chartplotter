@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
@@ -35,9 +36,14 @@ func init() {
 // DataPath, when set, is used as the JSON file that mirrors the waypoint
 // list across restarts. When empty, waypoints persist to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
+//
+// ArrivalRadiusMeters controls auto-arrival: when MovementSensor is set, a
+// background poller marks the next waypoint visited as soon as the boat is
+// within this many meters of it. 0 disables auto-arrival; default is 200 m.
 type NavConfig struct {
-	MovementSensor string `json:"movement_sensor,omitempty"`
-	DataPath       string `json:"data_path,omitempty"`
+	MovementSensor      string  `json:"movement_sensor,omitempty"`
+	DataPath            string  `json:"data_path,omitempty"`
+	ArrivalRadiusMeters float64 `json:"arrival_radius_m,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -49,6 +55,15 @@ func (cfg *NavConfig) Validate(path string) ([]string, error) {
 	}
 	return deps, nil
 }
+
+// defaultArrivalRadiusMeters is the auto-arrival threshold used when the
+// config doesn't specify one. ~0.1 nm.
+const defaultArrivalRadiusMeters = 200.0
+
+// arrivalCheckInterval is how often the background poller re-checks distance
+// to the next waypoint. Cheap to compute, and 5 s is plenty for typical
+// boat speeds (~30 m at 12 kn, well under the default radius).
+const arrivalCheckInterval = 5 * time.Second
 
 func newNav(
 	ctx context.Context,
@@ -70,10 +85,16 @@ func newNav(
 		return nil, err
 	}
 
+	arrivalRadius := cfg.ArrivalRadiusMeters
+	if arrivalRadius == 0 {
+		arrivalRadius = defaultArrivalRadiusMeters
+	}
+
 	svc := &navService{
-		name:   conf.ResourceName(),
-		logger: logger,
-		store:  store,
+		name:                conf.ResourceName(),
+		logger:              logger,
+		store:               store,
+		arrivalRadiusMeters: arrivalRadius,
 	}
 	svc.mode.Store(uint32(navigation.ModeManual))
 	logger.Infof("nav waypoints persisted at %s", dataPath)
@@ -84,6 +105,10 @@ func newNav(
 			return nil, errors.Wrapf(err, "could not get movement_sensor %q", cfg.MovementSensor)
 		}
 		svc.ms = ms
+		if arrivalRadius > 0 {
+			svc.startArrivalPoller(arrivalRadius)
+			logger.Infof("nav auto-arrival enabled: %.0f m radius", arrivalRadius)
+		}
 	}
 
 	return svc, nil
@@ -101,6 +126,70 @@ type navService struct {
 
 	// mode is held atomically so reads don't need to take the mutex.
 	mode atomic.Uint32
+
+	arrivalRadiusMeters float64
+
+	// Cancellation for the background arrival poller, if started.
+	arrivalCancel context.CancelFunc
+	arrivalDone   chan struct{}
+}
+
+// startArrivalPoller launches a background goroutine that periodically
+// checks the boat's distance to the next unvisited waypoint and marks the
+// waypoint visited (so it disappears from Waypoints()) once the boat is
+// within radiusMeters.
+func (s *navService) startArrivalPoller(radiusMeters float64) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.arrivalCancel = cancel
+	s.arrivalDone = make(chan struct{})
+	radiusKm := radiusMeters / 1000.0
+	go func() {
+		defer close(s.arrivalDone)
+		ticker := time.NewTicker(arrivalCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.checkArrival(ctx, radiusKm)
+			}
+		}
+	}()
+}
+
+// checkArrival is one tick of the arrival poller: pull the boat's position,
+// look up the next unvisited waypoint, and mark it visited if we're inside
+// the arrival radius. All errors are logged at debug level — the loop keeps
+// running so an intermittent GPS hiccup doesn't disable auto-arrival.
+func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
+	if s.ms == nil {
+		return
+	}
+	pt, _, err := s.ms.Position(ctx, nil)
+	if err != nil || pt == nil {
+		return
+	}
+	// Bail on null-island fixes; some movement sensors emit (0,0) before they
+	// have a lock and that would falsely "arrive" at any waypoint near it.
+	if pt.Lat() == 0 && pt.Lng() == 0 {
+		return
+	}
+	wps, err := s.store.Waypoints(ctx)
+	if err != nil || len(wps) == 0 {
+		return
+	}
+	next := wps[0]
+	dist := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
+	if dist > radiusKm {
+		return
+	}
+	if err := s.store.WaypointVisited(ctx, next.ID); err != nil {
+		s.logger.Debugw("WaypointVisited failed", "err", err)
+		return
+	}
+	s.logger.Infof("arrived at waypoint %s (%.0f m); marking visited",
+		next.ID.Hex(), dist*1000)
 }
 
 func (s *navService) Name() resource.Name { return s.name }
@@ -255,6 +344,14 @@ func (s *navService) doInsertWaypoint(ctx context.Context, raw interface{}) (map
 }
 
 func (s *navService) Close(ctx context.Context) error {
+	if s.arrivalCancel != nil {
+		s.arrivalCancel()
+		// Wait for the poller to exit so we don't race the store Close().
+		select {
+		case <-s.arrivalDone:
+		case <-ctx.Done():
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.store.Close(ctx)

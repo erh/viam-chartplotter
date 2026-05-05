@@ -26,12 +26,14 @@ type diskNavStore struct {
 // persistedWaypoint is the on-disk schema. We keep our own struct rather than
 // serialising navigation.Waypoint directly so the file stays human-friendly
 // (string ID, named lat/long fields) and decoupled from any future bson
-// changes upstream.
+// changes upstream. Visited waypoints stay on disk so the trip log survives
+// restarts; Waypoints() filters them out at read time.
 type persistedWaypoint struct {
-	ID    string  `json:"id"`
-	Lat   float64 `json:"lat"`
-	Long  float64 `json:"long"`
-	Order int     `json:"order,omitempty"`
+	ID      string  `json:"id"`
+	Lat     float64 `json:"lat"`
+	Long    float64 `json:"long"`
+	Order   int     `json:"order,omitempty"`
+	Visited bool    `json:"visited,omitempty"`
 }
 
 func newDiskNavStore(path string) (*diskNavStore, error) {
@@ -70,10 +72,11 @@ func (s *diskNavStore) load() error {
 			id = primitive.NewObjectID()
 		}
 		out = append(out, &navigation.Waypoint{
-			ID:    id,
-			Lat:   p.Lat,
-			Long:  p.Long,
-			Order: p.Order,
+			ID:      id,
+			Lat:     p.Lat,
+			Long:    p.Long,
+			Order:   p.Order,
+			Visited: p.Visited,
 		})
 	}
 	s.waypoints = out
@@ -91,10 +94,11 @@ func (s *diskNavStore) save() error {
 	out := make([]persistedWaypoint, 0, len(s.waypoints))
 	for _, wp := range s.waypoints {
 		out = append(out, persistedWaypoint{
-			ID:    wp.ID.Hex(),
-			Lat:   wp.Lat,
-			Long:  wp.Long,
-			Order: wp.Order,
+			ID:      wp.ID.Hex(),
+			Lat:     wp.Lat,
+			Long:    wp.Long,
+			Order:   wp.Order,
+			Visited: wp.Visited,
 		})
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
