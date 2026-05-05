@@ -86,7 +86,15 @@
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_BOAT_POSITION = "mapBoatPosition";
+  const COOKIE_LOCKED_ZOOM = "mapLockedZoom";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
+
+  function loadLockedZoom(): number | null {
+    var raw = getCookie(COOKIE_LOCKED_ZOOM);
+    if (!raw) return null;
+    var n = Number(raw);
+    return Number.isFinite(n) && n > 0 && n <= 22 ? n : null;
+  }
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
 
@@ -574,7 +582,7 @@
   } = {
     lastZoom: 0,
     lastCenter: null,
-    lockedZoom: null,
+    lockedZoom: loadLockedZoom(),
     lastPosition: [0, 0],
     lastPositions: {},
     trackFeatureIds: {},
@@ -1436,6 +1444,9 @@
   function stopPanning() {
     const z = mapGlobal.view?.getZoom();
     mapInternalState.lockedZoom = typeof z === "number" ? z : null;
+    if (mapInternalState.lockedZoom != null) {
+      setCookie(COOKIE_LOCKED_ZOOM, String(mapInternalState.lockedZoom), COOKIE_OPTS);
+    }
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
     inPanMode = false;
