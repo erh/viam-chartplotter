@@ -13,12 +13,37 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.viam.com/rdk/logging"
 )
+
+// cacheStatus describes what happened on a single proxy request, surfaced
+// to the client via the X-Cache response header so each tile request
+// self-reports in browser devtools.
+type cacheStatus int
+
+const (
+	cacheStatusMiss  cacheStatus = iota // had to wait for upstream
+	cacheStatusHit                      // fresh disk copy, zero upstream
+	cacheStatusStale                    // served stale disk copy + bg refresh kicked
+)
+
+func (s cacheStatus) String() string {
+	switch s {
+	case cacheStatusHit:
+		return "HIT"
+	case cacheStatusStale:
+		return "STALE"
+	case cacheStatusMiss:
+		return "MISS"
+	}
+	return "UNKNOWN"
+}
 
 const (
 	defaultUpstreamWMS = "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer"
@@ -49,6 +74,12 @@ type NoaaCache struct {
 	// evictMu serializes eviction passes; TryLock means a write that arrives mid-pass
 	// just skips kicking off another pass rather than queuing.
 	evictMu sync.Mutex
+
+	// Cumulative request outcomes, surfaced via /noaa-wms/stats.
+	hits   atomic.Uint64
+	misses atomic.Uint64
+	stales atomic.Uint64
+	errs   atomic.Uint64
 }
 
 func NewNoaaCache(cacheDir string, maxBytes int64, logger logging.Logger) (*NoaaCache, error) {
@@ -77,6 +108,38 @@ func (c *NoaaCache) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-wms/proxy", c.handleProxy)
 	mux.HandleFunc("/noaa-wms/prefetch", c.handlePrefetch)
 	mux.HandleFunc("/noaa-wms/stats", c.handleStats)
+	mux.HandleFunc("/noaa-wms/canon", c.handleCanon)
+}
+
+// handleCanon is a diagnostic: paste any /noaa-wms/proxy URL's query string
+// (or even a full upstream URL's query) and get back the canonical form, the
+// SHA256 cache key, the on-disk path, and whether that file exists. Two
+// requests for the "same tile" should return identical canon/sha values; if
+// they don't, the cache will never hit.
+func (c *NoaaCache) handleCanon(w http.ResponseWriter, r *http.Request) {
+	canonical, format, err := canonicalQuery(r.URL.RawQuery)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	path := c.cachePath(canonical)
+	exists := false
+	var size int64
+	var mtime time.Time
+	if info, err := os.Stat(path); err == nil {
+		exists = true
+		size = info.Size()
+		mtime = info.ModTime()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"canonical": canonical,
+		"format":    format,
+		"path":      path,
+		"exists":    exists,
+		"size":      size,
+		"mtime":     mtime,
+	})
 }
 
 // canonicalQuery returns a stable representation of the WMS query string so different
@@ -86,6 +149,12 @@ func (c *NoaaCache) Register(mux *http.ServeMux) {
 // OpenLayers cache-buster `_v=<build hash>`). They're dropped here so a new
 // build doesn't invalidate every previously-cached tile, and so we don't
 // forward them upstream to NOAA where they're meaningless.
+//
+// BBOX values are also numerically normalized: OpenLayers formats tile
+// extents with full JS number precision, so the same tile can come over
+// the wire as `22.5` one frame and `22.499999999999996` the next due to
+// floating-point intermediate ops. Without normalization those hash to
+// different cache keys and the cache effectively never hits.
 func canonicalQuery(raw string) (string, string, error) {
 	values, err := url.ParseQuery(raw)
 	if err != nil {
@@ -98,7 +167,14 @@ func canonicalQuery(raw string) (string, string, error) {
 			continue
 		}
 		uk := strings.ToUpper(k)
-		upper[uk] = append(upper[uk], v...)
+		normalized := v
+		if uk == "BBOX" {
+			normalized = make([]string, len(v))
+			for i, s := range v {
+				normalized[i] = normalizeBBox(s)
+			}
+		}
+		upper[uk] = append(upper[uk], normalized...)
 		keys = append(keys, uk)
 	}
 	sort.Strings(keys)
@@ -126,32 +202,57 @@ func canonicalQuery(raw string) (string, string, error) {
 	return canon, format, nil
 }
 
+// normalizeBBox parses "minx,miny,maxx,maxy" and re-emits each coordinate
+// as a fixed 6-decimal string. 6 places gives ~10 cm precision in degrees
+// and ~1 µm in metres — both well past meaningful tile precision and
+// safely past any FP intermediate-op drift OpenLayers emits. Values that
+// don't parse as numbers are passed through unchanged so this is safe for
+// arbitrary BBOX-like inputs.
+func normalizeBBox(s string) string {
+	parts := strings.Split(s, ",")
+	if len(parts) != 4 {
+		return s
+	}
+	out := make([]string, 4)
+	for i, p := range parts {
+		f, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return s
+		}
+		out[i] = strconv.FormatFloat(f, 'f', 6, 64)
+	}
+	return strings.Join(out, ",")
+}
+
 func (c *NoaaCache) cachePath(canonical string) string {
 	sum := sha256.Sum256([]byte(canonical))
 	hex := hex.EncodeToString(sum[:])
 	return filepath.Join(c.cacheDir, hex[:2], hex+".bin")
 }
 
-// fetch returns the cached bytes and content-type for the given canonical
-// query. Behaviour:
+// fetch returns the cached bytes, content-type, and a status describing
+// where the bytes came from (so callers can surface HIT/STALE/MISS to
+// clients). Behaviour:
 //   - Fresh on disk (mtime within staleAfter): serve from disk, no upstream call.
 //   - Stale on disk: serve the stale bytes immediately and kick a background
 //     refresh. If upstream is down we keep serving the old copy rather than
 //     leaving the client with nothing.
 //   - Nothing on disk: block on upstream and write through to disk.
-func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte, string, error) {
+func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte, string, cacheStatus, error) {
 	path := c.cachePath(canonical)
 	if info, err := os.Stat(path); err == nil {
 		if data, err := os.ReadFile(path); err == nil {
 			stale := c.staleAfter > 0 && time.Since(info.ModTime()) >= c.staleAfter
 			if stale {
 				go c.refreshAsync(canonical, format)
+				return data, format, cacheStatusStale, nil
 			}
-			return data, format, nil
+			return data, format, cacheStatusHit, nil
 		}
 	}
 	// No usable disk copy — must wait for upstream.
-	return c.fetchAndStore(ctx, canonical, format)
+	data, ct, err := c.fetchAndStore(ctx, canonical, format)
+	return data, ct, cacheStatusMiss, err
 }
 
 // refreshAsync triggers a fire-and-forget upstream refresh for `canonical`.
@@ -228,10 +329,14 @@ func (c *NoaaCache) fetchAndStore(ctx context.Context, canonical, format string)
 		ct = format
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		c.logger.Warnf("noaa cache: mkdir %q: %v", filepath.Dir(path), err)
+	} else {
 		tmp := path + ".tmp"
-		if err := os.WriteFile(tmp, body, 0o644); err == nil {
-			_ = os.Rename(tmp, path)
+		if err := os.WriteFile(tmp, body, 0o644); err != nil {
+			c.logger.Warnf("noaa cache: write %q: %v", tmp, err)
+		} else if err := os.Rename(tmp, path); err != nil {
+			c.logger.Warnf("noaa cache: rename %q -> %q: %v", tmp, path, err)
 		}
 	}
 
@@ -291,17 +396,49 @@ func (c *NoaaCache) maybeEvict() {
 func (c *NoaaCache) handleProxy(w http.ResponseWriter, r *http.Request) {
 	canonical, format, err := canonicalQuery(r.URL.RawQuery)
 	if err != nil {
+		c.errs.Add(1)
 		http.Error(w, "bad query", http.StatusBadRequest)
 		return
 	}
-	data, ct, err := c.fetch(r.Context(), canonical, format)
+	data, ct, status, err := c.fetch(r.Context(), canonical, format)
 	if err != nil {
+		c.errs.Add(1)
 		c.logger.Warnf("noaa proxy fetch failed: %v", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
+	switch status {
+	case cacheStatusHit:
+		c.hits.Add(1)
+	case cacheStatusStale:
+		c.stales.Add(1)
+	case cacheStatusMiss:
+		c.misses.Add(1)
+	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// X-Cache lets the browser devtools Network panel show, per-request,
+	// whether the proxy served from disk or hit upstream. Far less invasive
+	// than file-counting or logging — every tile self-reports.
+	w.Header().Set("X-Cache", status.String())
+	// X-Cache-Key (sha) and X-Cache-Canonical (the full canonicalized
+	// query that gets hashed) let you diff two "same tile" requests in
+	// devtools to see exactly which param is drifting. If two requests
+	// for the same tile show different keys, the canonicals will show
+	// which param differs.
+	sum := sha256.Sum256([]byte(canonical))
+	w.Header().Set("X-Cache-Key", hex.EncodeToString(sum[:]))
+	w.Header().Set("X-Cache-Canonical", canonical)
+	// X-Tile is just the BBOX (post-normalization). Two requests for the
+	// "same tile" — the thing your eye groups together — share a BBOX, so
+	// this header makes the grouping trivial in devtools: filter the
+	// Network panel for X-Tile=<value> and you see every request that
+	// should have hashed identically.
+	if cv, err := url.ParseQuery(canonical); err == nil {
+		if bbox := cv.Get("BBOX"); bbox != "" {
+			w.Header().Set("X-Tile", bbox)
+		}
+	}
 	_, _ = w.Write(data)
 }
 
@@ -353,7 +490,7 @@ func (c *NoaaCache) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			canonical := wmsCanonicalForTile(t, req.Layers)
-			if _, _, err := c.fetch(r.Context(), canonical, "image/png"); err != nil {
+			if _, _, _, err := c.fetch(r.Context(), canonical, "image/png"); err != nil {
 				c.logger.Debugf("prefetch tile %v: %v", t, err)
 			}
 		}()
@@ -375,6 +512,15 @@ func (c *NoaaCache) handleStats(w http.ResponseWriter, r *http.Request) {
 		bytes += info.Size()
 		return nil
 	})
+	hits := c.hits.Load()
+	stales := c.stales.Load()
+	misses := c.misses.Load()
+	errs := c.errs.Load()
+	served := hits + stales + misses
+	var hitRate float64
+	if served > 0 {
+		hitRate = float64(hits+stales) / float64(served)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"files":      files,
@@ -382,6 +528,11 @@ func (c *NoaaCache) handleStats(w http.ResponseWriter, r *http.Request) {
 		"maxBytes":   c.maxBytes,
 		"staleAfter": c.staleAfter.String(),
 		"cacheDir":   c.cacheDir,
+		"hits":       hits,
+		"stales":     stales,
+		"misses":     misses,
+		"errors":     errs,
+		"hitRate":    hitRate,
 	})
 }
 
