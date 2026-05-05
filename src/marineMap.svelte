@@ -48,6 +48,12 @@
   // we remap by the height ratio to keep rendered size consistent across
   // any source image.
   const BOAT_IMAGE_NATURAL_HEIGHT = 49;
+  // Floor on rendered width for the override icon. Some PNGs are very
+  // narrow (tall thin silhouette) and the height-ratio remap can leave
+  // them only a few pixels wide on screen — too small to spot on a busy
+  // chart. Bump scale up to guarantee at least this many pixels of width.
+  const MYBOAT_MIN_RENDERED_WIDTH_PX = 30;
+  let myBoatImageNaturalWidth = $state<number | null>(null);
   let myBoatImageNaturalHeight = $state<number | null>(null);
 
   let popupState = $state({
@@ -1101,6 +1107,7 @@
       img.src = url;
       await loaded;
       myBoatImageNaturalHeight = img.naturalHeight || null;
+      myBoatImageNaturalWidth = img.naturalWidth || null;
       myBoatImage = url;
       // Force the layer to re-evaluate its style with the new src/scale.
       mapGlobal.myBoatMarker?.changed();
@@ -1130,6 +1137,16 @@
     let effectiveScale = scale;
     if (src !== boatImage && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
       effectiveScale = scale * (BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight);
+      // Enforce a minimum rendered width so a narrow override doesn't end
+      // up as a sliver on the chart. Bumps scale up uniformly — aspect
+      // ratio is preserved, the icon just grows past the height-matched
+      // size when its width would otherwise be below the floor.
+      if (myBoatImageNaturalWidth && myBoatImageNaturalWidth > 0) {
+        const renderedWidth = myBoatImageNaturalWidth * effectiveScale;
+        if (renderedWidth < MYBOAT_MIN_RENDERED_WIDTH_PX) {
+          effectiveScale = MYBOAT_MIN_RENDERED_WIDTH_PX / myBoatImageNaturalWidth;
+        }
+      }
     }
 
     return new Style({
