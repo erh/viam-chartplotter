@@ -41,13 +41,14 @@ whole route.
   "attributes": {
     "movement_sensor": "gps",
     "data_path": "/var/lib/viam-chartplotter/nav.json"
-  },
-  "depends_on": ["gps"]
+  }
 }
 ```
 
-Both `attributes` fields are optional. The minimal config is just `model`
-plus `name`/`type`/`namespace`; in that case `Location` returns (0, 0) and
+Both `attributes` fields are optional — the dependency on `movement_sensor`
+is reported automatically from the service's config validator, so no
+explicit `depends_on` is needed. The minimal config is just `model` plus
+`name`/`type`/`namespace`; in that case `Location` returns (0, 0) and
 waypoints are written to the default cache path.
 
 ## Developing
