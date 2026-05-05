@@ -23,6 +23,7 @@
   import { Circle as CircleStyle, Fill, Icon, Stroke, Style } from "ol/style.js";
   import Overlay from "ol/Overlay.js";
   import { getDistance, offset as sphereOffset } from "ol/sphere.js";
+  import Modify from "ol/interaction/Modify.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
   import type { TileCoord } from "ol/tilecoord";
@@ -54,6 +55,20 @@
     },
   });
 
+  // Popup shown when the user clicks a waypoint or a route segment in edit
+  // mode. Mode "insert" offers "add waypoint here" between two existing
+  // waypoints; mode "delete" offers "delete this waypoint" for the clicked
+  // marker.
+  let editPopupState = $state({
+    overlay: null as Overlay | null,
+    visible: false,
+    mode: "insert" as "insert" | "delete",
+    lat: 0,
+    lng: 0,
+    // For "insert": the waypoint to slot before. For "delete": the waypoint to remove.
+    waypointId: "",
+  });
+
   let layersExpanded = $state(false);
   let boatsExpanded = $state(false);
   let mapLoaded = $state(false);
@@ -64,6 +79,8 @@
   let measurePoints = $state<number[][]>([]);
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
+
+  let addWaypointActive = $state(false);
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
@@ -225,6 +242,77 @@
     return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(lat === 0 && lng === 0); // Exclude null island
   }
 
+  // Initial bearing from `from` to `to` in degrees [0, 360). Standard
+  // forward-azimuth formula; we don't need accuracy beyond what the user
+  // would steer to.
+  function bearingDeg(from: [number, number], to: [number, number]): number {
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const φ1 = toRad(from[0]);
+    const φ2 = toRad(to[0]);
+    const Δλ = toRad(to[1] - from[1]);
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  }
+
+  function formatDurationMin(min: number): string {
+    if (!isFinite(min) || min <= 0) return "—";
+    if (min < 60) return `${Math.round(min)} min`;
+    const h = Math.floor(min / 60);
+    const m = Math.round(min % 60);
+    return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  }
+
+  function formatEta(min: number): string {
+    if (!isFinite(min) || min <= 0) return "—";
+    const eta = new Date(Date.now() + min * 60000);
+    return eta.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Derived overlay stats for the active route. Recomputes whenever the boat
+  // pose or waypoint list changes.
+  let routeStats = $derived.by(() => {
+    if (!navWaypoints || navWaypoints.length === 0 || !myBoat) return null;
+    if (!isValidCoordinate(myBoat.location[0], myBoat.location[1])) return null;
+
+    const speedKn = myBoat.speed ?? 0;
+    const startLngLat: [number, number] = [myBoat.location[1], myBoat.location[0]];
+
+    const next = navWaypoints[0];
+    const nextLngLat: [number, number] = [next.lng, next.lat];
+    const nextMeters = getDistance(startLngLat, nextLngLat);
+    const nextNm = nextMeters / 1852;
+    const nextBearing = bearingDeg(
+      [myBoat.location[0], myBoat.location[1]],
+      [next.lat, next.lng]
+    );
+    // hours = nm / kn ; convert to minutes
+    const nextMin = speedKn > 0.1 ? (nextNm / speedKn) * 60 : Infinity;
+
+    let totalMeters = nextMeters;
+    let prev = nextLngLat;
+    for (let i = 1; i < navWaypoints.length; i++) {
+      const cur: [number, number] = [navWaypoints[i].lng, navWaypoints[i].lat];
+      totalMeters += getDistance(prev, cur);
+      prev = cur;
+    }
+    const totalNm = totalMeters / 1852;
+    const totalMin = speedKn > 0.1 ? (totalNm / speedKn) * 60 : Infinity;
+
+    return {
+      next: {
+        distNm: nextNm,
+        headingDeg: nextBearing,
+        minutes: nextMin,
+      },
+      final: {
+        distNm: totalNm,
+        minutes: totalMin,
+        waypointCount: navWaypoints.length,
+      },
+    };
+  });
+
   function fitToVisibleBoats() {
     if (!mapGlobal.map || !mapGlobal.view) return;
 
@@ -311,6 +399,12 @@
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
     fullWidth = false,
+    navWaypoints,
+    onAddWaypoint,
+    onMoveWaypoint,
+    onInsertWaypoint,
+    onRemoveWaypoint,
+    onClearWaypoints,
     onReady,
     boatDetailSlot,
     fitBoundsPadding,
@@ -324,6 +418,21 @@
     depthColorTrack?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    /** Ordered waypoints from a navigation service. The route is drawn from the boat's
+     *  current position through each waypoint in order. */
+    navWaypoints?: { id: string; lat: number; lng: number }[];
+    /** Called when the user clicks the map while "add waypoint" mode is active. */
+    onAddWaypoint?: (lat: number, lng: number) => void;
+    /** Called when the user finishes dragging an existing waypoint. */
+    onMoveWaypoint?: (id: string, lat: number, lng: number) => void;
+    /** Called when the user picks "add waypoint here" on a route segment.
+     *  beforeId is the ID of the waypoint the new one should sort before;
+     *  empty string means "append to the end of the route". */
+    onInsertWaypoint?: (beforeId: string, lat: number, lng: number) => void;
+    /** Called when the user picks "delete this waypoint" on an existing marker. */
+    onRemoveWaypoint?: (id: string) => void;
+    /** Called when the user clicks the clear-route button. */
+    onClearWaypoints?: () => void;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
     externalVisibilityControl?: boolean;
     /** When false, offline boats are hidden from the boats panel (default: true) */
@@ -352,6 +461,7 @@
   let myBoatKey = $derived(
     myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null
   );
+  let navWaypointsKey = $derived(JSON.stringify(navWaypoints ?? []));
   let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
   let effectiveVisibleKey = $derived(JSON.stringify([...effectiveVisibleBoats]));
 
@@ -360,6 +470,7 @@
     const _boats = boatsKey;
     const _myBoat = myBoatKey;
     const _visible = visibleBoatsKey;
+    const _wps = navWaypointsKey;
     updateFromData();
   });
 
@@ -435,6 +546,8 @@
     trackFeatures: new Collection<Feature<Geometry>>(),
     aisTrackFeatures: new Collection<Feature<Geometry>>(),
     routeFeatures: new Collection<Feature<Geometry>>(),
+    navRouteLineFeatures: new Collection<Feature<Geometry>>(),
+    navWaypointFeatures: new Collection<Feature<Geometry>>(),
     headingLineFeatures: new Collection<Feature<Geometry>>(),
     trackFeaturesLastCheck: new Date(0),
     myBoatMarker: null as Feature<Point> | null,
@@ -542,6 +655,43 @@
       });
       mapGlobal.routeFeatures.push(f);
     }
+
+    // navigation-service route: draws a polyline from the boat through each
+    // waypoint in order, plus a circle marker at every waypoint. The line and
+    // markers live in separate sources so the Modify interaction can target
+    // only the markers (LineStrings would otherwise grow new control points
+    // on drag).
+    mapGlobal.navRouteLineFeatures.clear();
+    if (navWaypoints && navWaypoints.length > 0) {
+      const wpCoords: number[][] = navWaypoints.map((wp) => [wp.lng, wp.lat]);
+
+      const startCoord =
+        myBoat && isValidCoordinate(myBoat.location[0], myBoat.location[1])
+          ? [myBoat.location[1], myBoat.location[0]]
+          : null;
+      const lineCoords = startCoord ? [startCoord, ...wpCoords] : wpCoords;
+
+      if (lineCoords.length >= 2) {
+        // Each segment ends at the waypoint with this ID. When the user picks
+        // "add waypoint here" on segment i the new wp is inserted *before*
+        // this id, which keeps the segment's right endpoint stable.
+        const segmentBeforeIds: string[] = [];
+        for (let i = 1; i < lineCoords.length; i++) {
+          // line index i corresponds to wp index (i - offset) where offset is
+          // 1 if the line starts at the boat, 0 otherwise.
+          const wpIdx = startCoord ? i - 1 : i;
+          segmentBeforeIds.push(navWaypoints[wpIdx].id);
+        }
+        mapGlobal.navRouteLineFeatures.push(
+          new Feature({
+            type: "navRoute",
+            segmentBeforeIds,
+            geometry: new LineString(lineCoords),
+          })
+        );
+      }
+    }
+    syncNavWaypointFeatures();
 
     if (boats == null) {
       mapGlobal.aisFeatures.clear();
@@ -955,6 +1105,7 @@
       measurePoints = [];
       measureDistance = null;
       if (measureSource) measureSource.clear();
+      addWaypointActive = false;
       closePopup();
     }
   }
@@ -964,6 +1115,200 @@
     measurePoints = [];
     measureDistance = null;
     if (measureSource) measureSource.clear();
+  }
+
+  function toggleAddWaypoint() {
+    if (!onAddWaypoint) return;
+    addWaypointActive = !addWaypointActive;
+    if (addWaypointActive) {
+      // Mutually exclusive with measure mode.
+      if (measureActive) stopMeasure();
+      closePopup();
+    }
+  }
+
+  // Two-step confirmation for the clear-all-waypoints button. First click
+  // arms the confirm state; second click within CLEAR_CONFIRM_MS commits.
+  // Auto-disarms after the timeout so a forgotten click doesn't lurk.
+  const CLEAR_CONFIRM_MS = 4000;
+  let clearConfirmArmed = $state(false);
+  let clearConfirmTimer: number | undefined;
+
+  function clearWaypoints() {
+    if (!clearConfirmArmed) {
+      clearConfirmArmed = true;
+      if (clearConfirmTimer !== undefined) clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = setTimeout(() => {
+        clearConfirmArmed = false;
+        clearConfirmTimer = undefined;
+      }, CLEAR_CONFIRM_MS) as unknown as number;
+      return;
+    }
+    if (clearConfirmTimer !== undefined) {
+      clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = undefined;
+    }
+    clearConfirmArmed = false;
+    addWaypointActive = false;
+    onClearWaypoints?.();
+  }
+
+  // Reconcile the waypoint marker collection against the latest navWaypoints
+  // prop. We mutate-in-place rather than clearing/repopulating because the
+  // Modify interaction holds direct references to the Feature objects: blowing
+  // them away mid-drag would drop the user's gesture. While a marker is being
+  // dragged we leave it untouched so the drag can finish cleanly.
+  function syncNavWaypointFeatures() {
+    const desired = navWaypoints ?? [];
+    // Plain object lookup by id; the OL `Map` import shadows the global
+    // Map constructor in this module, so `new Map(...)` would build a map
+    // widget instead of a hash and blow up on `.has(...)`.
+    const desiredById: Record<string, true> = {};
+    for (const wp of desired) {
+      desiredById[wp.id] = true;
+    }
+
+    const features = mapGlobal.navWaypointFeatures;
+    for (let i = features.getLength() - 1; i >= 0; i--) {
+      const feat = features.item(i) as Feature<Point>;
+      const id = feat.get("waypointId") as string;
+      if (!desiredById[id] && id !== draggingWaypointId) {
+        features.removeAt(i);
+      }
+    }
+
+    const existingById: Record<string, Feature<Point>> = {};
+    features.forEach((f) => {
+      existingById[f.get("waypointId") as string] = f as Feature<Point>;
+    });
+
+    desired.forEach((wp, idx) => {
+      const existing = existingById[wp.id];
+      if (existing) {
+        if (wp.id !== draggingWaypointId) {
+          existing.setGeometry(new Point([wp.lng, wp.lat]));
+        }
+        existing.set("waypointIndex", idx);
+        return;
+      }
+      features.push(
+        new Feature({
+          type: "navWaypoint",
+          waypointId: wp.id,
+          waypointIndex: idx,
+          geometry: new Point([wp.lng, wp.lat]),
+        })
+      );
+    });
+  }
+
+  let draggingWaypointId: string | null = null;
+  let waypointModifyInteraction: Modify | null = null;
+  let waypointModifySource: VectorSource | null = null;
+
+  // The Modify interaction is added/removed alongside the "add waypoint" mode
+  // toggle so dragging is only possible while the user has explicitly opted in
+  // (this also avoids accidental drags during normal panning).
+  $effect(() => {
+    if (!mapGlobal.map) return;
+    if (addWaypointActive && onMoveWaypoint && !waypointModifyInteraction) {
+      installWaypointModify();
+    } else if ((!addWaypointActive || !onMoveWaypoint) && waypointModifyInteraction) {
+      uninstallWaypointModify();
+    }
+    if (!addWaypointActive && editPopupState.visible) {
+      closeEditPopup();
+    }
+  });
+
+  function installWaypointModify() {
+    if (!mapGlobal.map || !waypointModifySource) return;
+    waypointModifyInteraction = new Modify({
+      source: waypointModifySource,
+      // Restrict drags to the marker points: a route's line segments live in
+      // a different layer/source so they can't be edited.
+      pixelTolerance: 12,
+    });
+    waypointModifyInteraction.on("modifystart", (evt) => {
+      const feat = evt.features.item(0) as Feature<Point> | undefined;
+      draggingWaypointId = (feat?.get("waypointId") as string) ?? null;
+    });
+    waypointModifyInteraction.on("modifyend", (evt) => {
+      const feat = evt.features.item(0) as Feature<Point> | undefined;
+      draggingWaypointId = null;
+      if (!feat || !onMoveWaypoint) return;
+      const id = feat.get("waypointId") as string;
+      const geom = feat.getGeometry();
+      if (!id || !geom) return;
+      const [lng, lat] = geom.getCoordinates();
+      onMoveWaypoint(id, lat, lng);
+    });
+    mapGlobal.map.addInteraction(waypointModifyInteraction);
+  }
+
+  function uninstallWaypointModify() {
+    if (mapGlobal.map && waypointModifyInteraction) {
+      mapGlobal.map.removeInteraction(waypointModifyInteraction);
+    }
+    waypointModifyInteraction = null;
+    draggingWaypointId = null;
+  }
+
+  // Returns the index of the segment in `coords` (i.e. the segment from
+  // coords[i] to coords[i+1]) that lies closest to `pt`. Distances are in the
+  // map's projected units, which is fine for "which one did I click" — we
+  // only care about the relative ordering, not absolute meters.
+  function closestSegmentIndex(coords: number[][], pt: number[]): number {
+    let best = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const d = pointSegmentDist(pt, coords[i], coords[i + 1]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function pointSegmentDist(p: number[], a: number[], b: number[]): number {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq === 0 ? 0 : ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a[0] + t * dx;
+    const cy = a[1] + t * dy;
+    const ex = p[0] - cx;
+    const ey = p[1] - cy;
+    return Math.sqrt(ex * ex + ey * ey);
+  }
+
+  function showEditPopup(
+    mode: "insert" | "delete",
+    coord: number[],
+    waypointId: string
+  ) {
+    editPopupState.mode = mode;
+    editPopupState.lng = coord[0];
+    editPopupState.lat = coord[1];
+    editPopupState.waypointId = waypointId;
+    editPopupState.visible = true;
+    editPopupState.overlay?.setPosition(coord);
+  }
+
+  function closeEditPopup() {
+    editPopupState.visible = false;
+    editPopupState.overlay?.setPosition(undefined);
+  }
+
+  function confirmEditPopup() {
+    if (editPopupState.mode === "insert") {
+      onInsertWaypoint?.(editPopupState.waypointId, editPopupState.lat, editPopupState.lng);
+    } else {
+      onRemoveWaypoint?.(editPopupState.waypointId);
+    }
+    closeEditPopup();
   }
 
   function toggleHeadsUp() {
@@ -1303,6 +1648,53 @@
         layer: routeLayer,
         parent: "boat", // Route is a child of boat layer
       });
+
+      // Nav-service route: line + waypoint markers driven by `navWaypoints`.
+      // Two layers/sources (line and markers) so drag-to-edit only affects the
+      // markers.
+      var navRouteLineLayer = new Vector({
+        source: new VectorSource({
+          features: mapGlobal.navRouteLineFeatures,
+        }),
+        style: new Style({
+          stroke: new Stroke({
+            color: "#f59e0b",
+            width: 3,
+            lineDash: [10, 6],
+          }),
+        }),
+        zIndex: 21,
+      });
+
+      waypointModifySource = new VectorSource({
+        features: mapGlobal.navWaypointFeatures,
+      });
+      var navWaypointLayer = new Vector({
+        source: waypointModifySource,
+        style: new Style({
+          image: new CircleStyle({
+            radius: 7,
+            fill: new Fill({ color: "#f59e0b" }),
+            stroke: new Stroke({ color: "white", width: 2 }),
+          }),
+        }),
+        zIndex: 22,
+      });
+
+      mapGlobal.layerOptions.push({
+        name: "nav-route",
+        displayName: "nav route",
+        on: true,
+        layer: navRouteLineLayer,
+        parent: "boat",
+      });
+      mapGlobal.layerOptions.push({
+        name: "nav-waypoints",
+        displayName: "waypoints",
+        on: true,
+        layer: navWaypointLayer,
+        parent: "boat",
+      });
     }
 
     var aisLayer = new Vector({
@@ -1502,6 +1894,18 @@
     });
     mapGlobal.map.addOverlay(popupState.overlay);
 
+    // Setup edit popup overlay (single popup, anchored above the clicked
+    // spot on the route line or a waypoint marker).
+    const editPopupEl = document.getElementById("edit-waypoint-popup");
+    editPopupState.overlay = new Overlay({
+      element: editPopupEl || undefined,
+      autoPan: false,
+      positioning: "bottom-center",
+      offset: [0, -14],
+      stopEvent: true,
+    });
+    mapGlobal.map.addOverlay(editPopupState.overlay);
+
     // Setup depth tooltip overlay
     const depthTooltipElement = document.getElementById("depth-tooltip");
     const depthTooltipOverlay = new Overlay({
@@ -1523,6 +1927,58 @@
       if (measureActive) {
         handleMeasureClick(evt);
         return;
+      }
+      if (addWaypointActive && onAddWaypoint) {
+        // Hit-test in priority order: existing waypoint marker → route line →
+        // empty water. Iterate features ourselves so we can find the *first*
+        // marker AND the *first* line under the pixel without re-querying.
+        let waypointFeature: Feature<Point> | null = null;
+        let lineFeature: Feature<LineString> | null = null;
+        mapGlobal.map!.forEachFeatureAtPixel(
+          evt.pixel,
+          (f) => {
+            const t = f.get("type");
+            if (!waypointFeature && t === "navWaypoint") {
+              waypointFeature = f as Feature<Point>;
+            } else if (!lineFeature && t === "navRoute") {
+              lineFeature = f as Feature<LineString>;
+            }
+            // Stop early once we have both potential candidates.
+            return waypointFeature && lineFeature ? true : undefined;
+          },
+          { hitTolerance: 8 }
+        );
+
+        if (waypointFeature && onRemoveWaypoint) {
+          const wpFeat = waypointFeature as Feature<Point>;
+          const id = wpFeat.get("waypointId") as string;
+          const geom = wpFeat.getGeometry();
+          if (id && geom) {
+            showEditPopup("delete", geom.getCoordinates(), id);
+            return;
+          }
+        }
+
+        if (lineFeature && onInsertWaypoint && navWaypoints && navWaypoints.length > 0) {
+          const lineFeat = lineFeature as Feature<LineString>;
+          const geom = lineFeat.getGeometry();
+          const segIds = lineFeat.get("segmentBeforeIds") as string[] | undefined;
+          if (geom && segIds && segIds.length > 0) {
+            const segIdx = closestSegmentIndex(geom.getCoordinates(), evt.coordinate);
+            const beforeId = segIds[Math.max(0, Math.min(segIds.length - 1, segIdx))];
+            showEditPopup("insert", evt.coordinate, beforeId);
+            return;
+          }
+        }
+
+        // Empty water in edit mode: append to the end of the route.
+        const [lng, lat] = evt.coordinate;
+        onAddWaypoint(lat, lng);
+        return;
+      }
+      // Clicking outside any feature dismisses the edit popup if it's open.
+      if (editPopupState.visible) {
+        closeEditPopup();
       }
       const feature = mapGlobal.map!.forEachFeatureAtPixel(evt.pixel, function (f) {
         const type = f.get("type");
@@ -1604,11 +2060,8 @@
           );
         },
       });
-      mapGlobal.map!.getTargetElement()!.style.cursor = measureActive
-        ? "crosshair"
-        : hit
-          ? "pointer"
-          : "";
+      mapGlobal.map!.getTargetElement()!.style.cursor =
+        measureActive || addWaypointActive ? "crosshair" : hit ? "pointer" : "";
 
       // Depth tooltip on track hover
       let depthFound = false;
@@ -1773,6 +2226,11 @@
         container.removeEventListener("click", handleMapContainerClick as EventListener);
       }
 
+      if (clearConfirmTimer !== undefined) {
+        clearTimeout(clearConfirmTimer);
+        clearConfirmTimer = undefined;
+      }
+
       // Remove OpenLayers map event listeners to prevent memory leaks
       if (mapGlobal.map) {
         if (mapClickHandler) {
@@ -1844,6 +2302,29 @@
 
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
+
+  <!-- Edit popup. Shown when the user clicks a waypoint or a route segment
+       in edit mode. The element must always exist for OL's Overlay to bind
+       to; visibility is driven by class="hidden". -->
+  <div
+    id="edit-waypoint-popup"
+    class="edit-waypoint-popup"
+    class:hidden={!editPopupState.visible}
+    class:delete={editPopupState.mode === "delete"}
+  >
+    <button
+      class="edit-waypoint-btn"
+      class:delete={editPopupState.mode === "delete"}
+      onclick={confirmEditPopup}
+    >
+      {#if editPopupState.mode === "delete"}
+        Delete this waypoint
+      {:else}
+        + Add waypoint here
+      {/if}
+    </button>
+    <button class="edit-waypoint-close" onclick={closeEditPopup} aria-label="Cancel">✕</button>
+  </div>
 
   {#if inPanMode}
     <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
@@ -2022,6 +2503,48 @@
     >
   </button>
 
+  {#if onAddWaypoint}
+    <button
+      class="add-waypoint-toggle"
+      class:active={addWaypointActive}
+      onclick={toggleAddWaypoint}
+      aria-pressed={addWaypointActive}
+      title={addWaypointActive
+        ? "Click on the chart to add a waypoint (active)"
+        : "Add a route waypoint from current position"}
+      aria-label="Add waypoint"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
+        <circle cx="12" cy="9" r="2.5" />
+      </svg>
+    </button>
+    {#if navWaypoints && navWaypoints.length > 0}
+      <button
+        class="clear-waypoints-btn"
+        class:armed={clearConfirmArmed}
+        onclick={clearWaypoints}
+        title={clearConfirmArmed
+          ? "Click again to confirm clearing all waypoints"
+          : "Clear all route waypoints"}
+        aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+      >
+        {clearConfirmArmed ? "?" : "✕"}
+      </button>
+    {/if}
+  {/if}
+
   <button
     class="heads-up-toggle"
     class:active={headsUpActive}
@@ -2083,6 +2606,30 @@
   {#if measureActive && measureDistance !== null}
     <div class="measure-result">
       {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
+    </div>
+  {/if}
+
+  {#if routeStats}
+    <div class="route-stats" class:edit={addWaypointActive}>
+      <div class="route-stats-row">
+        <span class="route-stats-label">Next</span>
+        <span class="route-stats-value">{routeStats.next.distNm.toFixed(2)} nm</span>
+        <span class="route-stats-value">{routeStats.next.headingDeg.toFixed(0)}°</span>
+        <span class="route-stats-value">{formatDurationMin(routeStats.next.minutes)}</span>
+        <span class="route-stats-value">ETA {formatEta(routeStats.next.minutes)}</span>
+      </div>
+      {#if routeStats.final.waypointCount > 1}
+        <div class="route-stats-row">
+          <span class="route-stats-label">Final</span>
+          <span class="route-stats-value">{routeStats.final.distNm.toFixed(2)} nm</span>
+          <span class="route-stats-value route-stats-spacer"></span>
+          <span class="route-stats-value">{formatDurationMin(routeStats.final.minutes)}</span>
+          <span class="route-stats-value">ETA {formatEta(routeStats.final.minutes)}</span>
+        </div>
+      {/if}
+      {#if addWaypointActive}
+        <div class="route-stats-hint">click to add · drag waypoints to move</div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -2459,6 +3006,79 @@
     background: #1d4ed8;
   }
 
+  /* Add-waypoint toggle: sits to the left of the boat-position toggle. */
+  .add-waypoint-toggle {
+    position: absolute;
+    top: 10px;
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .add-waypoint-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .add-waypoint-toggle.active {
+    background: #f59e0b;
+    color: white;
+    border-color: #b45309;
+  }
+
+  .add-waypoint-toggle.active:hover {
+    background: #d97706;
+  }
+
+  /* Sits directly below the add-waypoint toggle when waypoints exist. */
+  .clear-waypoints-btn {
+    position: absolute;
+    top: calc(10px + 30px + 6px);
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #b45309;
+    font-size: 14px;
+    font-weight: bold;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .clear-waypoints-btn:hover {
+    background: #fef3c7;
+    border-color: #b45309;
+  }
+
+  /* Armed state: red so the second click clearly looks destructive. */
+  .clear-waypoints-btn.armed {
+    background: #dc2626;
+    color: white;
+    border-color: #991b1b;
+  }
+
+  .clear-waypoints-btn.armed:hover {
+    background: #b91c1c;
+  }
+
   /* When the data panel is hidden, the map is full-width and its top-right
      buttons collide with the page-level fullscreen / drawer-toggle buttons.
      Shift the map's top-right cluster left to clear them. */
@@ -2470,6 +3090,12 @@
   }
   #map-container.full-width .boat-position-toggle {
     right: calc(10px + 30px + 6px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .add-waypoint-toggle {
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
+  }
+  #map-container.full-width .clear-waypoints-btn {
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
   }
   #map-container.full-width .measure-result {
     right: calc(10px + 85px);
@@ -2492,6 +3118,123 @@
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
     z-index: 1000;
     white-space: nowrap;
+  }
+
+  .edit-waypoint-popup {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid #f59e0b;
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    z-index: 1002;
+    white-space: nowrap;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+  }
+
+  .edit-waypoint-popup.delete {
+    border-color: #dc2626;
+  }
+
+  .edit-waypoint-popup.hidden {
+    display: none;
+  }
+
+  .edit-waypoint-btn {
+    background: #f59e0b;
+    color: #1f2937;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .edit-waypoint-btn:hover {
+    background: #d97706;
+  }
+
+  .edit-waypoint-btn.delete {
+    background: #dc2626;
+    color: white;
+  }
+
+  .edit-waypoint-btn.delete:hover {
+    background: #b91c1c;
+  }
+
+  .edit-waypoint-close {
+    background: transparent;
+    color: #fde68a;
+    border: none;
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .edit-waypoint-close:hover {
+    color: white;
+  }
+
+  /* Next/final waypoint overlay. Sits above the bottom-left stop-panning area
+     so it stays visible whether the data panel is open or not. */
+  .route-stats {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    padding: 6px 10px;
+    background: rgba(15, 23, 42, 0.92);
+    color: #fde68a;
+    border: 1px solid rgba(245, 158, 11, 0.6);
+    border-radius: 4px;
+    font-size: 12px;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    z-index: 1001;
+    pointer-events: none;
+    line-height: 1.35;
+  }
+
+  .route-stats.edit {
+    border-color: #f59e0b;
+    background: rgba(120, 53, 15, 0.92);
+  }
+
+  .route-stats-row {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    white-space: nowrap;
+  }
+
+  .route-stats-label {
+    font-weight: 600;
+    color: #f59e0b;
+    min-width: 38px;
+  }
+
+  .route-stats-value {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .route-stats-spacer {
+    visibility: hidden;
+  }
+
+  .route-stats-hint {
+    margin-top: 4px;
+    color: #fef3c7;
+    font-size: 11px;
+    opacity: 0.8;
   }
 
   /* Boats panel (bottom-right, next to Layers) */

@@ -8,6 +8,12 @@
     {
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:chartplotter"
+    },
+    {
+      "api": "rdk:service:navigation",
+      "model": "erh:viam-chartplotter:nav",
+      "description": "Persistent in-memory navigation service for the chartplotter UI.",
+      "markdown_link": "README.md#navigation-service"
     }
   ],
   "first_run": "",

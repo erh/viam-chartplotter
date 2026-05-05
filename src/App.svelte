@@ -69,6 +69,8 @@
     cameraNames: [],
     lastCameraTimes: [],
 
+    navWaypoints: [] as { id: string; lat: number; lng: number }[],
+
     numUpdates: 0,
     status: "Not connected yet",
     statusLastError: new Date(),
@@ -97,6 +99,7 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    navServiceName: "",
     routeSensorName: "",
     seatempSensorName: "",
     depthSensorName: "",
@@ -324,6 +327,24 @@
         });
     }
 
+    if (globalConfig.navServiceName != "") {
+      new VIAM.NavigationClient(client, globalConfig.navServiceName)
+        .getWayPoints()
+        .then((wps) => {
+          globalData.navWaypoints = (wps ?? [])
+            .filter((wp) => wp.location != null)
+            .map((wp) => ({
+              id: wp.id,
+              lat: wp.location!.latitude,
+              lng: wp.location!.longitude,
+            }));
+        })
+        .catch((e) => {
+          globalData.navWaypoints = [];
+          errorHandler(e, "navigation");
+        });
+    }
+
     if (loopNumber % 30 == 2) {
       globalData.allResources.forEach((r) => {
         if (r.subtype != "sensor") {
@@ -543,6 +564,12 @@
       "component",
       "sensor",
       /\bais$/
+    );
+    globalConfig.navServiceName = filterResourcesFirstMatchingName(
+      resources,
+      "service",
+      "navigation",
+      null
     );
     globalConfig.routeSensorName = filterResourcesFirstMatchingName(
       resources,
@@ -1286,6 +1313,95 @@
     return res;
   }
 
+  async function addNavWaypoint(lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) {
+      globalLogger.warn("no navigation service configured; cannot add waypoint");
+      return;
+    }
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).addWayPoint({
+        latitude: lat,
+        longitude: lng,
+      });
+      // Optimistically append; the next poll will reconcile with the service.
+      globalData.navWaypoints = [
+        ...globalData.navWaypoints,
+        { id: `pending-${Date.now()}`, lat, lng },
+      ];
+    } catch (e) {
+      errorHandler(e, "addWayPoint");
+    }
+  }
+
+  async function insertNavWaypoint(beforeId: string, lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
+        VIAM.Struct.fromJson({ insert_waypoint: { before_id: beforeId, lat, lng } })
+      );
+      // Optimistically splice; the next poll will reconcile with the service.
+      const idx = beforeId
+        ? globalData.navWaypoints.findIndex((wp) => wp.id === beforeId)
+        : -1;
+      const placeholder = { id: `pending-${Date.now()}`, lat, lng };
+      if (idx >= 0) {
+        globalData.navWaypoints = [
+          ...globalData.navWaypoints.slice(0, idx),
+          placeholder,
+          ...globalData.navWaypoints.slice(idx),
+        ];
+      } else {
+        globalData.navWaypoints = [...globalData.navWaypoints, placeholder];
+      }
+    } catch (e) {
+      errorHandler(e, "insertWayPoint");
+    }
+  }
+
+  async function moveNavWaypoint(id: string, lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    if (!id || id.startsWith("pending-")) return;
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
+        VIAM.Struct.fromJson({ move_waypoint: { id, lat, lng } })
+      );
+      // Optimistic local update; the next poll will reconcile.
+      globalData.navWaypoints = globalData.navWaypoints.map((wp) =>
+        wp.id === id ? { ...wp, lat, lng } : wp
+      );
+    } catch (e) {
+      errorHandler(e, "moveWayPoint");
+    }
+  }
+
+  async function removeNavWaypoint(id: string) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    if (!id || id.startsWith("pending-")) return;
+    // Drop locally first so the marker disappears immediately.
+    globalData.navWaypoints = globalData.navWaypoints.filter((wp) => wp.id !== id);
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).removeWayPoint(id);
+    } catch (e) {
+      errorHandler(e, "removeWayPoint");
+    }
+  }
+
+  async function clearNavWaypoints() {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    var nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
+    var existing = [...globalData.navWaypoints];
+    // Snap the local state immediately so the UI feels responsive.
+    globalData.navWaypoints = [];
+    for (var wp of existing) {
+      if (!wp.id || wp.id.startsWith("pending-")) continue;
+      try {
+        await nav.removeWayPoint(wp.id);
+      } catch (e) {
+        errorHandler(e, "removeWayPoint");
+      }
+    }
+  }
+
   function seakeeper(name, value) {
     var cmd = {};
     cmd[name] = value;
@@ -1385,6 +1501,12 @@
       depthColorTrack={globalData.showDepthOnTrack}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
+      navWaypoints={globalData.navWaypoints}
+      onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
+      onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
+      onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
+      onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
+      onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
 
     {#if !globalData.hideDataPanel}
