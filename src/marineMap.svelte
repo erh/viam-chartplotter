@@ -1514,7 +1514,7 @@
         zIndex: 4,
         source: new TileWMS({
           url: noaaWmsUrl,
-          params: { _v: tileGenVersion },
+          params: { LAYERS: "0,1,2,3,4,5,6", _v: tileGenVersion },
           transition: 300,
         }),
       }),
