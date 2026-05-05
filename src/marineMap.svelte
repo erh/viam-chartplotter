@@ -1133,22 +1133,30 @@
   // dragged we leave it untouched so the drag can finish cleanly.
   function syncNavWaypointFeatures() {
     const desired = navWaypoints ?? [];
-    const desiredById = new Map(desired.map((wp) => [wp.id, wp]));
+    // Plain object lookup by id; the OL `Map` import shadows the global
+    // Map constructor in this module, so `new Map(...)` would build a map
+    // widget instead of a hash and blow up on `.has(...)`.
+    const desiredById: Record<string, true> = {};
+    for (const wp of desired) {
+      desiredById[wp.id] = true;
+    }
 
     const features = mapGlobal.navWaypointFeatures;
     for (let i = features.getLength() - 1; i >= 0; i--) {
       const feat = features.item(i) as Feature<Point>;
       const id = feat.get("waypointId") as string;
-      if (!desiredById.has(id) && id !== draggingWaypointId) {
+      if (!desiredById[id] && id !== draggingWaypointId) {
         features.removeAt(i);
       }
     }
 
-    const existingById = new Map<string, Feature<Point>>();
-    features.forEach((f) => existingById.set(f.get("waypointId") as string, f as Feature<Point>));
+    const existingById: Record<string, Feature<Point>> = {};
+    features.forEach((f) => {
+      existingById[f.get("waypointId") as string] = f as Feature<Point>;
+    });
 
     desired.forEach((wp, idx) => {
-      const existing = existingById.get(wp.id);
+      const existing = existingById[wp.id];
       if (existing) {
         if (wp.id !== draggingWaypointId) {
           existing.setGeometry(new Point([wp.lng, wp.lat]));
