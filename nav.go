@@ -2,6 +2,7 @@ package vc
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -30,8 +31,13 @@ func init() {
 // NavConfig is the config for the chartplotter navigation service.
 // MovementSensor is optional; when set, Location() reports the live
 // position/heading of that movement sensor.
+//
+// DataPath, when set, is used as the JSON file that mirrors the waypoint
+// list across restarts. When empty, waypoints persist to
+// "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
 type NavConfig struct {
 	MovementSensor string `json:"movement_sensor,omitempty"`
+	DataPath       string `json:"data_path,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -55,12 +61,22 @@ func newNav(
 		return nil, err
 	}
 
+	dataPath := cfg.DataPath
+	if dataPath == "" {
+		dataPath = filepath.Join(resolveCacheRoot(""), "nav", conf.ResourceName().Name+".json")
+	}
+	store, err := newDiskNavStore(dataPath)
+	if err != nil {
+		return nil, err
+	}
+
 	svc := &navService{
 		name:   conf.ResourceName(),
 		logger: logger,
-		store:  navigation.NewMemoryNavigationStore(),
+		store:  store,
 	}
 	svc.mode.Store(uint32(navigation.ModeManual))
+	logger.Infof("nav waypoints persisted at %s", dataPath)
 
 	if cfg.MovementSensor != "" {
 		ms, err := movementsensor.FromDependencies(deps, cfg.MovementSensor)
