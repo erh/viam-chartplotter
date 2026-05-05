@@ -1127,7 +1127,28 @@
     }
   }
 
+  // Two-step confirmation for the clear-all-waypoints button. First click
+  // arms the confirm state; second click within CLEAR_CONFIRM_MS commits.
+  // Auto-disarms after the timeout so a forgotten click doesn't lurk.
+  const CLEAR_CONFIRM_MS = 4000;
+  let clearConfirmArmed = $state(false);
+  let clearConfirmTimer: number | undefined;
+
   function clearWaypoints() {
+    if (!clearConfirmArmed) {
+      clearConfirmArmed = true;
+      if (clearConfirmTimer !== undefined) clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = setTimeout(() => {
+        clearConfirmArmed = false;
+        clearConfirmTimer = undefined;
+      }, CLEAR_CONFIRM_MS) as unknown as number;
+      return;
+    }
+    if (clearConfirmTimer !== undefined) {
+      clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = undefined;
+    }
+    clearConfirmArmed = false;
     addWaypointActive = false;
     onClearWaypoints?.();
   }
@@ -2205,6 +2226,11 @@
         container.removeEventListener("click", handleMapContainerClick as EventListener);
       }
 
+      if (clearConfirmTimer !== undefined) {
+        clearTimeout(clearConfirmTimer);
+        clearConfirmTimer = undefined;
+      }
+
       // Remove OpenLayers map event listeners to prevent memory leaks
       if (mapGlobal.map) {
         if (mapClickHandler) {
@@ -2507,11 +2533,14 @@
     {#if navWaypoints && navWaypoints.length > 0}
       <button
         class="clear-waypoints-btn"
+        class:armed={clearConfirmArmed}
         onclick={clearWaypoints}
-        title="Clear all route waypoints"
-        aria-label="Clear route"
+        title={clearConfirmArmed
+          ? "Click again to confirm clearing all waypoints"
+          : "Clear all route waypoints"}
+        aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
       >
-        ✕
+        {clearConfirmArmed ? "?" : "✕"}
       </button>
     {/if}
   {/if}
@@ -3037,6 +3066,17 @@
   .clear-waypoints-btn:hover {
     background: #fef3c7;
     border-color: #b45309;
+  }
+
+  /* Armed state: red so the second click clearly looks destructive. */
+  .clear-waypoints-btn.armed {
+    background: #dc2626;
+    color: white;
+    border-color: #991b1b;
+  }
+
+  .clear-waypoints-btn.armed:hover {
+    background: #b91c1c;
   }
 
   /* When the data panel is hidden, the map is full-width and its top-right
