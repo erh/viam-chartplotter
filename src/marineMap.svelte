@@ -1566,9 +1566,12 @@
     });
 
     // NOAA's public WMS chart service. Authoritative but slow — kept as a
-    // fallback / comparison reference. Always available regardless of where the
-    // page is being served from. The `_v` param is ignored by the WMS but
-    // changes the browser cache key when tileGenVersion is bumped.
+    // fallback / comparison reference. When served from the Go module (or
+    // proxied by Vite), we route through `/noaa-wms/proxy` so the disk cache
+    // absorbs repeat tile fetches; otherwise we hit NOAA directly.
+    const noaaWmsUrl = noaaCacheReachable()
+      ? "/noaa-wms/proxy"
+      : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
     mapGlobal.layerOptions.push({
       name: "noaa",
       on: false,
@@ -1577,8 +1580,8 @@
         preload: 2,
         zIndex: 4,
         source: new TileWMS({
-          url: "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-          params: { _v: tileGenVersion },
+          url: noaaWmsUrl,
+          params: { LAYERS: "0,1,2,3,4,5,6", _v: tileGenVersion },
           transition: 300,
         }),
       }),
