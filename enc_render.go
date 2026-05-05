@@ -3,7 +3,6 @@ package vc
 import (
 	"bytes"
 	"fmt"
-	"image"
 	"image/color"
 	"image/png"
 	"math"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
-	"golang.org/x/image/draw"
 	"golang.org/x/image/font/basicfont"
 
 	"github.com/beetlebugorg/s57/pkg/s57"
@@ -234,7 +232,16 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
 
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	// Only pull in cells whose compilation scale is appropriate for this
+	// display zoom. Without this, every Berthing-cell wreck and sounding gets
+	// painted at z=12 and overview-cell continents get painted at z=16.
+	minScale, maxScale := cellScaleRangeFor(z, (minLat+maxLat)/2)
+	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, minScale, maxScale)
+	// Fall back to all cells if the scale window left us with nothing — better
+	// to render something coarse than to return an empty tile.
+	if len(cells) == 0 {
+		cells = r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	}
 	// Paint coarsest first so finer-scale cells overwrite their detail on top.
 	// CScale is the compilation-scale denominator, so larger CScale = coarser.
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale > cells[j].CScale })
@@ -252,15 +259,6 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 
 	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
 	scale := zoomSymbolScale(z)
-
-	// Collect soundings up-front so we can build the bathymetry layer once.
-	// The polygon pass runs DEPARE included — DEPARE polygons paint their
-	// own DRVAL1-based depth colour so dredged channels render as safe water
-	// (e.g. a 14 m DRVAL1 → light blue) instead of being washed out by the
-	// IDW blending in adjacent shallow soundings. Bathymetry then composites
-	// on top with reduced opacity to soften polygon edges into a gradient.
-	soundings := r.gatherSoundings(cells, bbox, project)
-	hasBath := len(soundings) >= 12
 
 	drawCell := func(chart *s57.Chart, pass drawPass) {
 		for _, f := range chart.FeaturesInBounds(bbox) {
@@ -280,10 +278,6 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 			}
 			drawCell(chart, pass)
 		}
-		if pass == passAreas && hasBath {
-			r.compositeBathymetry(dc, cells, bbox, project, soundings, safeDepthM, z,
-				tileXmin, tileYmin, tileXmax, tileYmax)
-		}
 	}
 
 	var buf bytes.Buffer
@@ -291,99 +285,6 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// soundingPt is a depth seed for the IDW field, stored in EPSG:3857 mercator
-// metres so the IDW computation is invariant under map zoom (the same physical
-// location reads the same depth no matter how zoomed-in the tile is). Pixel
-// space would not be invariant — at higher zoom, one metre is more pixels, so
-// distance-based weights shift the field.
-type soundingPt struct{ mx, my, depthM float64 }
-
-// gatherSoundings collects every SOUNDG vertex AND every DEPARE polygon's
-// centroid (plus stride-sampled vertices for normally-sized polygons) from
-// the supplied cells, projected to mercator metres. SOUNDG gives the spot
-// soundings; DEPARE centroids encode the polygon's DRVAL1 directly into the
-// IDW field so dredged channels carry their canonical "this is N metres deep"
-// reading even without any soundings.
-//
-// Oversized DEPARE polygons (continent-sized overview rings) are still
-// allowed to seed the IDW via their centroid only — skipping their boundary
-// vertices, which sit on the coast and would otherwise dominate coastal
-// tiles' IDW with their offshore depth.
-//
-// Padding ensures features just outside the tile still influence pixels near
-// the tile edge so the IDW field has no hard tile-boundary seams.
-func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64)) []soundingPt {
-	// Pad by max(50% of the tile, absMinPad). The relative term keeps things
-	// proportional at low zoom; the absolute floor stabilises the seed set at
-	// high zoom, where 50% of a tiny tile would otherwise gather only a
-	// handful of nearby points and the IDW field would flip every time the
-	// user zoomed in another step. ~0.05° ≈ 5.5 km is a reasonable IDW
-	// influence radius for coastal navigation.
-	const absMinPad = 0.05
-	padLon := math.Max((bbox.MaxLon-bbox.MinLon)*0.5, absMinPad)
-	padLat := math.Max((bbox.MaxLat-bbox.MinLat)*0.5, absMinPad)
-	queryBox := s57.Bounds{
-		MinLon: bbox.MinLon - padLon,
-		MinLat: bbox.MinLat - padLat,
-		MaxLon: bbox.MaxLon + padLon,
-		MaxLat: bbox.MaxLat + padLat,
-	}
-	var points []soundingPt
-	addSeed := func(lon, lat, depthM float64) {
-		mx, my := lonLatToMerc(lon, lat)
-		points = append(points, soundingPt{mx: mx, my: my, depthM: depthM})
-	}
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(queryBox) {
-			switch f.ObjectClass() {
-			case "SOUNDG":
-				for _, c := range f.Geometry().Coordinates {
-					if len(c) < 3 {
-						continue
-					}
-					if math.IsNaN(c[2]) || c[2] < 0 {
-						continue
-					}
-					addSeed(c[0], c[1], c[2])
-				}
-			case "DEPARE":
-				geom := f.Geometry()
-				if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
-					continue
-				}
-				if isDegeneratePixelPolygon(geom.Coordinates, project) {
-					continue
-				}
-				min, max := depthRange(&f)
-				switch {
-				case math.IsNaN(min) && math.IsNaN(max):
-					continue
-				case math.IsNaN(min):
-					min = max
-				case min == 0 && !math.IsNaN(max) && max > 5:
-					// DRVAL1=0 with meaningful DRVAL2 is a range indicator;
-					// use the deeper edge so the polygon doesn't seed the
-					// IDW field as a drying flat.
-					min = max
-				}
-				// Only the centroid seeds — never boundary vertices. Vertex
-				// sampling caused a polygon's depth to bleed across its
-				// edge into adjacent polygons (a deep offshore DEPARE's
-				// coastline vertex would inject 200ft into a 12ft channel
-				// next to it via IDW), producing the dark/light halos that
-				// made deep channels read as shallow and vice versa.
-				cx, cy := polygonCentroid(geom.Coordinates)
-				addSeed(cx, cy, min)
-			}
-		}
-	}
-	return points
 }
 
 // splitRings reconstructs ring boundaries in an S-57 polygon coordinate array.
@@ -526,151 +427,6 @@ func tracePolygonPath(dc *gg.Context, coords [][]float64, project func(lon, lat 
 	}
 }
 
-// compositeBathymetry composites a smooth depth-shaded layer on top of `dc`,
-// masked by DEPARE polygon coverage. Bathymetry IDW gives the colour;
-// DEPARE polygons define where it shows. Outside DEPARE (= land or
-// uncharted) the underlying polygon fill (LNDARE tan etc.) stays visible.
-//
-// Render at quarter resolution (64x64) and bilinear-upsample for speed and
-// to blend adjacent IDW samples into a smoother gradient. The mask is built
-// at full 256x256 resolution so polygon edges stay crisp.
-//
-// IDW distance is computed in EPSG:3857 mercator metres so the depth field
-// is invariant under map zoom. Doing it in pixel space caused the same
-// physical location to read different depths at different zooms (since one
-// metre is more pixels at higher zoom), which interacted with the hard step
-// at the safety contour to flip a region between "shallow" and "deep" colour
-// across small zoom changes.
-func (r *ENCRenderer) compositeBathymetry(
-	dc *gg.Context,
-	cells []ENCCell,
-	bbox s57.Bounds,
-	project func(lon, lat float64) (float64, float64),
-	points []soundingPt,
-	safeDepthM float64,
-	z int,
-	tileXmin, tileYmin, tileXmax, tileYmax float64,
-) {
-	const downscale = 4
-	const lowW, lowH = 256 / downscale, 256 / downscale
-
-	// 1. Build the water mask by rasterising DEPARE polygons (with the same
-	// oversize/degenerate guards as drawFeature) onto a separate gg.Context.
-	// gg's anti-aliased fill produces a soft polygon edge — that gives the
-	// bathymetry/land transition a clean fade rather than aliased stairsteps.
-	maskCtx := gg.NewContext(256, 256)
-	maskCtx.SetColor(color.RGBA{0xFF, 0xFF, 0xFF, 0xFF})
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
-			if f.ObjectClass() != "DEPARE" {
-				continue
-			}
-			geom := f.Geometry()
-			if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
-				continue
-			}
-			if isOversizedPolygon(geom.Coordinates, bbox, 50) {
-				continue
-			}
-			if isDegeneratePixelPolygon(geom.Coordinates, project) {
-				continue
-			}
-			tracePolygonPath(maskCtx, geom.Coordinates, project)
-			maskCtx.Push()
-			maskCtx.SetFillRuleEvenOdd()
-			maskCtx.Fill()
-			maskCtx.Pop()
-		}
-	}
-	maskImg, ok := maskCtx.Image().(*image.RGBA)
-	if !ok || maskImg == nil {
-		return
-	}
-
-	// 2. IDW bathymetry at low resolution. Distances are in mercator metres so
-	// the depth field is the same physical surface at any zoom.
-	tileWMerc := tileXmax - tileXmin
-	tileHMerc := tileYmax - tileYmin
-	mxPerPx := tileWMerc / 256
-	myPerPx := tileHMerc / 256
-	// Floor IDW distance at half a (mercator) pixel² so a seed sitting exactly
-	// on a sample point doesn't blow up the weight. This preserves the same
-	// "near-zero distance" behaviour the old pixel-space IDW had, just scaled
-	// to mercator metres.
-	dsqFloor := 0.5 * mxPerPx * myPerPx
-	low := image.NewRGBA(image.Rect(0, 0, lowW, lowH))
-	for outY := range lowH {
-		py := (float64(outY) + 0.5) * downscale
-		// Mercator y decreases as image y increases (image y=0 is at top, where
-		// mercator y is tileYmax).
-		sampleMy := tileYmax - py*myPerPx
-		for outX := range lowW {
-			px := (float64(outX) + 0.5) * downscale
-			sampleMx := tileXmin + px*mxPerPx
-			sumW, sumD := 0.0, 0.0
-			for _, p := range points {
-				dx := p.mx - sampleMx
-				dy := p.my - sampleMy
-				dsq := dx*dx + dy*dy
-				if dsq < dsqFloor {
-					dsq = dsqFloor
-				}
-				// Power-3 IDW (1 / d^3): smoother than power-4 across
-				// medium distances, sharper than power-2 at close range.
-				w := 1.0 / (dsq * math.Sqrt(dsq))
-				sumW += w
-				sumD += w * p.depthM
-			}
-			depthM := sumD / sumW
-			c := depthFill(depthM, safeDepthM, z)
-			rgba, ok := c.(color.RGBA)
-			if !ok {
-				r0, g0, b0, a0 := c.RGBA()
-				rgba = color.RGBA{R: uint8(r0 / 257), G: uint8(g0 / 257), B: uint8(b0 / 257), A: uint8(a0 / 257)}
-			}
-			low.SetRGBA(outX, outY, rgba)
-		}
-	}
-
-	// 3. Bilinear-upsample the bathymetry to full tile resolution.
-	high := image.NewRGBA(image.Rect(0, 0, 256, 256))
-	draw.BiLinear.Scale(high, high.Bounds(), low, low.Bounds(), draw.Over, nil)
-
-	// 4. Apply DEPARE mask + reduced opacity. The mask multiplier limits
-	// bathymetry to actual water; the opacity multiplier lets the underlying
-	// DEPARE polygon colour (which carries the canonical "channel = safe"
-	// information from DRVAL1) bleed through. The result reads as the
-	// polygon depth-band coloring softened by the smooth IDW gradient.
-	//
-	// Opacity is intentionally low: DEPARE's DRVAL1-based fill is the
-	// authoritative depth signal — sharp, accurate, derived directly from
-	// chart data. The IDW field is only here to soften polygon edges into
-	// a gradient, not to override the polygon's own depth band. Higher
-	// opacity caused IDW artifacts (seed-dominated halos, cross-polygon
-	// bleed) to overpower the chart's actual depth bands.
-	const bathOpacity = 0.3
-	for y := range 256 {
-		for x := range 256 {
-			ma := maskImg.RGBAAt(x, y).A
-			if ma == 0 {
-				high.SetRGBA(x, y, color.RGBA{})
-				continue
-			}
-			c := high.RGBAAt(x, y)
-			a := float64(c.A) * float64(ma) / 255 * bathOpacity
-			c.A = uint8(a)
-			high.SetRGBA(x, y, c)
-		}
-	}
-
-	// 5. Composite onto the main canvas.
-	dc.DrawImage(high, 0, 0)
-}
-
 // isOversizedPolygon returns true if the polygon's lon/lat bbox is more than
 // `maxFactor`× the tile bbox in either direction. NOAA overview cells carry
 // continent-sized rings — a single LNDARE that covers the whole SE US, a
@@ -753,6 +509,37 @@ func isDegeneratePixelPolygon(coords [][]float64, project func(lon, lat float64)
 	return (maxX-minX) < minPx || (maxY-minY) < minPx
 }
 
+// cellScaleRangeFor returns the CScale window we want to render at the given
+// map zoom: [minScale, maxScale]. Cells outside this window are filtered out.
+//
+//   - minScale: 1/4 of the display scale — drops cells finer than the display
+//     can show. Keeps z=14 from rendering Berthing-cell detail at chart-detail
+//     density it can't represent.
+//   - maxScale: 8× the display scale — drops continent-sized overview cells
+//     at high zooms. Without this, an LNDARE from a 1:1 200 000 cell paints
+//     yellow over a z=16 harbour tile that the local Berthing cell would
+//     have outlined more precisely.
+//
+// Computed for `latDeg` so high-latitude tiles use the right mercator scale.
+func cellScaleRangeFor(z int, latDeg float64) (int, int) {
+	const screenMetresPerPx = 0.000264 // 96 DPI ≈ 0.000264 m / px
+	cosLat := math.Cos(latDeg * math.Pi / 180)
+	if cosLat < 0.1 {
+		cosLat = 0.1
+	}
+	groundResPerPx := 156543.04 * cosLat / math.Pow(2, float64(z))
+	displayScale := groundResPerPx / screenMetresPerPx
+	min := int(displayScale / 4)
+	max := int(displayScale * 8)
+	if min < 0 {
+		min = 0
+	}
+	if max < 0 {
+		max = 0
+	}
+	return min, max
+}
+
 // zoomSymbolScale returns a multiplier applied to stroke widths and point
 // symbol sizes. Goal: symbols stay readable when zoomed in but don't blow up
 // and crash into each other. Conservative — anything over ~2× starts looking
@@ -774,6 +561,64 @@ func zoomSymbolScale(z int) float64 {
 	}
 }
 
+// minZoomForFeature returns the lowest map zoom at which an S-57 object
+// class should render. Below this, the feature is dropped so coarse zooms
+// aren't blanketed in symbols. Matches the spirit of S-52 scale-dependent
+// symbology — NOAA's WMS thins out wrecks, obstructions, soundings, and
+// minor navaids at zoomed-out scales for exactly this reason. Tuned by
+// eyeballing the compare test against z=12/14/16 NOAA tiles.
+func minZoomForFeature(class string) int {
+	switch class {
+	// Major area fills — always show.
+	case "LNDARE", "DEPARE", "DRGARE", "BUAARE", "UNSARE", "LOKBSN":
+		return 0
+	// Coastline + depth contours — always.
+	case "COALNE", "DEPCNT":
+		return 0
+	// Shoreline construction (piers, jetties, seawalls): hundreds per
+	// harbour cell, way too dense at coastal zoom. Show only at chart
+	// detail.
+	case "SLCONS":
+		return 15
+	// Major navaids visible at overview.
+	case "BOYLAT", "BCNLAT":
+		return 11
+	case "LIGHTS":
+		return 12
+	// Other navaids — coastal zoom and up.
+	case "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
+		return 12
+	case "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
+		return 14
+	case "DAYMAR":
+		return 14
+	// Hazards. Wrecks/obstructions are dense in harbour cells; only show
+	// at chart-detail zoom. Underwater rocks even more so.
+	case "WRECKS", "OBSTRN":
+		return 15
+	case "UWTROC":
+		return 16
+	// Soundings: only at chart-detail zoom (NOAA also thins these).
+	case "SOUNDG":
+		return 15
+	// Mooring/pile/anchorage: harbour-detail zoom.
+	case "MORFAC", "PILPNT", "MOORNG", "ACHBRT":
+		return 15
+	// Linear features.
+	case "RIVERS", "BRIDGE", "CAUSWY":
+		return 11
+	case "FAIRWY", "RECTRC", "NAVLNE", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
+		return 13
+	case "PIPSOL", "CBLSUB", "CBLOHD":
+		return 15
+	case "DAMCON", "PONTON":
+		return 14
+	case "DOCARE", "HRBFAC", "HRBARE", "PIPARE":
+		return 13
+	}
+	return 14
+}
+
 // drawFeature dispatches to the right pass based on the feature's object class
 // and geometry. Anything we don't recognise is silently skipped. `scale` is a
 // zoom-derived multiplier applied to stroke widths and symbol sizes.
@@ -785,6 +630,21 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		return
 	}
 	class := f.ObjectClass()
+	if z < minZoomForFeature(class) {
+		return
+	}
+
+	// Place-name labels for major area features. Done before the geometry
+	// switch because the polygon path returns early on the points pass —
+	// labels live conceptually in the points pass even though the feature
+	// itself is a polygon.
+	if pass == passPoints && z >= 13 {
+		switch class {
+		case "LNDARE", "LNDRGN", "BUAARE", "SEAARE", "ADMARE", "BUISGL":
+			drawAreaLabel(dc, f, project, scale, tileBbox)
+			return
+		}
+	}
 
 	switch geom.Type {
 	case s57.GeometryTypePolygon:
@@ -793,7 +653,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// boundary is what charts actually show, so stroke the ring whenever
 		// lineStroke has an entry. This also covers fill+stroke on classes
 		// where both are styled.
-		fill := areaFill(class, f, safeDepthM, z)
+		fill := areaFill(class, f, safeDepthM)
 		stroke, width := lineStroke(class, f)
 
 		// Drop polygons whose projected pixel bbox is degenerate (< 3 px in
@@ -865,168 +725,155 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 	}
 }
 
+// drawAreaLabel paints OBJNAM at the polygon centroid in chart black, but
+// only if the polygon is small enough that a single tile-centred label makes
+// sense (a continent-sized polygon's centroid is meaningless for a tile) and
+// the centroid lands well inside the tile so the text isn't half-cut.
+func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64, tileBbox s57.Bounds) {
+	v, ok := f.Attribute("OBJNAM")
+	if !ok {
+		return
+	}
+	name, _ := v.(string)
+	if name == "" {
+		return
+	}
+	geom := f.Geometry()
+	if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
+		return
+	}
+	// Skip polygons whose own bbox is much bigger than the tile — the
+	// centroid is somewhere far away and the label would either render off
+	// this tile or end up where it doesn't make sense.
+	if isOversizedPolygon(geom.Coordinates, tileBbox, 4) {
+		return
+	}
+	cx, cy := polygonCentroid(geom.Coordinates)
+	px, py := project(cx, cy)
+	dc.SetFontFace(basicfont.Face7x13)
+	// Rough text-width estimate so a label doesn't run past the tile edge:
+	// 7 px per char in the basicfont, then scaled.
+	labelHalfW := float64(len(name)) * 7 * scale / 2
+	const halfH = 6.5
+	if px-labelHalfW < 2 || px+labelHalfW > 254 || py-halfH*scale < 2 || py+halfH*scale > 254 {
+		return
+	}
+	dc.SetColor(s52CHBLK)
+	dc.Push()
+	dc.ScaleAbout(scale, scale, px, py)
+	dc.DrawStringAnchored(name, px, py, 0.5, 0.5)
+	dc.Pop()
+}
+
+// S-52 day-bright palette. RGB values were sampled directly from cached NOAA
+// WMS tiles so our renders blend cleanly against the WMS reference layer.
+// The compare endpoint + TestCompareWithWMS test surface any palette drift
+// as it happens.
+var (
+	// Water fills. NOAA's WMS uses two-colour shading in coastal tiles —
+	// saturated blue below the safety contour, pure white at-or-above —
+	// plus a tan-green for drying areas.
+	s52DEPDW = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // safe water (≥ safety contour)
+	s52DEPVS = color.RGBA{0xAF, 0xCD, 0xE1, 0xFF} // unsafe water (< safety contour)
+	s52DEPIT = color.RGBA{0xD6, 0xDB, 0xC9, 0xFF} // intertidal / drying — pale tan-green
+
+	// Land + coast.
+	s52LANDA = color.RGBA{0xF4, 0xE8, 0xC1, 0xFF} // land area (warm pale yellow)
+	s52LANDF = color.RGBA{0xB7, 0xAE, 0x90, 0xFF} // land features (darker tan)
+	s52CSTLN = color.RGBA{0x00, 0x00, 0x00, 0xFF} // coastline (black)
+
+	// Generic chart colours.
+	s52CHBLK = color.RGBA{0x00, 0x00, 0x00, 0xFF}
+	s52CHGRD = color.RGBA{0x72, 0x72, 0x72, 0xFF} // grey (medium)
+	s52CHGRF = color.RGBA{0xA2, 0xA2, 0xA2, 0xFF} // grey (faint)
+	s52CHWHT = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
+	s52CHRED = color.RGBA{0xDC, 0x14, 0x14, 0xFF}
+	s52CHGRN = color.RGBA{0x14, 0xB4, 0x14, 0xFF}
+	s52CHYLW = color.RGBA{0xEF, 0xE7, 0x39, 0xFF} // bright chart yellow (navaid accents)
+	s52CHMGD = color.RGBA{0xDB, 0x49, 0x96, 0xFF} // chart magenta — pink, NOT pure magenta
+	s52CHMGF = color.RGBA{0xDB, 0xB5, 0xF2, 0xFF} // magenta (faint, sampled)
+	s52CHBRN = color.RGBA{0x82, 0x5A, 0x23, 0xFF}
+
+	// Soundings + depth contours.
+	s52SNDG1 = color.RGBA{0x72, 0x72, 0x72, 0xFF} // sounding label (deeper than safety)
+	s52SNDG2 = color.RGBA{0x00, 0x00, 0x00, 0xFF} // sounding label (shoaler than safety, bolder)
+	s52DEPCN = color.RGBA{0x83, 0x99, 0xA8, 0xFF} // depth contour line (subtle steel blue)
+	s52DEPSC = color.RGBA{0x57, 0x66, 0x70, 0xFF} // safety contour line (bolder)
+
+	// Light/buoy accents.
+	s52LITRD = color.RGBA{0xFF, 0x00, 0x00, 0xFF} // red light flare
+	s52LITGN = color.RGBA{0x00, 0xC0, 0x00, 0xFF} // green light flare
+	s52LITYW = color.RGBA{0xEF, 0xE7, 0x39, 0xFF} // yellow light flare
+)
+
 // areaFill returns the fill colour for a polygon feature, or nil to skip.
-// safeDepthM drives the DEPARE gradient.
+// safeDepthM keys the DEPARE four-colour band scheme.
 //
-// Philosophy: only fill classes that are ACTUALLY area-coloured on a paper
-// chart. Fairways, anchorages, harbours, docks, ponton/pontoon, and pipeline
-// areas all read as line/symbol/pattern features in S-52 — filling them with
-// translucent colours composites badly over depth banding and produces the
-// muddy olive/grey overlays we kept hitting. Leave their boundaries to
-// `lineStroke`.
-//
-// Land-side classes (LNDARE, BUAARE) are intentionally not filled here: the
-// noaa-local layer is composited over OSM, which already provides high-quality
-// land detail (roads, buildings, marinas). Painting NOAA's tan over OSM would
-// hide that detail. NOAA contributes only the marine layer — depth shading,
-// dredged areas, and the lines/symbols handled elsewhere (COALNE, DEPCNT,
-// buoys, soundings, wrecks).
-func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Color {
+// We fill the area classes that S-52 colours: depth areas (banded by depth),
+// drying (intertidal) areas, land, dredged areas, lock basins. Outline-only
+// classes (fairways, anchorages, harbour areas, docks, pontoons, pipeline
+// areas) are handled in lineStroke.
+func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
 	switch class {
-	case "DEPARE": // depth area — gradient driven by the boat's safety contour
+	case "DEPARE":
 		min, max := depthRange(f)
 		if math.IsNaN(min) {
-			// Some NOAA cells include DEPARE polygons with no DRVAL1 (and
-			// occasionally no DRVAL2 either). With nothing to key the gradient
-			// off of, skip the fill — better to leave a hole than to flag open
-			// ocean as a drying area.
+			// No DRVAL1 — try DRVAL2; if neither, default to DEPDW so
+			// open-ocean polygons read as "deep" rather than disappearing.
 			if math.IsNaN(max) {
-				return nil
+				return s52DEPDW
 			}
 			min = max
 		} else if min == 0 && !math.IsNaN(max) && max > 5 {
-			// DRVAL1=0 with a meaningful DRVAL2 is a *range* indicator
-			// ("anywhere from drying to N metres") — typical of overview-cell
-			// coastal-zone polygons. Painting these as drying flats turns
-			// large stretches of open ocean dark blue wherever the ring's
-			// rough geometry intersects a tile. Use the deeper edge so the
-			// gradient lands somewhere reasonable instead.
+			// DRVAL1=0 with meaningful DRVAL2 is a range indicator. Use the
+			// deeper edge so overview-cell coastal polygons don't paint the
+			// open ocean as drying flats wherever they intersect a tile.
 			min = max
 		}
-		return depthFill(min, safeDepthM, z)
-	case "DRGARE": // dredged area — slightly bluer than ambient water
-		return color.RGBA{0xCC, 0xE0, 0xF2, 0xFF}
-	case "LOKBSN": // lock basin
-		return color.RGBA{0xC8, 0xD0, 0xE0, 0xFF}
-	case "UNSARE": // unsurveyed area
-		return color.RGBA{0xE0, 0xE0, 0xE0, 0x80}
+		return depthFill(min, safeDepthM)
+	case "DRGARE":
+		// Dredged area: maintained safe-depth channel. NOAA's WMS paints
+		// these as DEPDW (white) — the channel is "above safety" by virtue
+		// of being dredged, regardless of the surrounding shallow water's
+		// DRVAL1.
+		return s52DEPDW
+	case "LNDARE":
+		return s52LANDA
+	case "BUAARE":
+		// Built-up area: NOAA uses a more-saturated yellow than plain land.
+		return color.RGBA{0xEF, 0xD8, 0xA3, 0xFF}
+	case "LOKBSN":
+		return s52DEPVS
+	case "UNSARE":
+		// Unsurveyed area: pale grey, mostly transparent.
+		return color.RGBA{0xE0, 0xE0, 0xE0, 0xC0}
 	}
 	return nil
 }
 
-// Depth-shading band scheme (feet, anchor positions on the right):
-//
-//   - drying / 0 ft ........................... black
-//   - 0 ......... < safe                       smooth gradient black → dark navy
-//   - safe ...... < safe × midFraction × deep  smooth gradient depthLight → depthMid
-//   - safe × m × deep .. < safe × deep         smooth gradient depthMid → white
-//   - >= safe × deep ........................... white
-//
-// Two smooth gradients in the safe-water zone, joined by a saturated mid
-// anchor. The mid anchor gives the gradient a non-linear colour path so
-// adjacent depths show visibly more variation than a flat pale→white lerp
-// would produce.
-//
-// `deep` is the multiplier on safeDepth at which the colour fully reaches
-// white. It scales with zoom: at chart-detail zoom (≥14) we want a wide
-// gradient so coastal depths (30–100 ft) show visible variation; at overview
-// zoom we compress so deeper water snaps to white quickly.
-const (
-	depthMidFraction = 0.30 // depthMid lands at safe + (deepEnd-safe) × this
-)
-
-var (
-	depthBlack    = color.RGBA{0x00, 0x00, 0x00, 0xFF}
-	depthDarkNavy = color.RGBA{0x0E, 0x29, 0x52, 0xFF} // approached from black just below safe
-	depthLight    = color.RGBA{0xB5, 0xDA, 0xEE, 0xFF} // at safe — stark step up from dark navy
-	depthMid      = color.RGBA{0x7A, 0xBE, 0xDC, 0xFF} // saturated mid anchor in the gradient
-	depthWhite    = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // at and beyond safe × deepMultiplier
-)
-
-// depthDeepMultiplierFor returns the safe-multiple at which the depth
-// gradient saturates to white for a given map zoom. Higher zooms get a
-// wider gradient so coastal depths show variation; lower zooms compress so
-// open ocean is mostly white.
-//
-// The mapping is linear in zoom (4 at z=10 → 30 at z=18) rather than
-// bucketed: discrete jumps caused the same DEPARE polygon to render a
-// visibly different colour across adjacent integer zooms (e.g. a 100 ft
-// polygon went from "mostly white" at z=15 to "midblue" at z=16 because
-// the multiplier jumped 20→30). Linear keeps each adjacent-zoom step ~3.3,
-// so the same area looks consistent as the user zooms in or out.
-func depthDeepMultiplierFor(z int) float64 {
-	const minZ, maxZ = 10, 18
-	const minMul, maxMul = 4.0, 30.0
-	if z <= minZ {
-		return minMul
-	}
-	if z >= maxZ {
-		return maxMul
-	}
-	t := float64(z-minZ) / float64(maxZ-minZ)
-	return minMul + (maxMul-minMul)*t
-}
-
 // depthFill returns the water fill for a DEPARE keyed off the boat's safety
-// depth and the current map zoom. The zoom controls how far the gradient
-// extends before hitting white (overview zooms snap to white sooner than
-// chart-detail zooms).
-func depthFill(minDepthM, safeDepthM float64, z int) color.Color {
+// contour. S-52 "two-colour shading" — three bands NOAA's WMS actually uses
+// in coastal tiles:
+//
+//   - DRVAL1 < 0          → DEPIT (intertidal / drying)
+//   - 0 ≤ DRVAL1 < safety → DEPVS (saturated blue, below safety contour)
+//   - DRVAL1 ≥ safety     → DEPDW (white, safe water)
+//
+// Sampled NOAA tiles overwhelmingly use just AFCDE1 (below safety) and pure
+// white (at-or-above safety). Adding intermediate bands (DEPMS / DEPMD) had
+// us painting channels in pale blue where NOAA paints them white because the
+// channel depth is past the safety contour.
+func depthFill(minDepthM, safeDepthM float64) color.Color {
 	if safeDepthM <= 0 {
 		safeDepthM = 1
 	}
-	minFt := minDepthM * feetPerMetre
-	safeFt := safeDepthM * feetPerMetre
-	deepEnd := safeFt * depthDeepMultiplierFor(z)
-
-	// Drying area / above MLLW: solid black.
-	if minFt <= 0 {
-		return depthBlack
+	if minDepthM < 0 {
+		return s52DEPIT
 	}
-
-	// Below safe: smooth gradient black → dark navy.
-	if minFt < safeFt {
-		return lerpRGBA(depthBlack, depthDarkNavy, minFt/safeFt)
+	if minDepthM < safeDepthM {
+		return s52DEPVS
 	}
-
-	// At or above safe: hard step to light blue, then a two-part gradient
-	// through a saturated mid blue (depthMid) on the way to white. The mid
-	// anchor gives adjacent depths visibly more chromatic variation than a
-	// flat pale→white lerp.
-	if minFt < deepEnd {
-		midFt := safeFt + (deepEnd-safeFt)*depthMidFraction
-		if minFt < midFt {
-			return lerpRGBA(depthLight, depthMid, (minFt-safeFt)/(midFt-safeFt))
-		}
-		return lerpRGBA(depthMid, depthWhite, (minFt-midFt)/(deepEnd-midFt))
-	}
-
-	// Beyond safe × deep multiplier: solid white.
-	return depthWhite
-}
-
-// lerpRGBA blends two solid RGBA colours, clamping t to [0, 1].
-func lerpRGBA(a, b color.RGBA, t float64) color.RGBA {
-	if t < 0 {
-		t = 0
-	} else if t > 1 {
-		t = 1
-	}
-	return color.RGBA{
-		R: lerpByte(a.R, b.R, t),
-		G: lerpByte(a.G, b.G, t),
-		B: lerpByte(a.B, b.B, t),
-		A: lerpByte(a.A, b.A, t),
-	}
-}
-
-func lerpByte(a, b uint8, t float64) uint8 {
-	if t < 0 {
-		t = 0
-	} else if t > 1 {
-		t = 1
-	}
-	return uint8(float64(a) + (float64(b)-float64(a))*t)
+	return s52DEPDW
 }
 
 // depthRange returns DRVAL1/DRVAL2 from the feature, leaving NaN when the
@@ -1048,36 +895,38 @@ func lineStroke(class string, f *s57.Feature) (color.Color, float64) {
 	_ = f
 	switch class {
 	case "COALNE", "SLCONS":
-		return color.RGBA{0x40, 0x40, 0x40, 0xFF}, 1.5
+		// Coastline / shoreline construction: solid black, full weight.
+		return s52CSTLN, 1.4
 	case "DEPCNT":
-		return color.RGBA{0x66, 0x99, 0xBB, 0xFF}, 0.7
-	case "NAVLNE", "RECTRC", "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT":
-		// Channel limit / recommended track / fairway / anchorage / deep-water
-		// route: conventional magenta boundary line. (Some of these come back
-		// as polygons; we only stroke the ring, not fill the interior.)
-		return color.RGBA{0x99, 0x33, 0x99, 0xCC}, 1.0
+		// Depth contour: pale blue. Safety-contour bolding (DEPCNT02 in
+		// S-52) would require comparing the contour's VALDCO to the boat's
+		// safety depth; we keep it uniform here.
+		return s52DEPCN, 0.6
+	case "NAVLNE", "RECTRC", "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
+		// Channel limit / recommended track / fairway / anchorage / deep-
+		// water route / restricted area — magenta boundary line.
+		return s52CHMGD, 0.8
 	case "RIVERS":
 		return color.RGBA{0x7F, 0xB0, 0xCB, 0xFF}, 0.8
 	case "BRIDGE", "CAUSWY":
-		return color.RGBA{0x33, 0x33, 0x33, 0xFF}, 1.2
+		return s52CHGRD, 1.2
 	case "PIPSOL", "CBLSUB", "CBLOHD":
-		return color.RGBA{0x99, 0x44, 0x44, 0x99}, 0.7
+		// Pipelines / cables: brownish dashed in S-52; we draw solid for now.
+		return color.RGBA{0x82, 0x32, 0x32, 0x99}, 0.7
 	case "DAMCON":
-		return color.RGBA{0x55, 0x55, 0x55, 0xFF}, 1.0
+		return s52CHGRD, 1.0
 	case "PONTON":
-		// Pontoon outline only — interior fill made marinas look black.
-		return color.RGBA{0x55, 0x55, 0x55, 0xFF}, 0.8
+		return s52CHGRD, 0.8
 	case "DOCARE", "HRBFAC", "HRBARE", "PIPARE":
-		// Outline-only area features.
-		return color.RGBA{0x66, 0x66, 0x66, 0x99}, 0.7
+		return color.RGBA{0x66, 0x66, 0x66, 0x99}, 0.6
 	}
 	return nil, 0
 }
 
 // drawPoint renders point/multi-point features (buoys, beacons, lights,
-// hazards, soundings). The shapes are intentionally simple — no S-52 symbology —
-// but the colours track the COLOUR attribute when present. `scale` grows symbol
-// sizes with zoom so a 3-px circle isn't a 1-px speck at z=16.
+// hazards, soundings). Shapes follow S-52 conventions where it matters most
+// for navigation: BOYSHP/BCNSHP drives the silhouette, COLOUR drives the fill
+// (and a second colour stripes for safe-water/isolated-danger marks).
 func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64) {
 	coords := f.Geometry().Coordinates
 	at := func(c []float64) (float64, float64) { return project(c[0], c[1]) }
@@ -1092,147 +941,313 @@ func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, l
 
 	switch class {
 	case "BOYLAT", "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
-		r := 3 * scale
-		first(func(px, py float64) {
-			dc.SetColor(buoyColour(f))
-			dc.DrawCircle(px, py, r)
-			dc.Fill()
-			dc.SetColor(color.Black)
-			dc.SetLineWidth(0.5 * scale)
-			dc.DrawCircle(px, py, r)
-			dc.Stroke()
-		})
+		first(func(px, py float64) { drawBuoy(dc, f, px, py, scale) })
 	case "BCNLAT", "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
-		half := 2.5 * scale
-		first(func(px, py float64) {
-			dc.SetColor(buoyColour(f))
-			dc.DrawRectangle(px-half, py-half, 2*half, 2*half)
-			dc.Fill()
-			dc.SetColor(color.Black)
-			dc.SetLineWidth(0.5 * scale)
-			dc.DrawRectangle(px-half, py-half, 2*half, 2*half)
-			dc.Stroke()
-		})
+		first(func(px, py float64) { drawBeacon(dc, f, px, py, scale) })
 	case "LIGHTS":
-		r := 3.5 * scale
-		first(func(px, py float64) {
-			dc.SetColor(color.RGBA{0xFF, 0xCC, 0x00, 0xFF})
-			dc.DrawCircle(px, py, r)
-			dc.Fill()
-			dc.SetColor(color.RGBA{0xCC, 0x00, 0xCC, 0xFF})
-			dc.SetLineWidth(0.8 * scale)
-			dc.DrawCircle(px, py, r)
-			dc.Stroke()
-		})
+		first(func(px, py float64) { drawLight(dc, f, px, py, scale) })
 	case "WRECKS", "OBSTRN":
-		// Real wrecks/obstructions: bold red cross.
+		// Wrecks / obstructions: red-magenta cross with sounding-style hash
+		// matching S-52's symbol. Bold so it pops over depth fills.
 		arm := 2.5 * scale
 		first(func(px, py float64) {
-			dc.SetColor(color.RGBA{0xCC, 0x00, 0x00, 0xFF})
+			dc.SetColor(s52CHMGD)
 			dc.SetLineWidth(1.2 * scale)
 			dc.DrawLine(px-arm, py-arm, px+arm, py+arm)
 			dc.DrawLine(px-arm, py+arm, px+arm, py-arm)
 			dc.Stroke()
 		})
 	case "UWTROC":
-		// Underwater rock — thousands per harbor cell. Subtle small + symbol so
-		// they don't blanket the chart. Use a thin, semi-transparent stroke.
+		// Underwater rock — small "+" so dense fields don't overpower the chart.
 		arm := 1.5 * scale
 		first(func(px, py float64) {
-			dc.SetColor(color.RGBA{0x99, 0x33, 0x33, 0xAA})
+			dc.SetColor(color.RGBA{0x82, 0x32, 0x32, 0xAA})
 			dc.SetLineWidth(0.6 * scale)
 			dc.DrawLine(px-arm, py, px+arm, py)
 			dc.DrawLine(px, py-arm, px, py+arm)
 			dc.Stroke()
 		})
 	case "MORFAC", "PILPNT", "MOORNG":
-		// Mooring/dolphin/pile point — small dark square, useful at harbor zoom.
+		// Mooring/dolphin/pile point — small black square.
 		half := 1.5 * scale
 		first(func(px, py float64) {
-			dc.SetColor(color.RGBA{0x33, 0x33, 0x33, 0xFF})
+			dc.SetColor(s52CHBLK)
 			dc.DrawRectangle(px-half, py-half, 2*half, 2*half)
 			dc.Fill()
 		})
 	case "ACHBRT":
-		// Anchorage berth — small open circle.
+		// Anchorage berth — magenta open circle (S-52 anchorage symbol).
 		r := 2.5 * scale
 		first(func(px, py float64) {
-			dc.SetColor(color.RGBA{0x99, 0x66, 0x00, 0xFF})
+			dc.SetColor(s52CHMGD)
 			dc.SetLineWidth(0.8 * scale)
 			dc.DrawCircle(px, py, r)
 			dc.Stroke()
 		})
 	case "SOUNDG":
-		// SOUNDG is a multi-point: each coord is (lon, lat, depth_in_metres).
-		// We render the depth in feet as a numeric label centred on the projected
-		// pixel position. Soft slate-blue, smaller than the chart's other symbols
-		// so dense fields don't visually dominate. If the Z coord is missing or
-		// invalid we fall back to a dot so the location is still visible.
-		soundColour := color.RGBA{0x55, 0x77, 0x99, 0xCC}
-		dc.SetColor(soundColour)
-		dc.SetFontFace(basicfont.Face7x13)
-		// Face7x13 is 13px; baseline ~6px, then grow gently with zoom.
-		fontScale := 0.45 * scale
-		dotR := 0.7 * scale
-		for _, c := range coords {
-			if len(c) < 2 {
-				continue
-			}
-			px, py := at(c)
-			if len(c) < 3 {
-				dc.DrawCircle(px, py, dotR)
-				dc.Fill()
-				continue
-			}
-			depthM := c[2]
-			if math.IsNaN(depthM) || depthM < 0 {
-				dc.DrawCircle(px, py, dotR)
-				dc.Fill()
-				continue
-			}
-			depthFt := math.Round(depthM * 3.28084)
-			label := fmt.Sprintf("%d", int(depthFt))
-			dc.Push()
-			dc.ScaleAbout(fontScale, fontScale, px, py)
-			dc.DrawStringAnchored(label, px, py, 0.5, 0.5)
-			dc.Pop()
-		}
+		drawSoundings(dc, coords, project, scale)
 	}
 }
 
-// buoyColour reads the COLOUR attribute (S-57 codes 1..13). NOAA cells store it
-// as a comma-separated string; we use the first colour present.
-func buoyColour(f *s57.Feature) color.Color {
+// drawBuoy paints a buoy at (px, py) shaped per BOYSHP and coloured per COLOUR.
+// Multi-colour buoys (e.g. safe-water red+white) get horizontal stripes via a
+// second-colour cap. Each buoy gets a thin black outline so it stays visible
+// against any depth band.
+func drawBuoy(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	colors := buoyColours(f)
+	primary := colors[0]
+	secondary := colors[0]
+	if len(colors) > 1 {
+		secondary = colors[1]
+	}
+	shape := intAttr(f, "BOYSHP")
+	r := 2.6 * scale
+	switch shape {
+	case 1: // conical (point up)
+		drawTriangleUp(dc, px, py, r, primary, s52CHBLK, scale)
+	case 2: // can / cylindrical
+		w := 2.0 * scale
+		h := 3.4 * scale
+		drawStripedRect(dc, px-w, py-h/2, 2*w, h, primary, secondary, s52CHBLK, scale)
+	case 3: // spherical
+		drawFilledCircle(dc, px, py, r, primary, secondary, s52CHBLK, scale)
+	case 4: // pillar
+		w := 1.6 * scale
+		h := 4.2 * scale
+		drawStripedRect(dc, px-w, py-h/2, 2*w, h, primary, secondary, s52CHBLK, scale)
+	case 5: // spar
+		w := 0.9 * scale
+		h := 4.6 * scale
+		drawStripedRect(dc, px-w, py-h/2, 2*w, h, primary, secondary, s52CHBLK, scale)
+	case 6: // barrel
+		w := 3.2 * scale
+		h := 2.0 * scale
+		drawStripedRect(dc, px-w/2, py-h/2, w, h, primary, secondary, s52CHBLK, scale)
+	default:
+		// Unknown shape — pillar is the most common default in NOAA cells.
+		w := 1.6 * scale
+		h := 4.0 * scale
+		drawStripedRect(dc, px-w, py-h/2, 2*w, h, primary, secondary, s52CHBLK, scale)
+	}
+}
+
+// drawBeacon paints a beacon: a thin vertical pillar (the "stick") with a
+// shape-specific topmark. Distinguishes from buoys so navigators see the
+// fixed-vs-floating difference at a glance.
+func drawBeacon(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	colors := buoyColours(f)
+	primary := colors[0]
+	// Stick: thin vertical line below the topmark.
+	stickH := 4.0 * scale
+	dc.SetColor(s52CHBLK)
+	dc.SetLineWidth(0.8 * scale)
+	dc.DrawLine(px, py, px, py+stickH)
+	dc.Stroke()
+	// Topmark: small filled square at the head.
+	half := 1.6 * scale
+	dc.SetColor(primary)
+	dc.DrawRectangle(px-half, py-half*2, 2*half, 2*half)
+	dc.Fill()
+	dc.SetColor(s52CHBLK)
+	dc.SetLineWidth(0.5 * scale)
+	dc.DrawRectangle(px-half, py-half*2, 2*half, 2*half)
+	dc.Stroke()
+}
+
+// drawLight paints a yellow flare with a magenta accent. S-52's light symbol
+// is a small magenta dot with a yellow flare extending toward the bearing of
+// the strongest sector — we just render a yellow flare pointing up-right which
+// reads as "light here" without needing the full sector geometry.
+func drawLight(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	_ = f
+	// Yellow flare: small triangle pointing up-right from the position.
+	flare := 4.0 * scale
+	dc.SetColor(s52LITYW)
+	dc.MoveTo(px, py)
+	dc.LineTo(px+flare, py-flare*0.4)
+	dc.LineTo(px+flare*0.4, py-flare)
+	dc.ClosePath()
+	dc.Fill()
+	dc.SetColor(s52CHMGD)
+	dc.SetLineWidth(0.6 * scale)
+	dc.MoveTo(px, py)
+	dc.LineTo(px+flare, py-flare*0.4)
+	dc.LineTo(px+flare*0.4, py-flare)
+	dc.ClosePath()
+	dc.Stroke()
+	// Magenta dot at the position itself.
+	dc.SetColor(s52CHMGD)
+	dc.DrawCircle(px, py, 1.0*scale)
+	dc.Fill()
+}
+
+func drawTriangleUp(dc *gg.Context, px, py, r float64, fill, outline color.Color, scale float64) {
+	dc.MoveTo(px, py-r)
+	dc.LineTo(px+r*0.866, py+r*0.5)
+	dc.LineTo(px-r*0.866, py+r*0.5)
+	dc.ClosePath()
+	dc.SetColor(fill)
+	dc.Fill()
+	dc.MoveTo(px, py-r)
+	dc.LineTo(px+r*0.866, py+r*0.5)
+	dc.LineTo(px-r*0.866, py+r*0.5)
+	dc.ClosePath()
+	dc.SetColor(outline)
+	dc.SetLineWidth(0.5 * scale)
+	dc.Stroke()
+}
+
+func drawFilledCircle(dc *gg.Context, px, py, r float64, fill, accent, outline color.Color, scale float64) {
+	dc.SetColor(fill)
+	dc.DrawCircle(px, py, r)
+	dc.Fill()
+	if accent != fill {
+		// Half-fill the bottom half with the accent colour for two-tone
+		// spheres (isolated-danger black+red, etc.).
+		dc.Push()
+		dc.DrawRectangle(px-r, py, 2*r, r)
+		dc.Clip()
+		dc.SetColor(accent)
+		dc.DrawCircle(px, py, r)
+		dc.Fill()
+		dc.Pop()
+	}
+	dc.SetColor(outline)
+	dc.SetLineWidth(0.5 * scale)
+	dc.DrawCircle(px, py, r)
+	dc.Stroke()
+}
+
+// drawStripedRect fills a rectangle and, if a second colour is given, paints
+// the bottom half in that colour — which gives lateral marks their two-tone
+// look (red/white safe-water buoys, etc.) without needing per-pixel patterns.
+func drawStripedRect(dc *gg.Context, x, y, w, h float64, primary, secondary, outline color.Color, scale float64) {
+	dc.SetColor(primary)
+	dc.DrawRectangle(x, y, w, h)
+	dc.Fill()
+	if secondary != primary {
+		dc.SetColor(secondary)
+		dc.DrawRectangle(x, y+h/2, w, h/2)
+		dc.Fill()
+	}
+	dc.SetColor(outline)
+	dc.SetLineWidth(0.5 * scale)
+	dc.DrawRectangle(x, y, w, h)
+	dc.Stroke()
+}
+
+func drawSoundings(dc *gg.Context, coords [][]float64, project func(lon, lat float64) (float64, float64), scale float64) {
+	at := func(c []float64) (float64, float64) { return project(c[0], c[1]) }
+	dc.SetColor(s52SNDG1)
+	dc.SetFontFace(basicfont.Face7x13)
+	fontScale := 0.45 * scale
+	dotR := 0.7 * scale
+	for _, c := range coords {
+		if len(c) < 2 {
+			continue
+		}
+		px, py := at(c)
+		if len(c) < 3 {
+			dc.DrawCircle(px, py, dotR)
+			dc.Fill()
+			continue
+		}
+		depthM := c[2]
+		if math.IsNaN(depthM) || depthM < 0 {
+			dc.DrawCircle(px, py, dotR)
+			dc.Fill()
+			continue
+		}
+		depthFt := math.Round(depthM * feetPerMetre)
+		label := fmt.Sprintf("%d", int(depthFt))
+		dc.Push()
+		dc.ScaleAbout(fontScale, fontScale, px, py)
+		dc.DrawStringAnchored(label, px, py, 0.5, 0.5)
+		dc.Pop()
+	}
+}
+
+// s57ColourCode maps an S-57 COLOUR code (1..13) to its S-52 RGB.
+func s57ColourCode(code string) color.RGBA {
+	switch strings.TrimSpace(code) {
+	case "1": // white
+		return s52CHWHT
+	case "2": // black
+		return s52CHBLK
+	case "3": // red
+		return s52CHRED
+	case "4": // green
+		return s52CHGRN
+	case "5": // blue
+		return color.RGBA{0x14, 0x46, 0xCC, 0xFF}
+	case "6": // yellow
+		return s52CHYLW
+	case "7": // grey
+		return s52CHGRD
+	case "8": // brown
+		return s52CHBRN
+	case "9": // amber
+		return color.RGBA{0xFF, 0xA5, 0x00, 0xFF}
+	case "10": // violet
+		return color.RGBA{0x82, 0x46, 0xC8, 0xFF}
+	case "11": // orange
+		return color.RGBA{0xFF, 0x6E, 0x00, 0xFF}
+	case "12": // magenta
+		return s52CHMGD
+	case "13": // pink
+		return color.RGBA{0xFF, 0xB4, 0xD2, 0xFF}
+	}
+	return s52CHGRF
+}
+
+// buoyColours returns the COLOUR attribute as an ordered list of S-52 RGB
+// colours. NOAA cells store COLOUR as a comma-separated string of S-57 codes
+// (e.g. "3,1" for red+white safe-water marks). Always returns at least one
+// colour (grey fallback) so callers never have to bounds-check.
+func buoyColours(f *s57.Feature) []color.RGBA {
 	v, ok := f.Attribute("COLOUR")
 	if !ok {
-		return color.RGBA{0x80, 0x80, 0x80, 0xFF}
+		return []color.RGBA{s52CHGRF}
 	}
 	s, _ := v.(string)
 	if s == "" {
-		return color.RGBA{0x80, 0x80, 0x80, 0xFF}
+		return []color.RGBA{s52CHGRF}
 	}
-	first := strings.SplitN(s, ",", 2)[0]
-	switch strings.TrimSpace(first) {
-	case "1":
-		return color.White
-	case "2":
-		return color.Black
-	case "3":
-		return color.RGBA{0xCC, 0x00, 0x00, 0xFF}
-	case "4":
-		return color.RGBA{0x00, 0x99, 0x00, 0xFF}
-	case "5":
-		return color.RGBA{0x00, 0x44, 0xCC, 0xFF}
-	case "6":
-		return color.RGBA{0xFF, 0xCC, 0x00, 0xFF}
-	case "7":
-		return color.RGBA{0xCC, 0x66, 0x00, 0xFF}
-	case "8":
-		return color.RGBA{0xCC, 0x33, 0xCC, 0xFF}
-	case "9":
-		return color.RGBA{0xFF, 0x99, 0xCC, 0xFF}
+	parts := strings.Split(s, ",")
+	out := make([]color.RGBA, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, s57ColourCode(p))
 	}
-	return color.RGBA{0x80, 0x80, 0x80, 0xFF}
+	if len(out) == 0 {
+		return []color.RGBA{s52CHGRF}
+	}
+	return out
+}
+
+// intAttr returns the integer-valued S-57 attribute, or 0 if missing or not
+// representable as an integer. Used for enumerated attributes like BOYSHP.
+func intAttr(f *s57.Feature, key string) int {
+	v, ok := f.Attribute(key)
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case float32:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		var i int
+		_, _ = fmt.Sscanf(strings.TrimSpace(n), "%d", &i)
+		return i
+	}
+	return 0
 }
 
 func numAttr(v any) float64 {

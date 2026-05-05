@@ -107,7 +107,7 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, safeDepthFt).Register(mux)
+	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, safeDepthFt).Register(mux)
 	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
 
 	// Per-process instance ID. The frontend polls /version and reloads when it
