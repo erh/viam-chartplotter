@@ -30,7 +30,34 @@
   // Track timeout IDs and blob URLs for cleanup
   let updateLoopTimeout: number | undefined;
   let cloudLoopTimeout: number | undefined;
+  let versionLoopTimeout: number | undefined;
   let cameraBlobUrls: Record<string, string> = {};
+
+  // Server instance ID seen on first successful /version fetch. When the
+  // module restarts (e.g. after an upgrade) the ID changes and we reload
+  // so the browser picks up the new build without a manual refresh.
+  let serverInstanceID: string | null = null;
+
+  async function checkServerVersion() {
+    try {
+      const resp = await fetch("/version", { cache: "no-store" });
+      if (resp.ok) {
+        const data = await resp.json();
+        const id = data?.instance;
+        if (typeof id === "string" && id !== "") {
+          if (serverInstanceID === null) {
+            serverInstanceID = id;
+          } else if (id !== serverInstanceID) {
+            window.location.reload();
+            return;
+          }
+        }
+      }
+    } catch {
+      // Server unreachable (mid-restart). Try again on the next tick.
+    }
+    versionLoopTimeout = setTimeout(checkServerVersion, 10000);
+  }
 
   let globalData = $state({
     pos: new Coordinate(0, 0),
@@ -1206,6 +1233,7 @@
 
   onMount(() => {
     start();
+    checkServerVersion();
     window.addEventListener("keydown", handleKeydown);
     window.addEventListener("hashchange", syncFromHash);
     syncFromHash();
@@ -1218,6 +1246,9 @@
     }
     if (cloudLoopTimeout !== undefined) {
       clearTimeout(cloudLoopTimeout);
+    }
+    if (versionLoopTimeout !== undefined) {
+      clearTimeout(versionLoopTimeout);
     }
 
     // Revoke all blob URLs to free memory

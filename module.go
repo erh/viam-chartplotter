@@ -2,7 +2,10 @@ package vc
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -105,6 +108,15 @@ func StartChartplotterServer(
 	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, safeDepthFt).Register(mux)
 	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
 
+	// Per-process instance ID. The frontend polls /version and reloads when it
+	// changes, so the browser picks up a new build/restart without manual refresh.
+	instanceID := newInstanceID()
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]string{"instance": instanceID})
+	})
+
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)
 	go func() {
@@ -131,4 +143,15 @@ func (r *chartplotterResource) Close(ctx context.Context) error {
 
 func (r *chartplotterResource) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	return nil, nil
+}
+
+func newInstanceID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand only fails on a broken OS RNG; fall back to a fixed
+		// string so the endpoint still responds (and reload-on-change still
+		// works on the next successful start).
+		return "fallback"
+	}
+	return hex.EncodeToString(b[:])
 }
