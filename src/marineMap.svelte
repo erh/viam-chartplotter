@@ -55,6 +55,17 @@
     },
   });
 
+  // Popup shown when the user clicks a route segment in edit mode. Offers a
+  // single "add waypoint here" action that inserts a new waypoint between the
+  // segment's two endpoints.
+  let insertPopupState = $state({
+    overlay: null as Overlay | null,
+    visible: false,
+    lat: 0,
+    lng: 0,
+    beforeId: "",
+  });
+
   let layersExpanded = $state(false);
   let boatsExpanded = $state(false);
   let mapLoaded = $state(false);
@@ -388,6 +399,7 @@
     navWaypoints,
     onAddWaypoint,
     onMoveWaypoint,
+    onInsertWaypoint,
     onClearWaypoints,
     onReady,
     boatDetailSlot,
@@ -409,6 +421,10 @@
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
     onMoveWaypoint?: (id: string, lat: number, lng: number) => void;
+    /** Called when the user picks "add waypoint here" on a route segment.
+     *  beforeId is the ID of the waypoint the new one should sort before;
+     *  empty string means "append to the end of the route". */
+    onInsertWaypoint?: (beforeId: string, lat: number, lng: number) => void;
     /** Called when the user clicks the clear-route button. */
     onClearWaypoints?: () => void;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
@@ -650,8 +666,22 @@
       const lineCoords = startCoord ? [startCoord, ...wpCoords] : wpCoords;
 
       if (lineCoords.length >= 2) {
+        // Each segment ends at the waypoint with this ID. When the user picks
+        // "add waypoint here" on segment i the new wp is inserted *before*
+        // this id, which keeps the segment's right endpoint stable.
+        const segmentBeforeIds: string[] = [];
+        for (let i = 1; i < lineCoords.length; i++) {
+          // line index i corresponds to wp index (i - offset) where offset is
+          // 1 if the line starts at the boat, 0 otherwise.
+          const wpIdx = startCoord ? i - 1 : i;
+          segmentBeforeIds.push(navWaypoints[wpIdx].id);
+        }
         mapGlobal.navRouteLineFeatures.push(
-          new Feature({ type: "navRoute", geometry: new LineString(lineCoords) })
+          new Feature({
+            type: "navRoute",
+            segmentBeforeIds,
+            geometry: new LineString(lineCoords),
+          })
         );
       }
     }
@@ -1151,6 +1181,9 @@
     } else if ((!addWaypointActive || !onMoveWaypoint) && waypointModifyInteraction) {
       uninstallWaypointModify();
     }
+    if (!addWaypointActive && insertPopupState.visible) {
+      closeInsertPopup();
+    }
   });
 
   function installWaypointModify() {
@@ -1184,6 +1217,55 @@
     }
     waypointModifyInteraction = null;
     draggingWaypointId = null;
+  }
+
+  // Returns the index of the segment in `coords` (i.e. the segment from
+  // coords[i] to coords[i+1]) that lies closest to `pt`. Distances are in the
+  // map's projected units, which is fine for "which one did I click" — we
+  // only care about the relative ordering, not absolute meters.
+  function closestSegmentIndex(coords: number[][], pt: number[]): number {
+    let best = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const d = pointSegmentDist(pt, coords[i], coords[i + 1]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function pointSegmentDist(p: number[], a: number[], b: number[]): number {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq === 0 ? 0 : ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a[0] + t * dx;
+    const cy = a[1] + t * dy;
+    const ex = p[0] - cx;
+    const ey = p[1] - cy;
+    return Math.sqrt(ex * ex + ey * ey);
+  }
+
+  function showInsertPopup(coord: number[], beforeId: string) {
+    insertPopupState.lng = coord[0];
+    insertPopupState.lat = coord[1];
+    insertPopupState.beforeId = beforeId;
+    insertPopupState.visible = true;
+    insertPopupState.overlay?.setPosition(coord);
+  }
+
+  function closeInsertPopup() {
+    insertPopupState.visible = false;
+    insertPopupState.overlay?.setPosition(undefined);
+  }
+
+  function confirmInsertWaypoint() {
+    if (!onInsertWaypoint) return;
+    onInsertWaypoint(insertPopupState.beforeId, insertPopupState.lat, insertPopupState.lng);
+    closeInsertPopup();
   }
 
   function toggleHeadsUp() {
@@ -1769,6 +1851,18 @@
     });
     mapGlobal.map.addOverlay(popupState.overlay);
 
+    // Setup insert-waypoint popup overlay (single button, anchored above the
+    // clicked spot on the route line).
+    const insertEl = document.getElementById("insert-waypoint-popup");
+    insertPopupState.overlay = new Overlay({
+      element: insertEl || undefined,
+      autoPan: false,
+      positioning: "bottom-center",
+      offset: [0, -10],
+      stopEvent: true,
+    });
+    mapGlobal.map.addOverlay(insertPopupState.overlay);
+
     // Setup depth tooltip overlay
     const depthTooltipElement = document.getElementById("depth-tooltip");
     const depthTooltipOverlay = new Overlay({
@@ -1792,9 +1886,32 @@
         return;
       }
       if (addWaypointActive && onAddWaypoint) {
+        // Prefer "insert between two waypoints" if the user clicked on the
+        // route line; otherwise fall through to the append behaviour.
+        if (onInsertWaypoint && navWaypoints && navWaypoints.length > 0) {
+          const lineFeature = mapGlobal.map!.forEachFeatureAtPixel(
+            evt.pixel,
+            (f) => (f.get("type") === "navRoute" ? (f as Feature<LineString>) : null),
+            { hitTolerance: 8 }
+          ) as Feature<LineString> | undefined;
+          if (lineFeature) {
+            const geom = lineFeature.getGeometry();
+            const segIds = lineFeature.get("segmentBeforeIds") as string[] | undefined;
+            if (geom && segIds && segIds.length > 0) {
+              const segIdx = closestSegmentIndex(geom.getCoordinates(), evt.coordinate);
+              const beforeId = segIds[Math.max(0, Math.min(segIds.length - 1, segIdx))];
+              showInsertPopup(evt.coordinate, beforeId);
+              return;
+            }
+          }
+        }
         const [lng, lat] = evt.coordinate;
         onAddWaypoint(lat, lng);
         return;
+      }
+      // Clicking outside any feature dismisses the insert popup if it's open.
+      if (insertPopupState.visible) {
+        closeInsertPopup();
       }
       const feature = mapGlobal.map!.forEachFeatureAtPixel(evt.pixel, function (f) {
         const type = f.get("type");
@@ -2113,6 +2230,18 @@
 
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
+
+  <!-- Insert-waypoint popup. Shown when the user clicks on a route segment in
+       edit mode. The element must always exist for OL's Overlay to bind to;
+       visibility is driven by class="hidden". -->
+  <div
+    id="insert-waypoint-popup"
+    class="insert-waypoint-popup"
+    class:hidden={!insertPopupState.visible}
+  >
+    <button class="insert-waypoint-btn" onclick={confirmInsertWaypoint}>+ Add waypoint here</button>
+    <button class="insert-waypoint-close" onclick={closeInsertPopup} aria-label="Cancel">✕</button>
+  </div>
 
   {#if inPanMode}
     <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
@@ -2892,6 +3021,55 @@
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
     z-index: 1000;
     white-space: nowrap;
+  }
+
+  .insert-waypoint-popup {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid #f59e0b;
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    z-index: 1002;
+    white-space: nowrap;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+  }
+
+  .insert-waypoint-popup.hidden {
+    display: none;
+  }
+
+  .insert-waypoint-btn {
+    background: #f59e0b;
+    color: #1f2937;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .insert-waypoint-btn:hover {
+    background: #d97706;
+  }
+
+  .insert-waypoint-close {
+    background: transparent;
+    color: #fde68a;
+    border: none;
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .insert-waypoint-close:hover {
+    color: white;
   }
 
   /* Next/final waypoint overlay. Sits above the bottom-left stop-panning area

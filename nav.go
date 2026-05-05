@@ -170,16 +170,26 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 }
 
 // DoCommand exposes service-specific commands that don't have a first-class
-// gRPC method on the navigation API. Currently:
+// gRPC method on the navigation API:
 //
-//	{"move_waypoint": {"id": "<hex>", "lat": <float>, "lng": <float>}}
+//	{"move_waypoint":   {"id": "<hex>", "lat": <float>, "lng": <float>}}
+//	{"insert_waypoint": {"before_id": "<hex>", "lat": <float>, "lng": <float>}}
 //
-// updates an existing waypoint in place (preserving its ID and order).
+// move_waypoint updates an existing waypoint in place (preserving its ID and
+// order). insert_waypoint inserts a new waypoint immediately before the
+// waypoint with the given before_id; an empty/missing before_id is equivalent
+// to AddWayPoint (append).
 func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	raw, ok := cmd["move_waypoint"]
-	if !ok {
-		return nil, resource.ErrDoUnimplemented
+	if raw, ok := cmd["move_waypoint"]; ok {
+		return s.doMoveWaypoint(ctx, raw)
 	}
+	if raw, ok := cmd["insert_waypoint"]; ok {
+		return s.doInsertWaypoint(ctx, raw)
+	}
+	return nil, resource.ErrDoUnimplemented
+}
+
+func (s *navService) doMoveWaypoint(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
 	m, ok := raw.(map[string]interface{})
 	if !ok {
 		return nil, errors.New("move_waypoint payload must be an object")
@@ -209,6 +219,39 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 		return nil, err
 	}
 	return map[string]interface{}{"ok": true}, nil
+}
+
+func (s *navService) doInsertWaypoint(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("insert_waypoint payload must be an object")
+	}
+	lat, latOK := m["lat"].(float64)
+	lng, lngOK := m["lng"].(float64)
+	if !latOK || !lngOK {
+		return nil, errors.New("insert_waypoint.lat and insert_waypoint.lng are required numbers")
+	}
+	var beforeID primitive.ObjectID
+	if idStr, _ := m["before_id"].(string); idStr != "" {
+		parsed, err := primitive.ObjectIDFromHex(idStr)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid insert_waypoint.before_id %q", idStr)
+		}
+		beforeID = parsed
+	}
+	inserter, ok := s.store.(interface {
+		InsertWaypoint(ctx context.Context, point *geo.Point, beforeID primitive.ObjectID) (navigation.Waypoint, error)
+	})
+	if !ok {
+		return nil, errors.New("waypoint store does not support insert")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wp, err := inserter.InsertWaypoint(ctx, geo.NewPoint(lat, lng), beforeID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"ok": true, "id": wp.ID.Hex()}, nil
 }
 
 func (s *navService) Close(ctx context.Context) error {

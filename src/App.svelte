@@ -1333,6 +1333,31 @@
     }
   }
 
+  async function insertNavWaypoint(beforeId: string, lat: number, lng: number) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    try {
+      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
+        VIAM.Struct.fromJson({ insert_waypoint: { before_id: beforeId, lat, lng } })
+      );
+      // Optimistically splice; the next poll will reconcile with the service.
+      const idx = beforeId
+        ? globalData.navWaypoints.findIndex((wp) => wp.id === beforeId)
+        : -1;
+      const placeholder = { id: `pending-${Date.now()}`, lat, lng };
+      if (idx >= 0) {
+        globalData.navWaypoints = [
+          ...globalData.navWaypoints.slice(0, idx),
+          placeholder,
+          ...globalData.navWaypoints.slice(idx),
+        ];
+      } else {
+        globalData.navWaypoints = [...globalData.navWaypoints, placeholder];
+      }
+    } catch (e) {
+      errorHandler(e, "insertWayPoint");
+    }
+  }
+
   async function moveNavWaypoint(id: string, lat: number, lng: number) {
     if (!globalClient || !globalConfig.navServiceName) return;
     if (!id || id.startsWith("pending-")) return;
@@ -1467,6 +1492,7 @@
       navWaypoints={globalData.navWaypoints}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
+      onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
     ></MarineMap>
 

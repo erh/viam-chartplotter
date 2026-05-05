@@ -169,6 +169,57 @@ func (s *diskNavStore) RemoveWaypoint(ctx context.Context, id primitive.ObjectID
 	return nil
 }
 
+// InsertWaypoint inserts a new waypoint immediately before the waypoint with
+// the given ID, preserving the order of every other waypoint. If beforeID is
+// the zero ObjectID the new waypoint is appended to the end (equivalent to
+// AddWaypoint). It is not part of the upstream NavStore interface; the
+// chartplotter UI uses it (via DoCommand) to "add waypoint here" between two
+// existing legs.
+func (s *diskNavStore) InsertWaypoint(
+	ctx context.Context,
+	point *geo.Point,
+	beforeID primitive.ObjectID,
+) (navigation.Waypoint, error) {
+	if err := ctx.Err(); err != nil {
+		return navigation.Waypoint{}, err
+	}
+	if point == nil {
+		return navigation.Waypoint{}, errors.New("waypoint location is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wp := &navigation.Waypoint{
+		ID:   primitive.NewObjectID(),
+		Lat:  point.Lat(),
+		Long: point.Lng(),
+	}
+	insertAt := len(s.waypoints)
+	if !beforeID.IsZero() {
+		found := false
+		for i, existing := range s.waypoints {
+			if existing.ID == beforeID {
+				insertAt = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			return navigation.Waypoint{}, errors.Errorf("no waypoint with id %s", beforeID.Hex())
+		}
+	}
+	prev := s.waypoints
+	next := make([]*navigation.Waypoint, 0, len(prev)+1)
+	next = append(next, prev[:insertAt]...)
+	next = append(next, wp)
+	next = append(next, prev[insertAt:]...)
+	s.waypoints = next
+	if err := s.save(); err != nil {
+		s.waypoints = prev
+		return navigation.Waypoint{}, err
+	}
+	return *wp, nil
+}
+
 // MoveWaypoint updates the lat/long of an existing waypoint in place,
 // preserving its ID and order. It is not part of the upstream NavStore
 // interface; the chartplotter UI uses it (via DoCommand) to support
