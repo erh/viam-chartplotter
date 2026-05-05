@@ -124,18 +124,56 @@ func (c *NoaaCache) cachePath(canonical string) string {
 	return filepath.Join(c.cacheDir, hex[:2], hex+".bin")
 }
 
-// fetch returns the cached bytes and content-type for the given canonical query, fetching
-// from upstream and persisting if not yet cached. Cache entries older than staleAfter are
-// treated as misses and refetched.
+// fetch returns the cached bytes and content-type for the given canonical
+// query. Behaviour:
+//   - Fresh on disk (mtime within staleAfter): serve from disk, no upstream call.
+//   - Stale on disk: serve the stale bytes immediately and kick a background
+//     refresh. If upstream is down we keep serving the old copy rather than
+//     leaving the client with nothing.
+//   - Nothing on disk: block on upstream and write through to disk.
 func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte, string, error) {
 	path := c.cachePath(canonical)
 	if info, err := os.Stat(path); err == nil {
-		if c.staleAfter <= 0 || time.Since(info.ModTime()) < c.staleAfter {
-			if data, err := os.ReadFile(path); err == nil {
-				return data, format, nil
+		if data, err := os.ReadFile(path); err == nil {
+			stale := c.staleAfter > 0 && time.Since(info.ModTime()) >= c.staleAfter
+			if stale {
+				go c.refreshAsync(canonical, format)
 			}
+			return data, format, nil
 		}
 	}
+	// No usable disk copy — must wait for upstream.
+	return c.fetchAndStore(ctx, canonical, format)
+}
+
+// refreshAsync triggers a fire-and-forget upstream refresh for `canonical`.
+// Skips if a fetch (sync or async) for the same key is already in flight, so
+// repeated requests against a stale tile only generate one upstream attempt
+// at a time. Errors are logged at Debug — the caller has already been served
+// the stale bytes.
+func (c *NoaaCache) refreshAsync(canonical, format string) {
+	c.mu.Lock()
+	if _, busy := c.inflight[canonical]; busy {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
+	// Detached from any request context: a client closing its socket must not
+	// abort an in-progress refresh, since the *next* request still wants the
+	// fresh bytes on disk.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, _, err := c.fetchAndStore(ctx, canonical, format); err != nil {
+		c.logger.Debugf("noaa cache bg refresh: %v", err)
+	}
+}
+
+// fetchAndStore performs a synchronous upstream fetch and persists a 200
+// response to disk. Concurrent calls for the same key are de-duped via
+// `inflight` — followers wait, then read the file the leader wrote.
+func (c *NoaaCache) fetchAndStore(ctx context.Context, canonical, format string) ([]byte, string, error) {
+	path := c.cachePath(canonical)
 
 	c.mu.Lock()
 	if wg, ok := c.inflight[canonical]; ok {
@@ -144,6 +182,8 @@ func (c *NoaaCache) fetch(ctx context.Context, canonical, format string) ([]byte
 		if data, err := os.ReadFile(path); err == nil {
 			return data, format, nil
 		}
+		// Leader's fetch failed and didn't write anything — fall through and
+		// try upstream ourselves.
 	} else {
 		wg := &sync.WaitGroup{}
 		wg.Add(1)
