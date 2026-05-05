@@ -81,6 +81,11 @@ func (c *NoaaCache) Register(mux *http.ServeMux) {
 
 // canonicalQuery returns a stable representation of the WMS query string so different
 // orderings/cases of the same logical request hash to the same cache key.
+//
+// Params whose name starts with `_` are treated as client-only (e.g. an
+// OpenLayers cache-buster `_v=<build hash>`). They're dropped here so a new
+// build doesn't invalidate every previously-cached tile, and so we don't
+// forward them upstream to NOAA where they're meaningless.
 func canonicalQuery(raw string) (string, string, error) {
 	values, err := url.ParseQuery(raw)
 	if err != nil {
@@ -89,6 +94,9 @@ func canonicalQuery(raw string) (string, string, error) {
 	keys := make([]string, 0, len(values))
 	upper := url.Values{}
 	for k, v := range values {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
 		uk := strings.ToUpper(k)
 		upper[uk] = append(upper[uk], v...)
 		keys = append(keys, uk)

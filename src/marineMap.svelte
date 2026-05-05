@@ -1598,7 +1598,11 @@
         zIndex: 4,
         source: new TileWMS({
           url: noaaWmsUrl,
-          params: { LAYERS: "0,1,2,3,4,5,6", _v: tileGenVersion },
+          // No _v cache-buster: NOAA tiles don't change with our build, and
+          // including it makes every restart with a dirty tree (vite injects
+          // a fresh Date.now() into __GIT_HASH__) generate a new disk-cache
+          // key — so the proxy cache reads as empty after every restart.
+          params: { LAYERS: "0,1,2,3,4,5,6" },
           transition: 300,
         }),
       }),
