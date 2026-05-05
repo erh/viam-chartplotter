@@ -65,6 +65,18 @@ const defaultArrivalRadiusMeters = 200.0
 // boat speeds (~30 m at 12 kn, well under the default radius).
 const arrivalCheckInterval = 5 * time.Second
 
+// bypassRadiusMultiplier × ArrivalRadiusMeters is the largest "closest
+// approach" distance that still counts as "we did try to hit this one"
+// for the local-minimum-bypass rule. Beyond this, we won't infer arrival
+// from passing geometry alone — it's more likely the user re-routed or
+// added a stale waypoint.
+const bypassRadiusMultiplier = 5.0
+
+// passEpsilonMeters is how much the boat's distance from the target must
+// grow past its recorded minimum before we treat it as "moving away."
+// Sized to comfortably exceed typical GPS jitter at the 5 s tick rate.
+const passEpsilonMeters = 30.0
+
 func newNav(
 	ctx context.Context,
 	deps resource.Dependencies,
@@ -132,6 +144,20 @@ type navService struct {
 	// Cancellation for the background arrival poller, if started.
 	arrivalCancel context.CancelFunc
 	arrivalDone   chan struct{}
+
+	// Rolling approach memory for the current next-waypoint. Read/written
+	// only from the arrival poller goroutine, so no synchronisation needed.
+	arrivalState arrivalState
+}
+
+// arrivalState tracks the closest the boat has been to targetID on the
+// current approach. Used for the bypass rule: if we hit a local minimum
+// in distance and started getting further away while simultaneously
+// getting closer to the *next* waypoint, we've passed targetID even if
+// we never crossed the absolute arrival radius.
+type arrivalState struct {
+	targetID    primitive.ObjectID
+	minDistance float64 // km
 }
 
 // startArrivalPoller launches a background goroutine that periodically
@@ -159,15 +185,25 @@ func (s *navService) startArrivalPoller(radiusMeters float64) {
 }
 
 // checkArrival is one tick of the arrival poller: pull the boat's position,
-// look up the next unvisited waypoint, and mark it visited if we're inside
-// the arrival radius. All errors are logged at debug level — the loop keeps
-// running so an intermittent GPS hiccup doesn't disable auto-arrival.
+// look up the next unvisited waypoint, and mark it visited if either:
+//   - we're inside the arrival radius, or
+//   - we hit a local minimum in distance to the next waypoint AND we're now
+//     closer to the waypoint after it than to the next one — i.e. we
+//     rounded a corner outside the radius but clearly passed the point.
+//
+// Errors are surfaced at warn so an unhealthy sensor or store is visible
+// in logs; the loop still keeps running so a transient blip doesn't
+// disable auto-arrival.
 func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 	if s.ms == nil {
 		return
 	}
 	pt, _, err := s.ms.Position(ctx, nil)
-	if err != nil || pt == nil {
+	if err != nil {
+		s.logger.Warnw("arrival poller: movement sensor Position failed", "err", err)
+		return
+	}
+	if pt == nil {
 		return
 	}
 	// Bail on null-island fixes; some movement sensors emit (0,0) before they
@@ -176,20 +212,56 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		return
 	}
 	wps, err := s.store.Waypoints(ctx)
-	if err != nil || len(wps) == 0 {
+	if err != nil {
+		s.logger.Warnw("arrival poller: Waypoints failed", "err", err)
+		return
+	}
+	if len(wps) == 0 {
 		return
 	}
 	next := wps[0]
-	dist := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
-	if dist > radiusKm {
+	distNext := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
+
+	// Reset rolling approach memory whenever the active target changes
+	// (first run, previous waypoint visited, list edited, etc.).
+	if s.arrivalState.targetID != next.ID {
+		s.arrivalState = arrivalState{targetID: next.ID, minDistance: distNext}
+	} else if distNext < s.arrivalState.minDistance {
+		s.arrivalState.minDistance = distNext
+	}
+
+	arrived := false
+	reason := ""
+	if distNext <= radiusKm {
+		arrived = true
+		reason = "inside arrival radius"
+	} else if len(wps) >= 2 {
+		// Bypass rule: requires (1) a usable "after-next" waypoint to compare
+		// against, (2) we actually got reasonably close, (3) distance is now
+		// growing past the minimum by more than GPS noise, and (4) the boat
+		// is geometrically closer to the after-next than to the next.
+		afterNext := wps[1]
+		distAfter := pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
+		passEpsKm := passEpsilonMeters / 1000.0
+		bypassMaxKm := radiusKm * bypassRadiusMultiplier
+		if s.arrivalState.minDistance < bypassMaxKm &&
+			distNext > s.arrivalState.minDistance+passEpsKm &&
+			distAfter < distNext {
+			arrived = true
+			reason = "passed (local min + closer to next)"
+		}
+	}
+
+	if !arrived {
 		return
 	}
+
 	if err := s.store.WaypointVisited(ctx, next.ID); err != nil {
-		s.logger.Debugw("WaypointVisited failed", "err", err)
+		s.logger.Warnw("arrival poller: WaypointVisited failed", "err", err, "id", next.ID.Hex())
 		return
 	}
-	s.logger.Infof("arrived at waypoint %s (%.0f m); marking visited",
-		next.ID.Hex(), dist*1000)
+	s.logger.Infof("arrived at waypoint %s (%.0f m, %s); marking visited",
+		next.ID.Hex(), distNext*1000, reason)
 }
 
 func (s *navService) Name() resource.Name { return s.name }
