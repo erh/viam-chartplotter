@@ -281,7 +281,8 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 			drawCell(chart, pass)
 		}
 		if pass == passAreas && hasBath {
-			r.compositeBathymetry(dc, cells, bbox, project, soundings, safeDepthM, z)
+			r.compositeBathymetry(dc, cells, bbox, project, soundings, safeDepthM, z,
+				tileXmin, tileYmin, tileXmax, tileYmax)
 		}
 	}
 
@@ -292,27 +293,48 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 	return buf.Bytes(), nil
 }
 
-// soundingPx is a SOUNDG point projected into tile pixel space.
-type soundingPx struct{ px, py, depthM float64 }
+// soundingPt is a depth seed for the IDW field, stored in EPSG:3857 mercator
+// metres so the IDW computation is invariant under map zoom (the same physical
+// location reads the same depth no matter how zoomed-in the tile is). Pixel
+// space would not be invariant — at higher zoom, one metre is more pixels, so
+// distance-based weights shift the field.
+type soundingPt struct{ mx, my, depthM float64 }
 
 // gatherSoundings collects every SOUNDG vertex AND every DEPARE polygon's
-// centroid from the supplied cells, projected into tile-pixel space. SOUNDG
-// gives the spot-depth measurements; DEPARE centroids encode the polygon's
-// DRVAL1 directly into the IDW field so dredged channels carry their
-// canonical "this is N metres deep" reading even without any soundings.
+// centroid (plus stride-sampled vertices for normally-sized polygons) from
+// the supplied cells, projected to mercator metres. SOUNDG gives the spot
+// soundings; DEPARE centroids encode the polygon's DRVAL1 directly into the
+// IDW field so dredged channels carry their canonical "this is N metres deep"
+// reading even without any soundings.
+//
+// Oversized DEPARE polygons (continent-sized overview rings) are still
+// allowed to seed the IDW via their centroid only — skipping their boundary
+// vertices, which sit on the coast and would otherwise dominate coastal
+// tiles' IDW with their offshore depth.
 //
 // Padding ensures features just outside the tile still influence pixels near
 // the tile edge so the IDW field has no hard tile-boundary seams.
-func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64)) []soundingPx {
-	padLon := (bbox.MaxLon - bbox.MinLon) * 0.5
-	padLat := (bbox.MaxLat - bbox.MinLat) * 0.5
+func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64)) []soundingPt {
+	// Pad by max(50% of the tile, absMinPad). The relative term keeps things
+	// proportional at low zoom; the absolute floor stabilises the seed set at
+	// high zoom, where 50% of a tiny tile would otherwise gather only a
+	// handful of nearby points and the IDW field would flip every time the
+	// user zoomed in another step. ~0.05° ≈ 5.5 km is a reasonable IDW
+	// influence radius for coastal navigation.
+	const absMinPad = 0.05
+	padLon := math.Max((bbox.MaxLon-bbox.MinLon)*0.5, absMinPad)
+	padLat := math.Max((bbox.MaxLat-bbox.MinLat)*0.5, absMinPad)
 	queryBox := s57.Bounds{
 		MinLon: bbox.MinLon - padLon,
 		MinLat: bbox.MinLat - padLat,
 		MaxLon: bbox.MaxLon + padLon,
 		MaxLat: bbox.MaxLat + padLat,
 	}
-	var points []soundingPx
+	var points []soundingPt
+	addSeed := func(lon, lat, depthM float64) {
+		mx, my := lonLatToMerc(lon, lat)
+		points = append(points, soundingPt{mx: mx, my: my, depthM: depthM})
+	}
 	for _, cell := range cells {
 		chart, err := r.chartFor(cell.Name)
 		if err != nil || chart == nil {
@@ -328,15 +350,11 @@ func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project 
 					if math.IsNaN(c[2]) || c[2] < 0 {
 						continue
 					}
-					px, py := project(c[0], c[1])
-					points = append(points, soundingPx{px: px, py: py, depthM: c[2]})
+					addSeed(c[0], c[1], c[2])
 				}
 			case "DEPARE":
 				geom := f.Geometry()
 				if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
-					continue
-				}
-				if isOversizedPolygon(geom.Coordinates, bbox, 50) {
 					continue
 				}
 				if isDegeneratePixelPolygon(geom.Coordinates, project) {
@@ -354,26 +372,14 @@ func (r *ENCRenderer) gatherSoundings(cells []ENCCell, bbox s57.Bounds, project 
 					// IDW field as a drying flat.
 					min = max
 				}
-				// Sample several control points across the polygon: centroid
-				// + a handful of vertices. A single centroid wouldn't pull
-				// the IDW field across a long, narrow channel polygon.
+				// Only the centroid seeds — never boundary vertices. Vertex
+				// sampling caused a polygon's depth to bleed across its
+				// edge into adjacent polygons (a deep offshore DEPARE's
+				// coastline vertex would inject 200ft into a 12ft channel
+				// next to it via IDW), producing the dark/light halos that
+				// made deep channels read as shallow and vice versa.
 				cx, cy := polygonCentroid(geom.Coordinates)
-				ppx, ppy := project(cx, cy)
-				points = append(points, soundingPx{px: ppx, py: ppy, depthM: min})
-				// Stride-sample vertices so we get coverage along the ring
-				// without pushing in thousands of points per polygon.
-				stride := len(geom.Coordinates) / 8
-				if stride < 1 {
-					stride = 1
-				}
-				for i := 0; i < len(geom.Coordinates); i += stride {
-					c := geom.Coordinates[i]
-					if len(c) < 2 {
-						continue
-					}
-					vpx, vpy := project(c[0], c[1])
-					points = append(points, soundingPx{px: vpx, py: vpy, depthM: min})
-				}
+				addSeed(cx, cy, min)
 			}
 		}
 	}
@@ -528,7 +534,23 @@ func tracePolygonPath(dc *gg.Context, coords [][]float64, project func(lon, lat 
 // Render at quarter resolution (64x64) and bilinear-upsample for speed and
 // to blend adjacent IDW samples into a smoother gradient. The mask is built
 // at full 256x256 resolution so polygon edges stay crisp.
-func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox s57.Bounds, project func(lon, lat float64) (float64, float64), points []soundingPx, safeDepthM float64, z int) {
+//
+// IDW distance is computed in EPSG:3857 mercator metres so the depth field
+// is invariant under map zoom. Doing it in pixel space caused the same
+// physical location to read different depths at different zooms (since one
+// metre is more pixels at higher zoom), which interacted with the hard step
+// at the safety contour to flip a region between "shallow" and "deep" colour
+// across small zoom changes.
+func (r *ENCRenderer) compositeBathymetry(
+	dc *gg.Context,
+	cells []ENCCell,
+	bbox s57.Bounds,
+	project func(lon, lat float64) (float64, float64),
+	points []soundingPt,
+	safeDepthM float64,
+	z int,
+	tileXmin, tileYmin, tileXmax, tileYmax float64,
+) {
 	const downscale = 4
 	const lowW, lowH = 256 / downscale, 256 / downscale
 
@@ -569,19 +591,33 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 		return
 	}
 
-	// 2. IDW bathymetry at low resolution.
+	// 2. IDW bathymetry at low resolution. Distances are in mercator metres so
+	// the depth field is the same physical surface at any zoom.
+	tileWMerc := tileXmax - tileXmin
+	tileHMerc := tileYmax - tileYmin
+	mxPerPx := tileWMerc / 256
+	myPerPx := tileHMerc / 256
+	// Floor IDW distance at half a (mercator) pixel² so a seed sitting exactly
+	// on a sample point doesn't blow up the weight. This preserves the same
+	// "near-zero distance" behaviour the old pixel-space IDW had, just scaled
+	// to mercator metres.
+	dsqFloor := 0.5 * mxPerPx * myPerPx
 	low := image.NewRGBA(image.Rect(0, 0, lowW, lowH))
 	for outY := range lowH {
-		cy := (float64(outY) + 0.5) * downscale
+		py := (float64(outY) + 0.5) * downscale
+		// Mercator y decreases as image y increases (image y=0 is at top, where
+		// mercator y is tileYmax).
+		sampleMy := tileYmax - py*myPerPx
 		for outX := range lowW {
-			cx := (float64(outX) + 0.5) * downscale
+			px := (float64(outX) + 0.5) * downscale
+			sampleMx := tileXmin + px*mxPerPx
 			sumW, sumD := 0.0, 0.0
 			for _, p := range points {
-				dx := p.px - cx
-				dy := p.py - cy
+				dx := p.mx - sampleMx
+				dy := p.my - sampleMy
 				dsq := dx*dx + dy*dy
-				if dsq < 0.5 {
-					dsq = 0.5
+				if dsq < dsqFloor {
+					dsq = dsqFloor
 				}
 				// Power-3 IDW (1 / d^3): smoother than power-4 across
 				// medium distances, sharper than power-2 at close range.
@@ -609,7 +645,14 @@ func (r *ENCRenderer) compositeBathymetry(dc *gg.Context, cells []ENCCell, bbox 
 	// DEPARE polygon colour (which carries the canonical "channel = safe"
 	// information from DRVAL1) bleed through. The result reads as the
 	// polygon depth-band coloring softened by the smooth IDW gradient.
-	const bathOpacity = 0.8
+	//
+	// Opacity is intentionally low: DEPARE's DRVAL1-based fill is the
+	// authoritative depth signal — sharp, accurate, derived directly from
+	// chart data. The IDW field is only here to soften polygon edges into
+	// a gradient, not to override the polygon's own depth band. Higher
+	// opacity caused IDW artifacts (seed-dominated halos, cross-polygon
+	// bleed) to overpower the chart's actual depth bands.
+	const bathOpacity = 0.3
 	for y := range 256 {
 		for x := range 256 {
 			ma := maskImg.RGBAAt(x, y).A
@@ -904,21 +947,24 @@ var (
 // gradient saturates to white for a given map zoom. Higher zooms get a
 // wider gradient so coastal depths show variation; lower zooms compress so
 // open ocean is mostly white.
+//
+// The mapping is linear in zoom (4 at z=10 → 30 at z=18) rather than
+// bucketed: discrete jumps caused the same DEPARE polygon to render a
+// visibly different colour across adjacent integer zooms (e.g. a 100 ft
+// polygon went from "mostly white" at z=15 to "midblue" at z=16 because
+// the multiplier jumped 20→30). Linear keeps each adjacent-zoom step ~3.3,
+// so the same area looks consistent as the user zooms in or out.
 func depthDeepMultiplierFor(z int) float64 {
-	switch {
-	case z >= 16:
-		return 30
-	case z >= 14:
-		return 20
-	case z >= 13:
-		return 12
-	case z >= 12:
-		return 8
-	case z >= 11:
-		return 5
-	default:
-		return 4
+	const minZ, maxZ = 10, 18
+	const minMul, maxMul = 4.0, 30.0
+	if z <= minZ {
+		return minMul
 	}
+	if z >= maxZ {
+		return maxMul
+	}
+	t := float64(z-minZ) / float64(maxZ-minZ)
+	return minMul + (maxMul-minMul)*t
 }
 
 // depthFill returns the water fill for a DEPARE keyed off the boat's safety
