@@ -43,6 +43,12 @@
   // swap in that URL just for the user's-own-boat marker. AIS markers keep
   // using the bundled boatImage above.
   let myBoatImage = $state<string>(boatImage);
+  // Natural pixel dimensions of the override icon, captured after preload.
+  // The createBoatStyle scale (0.6 etc.) was tuned to boat3.jpg's 16x49, so
+  // we remap by the height ratio to keep rendered size consistent across
+  // any source image.
+  const BOAT_IMAGE_NATURAL_HEIGHT = 49;
+  let myBoatImageNaturalHeight = $state<number | null>(null);
 
   let popupState = $state({
     overlay: null as Overlay | null,
@@ -1085,17 +1091,30 @@
       if (!resp.ok) return;
       // Cache-bust against tileGenVersion so a new build picks up an icon
       // swap on the server even if the browser cached the old bytes.
-      myBoatImage = "/myboat-icon?v=" + tileGenVersion;
-      // Force the layer to re-evaluate its style with the new src.
+      const url = "/myboat-icon?v=" + tileGenVersion;
+      // Preload to read natural dimensions — we need them to remap scale.
+      const img = new Image();
+      const loaded = new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("decode failed"));
+      });
+      img.src = url;
+      await loaded;
+      myBoatImageNaturalHeight = img.naturalHeight || null;
+      myBoatImage = url;
+      // Force the layer to re-evaluate its style with the new src/scale.
       mapGlobal.myBoatMarker?.changed();
     } catch {
-      // Endpoint not present (no override configured) — keep boatImage.
+      // Endpoint not present, fetch failed, or image failed to decode —
+      // keep the bundled default.
     }
   }
 
   // Create boat icon style. `src` defaults to the bundled boat image; pass
   // `myBoatImage` for the user's own boat so a configured override doesn't
-  // bleed into AIS markers.
+  // bleed into AIS markers. When `src` is the override, the scale is
+  // remapped by the height ratio to keep the rendered size matched to the
+  // bundled icon regardless of the override's source resolution.
   function createBoatStyle(
     heading: number,
     scale: number,
@@ -1108,10 +1127,15 @@
 
     const rotation = (heading / 360) * Math.PI * 2;
 
+    let effectiveScale = scale;
+    if (src !== boatImage && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
+      effectiveScale = scale * (BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight);
+    }
+
     return new Style({
       image: new Icon({
         src: src,
-        scale: scale,
+        scale: effectiveScale,
         rotation: rotation,
         rotateWithView: true,
       }),

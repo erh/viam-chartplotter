@@ -34,9 +34,12 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // Forward NOAA cache + ENC requests to the Go module (run via `make run`).
+      // Forward backend routes to the Go module (run via `make run`) so the
+      // dev server on :5173 behaves like the bundled production server.
       "/noaa-wms": "http://localhost:8888",
       "/noaa-enc": "http://localhost:8888",
+      "/version": "http://localhost:8888",
+      "/myboat-icon": "http://localhost:8888",
     },
   },
 });
