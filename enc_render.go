@@ -287,6 +287,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 	// CScale is the compilation-scale denominator, so larger CScale = coarser.
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale > cells[j].CScale })
 
+
 	// Area-fill base pass: at chart-detail zoom we use ALL overlapping
 	// cells (no scale filter) because fine-scale Berthing cells often have
 	// only the on-the-water detail (DEPARE, COALNE) — the LNDARE / BUAARE
@@ -374,6 +375,33 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 	// z=14 tile because its LNDARE feature only exists in the 1:10 000
 	// cell. Drawing labels uses centroid/extent guards in drawAreaLabel
 	// so off-tile features don't get rendered.
+	// We pull "harbour-scale only" features (channels, fairways) from
+	// any overlapping cell, even if outside the regular scale window.
+	// Reason: Ambrose-Channel-style FAIRWY polygons live in 1:12 000
+	// Berthing cells which the scale filter excludes until very high
+	// zoom. NOAA shows these channel lines at z=9 onward; without this
+	// pass we'd be missing the most navigationally-important feature.
+	if z >= 9 {
+		raw := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+		// Coarsest first so finest cell's feature wins.
+		sort.SliceStable(raw, func(i, j int) bool { return raw[i].CScale > raw[j].CScale })
+		for _, cell := range raw {
+			chart, err := r.chartFor(cell.Name)
+			if err != nil || chart == nil {
+				continue
+			}
+			for _, f := range chart.FeaturesInBounds(bbox) {
+				class := f.ObjectClass()
+				switch class {
+				case "FAIRWY", "RECTRC", "NAVLNE", "DWRTPT", "TWRTPT":
+				default:
+					continue
+				}
+				drawFeature(dc, &f, passLines, project, scale, safeDepthM, bbox, z, style)
+			}
+		}
+	}
+
 	if z >= 12 {
 		seen := map[string]bool{}
 		for _, cell := range allCells {

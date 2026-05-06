@@ -2505,13 +2505,18 @@
       <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
           type="checkbox"
-          bind:checked={mapGlobal.layerOptions[idx].on}
-          onchange={() => {
+          checked={mapGlobal.layerOptions[idx].on}
+          onchange={(e) => {
+            // Explicit assignment instead of bind:checked so saveLayerStates()
+            // sees the new value synchronously — Svelte 5's bind/onchange
+            // ordering would otherwise save the previous click's state.
+            const checked = (e.currentTarget as HTMLInputElement).checked;
+            mapGlobal.layerOptions[idx].on = checked;
             saveLayerStates();
             // When the local-NOAA layer is enabled, force a prefetch for the
             // current viewport — otherwise the user has to pan before any
             // cells are downloaded.
-            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && mapGlobal.layerOptions[idx].on) {
+            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
               lastNoaaPrefetchKey = "";
               maybePrefetchNoaaTiles();
             }

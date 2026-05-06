@@ -61,7 +61,14 @@ func TestCompareWithWMS(t *testing.T) {
 	//   z=15 Beaufort Harbor (mixed land/water/structures)
 	//   z=16 Norfolk Harbor (BUAARE land + BUISGL buildings)
 	// Override with CMP_TILES to test other tiles.
+	// Two regions, every zoom from 5 to 16. The Beaufort/NC tiles cover a
+	// quiet stretch of coast where our renderer matches NOAA most closely.
+	// The NYC harbour tiles hit a much harder case — fine 1:12 k Berthing
+	// cells, dense ferry/channel features, AFCDE1 dominant water — so we
+	// keep both in the regression set to surface trade-offs (gains for one
+	// can hurt the other).
 	tiles := envOrTiles(t, "CMP_TILES", []tileXYZ{
+		// NC / Chesapeake.
 		{z: 5, x: 9, y: 12},
 		{z: 6, x: 18, y: 25},
 		{z: 7, x: 36, y: 50},
@@ -74,6 +81,19 @@ func TestCompareWithWMS(t *testing.T) {
 		{z: 14, x: 4737, y: 6375},
 		{z: 15, x: 9405, y: 13010},
 		{z: 16, x: 18897, y: 25526},
+		// New York Harbour at every zoom.
+		{z: 5, x: 9, y: 12},
+		{z: 6, x: 18, y: 24},
+		{z: 7, x: 37, y: 48},
+		{z: 8, x: 75, y: 96},
+		{z: 9, x: 150, y: 192},
+		{z: 10, x: 301, y: 385},
+		{z: 11, x: 603, y: 771},
+		{z: 12, x: 1206, y: 1542},
+		{z: 13, x: 2412, y: 3084},
+		{z: 14, x: 4825, y: 6169},
+		{z: 15, x: 9651, y: 12339},
+		{z: 16, x: 19303, y: 24679},
 	})
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
