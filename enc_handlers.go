@@ -168,8 +168,10 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	bucket := safeDepthBucket(safeDepthFt)
 	safeDepthM := float64(bucket) / feetPerMetre
 
+	style := ParseRenderStyle(r.URL.Query().Get("style"))
+
 	if h.tileCache != nil {
-		if cached, ok := h.tileCache.Get(bucket, z, x, y); ok {
+		if cached, ok := h.tileCache.Get(style.String(), bucket, z, x, y); ok {
 			w.Header().Set("Content-Type", "image/png")
 			w.Header().Set("Cache-Control", "public, max-age=86400")
 			_, _ = w.Write(cached)
@@ -177,7 +179,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pngBytes, err := h.renderer.RenderTile(z, x, y, safeDepthM)
+	pngBytes, err := h.renderer.RenderTile(z, x, y, safeDepthM, style)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -190,7 +192,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	// empty tile is cheap, so it's safe to skip caching them.
 	const minCacheableTileBytes = 1024
 	if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
-		if err := h.tileCache.Put(bucket, z, x, y, pngBytes); err != nil {
+		if err := h.tileCache.Put(style.String(), bucket, z, x, y, pngBytes); err != nil {
 			// Cache write failures shouldn't fail the request; the next render
 			// will just have to redo the work.
 			_ = err
@@ -236,7 +238,7 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	safeDepthM := float64(safeDepthBucket(safeDepthFt)) / feetPerMetre
 
-	ourPNG, err := h.renderer.RenderTile(z, x, y, safeDepthM)
+	ourPNG, err := h.renderer.RenderTile(z, x, y, safeDepthM, ParseRenderStyle(r.URL.Query().Get("style")))
 	if err != nil {
 		http.Error(w, "render: "+err.Error(), http.StatusInternalServerError)
 		return

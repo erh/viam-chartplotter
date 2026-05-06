@@ -29,10 +29,14 @@ func NewENCTileCache(rootDir string) (*ENCTileCache, error) {
 }
 
 // Path returns the on-disk path for a tile, regardless of whether it exists.
-// Exposed for tests. safeDepthBucket is in integer feet.
-func (c *ENCTileCache) Path(safeDepthBucket, z, x, y int) string {
+// Exposed for tests. safeDepthBucket is in integer feet. `style` is "wms" or
+// "ecdis" — keyed separately so two layers don't collide.
+func (c *ENCTileCache) Path(style string, safeDepthBucket, z, x, y int) string {
+	if style == "" {
+		style = "wms"
+	}
 	return filepath.Join(c.rootDir,
-		"sd-"+strconv.Itoa(safeDepthBucket),
+		style+"-sd-"+strconv.Itoa(safeDepthBucket),
 		strconv.Itoa(z),
 		strconv.Itoa(x),
 		strconv.Itoa(y)+".png")
@@ -41,8 +45,8 @@ func (c *ENCTileCache) Path(safeDepthBucket, z, x, y int) string {
 // Get returns the cached PNG bytes for the tile if present. The bool is false
 // on any miss (including transient read errors); callers should treat that as
 // "render and Put".
-func (c *ENCTileCache) Get(safeDepthBucket, z, x, y int) ([]byte, bool) {
-	data, err := os.ReadFile(c.Path(safeDepthBucket, z, x, y))
+func (c *ENCTileCache) Get(style string, safeDepthBucket, z, x, y int) ([]byte, bool) {
+	data, err := os.ReadFile(c.Path(style, safeDepthBucket, z, x, y))
 	if err != nil {
 		return nil, false
 	}
@@ -52,8 +56,8 @@ func (c *ENCTileCache) Get(safeDepthBucket, z, x, y int) ([]byte, bool) {
 // Put writes the tile to disk atomically (write to a sibling .tmp file then
 // rename) so a concurrent renderer of the same tile can't observe a partial
 // PNG.
-func (c *ENCTileCache) Put(safeDepthBucket, z, x, y int, png []byte) error {
-	final := c.Path(safeDepthBucket, z, x, y)
+func (c *ENCTileCache) Put(style string, safeDepthBucket, z, x, y int, png []byte) error {
+	final := c.Path(style, safeDepthBucket, z, x, y)
 	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
 		return fmt.Errorf("enc tile cache: mkdir: %w", err)
 	}

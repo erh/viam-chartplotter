@@ -1656,9 +1656,14 @@
     // registered when we're being served from one of those ports; elsewhere
     // the path doesn't exist.
     if (noaaCacheReachable()) {
-      const params = new URLSearchParams();
-      params.set("v", tileGenVersion);
-      if (safeDepthParam) params.set("sd", safeDepthParam);
+      const sharedParams = new URLSearchParams();
+      sharedParams.set("v", tileGenVersion);
+      if (safeDepthParam) sharedParams.set("sd", safeDepthParam);
+      // noaa-local: tuned to mirror NOAA's WMS look as closely as possible.
+      // Use this for offline use that should look interchangeable with the
+      // live WMS layer.
+      const localParams = new URLSearchParams(sharedParams);
+      localParams.set("style", "wms");
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: false,
@@ -1667,7 +1672,26 @@
           preload: 2,
           zIndex: 5,
           source: new XYZ({
-            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${params.toString()}`,
+            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${localParams.toString()}`,
+            transition: 300,
+          }),
+        }),
+      });
+      // noaa-ecdis: same renderer + cells, but with S-52 conditional
+      // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
+      // soundings, TOPMAR rendering). Reads more like a real ECDIS display
+      // and makes the boat-specific safety contour more visually obvious.
+      const ecdisParams = new URLSearchParams(sharedParams);
+      ecdisParams.set("style", "ecdis");
+      mapGlobal.layerOptions.push({
+        name: "noaa-ecdis",
+        on: false,
+        layer: new TileLayer({
+          opacity: 0.7,
+          preload: 2,
+          zIndex: 6,
+          source: new XYZ({
+            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`,
             transition: 300,
           }),
         }),
@@ -1889,8 +1913,11 @@
 
   function maybePrefetchNoaaTiles() {
     if (!noaaCacheReachable()) return;
-    const noaa = findLayerByName("noaa-local");
-    if (!noaa || !noaa.on) return;
+    // Either noaa-local or noaa-ecdis being on warrants a prefetch — both
+    // pull from the same ENC cell store, just with different render styles.
+    const local = findLayerByName("noaa-local");
+    const ecdis = findLayerByName("noaa-ecdis");
+    if (!((local && local.on) || (ecdis && ecdis.on))) return;
     if (!mapGlobal.map || !mapGlobal.view) return;
 
     const size = mapGlobal.map.getSize();
@@ -2484,7 +2511,7 @@
             // When the local-NOAA layer is enabled, force a prefetch for the
             // current viewport — otherwise the user has to pan before any
             // cells are downloaded.
-            if (l.name === "noaa-local" && mapGlobal.layerOptions[idx].on) {
+            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && mapGlobal.layerOptions[idx].on) {
               lastNoaaPrefetchKey = "";
               maybePrefetchNoaaTiles();
             }

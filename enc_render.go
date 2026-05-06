@@ -227,7 +227,41 @@ func (r *ENCRenderer) DebugBBox(minLon, minLat, maxLon, maxLat float64) ([]Debug
 // transparent tile is returned so the layer composes cleanly with the basemap.
 // safeDepthM is the boat's safety contour in metres; depth-area shading uses a
 // gradient from coral at safeDepthM to white at 2×safeDepthM.
-func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error) {
+// RenderStyle selects how the tile is rendered.
+//
+// StyleWMS aims for the closest possible visual match to NOAA's WMS chart
+// service — uniform depth-contour weights, single-tone soundings, no
+// topmarks. Designed for users who want our renderer to compose seamlessly
+// with NOAA-style charts (for the /compare endpoint, or so users can flip
+// between cached tiles and live WMS without a visual jolt).
+//
+// StyleECDIS adds the S-52 conditional-symbology niceties — bold safety
+// contour (DEPCNT02), two-tone soundings (SOUNDG02), TOPMAR rendering, etc.
+// Reads more like a real ECDIS display but won't pixel-match NOAA WMS.
+type RenderStyle int
+
+const (
+	StyleWMS RenderStyle = iota
+	StyleECDIS
+)
+
+func (s RenderStyle) String() string {
+	if s == StyleECDIS {
+		return "ecdis"
+	}
+	return "wms"
+}
+
+// ParseRenderStyle accepts the string from a query parameter or config and
+// returns the corresponding RenderStyle. Anything not "ecdis" maps to WMS.
+func ParseRenderStyle(s string) RenderStyle {
+	if strings.EqualFold(s, "ecdis") {
+		return StyleECDIS
+	}
+	return StyleWMS
+}
+
+func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderStyle) ([]byte, error) {
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
@@ -272,7 +306,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 
 	drawCell := func(chart *s57.Chart, pass drawPass) {
 		for _, f := range chart.FeaturesInBounds(bbox) {
-			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z)
+			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z, style)
 		}
 	}
 
@@ -292,7 +326,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 			default:
 				continue
 			}
-			drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z)
+			drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z, style)
 		}
 	}
 
@@ -679,6 +713,10 @@ func minZoomForFeature(class string) int {
 		return 12
 	case "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
 		return 14
+	// Topmarks attach to buoys/beacons and only make sense at chart-detail
+	// zoom; smaller and they're indistinguishable from their parent symbol.
+	case "TOPMAR":
+		return 14
 	case "DAYMAR":
 		return 14
 	// Hazards. Wrecks/obstructions are dense in harbour cells; only show
@@ -716,7 +754,7 @@ func minZoomForFeature(class string) int {
 // zoom-derived multiplier applied to stroke widths and symbol sizes.
 // `safeDepthM` controls DEPARE depth-band colouring. `tileBbox` is used to
 // reject polygons that are way larger than the tile (overview-cell rings).
-func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, tileBbox s57.Bounds, z int) {
+func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, tileBbox s57.Bounds, z int, style RenderStyle) {
 	geom := f.Geometry()
 	if len(geom.Coordinates) == 0 {
 		return
@@ -746,7 +784,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// lineStroke has an entry. This also covers fill+stroke on classes
 		// where both are styled.
 		fill := areaFill(class, f, safeDepthM, z)
-		stroke, width := lineStroke(class, f)
+		stroke, width := lineStroke(class, f, safeDepthM, style)
 
 		// Drop polygons whose projected pixel bbox is degenerate (< 3 px in
 		// either direction). The s57 lib occasionally produces thin/collinear
@@ -792,7 +830,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		if pass != passLines {
 			return
 		}
-		stroke, width := lineStroke(class, f)
+		stroke, width := lineStroke(class, f, safeDepthM, style)
 		if stroke == nil {
 			return
 		}
@@ -816,7 +854,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		if pass != passPoints {
 			return
 		}
-		drawPoint(dc, class, f, project, scale)
+		drawPoint(dc, class, f, project, scale, safeDepthM, style)
 	}
 }
 
@@ -1129,16 +1167,23 @@ func depthRange(f *s57.Feature) (min, max float64) {
 	return min, max
 }
 
-func lineStroke(class string, f *s57.Feature) (color.Color, float64) {
-	_ = f
+func lineStroke(class string, f *s57.Feature, safeDepthM float64, style RenderStyle) (color.Color, float64) {
 	switch class {
 	case "COALNE", "SLCONS":
 		// Coastline / shoreline construction: solid black, full weight.
 		return s52CSTLN, 1.4
 	case "DEPCNT":
-		// Depth contour: pale blue. Safety-contour bolding (DEPCNT02 in
-		// S-52) would require comparing the contour's VALDCO to the boat's
-		// safety depth; we keep it uniform here.
+		// S-52 DEPCNT02: the contour matching the boat's safety depth gets
+		// rendered in DEPSC (bolder) so it stands out. Only applied in
+		// ECDIS mode — NOAA WMS uses uniform contour weights.
+		if style == StyleECDIS {
+			if v, ok := f.Attribute("VALDCO"); ok {
+				val := numAttr(v)
+				if !math.IsNaN(val) && math.Abs(val-safeDepthM) < 0.5 {
+					return s52DEPSC, 1.4
+				}
+			}
+		}
 		return s52DEPCN, 0.6
 	case "NAVLNE", "RECTRC", "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
 		// Channel limit / recommended track / fairway / anchorage / deep-
@@ -1165,7 +1210,7 @@ func lineStroke(class string, f *s57.Feature) (color.Color, float64) {
 // hazards, soundings). Shapes follow S-52 conventions where it matters most
 // for navigation: BOYSHP/BCNSHP drives the silhouette, COLOUR drives the fill
 // (and a second colour stripes for safe-water/isolated-danger marks).
-func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64) {
+func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, style RenderStyle) {
 	coords := f.Geometry().Coordinates
 	at := func(c []float64) (float64, float64) { return project(c[0], c[1]) }
 
@@ -1232,8 +1277,84 @@ func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, l
 			dc.Stroke()
 		})
 	case "SOUNDG":
-		drawSoundings(dc, coords, project, scale)
+		drawSoundings(dc, coords, project, scale, safeDepthM, style)
+	case "TOPMAR":
+		// Topmarks only render in ECDIS mode — NOAA WMS doesn't draw them
+		// as separate symbols (they're baked into the buoy/beacon shape
+		// when relevant), so adding them in WMS mode just adds noise.
+		if style == StyleECDIS {
+			first(func(px, py float64) { drawTopmark(dc, f, px, py, scale) })
+		}
 	}
+}
+
+// drawTopmark renders an S-57 TOPMAR feature: a small shape sitting at the
+// position of its parent buoy/beacon, with shape determined by TOPSHP. We
+// implement the most common topmark shapes — cone (1, 2), sphere (3, 4),
+// X (7), upright cross (8), 2-cone (13, 14, 15, 16). Anything else falls
+// back to a plain dot. Drawn in chart black so the silhouette reads against
+// any underlying buoy colour.
+func drawTopmark(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	shape := intAttr(f, "TOPSHP")
+	r := 2.0 * scale
+	// Anchor topmark just above the position so it doesn't overlap a
+	// nearby buoy/beacon symbol (S-52 places topmarks above the structure).
+	cy := py - 4.5*scale
+	dc.SetColor(s52CHBLK)
+	dc.SetLineWidth(0.6 * scale)
+	switch shape {
+	case 1: // cone, point up
+		drawTriangleStroke(dc, px, cy, r, true)
+	case 2: // cone, point down
+		drawTriangleStroke(dc, px, cy, r, false)
+	case 3: // sphere
+		dc.DrawCircle(px, cy, r)
+		dc.Fill()
+	case 4: // 2 spheres, vertical
+		dc.DrawCircle(px, cy-r*1.1, r*0.8)
+		dc.Fill()
+		dc.DrawCircle(px, cy+r*0.7, r*0.8)
+		dc.Fill()
+	case 7: // X-shape
+		dc.DrawLine(px-r, cy-r, px+r, cy+r)
+		dc.DrawLine(px-r, cy+r, px+r, cy-r)
+		dc.Stroke()
+	case 8: // upright cross
+		dc.DrawLine(px-r, cy, px+r, cy)
+		dc.DrawLine(px, cy-r, px, cy+r)
+		dc.Stroke()
+	case 13: // 2 cones, point up + point up
+		drawTriangleStroke(dc, px, cy-r*0.5, r*0.7, true)
+		drawTriangleStroke(dc, px, cy+r*0.7, r*0.7, true)
+	case 14: // 2 cones, point down + point down
+		drawTriangleStroke(dc, px, cy-r*0.5, r*0.7, false)
+		drawTriangleStroke(dc, px, cy+r*0.7, r*0.7, false)
+	case 15: // 2 cones, point down + point up
+		drawTriangleStroke(dc, px, cy-r*0.5, r*0.7, false)
+		drawTriangleStroke(dc, px, cy+r*0.7, r*0.7, true)
+	case 16: // 2 cones, point up + point down
+		drawTriangleStroke(dc, px, cy-r*0.5, r*0.7, true)
+		drawTriangleStroke(dc, px, cy+r*0.7, r*0.7, false)
+	default:
+		dc.DrawCircle(px, cy, r*0.6)
+		dc.Fill()
+	}
+}
+
+// drawTriangleStroke fills a triangle with the current colour, optionally
+// pointing up. Used for cone-style topmarks.
+func drawTriangleStroke(dc *gg.Context, px, cy, r float64, up bool) {
+	if up {
+		dc.MoveTo(px, cy-r)
+		dc.LineTo(px+r*0.866, cy+r*0.5)
+		dc.LineTo(px-r*0.866, cy+r*0.5)
+	} else {
+		dc.MoveTo(px, cy+r)
+		dc.LineTo(px+r*0.866, cy-r*0.5)
+		dc.LineTo(px-r*0.866, cy-r*0.5)
+	}
+	dc.ClosePath()
+	dc.Fill()
 }
 
 // drawBuoy paints a buoy at (px, py) shaped per BOYSHP and coloured per COLOUR.
@@ -1383,11 +1504,17 @@ func drawStripedRect(dc *gg.Context, x, y, w, h float64, primary, secondary, out
 	dc.Stroke()
 }
 
-func drawSoundings(dc *gg.Context, coords [][]float64, project func(lon, lat float64) (float64, float64), scale float64) {
+// drawSoundings implements (a simplified) S-52 SOUNDG02:
+//   - colour SNDG2 (bolder) for soundings shoaler than the safety contour,
+//     SNDG1 (lighter) for safe soundings
+//   - two-tone formatting: whole feet at full size, tenths rendered in a
+//     subscript half size, slightly to the lower-right
+//   - falls back to a small dot when the Z coordinate is missing
+func drawSoundings(dc *gg.Context, coords [][]float64, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, style RenderStyle) {
 	at := func(c []float64) (float64, float64) { return project(c[0], c[1]) }
-	dc.SetColor(s52SNDG1)
 	dc.SetFontFace(basicfont.Face7x13)
-	fontScale := 0.45 * scale
+	intScale := 0.55 * scale
+	subScale := 0.36 * scale
 	dotR := 0.7 * scale
 	for _, c := range coords {
 		if len(c) < 2 {
@@ -1395,22 +1522,56 @@ func drawSoundings(dc *gg.Context, coords [][]float64, project func(lon, lat flo
 		}
 		px, py := at(c)
 		if len(c) < 3 {
+			dc.SetColor(s52SNDG1)
 			dc.DrawCircle(px, py, dotR)
 			dc.Fill()
 			continue
 		}
 		depthM := c[2]
 		if math.IsNaN(depthM) || depthM < 0 {
+			dc.SetColor(s52SNDG1)
 			dc.DrawCircle(px, py, dotR)
 			dc.Fill()
 			continue
 		}
-		depthFt := math.Round(depthM * feetPerMetre)
-		label := fmt.Sprintf("%d", int(depthFt))
+		// Bolder colour when shoaler than safety so a sailor scanning the
+		// chart notices the dangerous depths first. Only in ECDIS mode —
+		// NOAA WMS draws every sounding the same shade.
+		col := s52SNDG1
+		if style == StyleECDIS && depthM < safeDepthM {
+			col = s52SNDG2
+		}
+		dc.SetColor(col)
+		depthFt := depthM * feetPerMetre
+		if style == StyleWMS {
+			// Single-tone: round to whole feet, draw centred. Matches NOAA
+			// WMS which doesn't show tenths at compare-relevant zooms.
+			label := fmt.Sprintf("%d", int(math.Round(depthFt)))
+			dc.Push()
+			dc.ScaleAbout(intScale, intScale, px, py)
+			dc.DrawStringAnchored(label, px, py, 0.5, 0.5)
+			dc.Pop()
+			continue
+		}
+		// ECDIS two-tone (SOUNDG02): round to nearest tenth, then split
+		// into integer + tenth so the tenth can render as a subscript.
+		tenths := math.Round(depthFt * 10)
+		intPart := int(tenths) / 10
+		decPart := int(tenths) % 10
+		intStr := fmt.Sprintf("%d", intPart)
 		dc.Push()
-		dc.ScaleAbout(fontScale, fontScale, px, py)
-		dc.DrawStringAnchored(label, px, py, 0.5, 0.5)
+		dc.ScaleAbout(intScale, intScale, px, py)
+		dc.DrawStringAnchored(intStr, px, py, 0.5, 0.5)
 		dc.Pop()
+		if decPart > 0 {
+			intHalfW := float64(len(intStr)) * 7 / 2 * intScale
+			subX := px + intHalfW + 0.6*scale
+			subY := py + 2.2*scale
+			dc.Push()
+			dc.ScaleAbout(subScale, subScale, subX, subY)
+			dc.DrawStringAnchored(fmt.Sprintf("%d", decPart), subX, subY, 0, 0.5)
+			dc.Pop()
+		}
 	}
 }
 
