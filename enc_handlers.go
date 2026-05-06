@@ -249,7 +249,10 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	canonical := wmsCanonicalForTile(tileXYZ{z: z, x: x, y: y}, "")
+	// Match the LAYERS the frontend's noaa TileWMS layer uses so this
+	// request shares the cache with whatever the user already browsed —
+	// otherwise every /compare hit MISSes and fetches NOAA upstream.
+	canonical := wmsCanonicalForTile(tileXYZ{z: z, x: x, y: y}, "0,1,2,3,4,5,6")
 	wmsBytes, _, _, err := h.wmsCache.fetch(r.Context(), canonical, "image/png")
 	if err != nil {
 		http.Error(w, "wms: "+err.Error(), http.StatusBadGateway)

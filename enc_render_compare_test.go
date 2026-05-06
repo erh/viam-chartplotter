@@ -62,6 +62,13 @@ func TestCompareWithWMS(t *testing.T) {
 	//   z=16 Norfolk Harbor (BUAARE land + BUISGL buildings)
 	// Override with CMP_TILES to test other tiles.
 	tiles := envOrTiles(t, "CMP_TILES", []tileXYZ{
+		{z: 5, x: 9, y: 12},
+		{z: 6, x: 18, y: 25},
+		{z: 7, x: 36, y: 50},
+		{z: 8, x: 73, y: 101},
+		{z: 9, x: 148, y: 199},
+		{z: 10, x: 293, y: 406},
+		{z: 11, x: 587, y: 813},
 		{z: 12, x: 1184, y: 1593},
 		{z: 13, x: 2368, y: 3187},
 		{z: 14, x: 4737, y: 6375},

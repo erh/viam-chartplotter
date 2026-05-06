@@ -271,23 +271,47 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 	// painted at z=12 and overview-cell continents get painted at z=16.
 	minScale, maxScale := cellScaleRangeFor(z, (minLat+maxLat)/2)
 	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, minScale, maxScale)
-	// Fall back to all cells if the scale window left us with nothing — better
-	// to render something coarse than to return an empty tile.
+	// Fall back if the scale window left us with nothing. At chart-detail
+	// zoom we'll use ANY available cell (better something coarse than an
+	// empty tile). At coarse zoom we restrict the fall-back to only
+	// continent-scale cells (≥1:200 k) so the tile doesn't end up showing
+	// the blocky seams between fine-cell coverage extents.
 	if len(cells) == 0 {
-		cells = r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+		minScaleFallback := 0
+		if z < 10 {
+			minScaleFallback = 800_000
+		}
+		cells = r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, minScaleFallback, 0)
 	}
 	// Paint coarsest first so finer-scale cells overwrite their detail on top.
 	// CScale is the compilation-scale denominator, so larger CScale = coarser.
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale > cells[j].CScale })
 
-	// Area-fill base pass uses ALL overlapping cells (no scale filter).
-	// Reason: a fine-scale Berthing cell often has only the on-the-water
-	// detail (DEPARE, COALNE) without the surrounding land-area polygons,
-	// because at that scale "land" is implicit context. The corresponding
-	// LNDARE / BUAARE coverage lives in the coarser Approach/Coastal cell.
-	// Without this pass, a z=16 harbour tile renders as DEPDW white where
-	// NOAA paints LANDA / BUAARE yellow.
-	allCells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	// Area-fill base pass: at chart-detail zoom we use ALL overlapping
+	// cells (no scale filter) because fine-scale Berthing cells often have
+	// only the on-the-water detail (DEPARE, COALNE) — the LNDARE / BUAARE
+	// coverage for the surrounding land lives in the coarser Approach
+	// cell.
+	//
+	// At coarse zoom (z<10) the regular scale filter turns up empty and
+	// we fall back to all-cells, but mixing fine (1:80 k) cells with the
+	// 1:1.2 M overview creates visibly rectangular cell-coverage seams
+	// because each cell's bbox is comparable in size to a tile. So at
+	// coarse zoom we restrict the base pass to only continent-scale
+	// (1:200 k or coarser) cells — they tile cleanly without seams.
+	allCellsRaw := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	allCells := allCellsRaw
+	if z < 10 {
+		// Only continent-scale (≥1:800 k) cells to avoid coverage-edge
+		// seams between adjacent finer cells.
+		filtered := allCells[:0]
+		for _, c := range allCellsRaw {
+			if c.CScale >= 800_000 {
+				filtered = append(filtered, c)
+			}
+		}
+		allCells = filtered
+	}
 	sort.SliceStable(allCells, func(i, j int) bool { return allCells[i].CScale > allCells[j].CScale })
 
 	dc := gg.NewContext(256, 256)
@@ -628,12 +652,15 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	}
 	groundResPerPx := 156543.04 * cosLat / math.Pow(2, float64(z))
 	displayScale := groundResPerPx / screenMetresPerPx
-	// Lower bound: tighten at coarse zooms because a 1:80 000 Approach
-	// cell's coastline has too many vertices to render coherently in a few
-	// pixels — produces black squiggle. ≥2× display scale at z≤11.
+	// Lower bound: zoom-tuned divisor on the display scale:
+	//   z≤9   → 8.0 (need 1:200 k+ cells; otherwise the overview is too
+	//           sparse to read as a chart at all — NOAA shows full chart
+	//           detail at z=9 even though our pixels are huge)
+	//   z=10+ → 2.0 (chart-detail; balances coastline cleanness vs feature
+	//           density)
 	div := 2.0
-	if z <= 11 {
-		div = 0.5
+	if z <= 9 {
+		div = 8.0
 	}
 	min := int(displayScale / div)
 	if min < 0 {
@@ -703,16 +730,15 @@ func minZoomForFeature(class string) int {
 	// detail.
 	case "SLCONS":
 		return 15
-	// Major navaids visible at overview.
-	case "BOYLAT", "BCNLAT":
-		return 11
-	case "LIGHTS":
-		return 12
-	// Other navaids — coastal zoom and up.
+	// Major navaids visible at overview. NOAA renders these at z=9
+	// (sometimes z=8) so a sailor scanning a chart at coastal scale still
+	// sees major lights, lateral marks, and major hazards.
+	case "BOYLAT", "BCNLAT", "LIGHTS":
+		return 9
 	case "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
-		return 12
+		return 11
 	case "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
-		return 14
+		return 13
 	// Topmarks attach to buoys/beacons and only make sense at chart-detail
 	// zoom; smaller and they're indistinguishable from their parent symbol.
 	case "TOPMAR":
@@ -725,20 +751,21 @@ func minZoomForFeature(class string) int {
 		return 15
 	case "UWTROC":
 		return 16
-	// Soundings: NOAA renders depth labels even at z=12 in coastal areas;
-	// they're the primary chart annotation telling a sailor "this part is
-	// 14 ft deep". Numeric labels are the densest feature class, so they
-	// carry a lot of the visual signal even at low zoom.
+	// Soundings: NOAA renders depth labels at z=9 already (offshore tiles
+	// show "65", "83", "95"-style depth labels). They're the densest
+	// feature class, so dropping them at z<9 keeps the chart readable.
 	case "SOUNDG":
-		return 12
+		return 9
 	// Mooring/pile/anchorage: harbour-detail zoom.
 	case "MORFAC", "PILPNT", "MOORNG", "ACHBRT":
 		return 15
 	// Linear features.
 	case "RIVERS", "BRIDGE", "CAUSWY":
 		return 11
+	// Channel limits / fairways / restricted areas — magenta lines show
+	// at z=9 in NOAA charts (busy in our renders below that).
 	case "FAIRWY", "RECTRC", "NAVLNE", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
-		return 12
+		return 9
 	case "PIPSOL", "CBLSUB", "CBLOHD":
 		return 15
 	case "DAMCON", "PONTON":
