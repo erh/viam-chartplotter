@@ -98,6 +98,11 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
+  // Debug helper: when on, clicking the map prints + copies the noaa-local
+  // tile URL covering that point. Used for diffing our render against NOAA's
+  // WMS for a specific tile.
+  let tileUrlActive = $state(false);
+
   let addWaypointActive = $state(false);
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
@@ -1520,6 +1525,44 @@
     inPanMode = false;
   }
 
+  // showTileUrlForClick computes the XYZ tile that contains the clicked
+  // lon/lat at the current view zoom and prints + copies its noaa-local
+  // tile URL (and the /compare URL). Used for diffing our render against
+  // NOAA's WMS for a specific tile — toggle "tile URL" in the bottom
+  // controls, click the map, paste the URL.
+  function showTileUrlForClick(evt: any) {
+    if (!mapGlobal.view) return;
+    const coord = evt.coordinate as [number, number];
+    if (!coord) return;
+    const lon = coord[0];
+    const lat = coord[1];
+    const z = Math.round(mapGlobal.view.getZoom() ?? 0);
+    const n = Math.pow(2, z);
+    const x = Math.floor(((lon + 180) / 360) * n);
+    const latRad = (lat * Math.PI) / 180;
+    const y = Math.floor(
+      ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
+    );
+    const origin = window.location.origin;
+    const tileUrl = `${origin}/noaa-enc/tile/${z}/${x}/${y}.png`;
+    const compareUrl = `${origin}/noaa-enc/compare/${z}/${x}/${y}.png`;
+    console.log("tile:    ", tileUrl);
+    console.log("compare: ", compareUrl);
+    if (navigator.clipboard) {
+      void navigator.clipboard.writeText(tileUrl).catch(() => {});
+    }
+    // Cheap visible feedback. The popup overlay is already wired up for
+    // boats, so reuse its element with our text — saves another overlay.
+    const el = document.getElementById("tile-url-popup");
+    if (el) {
+      el.innerHTML = `<a href="${tileUrl}" target="_blank">tile z=${z} x=${x} y=${y}</a><br><a href="${compareUrl}" target="_blank">compare</a>`;
+      el.style.display = "block";
+      window.setTimeout(() => {
+        el.style.display = "none";
+      }, 4000);
+    }
+  }
+
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
     // order regardless of toggle/insert sequence. Without this, toggling a
@@ -1887,13 +1930,6 @@
   }
 
   function updateOnLayers() {
-    // The marine chart layer skips painting land features (LNDARE/BUAARE) so
-    // OSM's land/road/marina detail can show through. That only works if OSM
-    // is actually visible, so force OSM on whenever noaa-local is on, even if
-    // the user has unchecked the OSM box.
-    const noaaLocalLayer = mapGlobal.layerOptions.find((p) => p.name === "noaa-local");
-    const noaaLocalOn = !!(noaaLocalLayer && noaaLocalLayer.on);
-
     for (var l of mapGlobal.layerOptions) {
       var idx = findOnLayerIndexOfName(l.name);
 
@@ -1902,10 +1938,7 @@
       const isParentOff = parentLayer && !parentLayer.on;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      let shouldBeVisible = l.on && !isParentOff;
-      if (l.name === "open street map" && noaaLocalOn) {
-        shouldBeVisible = true;
-      }
+      const shouldBeVisible = l.on && !isParentOff;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -2020,6 +2053,10 @@
     mapGlobal.map.addLayer(measureLayer);
 
     mapClickHandler = function (evt: any) {
+      if (tileUrlActive) {
+        showTileUrlForClick(evt);
+        return;
+      }
       if (measureActive) {
         handleMeasureClick(evt);
         return;
@@ -2400,6 +2437,11 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
+  <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
+       the map. Plain absolutely-positioned div in the centre top, simple
+       CSS — no OL overlay needed since the content isn't bound to a coord. -->
+  <div id="tile-url-popup" class="tile-url-popup"></div>
+
   <!-- Edit popup. Shown when the user clicks a waypoint or a route segment
        in edit mode. The element must always exist for OL's Overlay to bind
        to; visibility is driven by class="hidden". -->
@@ -2433,15 +2475,11 @@
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      {@const isOsmForcedByNoaaLocal =
-        l.name === "open street map" &&
-        !!mapGlobal.layerOptions.find((p) => p.name === "noaa-local")?.on}
-      <label class:child-layer={l.parent} class:disabled={isParentOff || isOsmForcedByNoaaLocal}>
+      <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
           type="checkbox"
-          checked={isOsmForcedByNoaaLocal ? true : mapGlobal.layerOptions[idx].on}
-          onchange={(e) => {
-            mapGlobal.layerOptions[idx].on = (e.currentTarget as HTMLInputElement).checked;
+          bind:checked={mapGlobal.layerOptions[idx].on}
+          onchange={() => {
             saveLayerStates();
             // When the local-NOAA layer is enabled, force a prefetch for the
             // current viewport — otherwise the user has to pan before any
@@ -2451,7 +2489,7 @@
               maybePrefetchNoaaTiles();
             }
           }}
-          disabled={isParentOff || isOsmForcedByNoaaLocal}
+          disabled={isParentOff}
         />
         {l.displayName || l.name}
         {#if l.name === "heading-line"}
@@ -2483,6 +2521,16 @@
       {:else}
         ▲ Layers
       {/if}
+    </button>
+
+    <button
+      class="tile-url-toggle"
+      class:active={tileUrlActive}
+      onclick={() => (tileUrlActive = !tileUrlActive)}
+      title="When on, click the map to copy the noaa-local tile URL for that location"
+      aria-label="Tile URL debug mode"
+    >
+      {"{}"}
     </button>
 
     {#if enableBoatsPanel}
@@ -2740,6 +2788,65 @@
     font-size: 12px;
     white-space: nowrap;
     pointer-events: none;
+  }
+
+  .tile-url-popup {
+    display: none;
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.95);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .tile-url-popup :global(a) {
+    color: #93c5fd;
+    text-decoration: none;
+  }
+
+  .tile-url-popup :global(a:hover) {
+    text-decoration: underline;
+  }
+
+  .tile-url-toggle {
+    position: absolute;
+    /* Slot in below OpenLayers' zoom +/- controls (top-left) so we don't
+       overlap any of the user-facing buttons. OL's zoom control sits at
+       ~5px / 5px and is ~75px tall. */
+    top: 90px;
+    left: 8px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    font-size: 12px;
+    font-weight: bold;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    line-height: 1;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+  }
+
+  .tile-url-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .tile-url-toggle.active {
+    background: #93c5fd;
+    border-color: #3b82f6;
+    color: white;
   }
 
   /* Map loading styles */

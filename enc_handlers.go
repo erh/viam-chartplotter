@@ -3,6 +3,7 @@ package vc
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -10,6 +11,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/fogleman/gg"
+	"golang.org/x/image/font/basicfont"
 )
 
 // ENCHandlers exposes the ENC catalog/store/renderer via HTTP under /noaa-enc/.
@@ -273,6 +277,12 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Panel labels so anyone looking at /tmp/foo.png or the network response
+	// knows which is which without checking the handler source.
+	annotatePanel(out, 4, 0, "ours")
+	annotatePanel(out, 260, 0, "WMS")
+	annotatePanel(out, 516, 0, fmt.Sprintf("diff z=%d x=%d y=%d", z, x, y))
+
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, out); err != nil {
 		http.Error(w, "encode: "+err.Error(), http.StatusInternalServerError)
@@ -281,6 +291,28 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(buf.Bytes())
+}
+
+// annotatePanel draws a label at the top-left of the given pixel position.
+// Solid black background (slightly transparent) with bold white text scaled
+// 2× for readability — basicfont is 7×13 which is tiny otherwise.
+func annotatePanel(img *image.RGBA, x, y int, label string) {
+	const scale = 2.0
+	dc := gg.NewContextForRGBA(img)
+	dc.SetFontFace(basicfont.Face7x13)
+	rawW, rawH := dc.MeasureString(label)
+	w, h := rawW*scale, rawH*scale
+	pad := 4.0
+	dc.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 0xCC})
+	dc.DrawRectangle(float64(x), float64(y), w+2*pad, h+2*pad)
+	dc.Fill()
+	dc.SetColor(color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF})
+	tx := float64(x) + pad
+	ty := float64(y) + pad + h*0.85
+	dc.Push()
+	dc.ScaleAbout(scale, scale, tx, ty)
+	dc.DrawStringAnchored(label, tx, ty, 0, 0)
+	dc.Pop()
 }
 
 func absInt(x int) int {

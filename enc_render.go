@@ -246,6 +246,16 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 	// CScale is the compilation-scale denominator, so larger CScale = coarser.
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale > cells[j].CScale })
 
+	// Area-fill base pass uses ALL overlapping cells (no scale filter).
+	// Reason: a fine-scale Berthing cell often has only the on-the-water
+	// detail (DEPARE, COALNE) without the surrounding land-area polygons,
+	// because at that scale "land" is implicit context. The corresponding
+	// LNDARE / BUAARE coverage lives in the coarser Approach/Coastal cell.
+	// Without this pass, a z=16 harbour tile renders as DEPDW white where
+	// NOAA paints LANDA / BUAARE yellow.
+	allCells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	sort.SliceStable(allCells, func(i, j int) bool { return allCells[i].CScale > allCells[j].CScale })
+
 	dc := gg.NewContext(256, 256)
 	// Transparent background so the OSM/seachart base layers below show through
 	// where we have no chart coverage.
@@ -266,6 +276,26 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 		}
 	}
 
+	// First, the land/built-up area base layer from ALL cells. This gives
+	// us shoreline coverage even when the scale-filtered set is missing
+	// LNDARE/BUAARE. Land features only — water polygons are handled in
+	// the regular passAreas below so they only paint from in-scale cells.
+	for _, cell := range allCells {
+		chart, err := r.chartFor(cell.Name)
+		if err != nil || chart == nil {
+			continue
+		}
+		for _, f := range chart.FeaturesInBounds(bbox) {
+			class := f.ObjectClass()
+			switch class {
+			case "LNDARE", "BUAARE", "BUISGL":
+			default:
+				continue
+			}
+			drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z)
+		}
+	}
+
 	for _, pass := range []drawPass{passAreas, passLines, passPoints} {
 		for _, cell := range cells {
 			chart, err := r.chartFor(cell.Name)
@@ -277,6 +307,40 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64) ([]byte, error
 				continue
 			}
 			drawCell(chart, pass)
+		}
+	}
+
+	// Label-only pass over ALL overlapping cells (no scale filter). Place
+	// names live on harbour/berthing-scale cells we'd otherwise drop at
+	// coastal zoom; without this pass, "Radio Island" disappears from a
+	// z=14 tile because its LNDARE feature only exists in the 1:10 000
+	// cell. Drawing labels uses centroid/extent guards in drawAreaLabel
+	// so off-tile features don't get rendered.
+	if z >= 12 {
+		seen := map[string]bool{}
+		for _, cell := range allCells {
+			chart, err := r.chartFor(cell.Name)
+			if err != nil || chart == nil {
+				continue
+			}
+			for _, f := range chart.FeaturesInBounds(bbox) {
+				class := f.ObjectClass()
+				switch class {
+				case "LNDARE", "LNDRGN", "BUAARE", "SEAARE", "ADMARE", "BUISGL":
+				default:
+					continue
+				}
+				v, ok := f.Attribute("OBJNAM")
+				if !ok {
+					continue
+				}
+				name, _ := v.(string)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				drawAreaLabel(dc, &f, project, scale, bbox)
+			}
 		}
 	}
 
@@ -512,9 +576,10 @@ func isDegeneratePixelPolygon(coords [][]float64, project func(lon, lat float64)
 // cellScaleRangeFor returns the CScale window we want to render at the given
 // map zoom: [minScale, maxScale]. Cells outside this window are filtered out.
 //
-//   - minScale: 1/4 of the display scale — drops cells finer than the display
-//     can show. Keeps z=14 from rendering Berthing-cell detail at chart-detail
-//     density it can't represent.
+//   - minScale: 1/2 of the display scale — drops cells finer than the display
+//     can sensibly show. At z=11 this drops 1:80 000 Approach cells whose
+//     coastlines have thousands of vertices that turn into solid black
+//     squiggles when smashed into a few pixels.
 //   - maxScale: 8× the display scale — drops continent-sized overview cells
 //     at high zooms. Without this, an LNDARE from a 1:1 200 000 cell paints
 //     yellow over a z=16 harbour tile that the local Berthing cell would
@@ -529,13 +594,33 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	}
 	groundResPerPx := 156543.04 * cosLat / math.Pow(2, float64(z))
 	displayScale := groundResPerPx / screenMetresPerPx
-	min := int(displayScale / 4)
-	max := int(displayScale * 8)
+	// Lower bound: tighten at coarse zooms because a 1:80 000 Approach
+	// cell's coastline has too many vertices to render coherently in a few
+	// pixels — produces black squiggle. ≥2× display scale at z≤11.
+	div := 2.0
+	if z <= 11 {
+		div = 0.5
+	}
+	min := int(displayScale / div)
 	if min < 0 {
 		min = 0
 	}
-	if max < 0 {
-		max = 0
+	// Upper bound: drop continent-sized overview cells from the regular
+	// rendering pass at z≥12 (8× display scale). Their giant DEPARE rings
+	// paint blanket water over finer-cell harbour detail — e.g. at z=12 a
+	// 1:1 200 000 "0-18 m" polygon covering the whole East Coast otherwise
+	// paints every Chesapeake-area tile DEPDW white. LNDARE/BUAARE
+	// coverage from the same overview cell still reaches the tile via the
+	// all-cells area-fill base pass.
+	//
+	// Below z=12 we don't cap — at z=10/11 those overview cells are the
+	// primary source of any land or water coverage at all.
+	max := 0
+	if z >= 12 {
+		max = int(displayScale * 8)
+		if max < 0 {
+			max = 0
+		}
 	}
 	return min, max
 }
@@ -572,6 +657,10 @@ func minZoomForFeature(class string) int {
 	// Major area fills — always show.
 	case "LNDARE", "DEPARE", "DRGARE", "BUAARE", "UNSARE", "LOKBSN":
 		return 0
+	// Single buildings (commercial / conspicuous structures): only at
+	// chart-detail zoom.
+	case "BUISGL":
+		return 14
 	// Coastline + depth contours — always.
 	case "COALNE", "DEPCNT":
 		return 0
@@ -598,9 +687,12 @@ func minZoomForFeature(class string) int {
 		return 15
 	case "UWTROC":
 		return 16
-	// Soundings: only at chart-detail zoom (NOAA also thins these).
+	// Soundings: NOAA renders depth labels even at z=12 in coastal areas;
+	// they're the primary chart annotation telling a sailor "this part is
+	// 14 ft deep". Numeric labels are the densest feature class, so they
+	// carry a lot of the visual signal even at low zoom.
 	case "SOUNDG":
-		return 15
+		return 12
 	// Mooring/pile/anchorage: harbour-detail zoom.
 	case "MORFAC", "PILPNT", "MOORNG", "ACHBRT":
 		return 15
@@ -608,7 +700,7 @@ func minZoomForFeature(class string) int {
 	case "RIVERS", "BRIDGE", "CAUSWY":
 		return 11
 	case "FAIRWY", "RECTRC", "NAVLNE", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
-		return 13
+		return 12
 	case "PIPSOL", "CBLSUB", "CBLOHD":
 		return 15
 	case "DAMCON", "PONTON":
@@ -653,7 +745,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// boundary is what charts actually show, so stroke the ring whenever
 		// lineStroke has an entry. This also covers fill+stroke on classes
 		// where both are styled.
-		fill := areaFill(class, f, safeDepthM)
+		fill := areaFill(class, f, safeDepthM, z)
 		stroke, width := lineStroke(class, f)
 
 		// Drop polygons whose projected pixel bbox is degenerate (< 3 px in
@@ -667,7 +759,10 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// Drop continent-sized rings from overview cells (e.g. an LNDARE that
 		// covers the whole SE US): they paint tan over real water at chart
 		// zoom. See isOversizedPolygon for why this is safe.
-		if isOversizedPolygon(geom.Coordinates, tileBbox, 50) {
+		// 200× tile passes regional overview-cell polygons (barrier-island
+		// strings, big harbour LNDARE) while still rejecting continent-
+		// sized rings that would paint blanket land over open ocean.
+		if isOversizedPolygon(geom.Coordinates, tileBbox, 200) {
 			return
 		}
 		switch pass {
@@ -725,6 +820,98 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 	}
 }
 
+// drawNavaidLabel paints the navaid's OBJNAM (e.g. "G "5"", "RG TC") next
+// to the symbol. NOAA renders short buoy/beacon identifiers like that
+// inline; we skip long descriptive names to avoid cluttering tiles.
+func drawNavaidLabel(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	v, ok := f.Attribute("OBJNAM")
+	if !ok {
+		return
+	}
+	name, _ := v.(string)
+	if name == "" {
+		return
+	}
+	// Skip long descriptive names — NOAA only labels short identifiers
+	// (e.g. "G "5"", "RG TC"). 12 chars is a generous upper bound that
+	// keeps short codes and rejects "Beaufort Harbor Channel Light".
+	if len(name) > 12 {
+		return
+	}
+	dc.SetFontFace(basicfont.Face7x13)
+	dc.SetColor(s52CHBLK)
+	tx := px + 5*scale
+	ty := py
+	dc.Push()
+	dc.ScaleAbout(scale*0.7, scale*0.7, tx, ty)
+	dc.DrawStringAnchored(name, tx, ty, 0, 0.5)
+	dc.Pop()
+}
+
+// drawLightLabel paints the abbreviated S-52 light description next to the
+// flare, e.g. "F G 65ft" — colour + character + height. NOAA renders these
+// inline; matching them is the single biggest visible gap at z=13–15.
+func drawLightLabel(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
+	parts := []string{}
+	// Character (LITCHR = 1..28 in S-57). 1=Fixed, 2=Flashing, 4=Quick, etc.
+	switch intAttr(f, "LITCHR") {
+	case 1:
+		parts = append(parts, "F")
+	case 2, 3:
+		parts = append(parts, "Fl")
+	case 4, 5, 6:
+		parts = append(parts, "Q")
+	case 7, 8:
+		parts = append(parts, "Iso")
+	case 9, 10:
+		parts = append(parts, "Oc")
+	case 11:
+		parts = append(parts, "Mo")
+	case 12, 13:
+		parts = append(parts, "FFl")
+	}
+	// Colour code(s) — first letter only (R/G/W/Y).
+	if v, ok := f.Attribute("COLOUR"); ok {
+		if s, _ := v.(string); s != "" {
+			letters := ""
+			for _, c := range strings.Split(s, ",") {
+				switch strings.TrimSpace(c) {
+				case "1":
+					letters += "W"
+				case "3":
+					letters += "R"
+				case "4":
+					letters += "G"
+				case "6":
+					letters += "Y"
+				}
+			}
+			if letters != "" {
+				parts = append(parts, letters)
+			}
+		}
+	}
+	// Height in feet. HEIGHT is in metres in S-57; convert.
+	if v, ok := f.Attribute("HEIGHT"); ok {
+		hM := numAttr(v)
+		if !math.IsNaN(hM) && hM > 0 {
+			parts = append(parts, fmt.Sprintf("%dft", int(math.Round(hM*feetPerMetre))))
+		}
+	}
+	if len(parts) == 0 {
+		return
+	}
+	label := strings.Join(parts, " ")
+	dc.SetFontFace(basicfont.Face7x13)
+	dc.SetColor(s52CHMGD)
+	tx := px + 4*scale
+	ty := py - 4*scale
+	dc.Push()
+	dc.ScaleAbout(scale*0.65, scale*0.65, tx, ty)
+	dc.DrawStringAnchored(label, tx, ty, 0, 0.5)
+	dc.Pop()
+}
+
 // drawAreaLabel paints OBJNAM at the polygon centroid in chart black, but
 // only if the polygon is small enough that a single tile-centred label makes
 // sense (a continent-sized polygon's centroid is meaningless for a tile) and
@@ -770,11 +957,16 @@ func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64
 // The compare endpoint + TestCompareWithWMS test surface any palette drift
 // as it happens.
 var (
-	// Water fills. NOAA's WMS uses two-colour shading in coastal tiles —
-	// saturated blue below the safety contour, pure white at-or-above —
-	// plus a tan-green for drying areas.
-	s52DEPDW = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // safe water (≥ safety contour)
-	s52DEPVS = color.RGBA{0xAF, 0xCD, 0xE1, 0xFF} // unsafe water (< safety contour)
+	// Water fills, four-band scheme keyed off the boat's safety contour.
+	// All four shades appear in the NOAA WMS sample data: AFCDE1 (below
+	// safety), D1DDEF / DDEAF7 (transition zone past the safety contour),
+	// pure white (well past safety / open ocean). DDEAF7 in particular is
+	// the dominant colour in offshore tiles — going 2-band forced us to
+	// paint those tiles either fully white or fully AFCDE1, neither right.
+	s52DEPDW = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // safe water (≥ 4× safety)
+	s52DEPMD = color.RGBA{0xDD, 0xEA, 0xF7, 0xFF} // medium-deep (2× to 4× safety)
+	s52DEPMS = color.RGBA{0xD1, 0xDD, 0xEF, 0xFF} // medium-shallow (safety to 2× safety)
+	s52DEPVS = color.RGBA{0xAF, 0xCD, 0xE1, 0xFF} // unsafe (< safety)
 	s52DEPIT = color.RGBA{0xD6, 0xDB, 0xC9, 0xFF} // intertidal / drying — pale tan-green
 
 	// Land + coast.
@@ -813,34 +1005,39 @@ var (
 // drying (intertidal) areas, land, dredged areas, lock basins. Outline-only
 // classes (fairways, anchorages, harbour areas, docks, pontoons, pipeline
 // areas) are handled in lineStroke.
-func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
+func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Color {
 	switch class {
 	case "DEPARE":
 		min, max := depthRange(f)
-		if math.IsNaN(min) {
-			// No DRVAL1 — try DRVAL2; if neither, default to DEPDW so
-			// open-ocean polygons read as "deep" rather than disappearing.
-			if math.IsNaN(max) {
-				return s52DEPDW
-			}
-			min = max
-		} else if min == 0 && !math.IsNaN(max) && max > 5 {
-			// DRVAL1=0 with meaningful DRVAL2 is a range indicator. Use the
-			// deeper edge so overview-cell coastal polygons don't paint the
-			// open ocean as drying flats wherever they intersect a tile.
-			min = max
+		// Drying check uses the shallower edge (DRVAL1 < 0). Band selection
+		// uses the deeper edge (DRVAL2) so an offshore polygon spanning
+		// "5 to 100 ft" reads as deep — matches NOAA's WMS, which paints
+		// such polygons DDEAF7 / white rather than the saturated DEPVS our
+		// shallow-edge keying produced.
+		if !math.IsNaN(min) && min < 0 {
+			return s52DEPIT
 		}
-		return depthFill(min, safeDepthM)
+		key := max
+		if math.IsNaN(key) {
+			key = min
+		}
+		if math.IsNaN(key) {
+			return s52DEPDW
+		}
+		return depthFill(key, safeDepthM, z)
 	case "DRGARE":
 		// Dredged area: maintained safe-depth channel. NOAA's WMS paints
 		// these as DEPDW (white) — the channel is "above safety" by virtue
-		// of being dredged, regardless of the surrounding shallow water's
+		// of being dredged regardless of the surrounding shallow water's
 		// DRVAL1.
+		_ = z
 		return s52DEPDW
 	case "LNDARE":
 		return s52LANDA
-	case "BUAARE":
-		// Built-up area: NOAA uses a more-saturated yellow than plain land.
+	case "BUAARE", "BUISGL":
+		// Built-up area / single conspicuous building: NOAA paints both
+		// with the same saturated yellow ochre, distinct from regular
+		// LANDA so harbour structures stand out.
 		return color.RGBA{0xEF, 0xD8, 0xA3, 0xFF}
 	case "LOKBSN":
 		return s52DEPVS
@@ -851,27 +1048,68 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64) color.Color {
 	return nil
 }
 
-// depthFill returns the water fill for a DEPARE keyed off the boat's safety
-// contour. S-52 "two-colour shading" — three bands NOAA's WMS actually uses
-// in coastal tiles:
+// S-52 contour thresholds in metres. SHALLOW separates drying-ish from
+// "covered but shallow"; DEEP separates "safe but mid-depth" from "well past
+// safe". DEEP at 7.5 m matches what NOAA's WMS appears to use — z=13
+// sampling shows polygons with DRVAL2 ≥ ~9 m painted as DEPDW (white),
+// which only happens with DEEP < 9.
+const (
+	s52ShallowContourM = 2.0
+	s52DeepContourM    = 7.5
+)
+
+// depthFill returns the water fill for a DEPARE polygon.
 //
-//   - DRVAL1 < 0          → DEPIT (intertidal / drying)
-//   - 0 ≤ DRVAL1 < safety → DEPVS (saturated blue, below safety contour)
-//   - DRVAL1 ≥ safety     → DEPDW (white, safe water)
+// At chart-detail zoom (z≥13) we use the full four-band scheme:
 //
-// Sampled NOAA tiles overwhelmingly use just AFCDE1 (below safety) and pure
-// white (at-or-above safety). Adding intermediate bands (DEPMS / DEPMD) had
-// us painting channels in pale blue where NOAA paints them white because the
-// channel depth is past the safety contour.
-func depthFill(minDepthM, safeDepthM float64) color.Color {
+//   - depth < 0                      → DEPIT (intertidal / drying)
+//   - 0 ≤ depth < SHALLOW            → DEPVS (AFCDE1, drying-ish saturated)
+//   - SHALLOW ≤ depth < safety       → DEPMS (D1DDEF, below-safety warning)
+//   - safety ≤ depth < DEEP          → DEPMD (DDEAF7, safe but mid-depth)
+//   - depth ≥ DEEP                   → DEPDW (white)
+//
+// At coarser zooms (z≤12) NOAA's WMS collapses to roughly two-colour
+// shading — saturated blue for water below safety, plain white past it,
+// with the intermediate bands either absent or much narrower. Sampling
+// NOAA z=12 tiles shows ~50/50 white vs AFCDE1 with the intermediate
+// blues nearly invisible. We match by remapping the DEPMD/DEPMS bands to
+// DEPDW (white) at z≤12.
+func depthFill(depthM, safeDepthM float64, z int) color.Color {
 	if safeDepthM <= 0 {
-		safeDepthM = 1
+		safeDepthM = s52DeepContourM
 	}
-	if minDepthM < 0 {
+	// Don't let safety creep below SHALLOW — we want a non-empty DEPMS band.
+	if safeDepthM <= s52ShallowContourM {
+		safeDepthM = s52ShallowContourM + 1
+	}
+	deep := s52DeepContourM
+	if deep < safeDepthM {
+		deep = safeDepthM * 1.5
+	}
+	if depthM < 0 {
 		return s52DEPIT
 	}
-	if minDepthM < safeDepthM {
+	if depthM < s52ShallowContourM {
 		return s52DEPVS
+	}
+	if z <= 12 {
+		// Two-colour shading at coarse zoom. NOAA's WMS effective threshold
+		// at z=12 lands around 10 m (sampled tiles split ~60/40 white vs
+		// AFCDE1 with the intermediate bands collapsed). Override the
+		// user's per-boat safety here so the chart-display tone matches
+		// NOAA — the per-boat shading is more useful at chart-detail zoom
+		// where channel polygons are visible anyway.
+		threshold := s52DeepContourM
+		if depthM < threshold {
+			return s52DEPVS
+		}
+		return s52DEPDW
+	}
+	if depthM < safeDepthM {
+		return s52DEPMS
+	}
+	if depthM < deep {
+		return s52DEPMD
 	}
 	return s52DEPDW
 }
@@ -941,11 +1179,20 @@ func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, l
 
 	switch class {
 	case "BOYLAT", "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
-		first(func(px, py float64) { drawBuoy(dc, f, px, py, scale) })
+		first(func(px, py float64) {
+			drawBuoy(dc, f, px, py, scale)
+			drawNavaidLabel(dc, f, px, py, scale)
+		})
 	case "BCNLAT", "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
-		first(func(px, py float64) { drawBeacon(dc, f, px, py, scale) })
+		first(func(px, py float64) {
+			drawBeacon(dc, f, px, py, scale)
+			drawNavaidLabel(dc, f, px, py, scale)
+		})
 	case "LIGHTS":
-		first(func(px, py float64) { drawLight(dc, f, px, py, scale) })
+		first(func(px, py float64) {
+			drawLight(dc, f, px, py, scale)
+			drawLightLabel(dc, f, px, py, scale)
+		})
 	case "WRECKS", "OBSTRN":
 		// Wrecks / obstructions: red-magenta cross with sounding-style hash
 		// matching S-52's symbol. Bold so it pops over depth fills.

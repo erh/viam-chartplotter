@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
+	"golang.org/x/image/font/basicfont"
 )
 
 // TestCompareWithWMS renders our tile next to NOAA's WMS tile for the same
@@ -45,16 +47,26 @@ func TestCompareWithWMS(t *testing.T) {
 	outDir := envOr("CMP_OUT_DIR", "/tmp/noaa-compare")
 	cacheDir := envOr("CMP_CACHE_DIR", filepath.Join(mustUserCacheDir(t), "viam-chartplotter", "noaa-enc"))
 	wmsCacheDir := envOr("CMP_WMS_CACHE_DIR", filepath.Join(mustUserCacheDir(t), "viam-chartplotter", "noaa-wms"))
-	// NOAA's WMS defaults to a 30 ft safety contour (S-52 PRESLIB default).
-	// Matching it here so our depth-band colours land in the same DEPVS /
-	// DEPMS / DEPDW buckets the WMS reference uses; otherwise the diff is
-	// dominated by everyone-renders-water-but-we-disagree-on-band.
-	safeDepthFt := envOrFloat(t, "CMP_SAFE_DEPTH_FT", 30)
+	// Match the module's default safe_depth_ft so test renders agree with
+	// what the live /noaa-enc/tile/... URL produces. depthFill clamps
+	// effective safety up to SHALLOW+1 m (= 3 m), which lines up with
+	// NOAA's WMS effective rendering after sampling.
+	safeDepthFt := envOrFloat(t, "CMP_SAFE_DEPTH_FT", 6)
 	doPrefetch := os.Getenv("CMP_PREFETCH") != "0"
+	// Curated regression set — five user-flagged tiles spanning z=12..16
+	// across different chart-content scenarios:
+	//   z=12 Chesapeake approach (mostly water, soundings, channel)
+	//   z=13 offshore Virginia (deep water, depth contour, label-heavy)
+	//   z=14 offshore (DEPMD-dominant, sparse features)
+	//   z=15 Beaufort Harbor (mixed land/water/structures)
+	//   z=16 Norfolk Harbor (BUAARE land + BUISGL buildings)
+	// Override with CMP_TILES to test other tiles.
 	tiles := envOrTiles(t, "CMP_TILES", []tileXYZ{
-		{z: 15, x: 9405, y: 13010},  // Beaufort Harbor, NC
-		{z: 14, x: 4702, y: 6505},   // Beaufort area, zoomed out
-		{z: 16, x: 18811, y: 26021}, // Beaufort, zoomed in
+		{z: 12, x: 1184, y: 1593},
+		{z: 13, x: 2368, y: 3187},
+		{z: 14, x: 4737, y: 6375},
+		{z: 15, x: 9405, y: 13010},
+		{z: 16, x: 18897, y: 25526},
 	})
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -91,6 +103,7 @@ func TestCompareWithWMS(t *testing.T) {
 
 	// One render per tile: prefetch its bbox, render ours, fetch WMS, save the
 	// 3-panel image, log the metric.
+	var rows []gridRow
 	for _, tile := range tiles {
 		if doPrefetch {
 			minLon, minLat, maxLon, maxLat := tileLonLatBBox(tile)
@@ -138,7 +151,79 @@ func TestCompareWithWMS(t *testing.T) {
 		m := compareMetric(ourImg, wmsImg)
 		t.Logf("z=%-2d x=%-6d y=%-6d  avg_rgb_diff=%6.2f  pct_diff>30=%5.2f%%  pct_diff>60=%5.2f%%  saved=%s",
 			tile.z, tile.x, tile.y, m.avgDelta, m.pctOver30, m.pctOver60, outPath)
+		rows = append(rows, gridRow{tile: tile, panel: panel, metric: m})
 	}
+
+	if len(rows) > 0 {
+		gridPath := filepath.Join(outDir, "grid.png")
+		if err := writeGrid(gridPath, rows); err != nil {
+			t.Errorf("write grid: %v", err)
+		} else {
+			t.Logf("grid:    %s (%d tiles)", gridPath, len(rows))
+		}
+		var sumAvg, sumPct30, sumPct60 float64
+		for _, r := range rows {
+			sumAvg += r.metric.avgDelta
+			sumPct30 += r.metric.pctOver30
+			sumPct60 += r.metric.pctOver60
+		}
+		n := float64(len(rows))
+		t.Logf("summary: tiles=%d  avg_rgb_diff=%.2f  pct_diff>30=%.2f%%  pct_diff>60=%.2f%%",
+			len(rows), sumAvg/n, sumPct30/n, sumPct60/n)
+	}
+}
+
+// gridRow holds one tile's compare panel plus its metric so we can stack
+// them into a single review image at the end of the test.
+type gridRow struct {
+	tile   tileXYZ
+	panel  *image.RGBA
+	metric cmpMetric
+}
+
+// writeGrid stacks the compare panels vertically with a header strip per row
+// containing the tile coords and metrics. The output is a single large PNG
+// good for a quick visual review of all five tiles at once.
+func writeGrid(path string, rows []gridRow) error {
+	const (
+		panelW    = 768
+		panelH    = 256
+		headerH   = 28 // tile coords + metric line
+		paddingH  = 4
+	)
+	rowH := panelH + headerH + paddingH
+	totalH := rowH*len(rows) + paddingH
+	out := image.NewRGBA(image.Rect(0, 0, panelW, totalH))
+	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.RGBA{R: 0xF4, G: 0xF4, B: 0xF4, A: 0xFF}}, image.Point{}, draw.Src)
+
+	dc := gg.NewContextForRGBA(out)
+	dc.SetFontFace(basicfont.Face7x13)
+	for i, r := range rows {
+		y := paddingH + i*rowH
+		// Header bar.
+		dc.SetColor(color.RGBA{R: 0x18, G: 0x1B, B: 0x21, A: 0xFF})
+		dc.DrawRectangle(0, float64(y), panelW, headerH)
+		dc.Fill()
+		// Header text — tile coords on the left, metrics on the right.
+		left := fmt.Sprintf("z=%d  x=%d  y=%d", r.tile.z, r.tile.x, r.tile.y)
+		right := fmt.Sprintf("avg=%.1f   pct>30=%.1f%%   pct>60=%.1f%%",
+			r.metric.avgDelta, r.metric.pctOver30, r.metric.pctOver60)
+		dc.SetColor(color.RGBA{R: 0xE6, G: 0xE6, B: 0xE6, A: 0xFF})
+		dc.Push()
+		dc.ScaleAbout(1.5, 1.5, 8, float64(y)+8)
+		dc.DrawStringAnchored(left, 8, float64(y)+8, 0, 0)
+		dc.Pop()
+		dc.Push()
+		rightX := float64(panelW - 8)
+		dc.ScaleAbout(1.5, 1.5, rightX, float64(y)+8)
+		dc.DrawStringAnchored(right, rightX, float64(y)+8, 1, 0)
+		dc.Pop()
+		// Panel.
+		draw.Draw(out, image.Rect(0, y+headerH, panelW, y+headerH+panelH),
+			r.panel, image.Point{}, draw.Src)
+	}
+
+	return writePNG(path, out)
 }
 
 // compareMetric quantifies how different `our` is from `wms` on a 256x256
