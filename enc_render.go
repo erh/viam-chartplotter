@@ -402,11 +402,21 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 		}
 	}
 
-	// Place-name labels show at overview zooms (z >= 10) — same threshold
-	// where NOAA WMS surfaces them. At z <= 9 the world coverage is too
-	// large for individual place labels to read meaningfully.
+	// Place-name labels at overview zooms (z >= 10). Bigger features get
+	// priority: we collect all viable candidates, dedupe by name keeping
+	// the largest polygon, sort largest-first, then place greedily with
+	// collision detection so a tile full of named marshes/coves doesn't
+	// turn into stacked unreadable text. Without this z=11 was painting
+	// 10+ overlapping labels per tile.
 	if z >= 10 {
-		seen := map[string]bool{}
+		type labelCand struct {
+			name              string
+			px, py            float64
+			labelScale        float64
+			halfW, halfH, pad float64
+			area              float64
+		}
+		bestByName := map[string]labelCand{}
 		for _, cell := range allCells {
 			chart, err := r.chartFor(cell.Name)
 			if err != nil || chart == nil {
@@ -424,12 +434,86 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 					continue
 				}
 				name, _ := v.(string)
-				if name == "" || seen[name] {
+				if name == "" {
 					continue
 				}
-				seen[name] = true
-				drawAreaLabel(dc, &f, project, scale, bbox, z)
+				geom := f.Geometry()
+				if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
+					continue
+				}
+				if isOversizedPolygon(geom.Coordinates, bbox, 4) {
+					continue
+				}
+				cx, cy := polygonCentroid(geom.Coordinates)
+				px, py := project(cx, cy)
+
+				ls := scale
+				switch {
+				case z <= 10:
+					ls = scale * 1.7
+				case z == 11:
+					ls = scale * 1.5
+				case z == 12:
+					ls = scale * 1.25
+				}
+				halfW := float64(len(name)) * 7 * ls / 2
+				halfH := 6.5 * ls
+				if px-halfW < 2 || px+halfW > 254 || py-halfH < 2 || py+halfH > 254 {
+					continue
+				}
+
+				// Polygon area as importance proxy. Use the dominant ring.
+				rings := splitRings(geom.Coordinates)
+				if len(rings) == 0 {
+					rings = [][][]float64{geom.Coordinates}
+				}
+				var area float64
+				for _, ring := range rings {
+					a := math.Abs(ringSignedArea(ring))
+					if a > area {
+						area = a
+					}
+				}
+
+				cand := labelCand{name, px, py, ls, halfW, halfH, 2.0, area}
+				if existing, dup := bestByName[name]; !dup || cand.area > existing.area {
+					bestByName[name] = cand
+				}
 			}
+		}
+
+		cands := make([]labelCand, 0, len(bestByName))
+		for _, c := range bestByName {
+			cands = append(cands, c)
+		}
+		sort.Slice(cands, func(i, j int) bool { return cands[i].area > cands[j].area })
+
+		type rect struct{ minX, minY, maxX, maxY float64 }
+		var placed []rect
+		for _, c := range cands {
+			r := rect{
+				c.px - c.halfW - c.pad,
+				c.py - c.halfH - c.pad,
+				c.px + c.halfW + c.pad,
+				c.py + c.halfH + c.pad,
+			}
+			overlap := false
+			for _, p := range placed {
+				if !(r.maxX < p.minX || r.minX > p.maxX || r.maxY < p.minY || r.minY > p.maxY) {
+					overlap = true
+					break
+				}
+			}
+			if overlap {
+				continue
+			}
+			placed = append(placed, r)
+			dc.SetFontFace(basicfont.Face7x13)
+			dc.SetColor(s52CHBLK)
+			dc.Push()
+			dc.ScaleAbout(c.labelScale, c.labelScale, c.px, c.py)
+			dc.DrawStringAnchored(c.name, c.px, c.py, 0.5, 0.5)
+			dc.Pop()
 		}
 	}
 
