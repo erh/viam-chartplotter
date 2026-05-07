@@ -126,6 +126,7 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    airstreamName: "",
     navServiceName: "",
     routeSensorName: "",
     seatempSensorName: "",
@@ -140,6 +141,13 @@
 
     zoomModifier: 0,
   });
+
+  // Airstream (viamboat aisstream) state. The map's "airstream" layer toggle
+  // controls whether we fetch from the global aisstream feed and feed bounding
+  // boxes to it. Until the bounding box is set we don't do anything — that's
+  // the contract on the airstream component itself, mirrored on the client.
+  let airstreamLayerActive = $state(false);
+  let airstreamBboxDebounce: number | undefined;
 
   function gotNewData() {
     globalData.lastData = new Date();
@@ -391,43 +399,132 @@
           })
           .catch(errorHandlerMaker(r.name));
       });
+    }
 
+    // AIS + airstream poll at 10 s, faster than the 30 s gauge poll because
+    // boat positions move continuously and the airstream feed accumulates
+    // websocket messages between fetches.
+    if (loopNumber % 10 == 2) {
+      const aisFetches: Promise<{ boat: any; ts: number }[]>[] = [];
       if (globalConfig.aisSensorName != "") {
-        new VIAM.SensorClient(client, globalConfig.aisSensorName)
-          .getReadings()
-          .then((raw) => {
-            var good = [];
-
-            for (var mmsi in raw) {
-              var rawBoat = raw[mmsi];
-              if (
-                rawBoat == null ||
-                rawBoat.Location == null ||
-                rawBoat.Location.length != 2 ||
-                rawBoat.Location[0] == null
-              ) {
-                continue;
+        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"));
+      }
+      // Airstream is gated on the layer toggle: only fetch when the user
+      // has selected it, since the airstream sensor itself is idle until
+      // we send it a bounding box.
+      if (globalConfig.airstreamName != "" && airstreamLayerActive) {
+        aisFetches.push(
+          fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream")
+        );
+      }
+      if (aisFetches.length === 0) {
+        globalData.aisBoats = [];
+      } else {
+        Promise.all(aisFetches).then((sources) => {
+          // Merge sources by mmsi, keeping the entry with the latest Timestamp.
+          const byMmsi = new Map<string, { boat: any; ts: number }>();
+          for (const src of sources) {
+            for (const e of src) {
+              const existing = byMmsi.get(e.boat.mmsi);
+              if (!existing || e.ts > existing.ts) {
+                byMmsi.set(e.boat.mmsi, e);
               }
-
-              var boat = {
-                name: rawBoat.Name || "",
-                location: rawBoat.Location,
-                speed: rawBoat.Speed || 0,
-                heading: rawBoat.Heading || 0,
-                mmsi: mmsi,
-              };
-
-              good.push(boat);
             }
-
-            globalData.aisBoats = good;
-          })
-          .catch((e) => {
-            globalData.aisBoats = [];
-            errorHandler(e, "ais");
-          });
+          }
+          globalData.aisBoats = Array.from(byMmsi.values()).map((v) => v.boat);
+        });
       }
     }
+  }
+
+  // fetchBoatsFromSensor pulls AIS-shaped readings from a viamboat sensor
+  // (either the local `ais` model or the `aisstream` model — both return
+  // the same map<mmsi, {Timestamp, Location, Heading, COG, SOG, Name, ...}>
+  // shape). Returned entries carry the parsed Timestamp ms so the caller
+  // can dedupe across multiple sources by recency.
+  function fetchBoatsFromSensor(
+    client: any,
+    name: string,
+    label: string
+  ): Promise<{ boat: any; ts: number }[]> {
+    return new VIAM.SensorClient(client, name)
+      .getReadings()
+      .then((raw: any) => {
+        const out: { boat: any; ts: number }[] = [];
+        for (const mmsi in raw) {
+          const rawBoat = raw[mmsi];
+          if (
+            rawBoat == null ||
+            typeof rawBoat !== "object" ||
+            rawBoat.Location == null ||
+            rawBoat.Location.length != 2 ||
+            rawBoat.Location[0] == null
+          ) {
+            continue;
+          }
+          // Both sources serialize Timestamp as RFC822Z. new Date() handles
+          // it; on parse failure fall back to 0 so any other source wins.
+          let ts = 0;
+          if (typeof rawBoat.Timestamp === "string") {
+            const parsed = Date.parse(rawBoat.Timestamp);
+            if (!Number.isNaN(parsed)) ts = parsed;
+          }
+          out.push({
+            boat: {
+              name: rawBoat.Name || "",
+              location: rawBoat.Location,
+              speed: rawBoat.Speed || 0,
+              heading: rawBoat.Heading || 0,
+              mmsi: mmsi,
+            },
+            ts,
+          });
+        }
+        return out;
+      })
+      .catch((e: any) => {
+        errorHandler(e, label);
+        return [] as { boat: any; ts: number }[];
+      });
+  }
+
+  // Send a DoCommand to the airstream sensor, no-op if not configured or no
+  // client. Airstream tolerates rapid re-subscriptions but each one drops the
+  // current websocket and reconnects, so callers should debounce viewport
+  // changes via onAirstreamBboxChange.
+  function airstreamDoCommand(cmd: Record<string, any>) {
+    if (!globalClient || !globalConfig.airstreamName) return;
+    new VIAM.SensorClient(globalClient, globalConfig.airstreamName)
+      .doCommand(VIAM.Struct.fromJson(cmd))
+      .catch((e: any) => errorHandler(e, "airstream"));
+  }
+
+  // Bridge from the map: bbox=null means the layer was toggled off (or the
+  // viewport became invalid). We send clear/set accordingly. Set calls are
+  // debounced so dragging/zooming doesn't churn the airstream connection.
+  function onAirstreamBboxChange(
+    bbox: { minLon: number; minLat: number; maxLon: number; maxLat: number } | null
+  ) {
+    if (airstreamBboxDebounce !== undefined) {
+      clearTimeout(airstreamBboxDebounce);
+      airstreamBboxDebounce = undefined;
+    }
+    if (bbox == null) {
+      airstreamLayerActive = false;
+      airstreamDoCommand({ command: "clear_bounding_box" });
+      return;
+    }
+    airstreamLayerActive = true;
+    airstreamBboxDebounce = window.setTimeout(() => {
+      airstreamBboxDebounce = undefined;
+      airstreamDoCommand({
+        command: "set_bounding_box",
+        min_lat: bbox.minLat,
+        max_lat: bbox.maxLat,
+        min_lon: bbox.minLon,
+        max_lon: bbox.maxLon,
+      });
+    }, 800);
   }
 
   function acPowerVoltAverage(data) {
@@ -591,6 +688,12 @@
       "component",
       "sensor",
       /\bais$/
+    );
+    globalConfig.airstreamName = filterResourcesFirstMatchingName(
+      resources,
+      "component",
+      "sensor",
+      /\bairstream$/
     );
     globalConfig.navServiceName = filterResourcesFirstMatchingName(
       resources,
@@ -1117,7 +1220,24 @@
     }
 
     data = data.map((raw) => {
-      var point = { lat: raw.pos.coordinate.latitude, lng: raw.pos.coordinate.longitude };
+      // raw.ts comes from the MQL `$min: "$time_received"` aggregation. BSON
+      // deserialization typically returns a Date; the legacy albertboat fetch
+      // path can return a string. Normalise here so renderHistoricalTrack
+      // gets a Date and can do its realtime/historical hand-off correctly.
+      var ts: Date | undefined;
+      if (raw.ts instanceof Date) {
+        ts = raw.ts;
+      } else if (typeof raw.ts === "string") {
+        const parsed = new Date(raw.ts);
+        if (!Number.isNaN(parsed.getTime())) ts = parsed;
+      } else if (typeof raw.ts === "number") {
+        ts = new Date(raw.ts);
+      }
+      var point: any = {
+        lat: raw.pos.coordinate.latitude,
+        lng: raw.pos.coordinate.longitude,
+        ts,
+      };
       if (raw._id && depthLookup[raw._id] !== undefined) {
         point.depth = depthLookup[raw._id];
       }
@@ -1538,6 +1658,8 @@
       onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
       onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
+      airstreamConfigured={globalConfig.airstreamName !== ""}
+      onAirstreamBboxChange={globalConfig.airstreamName !== "" ? onAirstreamBboxChange : undefined}
     ></MarineMap>
 
     {#if !globalData.hideDataPanel}

@@ -450,6 +450,8 @@
     fitBoundsPadding,
     onBoatPopupOpen,
     detectionConfig,
+    airstreamConfigured = false,
+    onAirstreamBboxChange,
   }: {
     myBoat?: BoatInfo;
     zoomModifier?: number;
@@ -492,6 +494,17 @@
     fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
     onBoatPopupOpen?: (boatPartId?: string) => void;
     detectionConfig?: DetectionConfig;
+    /** When true, register the airstream toggle layer in the layer panel.
+     *  When false (default) it's hidden — the host machine has no airstream
+     *  component to drive. */
+    airstreamConfigured?: boolean;
+    /** Called by the map when the airstream layer's bbox changes: bbox=null
+     *  means the layer was toggled off, otherwise bbox is the current
+     *  viewport in lon/lat. App.svelte uses this to hit airstream's DoCommand
+     *  (and to gate fetching from it). */
+    onAirstreamBboxChange?: (
+      bbox: { minLon: number; minLat: number; maxLon: number; maxLat: number } | null
+    ) => void;
   } = $props();
 
   // Create derived values for reactivity tracking
@@ -610,6 +623,11 @@
     trackFeatureIds: Record<string, boolean>;
     aisTrackFeatureIds: Record<string, boolean>;
     lastPosHistoricalKey: string;
+    // Timestamps (ms) of realtime track points we've actually recorded,
+    // per boat. Used by renderHistoricalTrack to avoid double-painting
+    // the last-10-minute window when realtime already has it covered,
+    // while still painting historical wherever realtime has a gap.
+    realtimeTrackTs: Record<string, number[]>;
   } = {
     lastZoom: 0,
     lastCenter: null,
@@ -618,7 +636,18 @@
     trackFeatureIds: {},
     aisTrackFeatureIds: {},
     lastPosHistoricalKey: "",
+    realtimeTrackTs: {},
   };
+
+  // Realtime "wins" for the last realtimeWindowMs ms; historical paints
+  // anything older. Within the window, historical only paints where
+  // realtime has a gap larger than realtimeMatchToleranceMs.
+  const realtimeWindowMs = 10 * 60 * 1000;
+  const realtimeMatchToleranceMs = 30 * 1000;
+  // Cap how far back we keep realtime timestamps. Anything past the
+  // realtime window plus a margin can be dropped — historical takes
+  // over there anyway.
+  const realtimeTsKeepMs = realtimeWindowMs + 5 * 60 * 1000;
 
   function updateFromData() {
     if (!mapGlobal.map || !mapGlobal.view) {
@@ -1047,6 +1076,26 @@
         })
       );
 
+      // Record the timestamp so renderHistoricalTrack can tell which
+      // historical points are already covered by realtime. Append-only
+      // sorted (Date.now() is monotonic-ish for our purposes); prune the
+      // tail to keep the array bounded.
+      const now = Date.now();
+      let arr = mapInternalState.realtimeTrackTs[boatId];
+      if (!arr) {
+        arr = [];
+        mapInternalState.realtimeTrackTs[boatId] = arr;
+      }
+      arr.push(now);
+      const dropBefore = now - realtimeTsKeepMs;
+      let dropCount = 0;
+      while (dropCount < arr.length && arr[dropCount] < dropBefore) {
+        dropCount++;
+      }
+      if (dropCount > 0) {
+        arr.splice(0, dropCount);
+      }
+
       if (lastPosKey) {
         mapInternalState.lastPositions[lastPosKey] = position;
       } else {
@@ -1073,33 +1122,79 @@
     return R * c;
   }
 
-  // Render historical track from position history array
-  // Draws dotted 33% transparent lines between points that are 10+ nautical miles apart
+  // realtimeCoversTs returns true if realtime has a recorded point within
+  // realtimeMatchToleranceMs of `ts`. Implemented as a binary search on
+  // the sorted-append-only timestamp list per boat.
+  function realtimeCoversTs(boatId: string, ts: number): boolean {
+    const arr = mapInternalState.realtimeTrackTs[boatId];
+    if (!arr || arr.length === 0) return false;
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid] < ts) lo = mid + 1;
+      else hi = mid;
+    }
+    // Closest entry is at lo or lo-1; check both.
+    const a = lo > 0 ? Math.abs(arr[lo - 1] - ts) : Infinity;
+    const b = lo < arr.length ? Math.abs(arr[lo] - ts) : Infinity;
+    return Math.min(a, b) <= realtimeMatchToleranceMs;
+  }
+
+  // Render historical track from position history array.
+  // Draws dotted 33% transparent lines between points that are 10+ nautical miles apart.
+  //
+  // Hand-off rule with the realtime track: realtime is the source of truth
+  // for the last realtimeWindowMs (10 min). Historical only paints inside
+  // that window where realtime has a gap (no recorded point within
+  // realtimeMatchToleranceMs of the historical point's timestamp). Outside
+  // the window historical paints unconditionally. Net effect: no
+  // double-painting of the recent past, but disconnections / sensor blips
+  // in realtime get filled in by historical.
   function renderHistoricalTrack(
     boatId: string,
-    history: { lat: number; lng: number; depth?: number }[],
+    history: PositionPoint[],
     idPrefix: string
   ): void {
+    const now = Date.now();
+    const realtimeWindowStart = now - realtimeWindowMs;
+
     let prev: number[] | null = null;
-    let prevPoint: { lat: number; lng: number; depth?: number } | null = null;
+    let prevPoint: PositionPoint | null = null;
 
     history.forEach((p) => {
       const pp = [p.lng, p.lat];
 
       if (prev && prevPoint) {
-        // Calculate distance between consecutive points
-        const distanceNM = calculateDistanceNM(prevPoint.lat, prevPoint.lng, p.lat, p.lng);
+        // Some history sources (e.g. legacy AIS positionHistory, or albertboat
+        // fetch) don't carry per-point timestamps. Without a ts we can't run
+        // the realtime hand-off check, so paint unconditionally — same
+        // behaviour as before the hand-off rule existed.
+        let ts: number | null = null;
+        if (p.ts instanceof Date) {
+          const t = p.ts.getTime();
+          if (!Number.isNaN(t)) ts = t;
+        }
+        let skip = false;
+        if (ts !== null && ts >= realtimeWindowStart && realtimeCoversTs(boatId, ts)) {
+          skip = true;
+        }
 
-        // Mark as gap if points are more than 10 nautical miles apart
-        const isGap = distanceNM >= 10;
+        if (!skip) {
+          // Calculate distance between consecutive points
+          const distanceNM = calculateDistanceNM(prevPoint.lat, prevPoint.lng, p.lat, p.lng);
 
-        addTrackFeature(
-          `${idPrefix}-line-${p.lng}-${p.lat}`,
-          new LineString([prev, pp]),
-          boatId,
-          isGap,
-          p.depth
-        );
+          // Mark as gap if points are more than 10 nautical miles apart
+          const isGap = distanceNM >= 10;
+
+          addTrackFeature(
+            `${idPrefix}-line-${p.lng}-${p.lat}`,
+            new LineString([prev, pp]),
+            boatId,
+            isGap,
+            p.depth
+          );
+        }
       }
 
       prev = pp;
@@ -1901,6 +1996,19 @@
       layer: aisTrackLayer,
       parent: "ais",
     });
+
+    // Airstream toggle layer. Always registered (resource discovery is
+    // async and setupLayers only runs once at mount, so we can't gate
+    // registration on airstreamConfigured being true at this moment).
+    // The layer panel hides the row when airstreamConfigured is false,
+    // and the bbox-emit / DoCommand callbacks check the prop themselves —
+    // so a machine without airstream sees no toggle and fires nothing.
+    mapGlobal.layerOptions.push({
+      name: "airstream",
+      displayName: "airstream",
+      on: false,
+      layer: new Vector({ source: new VectorSource() }),
+    });
   }
 
   function findLayerByName(name: string): LayerOption | null {
@@ -1942,6 +2050,32 @@
   // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
   // spam the backend with overlapping cell-download jobs.
   let lastNoaaPrefetchKey = "";
+
+  // Last bbox we emitted to onAirstreamBboxChange so trivial pans don't
+  // re-fire the callback. Rounded to keep this a coarse comparison.
+  let lastAirstreamBboxKey = "";
+
+  function maybeEmitAirstreamBbox() {
+    if (!airstreamConfigured || !onAirstreamBboxChange) return;
+    const layer = findLayerByName("airstream");
+    if (!layer || !layer.on) return;
+    if (!mapGlobal.map || !mapGlobal.view) return;
+    const size = mapGlobal.map.getSize();
+    if (!size) return;
+    const extent = mapGlobal.view.calculateExtent(size);
+    // Round to 0.01° (~1 km) so a tiny drift doesn't churn the airstream
+    // websocket. set_bounding_box drops and reconnects on every call.
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const minLon = round(extent[0]);
+    const minLat = round(extent[1]);
+    const maxLon = round(extent[2]);
+    const maxLat = round(extent[3]);
+    if (!Number.isFinite(minLon) || minLat >= maxLat || minLon >= maxLon) return;
+    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
+    if (key === lastAirstreamBboxKey) return;
+    lastAirstreamBboxKey = key;
+    onAirstreamBboxChange({ minLon, minLat, maxLon, maxLat });
+  }
 
   function maybePrefetchNoaaTiles() {
     if (!noaaCacheReachable()) return;
@@ -2085,6 +2219,7 @@
     // current viewport. The handler is a no-op when the noaa layer is off.
     mapGlobal.map.on("moveend", () => {
       maybePrefetchNoaaTiles();
+      maybeEmitAirstreamBbox();
     });
 
     // Setup popup overlay
@@ -2554,6 +2689,8 @@
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
+      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {#if !isHidden}
       <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
           type="checkbox"
@@ -2571,6 +2708,15 @@
             if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
               lastNoaaPrefetchKey = "";
               maybePrefetchNoaaTiles();
+            }
+            if (l.name === "airstream") {
+              if (checked) {
+                lastAirstreamBboxKey = "";
+                maybeEmitAirstreamBbox();
+              } else if (onAirstreamBboxChange) {
+                lastAirstreamBboxKey = "";
+                onAirstreamBboxChange(null);
+              }
             }
           }}
           disabled={isParentOff}
@@ -2591,6 +2737,7 @@
           </select>
         {/if}
       </label>
+      {/if}
     {/each}
   </div>
 
