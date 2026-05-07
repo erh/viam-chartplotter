@@ -7,6 +7,7 @@
 ** See old routes
 ** save route
 ** Add: Undo button in case you accidentally delete a route like I just did
+** Rum lines and courses
 
 ## Navigation service
 
