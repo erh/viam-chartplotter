@@ -70,6 +70,23 @@ const arrivalCheckInterval = 5 * time.Second
 // Sized to comfortably exceed typical GPS jitter at the 5 s tick rate.
 const passEpsilonMeters = 30.0
 
+// lastWaypointPassMinDistanceMeters and lastWaypointPassFactor configure
+// the fallback arrival rule for the *final* waypoint, where there's no
+// after-next to compare against. We mark the last waypoint visited if the
+// boat got within lastWaypointPassMinDistanceMeters of it AND has since
+// moved at least lastWaypointPassFactor× that minimum away — i.e. an
+// overshoot we can be confident about even without a direction reference.
+const lastWaypointPassMinDistanceMeters = 400.0
+const lastWaypointPassFactor = 2.5
+
+// arrivalLogInterval throttles the periodic "where are we relative to the
+// next waypoint" log line. Logs once per interval at info level when the
+// boat is within arrivalLogProximityMeters of the next waypoint, so an
+// operator can confirm the poller is alive and see why a pass-through
+// didn't fire.
+const arrivalLogInterval = 30 * time.Second
+const arrivalLogProximityMeters = 5000.0
+
 func newNav(
 	ctx context.Context,
 	deps resource.Dependencies,
@@ -140,7 +157,8 @@ type navService struct {
 
 	// Rolling approach memory for the current next-waypoint. Read/written
 	// only from the arrival poller goroutine, so no synchronisation needed.
-	arrivalState arrivalState
+	arrivalState   arrivalState
+	lastArrivalLog time.Time
 }
 
 // arrivalState tracks the closest the boat has been to targetID on the
@@ -225,10 +243,12 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 
 	arrived := false
 	reason := ""
-	if distNext <= radiusKm {
+	distAfterKm := -1.0 // -1 sentinel for "no after-next" in the diagnostic log
+	switch {
+	case distNext <= radiusKm:
 		arrived = true
 		reason = "inside arrival radius"
-	} else if len(wps) >= 2 {
+	case len(wps) >= 2:
 		// Bypass rule: we've moved away from our closest approach to the
 		// next waypoint AND we're now geometrically closer to the after-
 		// next waypoint than to the next. We deliberately do NOT require
@@ -237,16 +257,45 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		// radius, and as long as we're now past it heading toward the
 		// next one, that's the right call.
 		afterNext := wps[1]
-		distAfter := pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
+		distAfterKm = pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
 		passEpsKm := passEpsilonMeters / 1000.0
 		if distNext > s.arrivalState.minDistance+passEpsKm &&
-			distAfter < distNext {
+			distAfterKm < distNext {
 			arrived = true
 			reason = "passed (moved away + closer to next)"
+		}
+	default:
+		// Single (last) waypoint: no after-next to compare to, so the
+		// bypass rule above can't fire. Fall back to overshoot detection:
+		// we got within a reasonable approach distance and have since
+		// moved well past it. This handles "I drove by my final
+		// destination" without requiring the boat to land in the radius.
+		minKm := s.arrivalState.minDistance
+		if minKm <= lastWaypointPassMinDistanceMeters/1000.0 &&
+			distNext >= minKm*lastWaypointPassFactor &&
+			distNext > radiusKm {
+			arrived = true
+			reason = "overshot last waypoint"
 		}
 	}
 
 	if !arrived {
+		// Periodic diagnostic so a missed pass leaves a trail. Only log
+		// when the boat is within arrivalLogProximityMeters and at most
+		// once per arrivalLogInterval; otherwise this would flood logs
+		// during long offshore legs.
+		now := time.Now()
+		if distNext*1000 < arrivalLogProximityMeters && now.Sub(s.lastArrivalLog) >= arrivalLogInterval {
+			s.lastArrivalLog = now
+			s.logger.Infow("arrival poller: not arrived",
+				"target_id", next.ID.Hex(),
+				"dist_m", distNext*1000,
+				"min_dist_m", s.arrivalState.minDistance*1000,
+				"radius_m", radiusKm*1000,
+				"dist_after_m", distAfterKm*1000,
+				"wps_remaining", len(wps),
+			)
+		}
 		return
 	}
 
