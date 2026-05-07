@@ -1631,6 +1631,15 @@
     // events and persisted via the change:resolution listener. We just
     // clear the pan-detection memory so the next tick re-centers on the
     // boat at the existing zoom.
+    //
+    // Also force-disable auto-zoom: once the user has zoomed/panned by
+    // hand, the speed-formula would otherwise override their chosen zoom
+    // on the very next tick. They can re-enable auto-zoom from the
+    // toolbar button when they want it back.
+    if (autoZoomActive) {
+      autoZoomActive = false;
+      setCookie(COOKIE_AUTO_ZOOM, "0", COOKIE_OPTS);
+    }
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
     inPanMode = false;
