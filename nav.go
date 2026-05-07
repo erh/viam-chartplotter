@@ -83,9 +83,10 @@ const lastWaypointPassFactor = 2.5
 // next waypoint" log line. Logs once per interval at info level when the
 // boat is within arrivalLogProximityMeters of the next waypoint, so an
 // operator can confirm the poller is alive and see why a pass-through
-// didn't fire.
+// didn't fire. ~30 km covers typical coastal-cruising approach distances
+// (well over 10 nm) so a missed pass leaves a trail in the log.
 const arrivalLogInterval = 30 * time.Second
-const arrivalLogProximityMeters = 5000.0
+const arrivalLogProximityMeters = 30000.0
 
 func newNav(
 	ctx context.Context,
@@ -121,15 +122,20 @@ func newNav(
 	svc.mode.Store(uint32(navigation.ModeManual))
 	logger.Infof("nav waypoints persisted at %s", dataPath)
 
-	if cfg.MovementSensor != "" {
+	if cfg.MovementSensor == "" {
+		logger.Warnf("nav auto-arrival disabled: no `movement_sensor` configured; waypoints will only be removed by explicit RemoveWaypoint calls")
+	} else {
 		ms, err := movementsensor.FromDependencies(deps, cfg.MovementSensor)
 		if err != nil {
 			return nil, errors.Wrapf(err, "could not get movement_sensor %q", cfg.MovementSensor)
 		}
 		svc.ms = ms
-		if arrivalRadius > 0 {
+		if arrivalRadius <= 0 {
+			logger.Warnf("nav auto-arrival disabled: `arrival_radius_m` is %.1f (must be > 0)", arrivalRadius)
+		} else {
 			svc.startArrivalPoller(arrivalRadius)
-			logger.Infof("nav auto-arrival enabled: %.0f m radius", arrivalRadius)
+			logger.Infof("nav auto-arrival enabled: %.0f m radius, polling every %s",
+				arrivalRadius, arrivalCheckInterval)
 		}
 	}
 
@@ -161,6 +167,19 @@ type navService struct {
 	lastArrivalLog time.Time
 }
 
+// maybeArrivalInfo throttles a poller-status info log to one per
+// arrivalLogInterval. Used for the silent early-return paths in
+// checkArrival so we can tell *why* a tick did nothing without flooding
+// the log every 5 s.
+func (s *navService) maybeArrivalInfo(msg string, kvs ...interface{}) {
+	now := time.Now()
+	if now.Sub(s.lastArrivalLog) < arrivalLogInterval {
+		return
+	}
+	s.lastArrivalLog = now
+	s.logger.Infow(msg, kvs...)
+}
+
 // arrivalState tracks the closest the boat has been to targetID on the
 // current approach. Used for the bypass rule: if we hit a local minimum
 // in distance and started getting further away while simultaneously
@@ -184,12 +203,24 @@ func (s *navService) startArrivalPoller(radiusMeters float64) {
 		defer close(s.arrivalDone)
 		ticker := time.NewTicker(arrivalCheckInterval)
 		defer ticker.Stop()
+		// Heartbeat so an operator can confirm the poller is alive even when
+		// far from any waypoint (where the per-tick proximity log stays
+		// quiet). Fires on the first tick and every minute thereafter.
+		heartbeat := time.NewTicker(time.Minute)
+		defer heartbeat.Stop()
+		s.logger.Info("arrival poller: starting first tick")
+		s.checkArrival(ctx, radiusKm)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				s.checkArrival(ctx, radiusKm)
+			case <-heartbeat.C:
+				s.logger.Infow("arrival poller: alive",
+					"interval", arrivalCheckInterval.String(),
+					"radius_m", radiusMeters,
+				)
 			}
 		}
 	}()
@@ -215,11 +246,14 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		return
 	}
 	if pt == nil {
+		s.maybeArrivalInfo("arrival poller: movement sensor returned nil position")
 		return
 	}
 	// Bail on null-island fixes; some movement sensors emit (0,0) before they
 	// have a lock and that would falsely "arrive" at any waypoint near it.
 	if pt.Lat() == 0 && pt.Lng() == 0 {
+		s.maybeArrivalInfo("arrival poller: skipping null-island fix",
+			"lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
 	wps, err := s.store.Waypoints(ctx)
@@ -228,6 +262,8 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		return
 	}
 	if len(wps) == 0 {
+		s.maybeArrivalInfo("arrival poller: no unvisited waypoints",
+			"lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
 	next := wps[0]
@@ -378,11 +414,14 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 //
 //	{"move_waypoint":   {"id": "<hex>", "lat": <float>, "lng": <float>}}
 //	{"insert_waypoint": {"before_id": "<hex>", "lat": <float>, "lng": <float>}}
+//	{"arrival_status":  true}
 //
 // move_waypoint updates an existing waypoint in place (preserving its ID and
 // order). insert_waypoint inserts a new waypoint immediately before the
 // waypoint with the given before_id; an empty/missing before_id is equivalent
-// to AddWayPoint (append).
+// to AddWayPoint (append). arrival_status returns a snapshot of the
+// auto-arrival poller so an operator can see, on demand, why a pass didn't
+// fire (current target, boat position, distances, minDistance, etc.).
 func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	if raw, ok := cmd["move_waypoint"]; ok {
 		return s.doMoveWaypoint(ctx, raw)
@@ -390,7 +429,70 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	if raw, ok := cmd["insert_waypoint"]; ok {
 		return s.doInsertWaypoint(ctx, raw)
 	}
+	if _, ok := cmd["arrival_status"]; ok {
+		return s.doArrivalStatus(ctx)
+	}
 	return nil, resource.ErrDoUnimplemented
+}
+
+// doArrivalStatus returns a snapshot of the arrival poller's current view:
+// boat position, the next waypoint and its distance, the rolling
+// minDistance, the after-next distance (if any), and whether auto-arrival
+// is enabled. Cheap — no side effects on poller state.
+func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{}, error) {
+	out := map[string]interface{}{
+		"auto_arrival_enabled": s.ms != nil && s.arrivalCancel != nil,
+		"radius_m":             s.arrivalRadiusMeters,
+		"check_interval":       arrivalCheckInterval.String(),
+	}
+	if s.ms == nil {
+		out["note"] = "no movement_sensor configured"
+		return out, nil
+	}
+	pt, _, err := s.ms.Position(ctx, nil)
+	if err != nil {
+		out["position_error"] = err.Error()
+		return out, nil
+	}
+	if pt == nil {
+		out["note"] = "movement_sensor returned nil position"
+		return out, nil
+	}
+	out["lat"] = pt.Lat()
+	out["lng"] = pt.Lng()
+
+	wps, err := s.store.Waypoints(ctx)
+	if err != nil {
+		out["waypoints_error"] = err.Error()
+		return out, nil
+	}
+	out["wps_remaining"] = len(wps)
+	if len(wps) == 0 {
+		out["note"] = "no unvisited waypoints"
+		return out, nil
+	}
+
+	next := wps[0]
+	distNext := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
+	out["next_id"] = next.ID.Hex()
+	out["next_lat"] = next.Lat
+	out["next_lng"] = next.Long
+	out["next_dist_m"] = distNext * 1000
+
+	// If state is for this target, expose it; otherwise just current dist.
+	if s.arrivalState.targetID == next.ID {
+		out["min_dist_m"] = s.arrivalState.minDistance * 1000
+		out["away_from_min_m"] = (distNext - s.arrivalState.minDistance) * 1000
+	}
+
+	if len(wps) >= 2 {
+		afterNext := wps[1]
+		distAfter := pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
+		out["after_next_id"] = afterNext.ID.Hex()
+		out["after_next_dist_m"] = distAfter * 1000
+		out["closer_to_after_next"] = distAfter < distNext
+	}
+	return out, nil
 }
 
 func (s *navService) doMoveWaypoint(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
