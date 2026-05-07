@@ -1916,10 +1916,27 @@
   // 8888) and is also reachable through the Vite dev server (5173) via its proxy. When
   // the page is served from anywhere else we skip both the proxy URL and the prefetch
   // calls and let OpenLayers hit NOAA directly.
+  // Whether the Go module's noaa-enc + noaa-wms endpoints are reachable on
+  // the current origin. Probed once at mount via /noaa-enc/stats; falls
+  // back to the legacy port heuristic for environments where the probe
+  // hasn't completed yet (so layer setup at first render still picks the
+  // right URL when running locally on :5173 / :8888).
+  let noaaCacheProbeResult = $state<boolean | null>(null);
+
   function noaaCacheReachable(): boolean {
+    if (noaaCacheProbeResult !== null) return noaaCacheProbeResult;
     if (typeof window === "undefined") return false;
     const port = window.location.port;
     return port === "5173" || port === "8888";
+  }
+
+  async function probeNoaaCache() {
+    try {
+      const resp = await fetch("/noaa-enc/stats", { method: "GET" });
+      noaaCacheProbeResult = resp.ok;
+    } catch {
+      noaaCacheProbeResult = false;
+    }
   }
 
   // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
@@ -2022,8 +2039,12 @@
   let mapPointerHandler: any = null;
   let mapPointerDragHandler: any = null;
 
-  function setupMap() {
+  async function setupMap() {
     useGeographic();
+    // Probe before setupLayers so the noaa-local / noaa-ecdis / noaa-wms
+    // layers register with the correct origin assumption regardless of
+    // which port the Go module is bound to.
+    await probeNoaaCache();
     setupLayers();
 
     mapGlobal.view = new View({
@@ -2387,19 +2408,24 @@
   }
 
   onMount(() => {
-    setupMap();
-    probeMyBoatIcon();
+    // setupMap is async (waits for the noaa-cache probe so layer URLs
+    // resolve correctly regardless of bind port). Run the rendercomplete
+    // and click handlers after the map is actually constructed.
+    void (async () => {
+      await setupMap();
+      probeMyBoatIcon();
 
-    // Listen for initial render complete to fade in map
-    if (mapGlobal.map) {
-      mapGlobal.map.once("rendercomplete", () => {
-        mapLoaded = true;
-      });
-      // Fallback in case rendercomplete doesn't fire
-      setTimeout(() => {
-        mapLoaded = true;
-      }, 1000);
-    }
+      // Listen for initial render complete to fade in map
+      if (mapGlobal.map) {
+        mapGlobal.map.once("rendercomplete", () => {
+          mapLoaded = true;
+        });
+        // Fallback in case rendercomplete doesn't fire
+        setTimeout(() => {
+          mapLoaded = true;
+        }, 1000);
+      }
+    })();
 
     // Add click-outside handler for panels
     const container = document.getElementById("map-container");
