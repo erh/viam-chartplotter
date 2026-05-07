@@ -109,14 +109,19 @@
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_BOAT_POSITION = "mapBoatPosition";
-  const COOKIE_LOCKED_ZOOM = "mapLockedZoom";
+  const COOKIE_AUTO_ZOOM = "mapAutoZoom";
+  const COOKIE_VIEW_ZOOM = "mapViewZoom";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
-  function loadLockedZoom(): number | null {
-    var raw = getCookie(COOKIE_LOCKED_ZOOM);
-    if (!raw) return null;
+  // Default zoom used when no cookie value is present (matches the previous
+  // hard-coded `new View({ zoom: 15 })`).
+  const DEFAULT_VIEW_ZOOM = 15;
+
+  function loadViewZoom(): number {
+    var raw = getCookie(COOKIE_VIEW_ZOOM);
+    if (!raw) return DEFAULT_VIEW_ZOOM;
     var n = Number(raw);
-    return Number.isFinite(n) && n > 0 && n <= 22 ? n : null;
+    return Number.isFinite(n) && n > 0 && n <= 22 ? n : DEFAULT_VIEW_ZOOM;
   }
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
@@ -156,6 +161,10 @@
   let boatPositionMode = $state<"center" | "bottom">(
     getCookie(COOKIE_BOAT_POSITION) === "bottom" ? "bottom" : "center"
   );
+  // Auto-zoom: when on, recenter ticks override the user's zoom with a
+  // speed-derived value. Default off so the user keeps full control unless
+  // they opt in.
+  let autoZoomActive = $state(getCookie(COOKIE_AUTO_ZOOM) === "1");
 
   function loadHeadingLineLength(): number {
     var raw = getCookie(COOKIE_HEADING_LINE_LENGTH);
@@ -596,7 +605,6 @@
   let mapInternalState: {
     lastZoom: number;
     lastCenter: number[] | null;
-    lockedZoom: number | null;
     lastPosition: number[];
     lastPositions: Record<string, number[]>;
     trackFeatureIds: Record<string, boolean>;
@@ -605,7 +613,6 @@
   } = {
     lastZoom: 0,
     lastCenter: null,
-    lockedZoom: loadLockedZoom(),
     lastPosition: [0, 0],
     lastPositions: {},
     trackFeatureIds: {},
@@ -649,21 +656,25 @@
           boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
         mapGlobal.view.centerOn(pp, sz, boatPx);
 
-        var zoom: number;
-        if (mapInternalState.lockedZoom != null) {
-          zoom = mapInternalState.lockedZoom;
-        } else {
-          // zoom of 10 is about 30 miles
-          // zoom of 16 is city level
-          zoom = Math.pow(Math.floor(myBoat.speed), 0.41);
+        if (autoZoomActive) {
+          // zoom of 10 is about 30 miles, zoom of 16 is city level
+          var zoom = Math.pow(Math.floor(myBoat.speed), 0.41);
           zoom = Math.floor(16 - zoom) + (zoomModifier || 0);
           if (zoom <= 0) {
             zoom = 1;
           }
+          mapGlobal.view.setZoom(zoom);
+          mapInternalState.lastZoom = zoom;
+        } else {
+          // Auto-zoom off: leave the user's zoom alone, but keep lastZoom
+          // in sync so the pan-detection diff check at the top of this
+          // function doesn't false-positive a pan from our own re-center.
+          var z = mapGlobal.view.getZoom();
+          if (typeof z === "number") {
+            mapInternalState.lastZoom = z;
+          }
         }
-        mapGlobal.view.setZoom(zoom);
 
-        mapInternalState.lastZoom = zoom;
         // Record the actual view center, not the boat position — in
         // "bottom" mode centerOn offsets the view so the boat sits at
         // 80% down. Storing pp here would make the next tick's diff
@@ -1515,14 +1526,18 @@
   }
 
   function stopPanning() {
-    const z = mapGlobal.view?.getZoom();
-    mapInternalState.lockedZoom = typeof z === "number" ? z : null;
-    if (mapInternalState.lockedZoom != null) {
-      setCookie(COOKIE_LOCKED_ZOOM, String(mapInternalState.lockedZoom), COOKIE_OPTS);
-    }
+    // Don't touch zoom — the user's chosen zoom is preserved across pan
+    // events and persisted via the change:resolution listener. We just
+    // clear the pan-detection memory so the next tick re-centers on the
+    // boat at the existing zoom.
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
     inPanMode = false;
+  }
+
+  function toggleAutoZoom() {
+    autoZoomActive = !autoZoomActive;
+    setCookie(COOKIE_AUTO_ZOOM, autoZoomActive ? "1" : "0", COOKIE_OPTS);
   }
 
   // showTileUrlForClick computes the XYZ tile that contains the clicked
@@ -2013,8 +2028,19 @@
 
     mapGlobal.view = new View({
       center: [0, 0],
-      zoom: 15,
+      zoom: loadViewZoom(),
       maxZoom: 19,
+    });
+
+    // Persist whatever zoom the view ends up at so reloads come back at
+    // the same level. change:resolution fires for both user-initiated
+    // changes (wheel/pinch) and our own setZoom calls in auto-zoom mode —
+    // both are correct things to remember.
+    mapGlobal.view.on("change:resolution", () => {
+      const z = mapGlobal.view?.getZoom();
+      if (typeof z === "number" && Number.isFinite(z)) {
+        setCookie(COOKIE_VIEW_ZOOM, String(z), COOKIE_OPTS);
+      }
     });
 
     updateOnLayers();
@@ -2780,6 +2806,35 @@
     </svg>
   </button>
 
+  <button
+    class="auto-zoom-toggle"
+    class:active={autoZoomActive}
+    onclick={toggleAutoZoom}
+    aria-pressed={autoZoomActive}
+    title={autoZoomActive
+      ? "Auto-zoom (on): zoom follows boat speed"
+      : "Auto-zoom (off): manual zoom"}
+    aria-label="Toggle auto-zoom"
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <line x1="8" y1="11" x2="14" y2="11" />
+      <line x1="11" y1="8" x2="11" y2="14" />
+    </svg>
+  </button>
+
   {#if measureActive && measureDistance !== null}
     <div class="measure-result">
       {measureDistance.toFixed(2)} nm ({(measureDistance * 1.15078).toFixed(2)} mi)
@@ -3242,11 +3297,46 @@
     background: #1d4ed8;
   }
 
-  /* Add-waypoint toggle: sits to the left of the boat-position toggle. */
-  .add-waypoint-toggle {
+  /* Auto-zoom toggle: sits to the left of the boat-position toggle. */
+  .auto-zoom-toggle {
     position: absolute;
     top: 10px;
     right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .auto-zoom-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .auto-zoom-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .auto-zoom-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
+  /* Add-waypoint toggle: sits to the left of the auto-zoom toggle. */
+  .add-waypoint-toggle {
+    position: absolute;
+    top: 10px;
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -3281,7 +3371,7 @@
   .clear-waypoints-btn {
     position: absolute;
     top: calc(10px + 30px + 6px);
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -3327,11 +3417,14 @@
   #map-container.full-width .boat-position-toggle {
     right: calc(10px + 30px + 6px + 30px + 6px + 85px);
   }
-  #map-container.full-width .add-waypoint-toggle {
+  #map-container.full-width .auto-zoom-toggle {
     right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
   }
+  #map-container.full-width .add-waypoint-toggle {
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
+  }
   #map-container.full-width .clear-waypoints-btn {
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
+    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
   }
   #map-container.full-width .measure-result {
     right: calc(10px + 85px);
