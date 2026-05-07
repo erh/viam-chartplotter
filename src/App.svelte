@@ -153,6 +153,17 @@
     globalData.lastData = new Date();
   }
 
+  // compassFmt renders a heading/COG as a 3-digit zero-padded degree
+  // string, e.g. 14 -> "014°". Returns "—" when the value is null/NaN so
+  // the UI stays readable while we wait for a fix. Bearings are normalised
+  // into [0, 360) before formatting so a stale 360+ value doesn't render
+  // as "360°".
+  function compassFmt(deg: number | null | undefined): string {
+    if (deg == null || !Number.isFinite(deg)) return "—";
+    const norm = ((deg % 360) + 360) % 360;
+    return Math.round(norm).toString().padStart(3, "0") + "°";
+  }
+
   function errorHandlerMaker(m) {
     return function (e) {
       return errorHandler(e, m);
@@ -1690,7 +1701,7 @@
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">Depth</div>
             <div>
-              <span class="font-bold">{globalData.depth.toFixed(2)}</span>
+              <span class="font-bold">{globalData.depth.toFixed(1)}</span>
               <sup>ft</sup>
             </div>
           </div>
@@ -1761,10 +1772,8 @@
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">Heading / COG</div>
             <div>
-              <span class="font-bold">{globalData.heading.toFixed(2)}</span> /
-              <span class="font-bold"
-                >{globalData.cog !== null ? globalData.cog.toFixed(2) : "—"}</span
-              >
+              <span class="font-bold">{compassFmt(globalData.heading)}</span> /
+              <span class="font-bold">{compassFmt(globalData.cog)}</span>
             </div>
           </div>
         {/if}
@@ -1967,15 +1976,13 @@
         {/if}
         {#if globalConfig.movementSensorProps.compassHeadingSupported}
           <div>
-            HDG/COG <span class="font-bold">{globalData.heading.toFixed(0)}</span> /
-            <span class="font-bold"
-              >{globalData.cog !== null ? globalData.cog.toFixed(0) : "—"}</span
-            >
+            HDG/COG <span class="font-bold">{compassFmt(globalData.heading)}</span> /
+            <span class="font-bold">{compassFmt(globalData.cog)}</span>
           </div>
         {/if}
         {#if globalConfig.depthSensorName != ""}
           <div>
-            Depth <span class="font-bold">{globalData.depth.toFixed(2)}</span>
+            Depth <span class="font-bold">{globalData.depth.toFixed(1)}</span>
             <sup>ft</sup>
           </div>
         {/if}
