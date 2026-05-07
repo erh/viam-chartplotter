@@ -2429,8 +2429,42 @@
     };
     mapGlobal.map.on("pointermove", mapPointerHandler);
 
-    mapPointerDragHandler = function () {
-      inPanMode = true;
+    // Pointer-drag handling with a pixel threshold. OL fires `pointerdrag`
+    // for any pointer-with-button-pressed movement, including sub-pixel
+    // jitter and stray touchscreen contact. Without a threshold the user
+    // would see "Stop Panning" reappear minutes after dismissing it because
+    // a single stray drag event flipped inPanMode. We treat a drag as
+    // intentional only after the cumulative distance from pointerdown
+    // exceeds dragPxThreshold.
+    let pointerDownPx: [number, number] | null = null;
+    let pointerDragCounted = false;
+    const dragPxThreshold = 5;
+    mapGlobal.map.on("pointerdown", (evt: any) => {
+      pointerDownPx = evt.pixel as [number, number];
+      pointerDragCounted = false;
+    });
+    mapPointerDragHandler = function (evt: any) {
+      if (pointerDragCounted) return;
+      const px = evt.pixel as [number, number] | undefined;
+      if (!px) {
+        // No pixel info — fall back to the previous behaviour so we don't
+        // miss a real drag.
+        inPanMode = true;
+        pointerDragCounted = true;
+        return;
+      }
+      if (!pointerDownPx) {
+        // Missed the pointerdown for some reason; treat the first observed
+        // drag pixel as the anchor and decide on the next event.
+        pointerDownPx = px;
+        return;
+      }
+      const dx = px[0] - pointerDownPx[0];
+      const dy = px[1] - pointerDownPx[1];
+      if (dx * dx + dy * dy >= dragPxThreshold * dragPxThreshold) {
+        inPanMode = true;
+        pointerDragCounted = true;
+      }
     };
     mapGlobal.map.on("pointerdrag", mapPointerDragHandler);
 
