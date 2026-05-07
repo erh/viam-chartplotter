@@ -65,13 +65,6 @@ const defaultArrivalRadiusMeters = 200.0
 // boat speeds (~30 m at 12 kn, well under the default radius).
 const arrivalCheckInterval = 5 * time.Second
 
-// bypassRadiusMultiplier × ArrivalRadiusMeters is the largest "closest
-// approach" distance that still counts as "we did try to hit this one"
-// for the local-minimum-bypass rule. Beyond this, we won't infer arrival
-// from passing geometry alone — it's more likely the user re-routed or
-// added a stale waypoint.
-const bypassRadiusMultiplier = 5.0
-
 // passEpsilonMeters is how much the boat's distance from the target must
 // grow past its recorded minimum before we treat it as "moving away."
 // Sized to comfortably exceed typical GPS jitter at the 5 s tick rate.
@@ -236,19 +229,20 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		arrived = true
 		reason = "inside arrival radius"
 	} else if len(wps) >= 2 {
-		// Bypass rule: requires (1) a usable "after-next" waypoint to compare
-		// against, (2) we actually got reasonably close, (3) distance is now
-		// growing past the minimum by more than GPS noise, and (4) the boat
-		// is geometrically closer to the after-next than to the next.
+		// Bypass rule: we've moved away from our closest approach to the
+		// next waypoint AND we're now geometrically closer to the after-
+		// next waypoint than to the next. We deliberately do NOT require
+		// minDistance to have been particularly small — the user might
+		// have rounded the corner well outside any reasonable "got close"
+		// radius, and as long as we're now past it heading toward the
+		// next one, that's the right call.
 		afterNext := wps[1]
 		distAfter := pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
 		passEpsKm := passEpsilonMeters / 1000.0
-		bypassMaxKm := radiusKm * bypassRadiusMultiplier
-		if s.arrivalState.minDistance < bypassMaxKm &&
-			distNext > s.arrivalState.minDistance+passEpsKm &&
+		if distNext > s.arrivalState.minDistance+passEpsKm &&
 			distAfter < distNext {
 			arrived = true
-			reason = "passed (local min + closer to next)"
+			reason = "passed (moved away + closer to next)"
 		}
 	}
 
