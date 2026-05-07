@@ -2,16 +2,11 @@
 
 ## ToDo
 
-- display for what data old and restart
-- maps
-  ** option for ais tracks and prediction
-  ** COG / Heading for boat + ais
-- Camera - make streaming when fixed
-- History
-- Configuration
-- Multiple tabs
-- Later Cool Stuff
-  \*\* tides
+* Options to select color of: tracks, heading line, route line, ais targets and their tracks
+* Routes
+** See old routes
+** save route
+** Add: Undo button in case you accidentally delete a route like I just did
 
 ## Navigation service
 

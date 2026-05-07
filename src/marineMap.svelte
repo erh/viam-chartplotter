@@ -615,6 +615,12 @@
 
   let inPanMode = $state(false);
 
+  // Cursor-info: distance + bearing from boat to mouse pointer. null when
+  // the pointer isn't over the map or when there's no usable boat fix.
+  // Rendered as a fixed-position box in the bottom-left of the map (above
+  // the scale line) so it doesn't move around as the user moves the mouse.
+  let cursorInfo = $state<{ nm: number; brg: number } | null>(null);
+
   let mapInternalState: {
     lastZoom: number;
     lastCenter: number[] | null;
@@ -2253,6 +2259,7 @@
     });
     mapGlobal.map.addOverlay(depthTooltipOverlay);
 
+
     // Setup measure layer
     measureSource = new VectorSource();
     const measureLayer = new Vector({
@@ -2426,8 +2433,36 @@
       if (!depthFound) {
         depthTooltipOverlay.setPosition(undefined);
       }
+
+      // Cursor-info: distance + bearing from boat to mouse position. Hide
+      // if we have no boat fix or it's at null-island. evt.coordinate is
+      // [lng, lat] under useGeographic(); our helpers want [lat, lng].
+      if (
+        myBoat &&
+        myBoat.location &&
+        !(myBoat.location[0] === 0 && myBoat.location[1] === 0) &&
+        evt.coordinate
+      ) {
+        const cursorLngLat = evt.coordinate as [number, number];
+        const boatLatLng: [number, number] = [myBoat.location[0], myBoat.location[1]];
+        const cursorLatLng: [number, number] = [cursorLngLat[1], cursorLngLat[0]];
+        const meters = getDistance(
+          [myBoat.location[1], myBoat.location[0]], // [lng, lat]
+          cursorLngLat
+        );
+        cursorInfo = { nm: meters / 1852, brg: bearingDeg(boatLatLng, cursorLatLng) };
+      } else {
+        cursorInfo = null;
+      }
     };
     mapGlobal.map.on("pointermove", mapPointerHandler);
+    // Hide the cursor-info box when the pointer leaves the map entirely.
+    const target = mapGlobal.map.getTargetElement();
+    if (target) {
+      target.addEventListener("pointerleave", () => {
+        cursorInfo = null;
+      });
+    }
 
     // Pointer-drag handling with a pixel threshold. OL fires `pointerdrag`
     // for any pointer-with-button-pressed movement, including sub-pixel
@@ -2684,6 +2719,17 @@
 
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
+
+  <!-- Cursor-info: distance + bearing from boat to current mouse position.
+       Pinned to bottom-left of the map (just above OL's scale line) so the
+       readout doesn't move as the mouse moves. Hidden when the pointer
+       isn't over the map or there's no boat fix. -->
+  {#if cursorInfo}
+    <div class="cursor-info" class:with-route-stats={!!routeStats}>
+      <div>{cursorInfo.nm.toFixed(2)}<sup>nm</sup></div>
+      <div>{cursorInfo.brg.toFixed(0).padStart(3, "0")}°</div>
+    </div>
+  {/if}
 
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
@@ -3082,6 +3128,41 @@
     font-size: 12px;
     white-space: nowrap;
     pointer-events: none;
+  }
+
+  /* Mouse-on-map cursor-info box: distance + bearing from the boat to the
+     mouse pointer. Pinned at bottom-left of the map, just above OL's
+     scale line (which sits at bottom:8px left:8px). z-index above the
+     scale line so it overlays cleanly when both are present. Style
+     matches the SOG/Depth panel (semi-transparent black, white text,
+     rounded). pointer-events:none so it never blocks click-through. */
+  .cursor-info {
+    position: absolute;
+    bottom: 36px;
+    left: 8px;
+    z-index: 1002;
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    padding: 4px 8px;
+    border: 1px solid #6b7280;
+    border-radius: 3px;
+    font-size: 12px;
+    line-height: 1.25;
+    white-space: nowrap;
+    pointer-events: none;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  /* When the route-stats overlay is also showing, lift cursor-info above
+     it so the two don't overlap. route-stats can be 1-3 rows tall (~30-70 px
+     plus padding); 110 px is enough headroom for all variants including
+     the add-waypoint edit-mode hint. */
+  .cursor-info.with-route-stats {
+    bottom: 110px;
+  }
+  .cursor-info sup {
+    font-size: 9px;
+    margin-left: 1px;
   }
 
   .tile-url-popup {
