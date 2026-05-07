@@ -3,9 +3,12 @@ package vc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
@@ -83,6 +86,33 @@ func (s *diskNavStore) load() error {
 	return nil
 }
 
+// snapshot copies the current on-disk waypoints file to a timestamped
+// sibling, e.g. nav.json -> nav.2026-05-07T15-04-23.123.json. Best-effort:
+// any error (file missing, write failure) is swallowed so a backup
+// problem never blocks a real mutation. Caller must hold s.mu so the
+// file content can't be mid-write under us.
+//
+// Called from user-driven mutators (Add/Remove/Insert/Move) before the
+// in-memory list is changed. Auto-arrival's WaypointVisited deliberately
+// does not snapshot — it fires once per passed waypoint and would
+// otherwise produce dozens of backups during normal cruising.
+func (s *diskNavStore) snapshot() {
+	if s.path == "" {
+		return
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	// Millisecond resolution so two mutations in the same second don't
+	// overwrite each other's backups. Filesystem-safe (no colons).
+	ts := time.Now().Format("2006-01-02T15-04-05.000")
+	ext := filepath.Ext(s.path)
+	base := strings.TrimSuffix(s.path, ext)
+	backupPath := fmt.Sprintf("%s.%s%s", base, ts, ext)
+	_ = os.WriteFile(backupPath, data, 0o644)
+}
+
 // save flushes the current waypoint slice to disk. Caller must hold s.mu.
 func (s *diskNavStore) save() error {
 	if s.path == "" {
@@ -134,6 +164,7 @@ func (s *diskNavStore) AddWaypoint(ctx context.Context, point *geo.Point) (navig
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.snapshot()
 	wp := &navigation.Waypoint{
 		ID:   primitive.NewObjectID(),
 		Lat:  point.Lat(),
@@ -165,6 +196,7 @@ func (s *diskNavStore) RemoveWaypoint(ctx context.Context, id primitive.ObjectID
 	if len(next) == len(prev) {
 		return nil
 	}
+	s.snapshot()
 	s.waypoints = next
 	if err := s.save(); err != nil {
 		s.waypoints = prev
@@ -211,6 +243,7 @@ func (s *diskNavStore) InsertWaypoint(
 			return navigation.Waypoint{}, errors.Errorf("no waypoint with id %s", beforeID.Hex())
 		}
 	}
+	s.snapshot()
 	prev := s.waypoints
 	next := make([]*navigation.Waypoint, 0, len(prev)+1)
 	next = append(next, prev[:insertAt]...)
@@ -241,6 +274,7 @@ func (s *diskNavStore) MoveWaypoint(ctx context.Context, id primitive.ObjectID, 
 		if wp.ID != id {
 			continue
 		}
+		s.snapshot()
 		oldLat, oldLong := wp.Lat, wp.Long
 		wp.Lat = point.Lat()
 		wp.Long = point.Lng()
