@@ -402,7 +402,10 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 		}
 	}
 
-	if z >= 12 {
+	// Place-name labels show at overview zooms (z >= 10) — same threshold
+	// where NOAA WMS surfaces them. At z <= 9 the world coverage is too
+	// large for individual place labels to read meaningfully.
+	if z >= 10 {
 		seen := map[string]bool{}
 		for _, cell := range allCells {
 			chart, err := r.chartFor(cell.Name)
@@ -425,7 +428,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 					continue
 				}
 				seen[name] = true
-				drawAreaLabel(dc, &f, project, scale, bbox)
+				drawAreaLabel(dc, &f, project, scale, bbox, z)
 			}
 		}
 	}
@@ -826,7 +829,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 	if pass == passPoints && z >= 13 {
 		switch class {
 		case "LNDARE", "LNDRGN", "BUAARE", "SEAARE", "ADMARE", "BUISGL":
-			drawAreaLabel(dc, f, project, scale, tileBbox)
+			drawAreaLabel(dc, f, project, scale, tileBbox, z)
 			return
 		}
 	}
@@ -839,7 +842,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		// lineStroke has an entry. This also covers fill+stroke on classes
 		// where both are styled.
 		fill := areaFill(class, f, safeDepthM, z)
-		stroke, width := lineStroke(class, f, safeDepthM, style)
+		stroke, width := lineStroke(class, f, safeDepthM, style, z)
 
 		// Drop polygons whose projected pixel bbox is degenerate (< 3 px in
 		// either direction). The s57 lib occasionally produces thin/collinear
@@ -882,10 +885,20 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		}
 
 	case s57.GeometryTypeLineString:
+		// DEPCNT depth contours get their VALDCO labeled in the points
+		// pass so the text paints on top of any line that crosses it.
+		// The 60-px arc-length guard inside drawContourLabel keeps
+		// short fragments from cluttering — at z=10 that's ~5 nm of
+		// contour minimum, which leaves the labels meaningful without
+		// spamming.
+		if pass == passPoints && class == "DEPCNT" && z >= 10 {
+			drawContourLabel(dc, f, project, scale, z)
+			return
+		}
 		if pass != passLines {
 			return
 		}
-		stroke, width := lineStroke(class, f, safeDepthM, style)
+		stroke, width := lineStroke(class, f, safeDepthM, style, z)
 		if stroke == nil {
 			return
 		}
@@ -909,7 +922,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		if pass != passPoints {
 			return
 		}
-		drawPoint(dc, class, f, project, scale, safeDepthM, style)
+		drawPoint(dc, class, f, project, scale, safeDepthM, style, z)
 	}
 }
 
@@ -1009,7 +1022,12 @@ func drawLightLabel(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
 // only if the polygon is small enough that a single tile-centred label makes
 // sense (a continent-sized polygon's centroid is meaningless for a tile) and
 // the centroid lands well inside the tile so the text isn't half-cut.
-func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64, tileBbox s57.Bounds) {
+//
+// At low zoom (z <= 12) the label is rendered at a bumped font scale so
+// place names actually read at overview — a 7-px font on a 256-px tile that
+// covers ~30 nm of coast is unreadable, and the user is looking at the
+// chart specifically to find named features.
+func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64, tileBbox s57.Bounds, z int) {
 	v, ok := f.Attribute("OBJNAM")
 	if !ok {
 		return
@@ -1031,17 +1049,119 @@ func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64
 	cx, cy := polygonCentroid(geom.Coordinates)
 	px, py := project(cx, cy)
 	dc.SetFontFace(basicfont.Face7x13)
+	// Boost label scale at low zoom — base `scale` is 1.0 at z<14, which
+	// puts a 7-px label on tiles that cover huge geographic extents and
+	// makes them invisible. Tighten back to 1.0 at chart-detail zooms.
+	labelScale := scale
+	switch {
+	case z <= 10:
+		labelScale = scale * 1.7
+	case z == 11:
+		labelScale = scale * 1.5
+	case z == 12:
+		labelScale = scale * 1.25
+	}
 	// Rough text-width estimate so a label doesn't run past the tile edge:
 	// 7 px per char in the basicfont, then scaled.
-	labelHalfW := float64(len(name)) * 7 * scale / 2
+	labelHalfW := float64(len(name)) * 7 * labelScale / 2
 	const halfH = 6.5
-	if px-labelHalfW < 2 || px+labelHalfW > 254 || py-halfH*scale < 2 || py+halfH*scale > 254 {
+	if px-labelHalfW < 2 || px+labelHalfW > 254 || py-halfH*labelScale < 2 || py+halfH*labelScale > 254 {
 		return
 	}
 	dc.SetColor(s52CHBLK)
 	dc.Push()
-	dc.ScaleAbout(scale, scale, px, py)
+	dc.ScaleAbout(labelScale, labelScale, px, py)
 	dc.DrawStringAnchored(name, px, py, 0.5, 0.5)
+	dc.Pop()
+}
+
+// drawContourLabel paints the depth value on a DEPCNT line at the line's
+// arc-length midpoint, in feet, in the contour stroke color. Short-fragment
+// guard skips labeling tiny pieces that would just clutter the tile, but
+// long contours that get split across multiple features still get one label
+// each — that matches NOAA's repeated labeling of long contour stretches.
+func drawContourLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64, z int) {
+	v, ok := f.Attribute("VALDCO")
+	if !ok {
+		return
+	}
+	val := numAttr(v)
+	if math.IsNaN(val) || val <= 0 {
+		return
+	}
+	coords := f.Geometry().Coordinates
+	if len(coords) < 2 {
+		return
+	}
+
+	// Project all vertices once and walk arc length to find the midpoint.
+	type pt struct{ x, y float64 }
+	pts := make([]pt, 0, len(coords))
+	for _, c := range coords {
+		if len(c) < 2 {
+			continue
+		}
+		x, y := project(c[0], c[1])
+		pts = append(pts, pt{x, y})
+	}
+	if len(pts) < 2 {
+		return
+	}
+	var total float64
+	segLens := make([]float64, len(pts)-1)
+	for i := 1; i < len(pts); i++ {
+		dx := pts[i].x - pts[i-1].x
+		dy := pts[i].y - pts[i-1].y
+		segLens[i-1] = math.Sqrt(dx*dx + dy*dy)
+		total += segLens[i-1]
+	}
+	// Skip stubby fragments — they'd produce a label the user can't tie
+	// back to a recognizable line.
+	if total < 60 {
+		return
+	}
+
+	// Walk to the arc-length midpoint and interpolate within that segment.
+	half := total / 2
+	var px, py float64
+	acc := 0.0
+	for i, segLen := range segLens {
+		if acc+segLen >= half {
+			t := (half - acc) / segLen
+			px = pts[i].x + t*(pts[i+1].x-pts[i].x)
+			py = pts[i].y + t*(pts[i+1].y-pts[i].y)
+			break
+		}
+		acc += segLen
+	}
+
+	// Off-tile / edge-clipped guard.
+	if px < 6 || px > 250 || py < 6 || py > 250 {
+		return
+	}
+
+	ft := val * feetPerMetre
+	label := fmt.Sprintf("%d", int(math.Round(ft)))
+
+	// Bump font at low zoom so the integer reads on a sparse overview tile.
+	// Slightly less aggressive than place-name labels — depth values are
+	// short (1-3 chars) so they stay readable at smaller scales than a
+	// 14-char place name.
+	labelScale := scale
+	switch {
+	case z <= 10:
+		labelScale = scale * 1.5
+	case z == 11:
+		labelScale = scale * 1.3
+	case z == 12:
+		labelScale = scale * 1.15
+	}
+
+	dc.SetFontFace(basicfont.Face7x13)
+	dc.SetColor(s52DEPCN)
+	dc.Push()
+	dc.ScaleAbout(labelScale, labelScale, px, py)
+	dc.DrawStringAnchored(label, px, py, 0.5, 0.5)
 	dc.Pop()
 }
 
@@ -1222,7 +1342,7 @@ func depthRange(f *s57.Feature) (min, max float64) {
 	return min, max
 }
 
-func lineStroke(class string, f *s57.Feature, safeDepthM float64, style RenderStyle) (color.Color, float64) {
+func lineStroke(class string, f *s57.Feature, safeDepthM float64, style RenderStyle, z int) (color.Color, float64) {
 	switch class {
 	case "COALNE", "SLCONS":
 		// Coastline / shoreline construction: solid black, full weight.
@@ -1243,7 +1363,19 @@ func lineStroke(class string, f *s57.Feature, safeDepthM float64, style RenderSt
 	case "NAVLNE", "RECTRC", "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
 		// Channel limit / recommended track / fairway / anchorage / deep-
 		// water route / restricted area — magenta boundary line.
-		return s52CHMGD, 0.8
+		// At overview zoom these are the most navigationally meaningful
+		// features on screen (NOAA WMS makes them dominant); bump weight
+		// so they don't disappear when zoomSymbolScale is still 1.0.
+		w := 0.8
+		switch {
+		case z <= 10:
+			w = 1.6
+		case z == 11:
+			w = 1.3
+		case z == 12:
+			w = 1.0
+		}
+		return s52CHMGD, w
 	case "RIVERS":
 		return color.RGBA{0x7F, 0xB0, 0xCB, 0xFF}, 0.8
 	case "BRIDGE", "CAUSWY":
@@ -1264,8 +1396,10 @@ func lineStroke(class string, f *s57.Feature, safeDepthM float64, style RenderSt
 // drawPoint renders point/multi-point features (buoys, beacons, lights,
 // hazards, soundings). Shapes follow S-52 conventions where it matters most
 // for navigation: BOYSHP/BCNSHP drives the silhouette, COLOUR drives the fill
-// (and a second colour stripes for safe-water/isolated-danger marks).
-func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, style RenderStyle) {
+// (and a second colour stripes for safe-water/isolated-danger marks). The z
+// parameter lets per-class handlers adjust behaviour at overview zoom — e.g.
+// suppressing soundings, which become visual noise at z <= 11.
+func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, style RenderStyle, z int) {
 	coords := f.Geometry().Coordinates
 	at := func(c []float64) (float64, float64) { return project(c[0], c[1]) }
 
@@ -1277,21 +1411,28 @@ func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, l
 		draw(px, py)
 	}
 
+	// Buoys/beacons/lights are chart-critical and were rendering small
+	// enough to be hard to read at coastal zoom. Bump their effective
+	// scale uniformly so the symbol grows but the zoom-derived growth
+	// curve still applies on top.
+	const navaidSizeBoost = 1.4
+	navaidScale := scale * navaidSizeBoost
+
 	switch class {
 	case "BOYLAT", "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
 		first(func(px, py float64) {
-			drawBuoy(dc, f, px, py, scale)
-			drawNavaidLabel(dc, f, px, py, scale)
+			drawBuoy(dc, f, px, py, navaidScale)
+			drawNavaidLabel(dc, f, px, py, navaidScale)
 		})
 	case "BCNLAT", "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
 		first(func(px, py float64) {
-			drawBeacon(dc, f, px, py, scale)
-			drawNavaidLabel(dc, f, px, py, scale)
+			drawBeacon(dc, f, px, py, navaidScale)
+			drawNavaidLabel(dc, f, px, py, navaidScale)
 		})
 	case "LIGHTS":
 		first(func(px, py float64) {
-			drawLight(dc, f, px, py, scale)
-			drawLightLabel(dc, f, px, py, scale)
+			drawLight(dc, f, px, py, navaidScale)
+			drawLightLabel(dc, f, px, py, navaidScale)
 		})
 	case "WRECKS", "OBSTRN":
 		// Wrecks / obstructions: red-magenta cross with sounding-style hash
@@ -1332,6 +1473,14 @@ func drawPoint(dc *gg.Context, class string, f *s57.Feature, project func(lon, l
 			dc.Stroke()
 		})
 	case "SOUNDG":
+		// At overview zoom, soundings are visual noise: dense fields of
+		// numbers crowd out the bigger-picture features (channels, place
+		// names, coastline) the user is actually looking for. NOAA WMS
+		// thins these out the same way; suppressing them entirely below
+		// z=12 is a coarser approximation that's also simpler.
+		if z <= 11 {
+			return
+		}
 		drawSoundings(dc, coords, project, scale, safeDepthM, style)
 	case "TOPMAR":
 		// Topmarks only render in ECDIS mode — NOAA WMS doesn't draw them
