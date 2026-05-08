@@ -2264,14 +2264,16 @@
       class BoatAnchoredMouseWheelZoom extends MouseWheelZoom {
         handleEvent(event: any) {
           if (event && event.type === "wheel") {
-            // Anchor at the boat regardless of pan-mode state. OL's
-            // MouseWheelZoom stores `event.pixel` as lastAnchor_ and
-            // converts it back via map.getCoordinateFromPixel at zoom
-            // time — overriding `event.coordinate` would be ignored.
-            // Pin the pixel to wherever the boat currently sits on
-            // screen so the parent class anchors there. Skip only when
-            // there's no usable boat fix at all.
+            // Boat-anchor when auto-tracking (not pan mode): the chart
+            // is following the boat, so zoom-around-boat keeps the boat
+            // visually fixed during the zoom rather than letting OL's
+            // default cursor anchor drag the boat off its anchor pixel
+            // for a frame before the next tick re-centers. In pan mode
+            // we let OL's default cursor anchor run — the user is
+            // exploring elsewhere and "zoom toward what I'm pointing
+            // at" is the expected behaviour for a normal map.
             if (
+              !inPanMode &&
               myBoat?.location &&
               !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
             ) {
@@ -2280,7 +2282,8 @@
                 myBoat.location[1],
                 myBoat.location[0],
               ]);
-              if (px) {
+              const sz = map?.getSize();
+              if (px && sz && px[0] >= 0 && px[1] >= 0 && px[0] <= sz[0] && px[1] <= sz[1]) {
                 event.pixel = px;
               }
             }
