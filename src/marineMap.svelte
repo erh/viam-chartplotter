@@ -24,6 +24,7 @@
   import Overlay from "ol/Overlay.js";
   import { getDistance, offset as sphereOffset } from "ol/sphere.js";
   import Modify from "ol/interaction/Modify.js";
+  import MouseWheelZoom from "ol/interaction/MouseWheelZoom.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
   import type { TileCoord } from "ol/tilecoord";
@@ -660,25 +661,13 @@
       return;
     }
 
-    if (
-      mapInternalState.lastZoom > 0 &&
-      mapInternalState.lastCenter != null &&
-      mapInternalState.lastCenter[0] != 0
-    ) {
-      // Pan-mode detection is purely on center drift. Zoom changes (scroll
-      // wheel, pinch) used to flip pan mode too, but that meant the user
-      // couldn't tweak zoom without losing auto-tracking. Zoom is its own
-      // axis: the auto-zoom toggle controls speed-driven zoom, manual zoom
-      // is preserved by stopPanning, and intentional pans are still
-      // detected here via the center diff.
-      var c = mapGlobal.view.getCenter();
-      if (c) {
-        var diff = pointDiff(c, mapInternalState.lastCenter);
-        if (diff > 0.003) {
-          inPanMode = true;
-        }
-      }
-    }
+    // Pan-mode detection is now exclusively via the pointerdrag handler
+    // (5 px threshold). The previous diff-based check on view.getCenter()
+    // tripped on programmatic center shifts that the boat-anchored
+    // wheel-zoom necessarily produces in "bottom" mode (boat stays at
+    // boatPx, but the geographic center drifts). That meant scrolling
+    // would flip inPanMode true, lose auto-tracking, and produce jitter
+    // as the recenter logic fought the zoom anchor.
 
     var sz = mapGlobal.map.getSize();
 
@@ -2071,6 +2060,30 @@
   // re-fire the callback. Rounded to keep this a coarse comparison.
   let lastAirstreamBboxKey = "";
 
+  // After a zoom (or any view settle), put the boat back at its configured
+  // anchor pixel — center for "center" mode, 80% down for "bottom" mode.
+  // OL's default scroll/pinch zoom anchors at the cursor, which would
+  // otherwise drift the boat off-anchor when the user just wanted to
+  // change zoom level. Skipped while in pan mode (the user is intentionally
+  // looking elsewhere) and when there's no usable boat fix.
+  function maybeReanchorOnBoat() {
+    if (inPanMode) return;
+    if (!myBoat || !myBoat.location) return;
+    if (myBoat.location[0] === 0 && myBoat.location[1] === 0) return;
+    if (!mapGlobal.map || !mapGlobal.view) return;
+    const sz = mapGlobal.map.getSize();
+    if (!sz) return;
+    const pp = [myBoat.location[1], myBoat.location[0]];
+    const boatPx: [number, number] =
+      boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
+    mapGlobal.view.centerOn(pp, sz, boatPx);
+    // Keep mapInternalState.lastCenter in sync with the now-anchored view
+    // so updateFromData's pan-detection diff doesn't false-positive on
+    // the next tick.
+    const vc = mapGlobal.view.getCenter();
+    if (vc) mapInternalState.lastCenter = [vc[0], vc[1]];
+  }
+
   function maybeEmitAirstreamBbox() {
     if (!airstreamConfigured || !onAirstreamBboxChange) return;
     const layer = findLayerByName("airstream");
@@ -2231,11 +2244,59 @@
       controls: defaultControls().extend([scaleThing]),
     });
 
+    // Replace the default mouse-wheel zoom with one that anchors at the
+    // boat's current position (so the boat stays fixed on screen while
+    // surrounding chart zooms around it). We subclass OL's MouseWheelZoom
+    // and rewrite the event coordinate before super.handleEvent runs;
+    // that's the value the parent records as its lastAnchor_, so the
+    // wheel/trackpad detection, debouncing, and animation tweening all
+    // come along for free — we just point them at the boat instead of
+    // the cursor. Falls back to the original (cursor) coordinate when the
+    // user is in pan mode or has no usable boat fix.
+    {
+      const interactions = mapGlobal.map.getInteractions();
+      const existing = interactions.getArray().slice();
+      for (const item of existing) {
+        if (item instanceof MouseWheelZoom) {
+          interactions.remove(item);
+        }
+      }
+      class BoatAnchoredMouseWheelZoom extends MouseWheelZoom {
+        handleEvent(event: any) {
+          if (event && event.type === "wheel") {
+            // Anchor at the boat regardless of pan-mode state. OL's
+            // MouseWheelZoom stores `event.pixel` as lastAnchor_ and
+            // converts it back via map.getCoordinateFromPixel at zoom
+            // time — overriding `event.coordinate` would be ignored.
+            // Pin the pixel to wherever the boat currently sits on
+            // screen so the parent class anchors there. Skip only when
+            // there's no usable boat fix at all.
+            if (
+              myBoat?.location &&
+              !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
+            ) {
+              const map = event.map ?? mapGlobal.map;
+              const px = map?.getPixelFromCoordinate([
+                myBoat.location[1],
+                myBoat.location[0],
+              ]);
+              if (px) {
+                event.pixel = px;
+              }
+            }
+          }
+          return super.handleEvent(event);
+        }
+      }
+      mapGlobal.map.addInteraction(new BoatAnchoredMouseWheelZoom());
+    }
+
     // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
     // current viewport. The handler is a no-op when the noaa layer is off.
     mapGlobal.map.on("moveend", () => {
       maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
+      maybeReanchorOnBoat();
     });
 
     // Setup popup overlay
