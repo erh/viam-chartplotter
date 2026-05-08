@@ -2482,7 +2482,7 @@
     // exceeds dragPxThreshold.
     let pointerDownPx: [number, number] | null = null;
     let pointerDragCounted = false;
-    const dragPxThreshold = 5;
+    const dragPxThreshold = 10;
     mapGlobal.map.on("pointerdown", (evt: any) => {
       pointerDownPx = evt.pixel as [number, number];
       pointerDragCounted = false;
