@@ -3428,11 +3428,11 @@
     bottom: 45px;
     right: 10px;
     z-index: 1001;
-    padding: 12px 24px;
+    padding: 18px 36px;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
-    border-radius: 4px;
-    font-size: 24px;
+    border-radius: 6px;
+    font-size: 36px;
     font-family:
       system-ui,
       -apple-system,
