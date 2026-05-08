@@ -665,11 +665,12 @@
       mapInternalState.lastCenter != null &&
       mapInternalState.lastCenter[0] != 0
     ) {
-      var z = mapGlobal.view.getZoom();
-      if (z != mapInternalState.lastZoom) {
-        inPanMode = true;
-      }
-
+      // Pan-mode detection is purely on center drift. Zoom changes (scroll
+      // wheel, pinch) used to flip pan mode too, but that meant the user
+      // couldn't tweak zoom without losing auto-tracking. Zoom is its own
+      // axis: the auto-zoom toggle controls speed-driven zoom, manual zoom
+      // is preserved by stopPanning, and intentional pans are still
+      // detected here via the center diff.
       var c = mapGlobal.view.getCenter();
       if (c) {
         var diff = pointDiff(c, mapInternalState.lastCenter);
