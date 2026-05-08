@@ -3427,11 +3427,11 @@
     bottom: 45px;
     right: 10px;
     z-index: 1001;
-    padding: 6px 12px;
+    padding: 12px 24px;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: 24px;
     font-family:
       system-ui,
       -apple-system,
