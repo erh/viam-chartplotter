@@ -36,14 +36,9 @@ func init() {
 // DataPath, when set, is used as the JSON file that mirrors the waypoint
 // list across restarts. When empty, waypoints persist to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
-//
-// ArrivalRadiusMeters controls auto-arrival: when MovementSensor is set, a
-// background poller marks the next waypoint visited as soon as the boat is
-// within this many meters of it. 0 disables auto-arrival; default is 200 m.
 type NavConfig struct {
-	MovementSensor      string  `json:"movement_sensor,omitempty"`
-	DataPath            string  `json:"data_path,omitempty"`
-	ArrivalRadiusMeters float64 `json:"arrival_radius_m,omitempty"`
+	MovementSensor string `json:"movement_sensor,omitempty"`
+	DataPath       string `json:"data_path,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -56,28 +51,38 @@ func (cfg *NavConfig) Validate(path string) ([]string, error) {
 	return deps, nil
 }
 
-// defaultArrivalRadiusMeters is the auto-arrival threshold used when the
-// config doesn't specify one. ~0.1 nm.
-const defaultArrivalRadiusMeters = 200.0
-
-// arrivalCheckInterval is how often the background poller re-checks distance
-// to the next waypoint. Cheap to compute, and 5 s is plenty for typical
-// boat speeds (~30 m at 12 kn, well under the default radius).
+// arrivalCheckInterval is how often the background poller re-checks
+// distance to the next waypoint.
 const arrivalCheckInterval = 5 * time.Second
 
-// passEpsilonMeters is how much the boat's distance from the target must
-// grow past its recorded minimum before we treat it as "moving away."
-// Sized to comfortably exceed typical GPS jitter at the 5 s tick rate.
-const passEpsilonMeters = 30.0
+// arrivalDistanceMeters: when distanceToWaypoint drops below this, we've
+// arrived at the waypoint regardless of any other signal.
+const arrivalDistanceMeters = 50.0
+
+// nearWaypointMeters: the bypass rule (passed-without-arriving) only
+// fires when distanceToWaypoint is below this. Outside this we don't
+// trust the bypass signals — we're not close enough to the waypoint for
+// "moving away from it" to mean anything.
+const nearWaypointMeters = 500.0
 
 // lastWaypointPassMinDistanceMeters and lastWaypointPassFactor configure
 // the fallback arrival rule for the *final* waypoint, where there's no
-// after-next to compare against. We mark the last waypoint visited if the
-// boat got within lastWaypointPassMinDistanceMeters of it AND has since
-// moved at least lastWaypointPassFactor× that minimum away — i.e. an
-// overshoot we can be confident about even without a direction reference.
+// following waypoint to compare against. We mark the last waypoint visited
+// if the boat got within lastWaypointPassMinDistanceMeters of it AND has
+// since moved at least lastWaypointPassFactor× that minimum away — i.e.
+// an overshoot we can be confident about even without a direction
+// reference. lastWaypointPassFactor is also used as the "definitely
+// overshot" multiplier in the far-overshoot bypass rule below.
 const lastWaypointPassMinDistanceMeters = 400.0
 const lastWaypointPassFactor = 2.5
+
+// followingWaypointApproachMeters is how much closer the boat must be to
+// the following waypoint than the furthest it's been from it on this
+// approach for the far-overshoot bypass rule to fire. Combined with a
+// lastWaypointPassFactor× overshoot of the current waypoint, this is a
+// strong "we passed it" signal even when we never came inside
+// nearWaypointMeters.
+const followingWaypointApproachMeters = 500.0
 
 // arrivalLogInterval throttles the periodic "where are we relative to the
 // next waypoint" log line. Logs once per interval at info level when the
@@ -108,16 +113,10 @@ func newNav(
 		return nil, err
 	}
 
-	arrivalRadius := cfg.ArrivalRadiusMeters
-	if arrivalRadius == 0 {
-		arrivalRadius = defaultArrivalRadiusMeters
-	}
-
 	svc := &navService{
-		name:                conf.ResourceName(),
-		logger:              logger,
-		store:               store,
-		arrivalRadiusMeters: arrivalRadius,
+		name:   conf.ResourceName(),
+		logger: logger,
+		store:  store,
 	}
 	svc.mode.Store(uint32(navigation.ModeManual))
 	logger.Infof("nav waypoints persisted at %s", dataPath)
@@ -130,13 +129,9 @@ func newNav(
 			return nil, errors.Wrapf(err, "could not get movement_sensor %q", cfg.MovementSensor)
 		}
 		svc.ms = ms
-		if arrivalRadius <= 0 {
-			logger.Warnf("nav auto-arrival disabled: `arrival_radius_m` is %.1f (must be > 0)", arrivalRadius)
-		} else {
-			svc.startArrivalPoller(arrivalRadius)
-			logger.Infof("nav auto-arrival enabled: %.0f m radius, polling every %s",
-				arrivalRadius, arrivalCheckInterval)
-		}
+		svc.startArrivalPoller()
+		logger.Infof("nav auto-arrival enabled: arrival<%.0fm, near<%.0fm, polling every %s",
+			arrivalDistanceMeters, nearWaypointMeters, arrivalCheckInterval)
 	}
 
 	return svc, nil
@@ -155,14 +150,13 @@ type navService struct {
 	// mode is held atomically so reads don't need to take the mutex.
 	mode atomic.Uint32
 
-	arrivalRadiusMeters float64
-
 	// Cancellation for the background arrival poller, if started.
 	arrivalCancel context.CancelFunc
 	arrivalDone   chan struct{}
 
-	// Rolling approach memory for the current next-waypoint. Read/written
-	// only from the arrival poller goroutine, so no synchronisation needed.
+	// Rolling approach memory for the current waypoint and the one
+	// following it. Read/written only from the arrival poller goroutine,
+	// so no synchronisation needed.
 	arrivalState   arrivalState
 	lastArrivalLog time.Time
 }
@@ -180,25 +174,27 @@ func (s *navService) maybeArrivalInfo(msg string, kvs ...interface{}) {
 	s.logger.Infow(msg, kvs...)
 }
 
-// arrivalState tracks the closest the boat has been to targetID on the
-// current approach. Used for the bypass rule: if we hit a local minimum
-// in distance and started getting further away while simultaneously
-// getting closer to the *next* waypoint, we've passed targetID even if
-// we never crossed the absolute arrival radius.
+// arrivalState tracks the closest the boat has been to the current
+// waypoint and the one following it on this approach. The "passed without
+// arriving" rule fires when we've moved away from our closest approach to
+// the current waypoint while simultaneously hitting a new minimum on the
+// following waypoint — i.e. we rounded the corner without entering the
+// arrival radius.
 type arrivalState struct {
-	targetID    primitive.ObjectID
-	minDistance float64 // km
+	waypointID                     primitive.ObjectID
+	followingWaypointID            primitive.ObjectID // zero if no following waypoint
+	minDistanceToWaypoint          float64            // meters
+	minDistanceToFollowingWaypoint float64            // meters; meaningless when followingWaypointID is zero
+	maxDistanceToFollowingWaypoint float64            // meters; meaningless when followingWaypointID is zero
 }
 
 // startArrivalPoller launches a background goroutine that periodically
-// checks the boat's distance to the next unvisited waypoint and marks the
-// waypoint visited (so it disappears from Waypoints()) once the boat is
-// within radiusMeters.
-func (s *navService) startArrivalPoller(radiusMeters float64) {
+// checks the boat's distance to the next unvisited waypoint and marks it
+// visited (so it disappears from Waypoints()) once arrival is detected.
+func (s *navService) startArrivalPoller() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.arrivalCancel = cancel
 	s.arrivalDone = make(chan struct{})
-	radiusKm := radiusMeters / 1000.0
 	go func() {
 		defer close(s.arrivalDone)
 		ticker := time.NewTicker(arrivalCheckInterval)
@@ -209,34 +205,40 @@ func (s *navService) startArrivalPoller(radiusMeters float64) {
 		heartbeat := time.NewTicker(time.Minute)
 		defer heartbeat.Stop()
 		s.logger.Info("arrival poller: starting first tick")
-		s.checkArrival(ctx, radiusKm)
+		s.checkArrival(ctx)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.checkArrival(ctx, radiusKm)
+				s.checkArrival(ctx)
 			case <-heartbeat.C:
 				s.logger.Infow("arrival poller: alive",
 					"interval", arrivalCheckInterval.String(),
-					"radius_m", radiusMeters,
+					"arrival_m", arrivalDistanceMeters,
+					"near_m", nearWaypointMeters,
 				)
 			}
 		}
 	}()
 }
 
-// checkArrival is one tick of the arrival poller: pull the boat's position,
-// look up the next unvisited waypoint, and mark it visited if either:
-//   - we're inside the arrival radius, or
-//   - we hit a local minimum in distance to the next waypoint AND we're now
-//     closer to the waypoint after it than to the next one — i.e. we
-//     rounded a corner outside the radius but clearly passed the point.
+// checkArrival is one tick of the arrival poller: pull the boat's
+// position, look up the current waypoint (and the one following it, if
+// any), and mark the current waypoint visited when one of:
+//   - distanceToWaypoint < arrivalDistanceMeters (we're there), or
+//   - distanceToWaypoint < nearWaypointMeters AND we've moved past our
+//     closest approach to the current waypoint AND we just hit a new
+//     minimum approach to the following waypoint — i.e. we rounded the
+//     corner without entering the arrival radius, or
+//   - last-waypoint overshoot: with no following waypoint to compare to,
+//     we got within lastWaypointPassMinDistanceMeters and have since
+//     moved at least lastWaypointPassFactor× that minimum away.
 //
 // Errors are surfaced at warn so an unhealthy sensor or store is visible
 // in logs; the loop still keeps running so a transient blip doesn't
 // disable auto-arrival.
-func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
+func (s *navService) checkArrival(ctx context.Context) {
 	if s.ms == nil {
 		return
 	}
@@ -266,50 +268,80 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 			"lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
-	next := wps[0]
-	distNext := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
+	waypoint := wps[0]
+	distanceToWaypoint := pt.GreatCircleDistance(geo.NewPoint(waypoint.Lat, waypoint.Long)) * 1000
 
-	// Reset rolling approach memory whenever the active target changes
-	// (first run, previous waypoint visited, list edited, etc.).
-	if s.arrivalState.targetID != next.ID {
-		s.arrivalState = arrivalState{targetID: next.ID, minDistance: distNext}
-	} else if distNext < s.arrivalState.minDistance {
-		s.arrivalState.minDistance = distNext
+	var followingID primitive.ObjectID
+	distanceToFollowingWaypoint := -1.0
+	if len(wps) >= 2 {
+		following := wps[1]
+		followingID = following.ID
+		distanceToFollowingWaypoint = pt.GreatCircleDistance(geo.NewPoint(following.Lat, following.Long)) * 1000
+	}
+
+	// Reset rolling approach memory whenever the current waypoint or the
+	// one following it changes (first run, previous waypoint visited, list
+	// edited, etc.).
+	if s.arrivalState.waypointID != waypoint.ID || s.arrivalState.followingWaypointID != followingID {
+		s.arrivalState = arrivalState{
+			waypointID:                     waypoint.ID,
+			followingWaypointID:            followingID,
+			minDistanceToWaypoint:          distanceToWaypoint,
+			minDistanceToFollowingWaypoint: distanceToFollowingWaypoint,
+			maxDistanceToFollowingWaypoint: distanceToFollowingWaypoint,
+		}
+	}
+
+	// Capture pre-update minima so the bypass rule can detect a new minimum
+	// for the following waypoint on this tick.
+	prevMinDistanceToFollowingWaypoint := s.arrivalState.minDistanceToFollowingWaypoint
+
+	if distanceToWaypoint < s.arrivalState.minDistanceToWaypoint {
+		s.arrivalState.minDistanceToWaypoint = distanceToWaypoint
+	}
+	if distanceToFollowingWaypoint >= 0 {
+		if distanceToFollowingWaypoint < s.arrivalState.minDistanceToFollowingWaypoint {
+			s.arrivalState.minDistanceToFollowingWaypoint = distanceToFollowingWaypoint
+		}
+		if distanceToFollowingWaypoint > s.arrivalState.maxDistanceToFollowingWaypoint {
+			s.arrivalState.maxDistanceToFollowingWaypoint = distanceToFollowingWaypoint
+		}
 	}
 
 	arrived := false
 	reason := ""
-	distAfterKm := -1.0 // -1 sentinel for "no after-next" in the diagnostic log
 	switch {
-	case distNext <= radiusKm:
+	case distanceToWaypoint < arrivalDistanceMeters:
 		arrived = true
-		reason = "inside arrival radius"
-	case len(wps) >= 2:
-		// Bypass rule: we've moved away from our closest approach to the
-		// next waypoint AND we're now geometrically closer to the after-
-		// next waypoint than to the next. We deliberately do NOT require
-		// minDistance to have been particularly small — the user might
-		// have rounded the corner well outside any reasonable "got close"
-		// radius, and as long as we're now past it heading toward the
-		// next one, that's the right call.
-		afterNext := wps[1]
-		distAfterKm = pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
-		passEpsKm := passEpsilonMeters / 1000.0
-		if distNext > s.arrivalState.minDistance+passEpsKm &&
-			distAfterKm < distNext {
+		reason = "inside arrival distance"
+	case distanceToFollowingWaypoint >= 0:
+		// Bypass rule: we got close to the current waypoint, have started
+		// moving away from our closest approach to it, and just hit a new
+		// minimum on the following waypoint — we rounded the corner.
+		switch {
+		case distanceToWaypoint < nearWaypointMeters &&
+			distanceToWaypoint > s.arrivalState.minDistanceToWaypoint &&
+			distanceToFollowingWaypoint < prevMinDistanceToFollowingWaypoint:
 			arrived = true
-			reason = "passed (moved away + closer to next)"
+			reason = "passed (moved away from current + new min to following)"
+		case distanceToWaypoint > s.arrivalState.minDistanceToWaypoint*lastWaypointPassFactor &&
+			distanceToFollowingWaypoint+followingWaypointApproachMeters < s.arrivalState.maxDistanceToFollowingWaypoint:
+			// Far-overshoot variant: we never came inside nearWaypointMeters
+			// but we're now well past the current waypoint (≥2.5× our
+			// closest approach) AND we've closed at least 500 m on the
+			// following waypoint vs the furthest we'd been from it. Catches
+			// passes that round the corner outside the proximity gate.
+			arrived = true
+			reason = "passed (far overshoot + closed on following)"
 		}
 	default:
-		// Single (last) waypoint: no after-next to compare to, so the
-		// bypass rule above can't fire. Fall back to overshoot detection:
-		// we got within a reasonable approach distance and have since
-		// moved well past it. This handles "I drove by my final
-		// destination" without requiring the boat to land in the radius.
-		minKm := s.arrivalState.minDistance
-		if minKm <= lastWaypointPassMinDistanceMeters/1000.0 &&
-			distNext >= minKm*lastWaypointPassFactor &&
-			distNext > radiusKm {
+		// Last waypoint: no following to compare to. Fall back to
+		// overshoot detection: we got within a reasonable approach
+		// distance and have since moved well past it.
+		min := s.arrivalState.minDistanceToWaypoint
+		if min <= lastWaypointPassMinDistanceMeters &&
+			distanceToWaypoint >= min*lastWaypointPassFactor &&
+			distanceToWaypoint > arrivalDistanceMeters {
 			arrived = true
 			reason = "overshot last waypoint"
 		}
@@ -321,26 +353,27 @@ func (s *navService) checkArrival(ctx context.Context, radiusKm float64) {
 		// once per arrivalLogInterval; otherwise this would flood logs
 		// during long offshore legs.
 		now := time.Now()
-		if distNext*1000 < arrivalLogProximityMeters && now.Sub(s.lastArrivalLog) >= arrivalLogInterval {
+		if distanceToWaypoint < arrivalLogProximityMeters && now.Sub(s.lastArrivalLog) >= arrivalLogInterval {
 			s.lastArrivalLog = now
 			s.logger.Infow("arrival poller: not arrived",
-				"target_id", next.ID.Hex(),
-				"dist_m", distNext*1000,
-				"min_dist_m", s.arrivalState.minDistance*1000,
-				"radius_m", radiusKm*1000,
-				"dist_after_m", distAfterKm*1000,
+				"waypoint_id", waypoint.ID.Hex(),
+				"distance_to_waypoint_m", distanceToWaypoint,
+				"min_distance_to_waypoint_m", s.arrivalState.minDistanceToWaypoint,
+				"distance_to_following_waypoint_m", distanceToFollowingWaypoint,
+				"min_distance_to_following_waypoint_m", s.arrivalState.minDistanceToFollowingWaypoint,
+				"max_distance_to_following_waypoint_m", s.arrivalState.maxDistanceToFollowingWaypoint,
 				"wps_remaining", len(wps),
 			)
 		}
 		return
 	}
 
-	if err := s.store.WaypointVisited(ctx, next.ID); err != nil {
-		s.logger.Warnw("arrival poller: WaypointVisited failed", "err", err, "id", next.ID.Hex())
+	if err := s.store.WaypointVisited(ctx, waypoint.ID); err != nil {
+		s.logger.Warnw("arrival poller: WaypointVisited failed", "err", err, "id", waypoint.ID.Hex())
 		return
 	}
 	s.logger.Infof("arrived at waypoint %s (%.0f m, %s); marking visited",
-		next.ID.Hex(), distNext*1000, reason)
+		waypoint.ID.Hex(), distanceToWaypoint, reason)
 }
 
 func (s *navService) Name() resource.Name { return s.name }
@@ -435,14 +468,16 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	return nil, resource.ErrDoUnimplemented
 }
 
-// doArrivalStatus returns a snapshot of the arrival poller's current view:
-// boat position, the next waypoint and its distance, the rolling
-// minDistance, the after-next distance (if any), and whether auto-arrival
-// is enabled. Cheap — no side effects on poller state.
+// doArrivalStatus returns a snapshot of the arrival poller's current
+// view: boat position, the current waypoint and its distance, the
+// rolling minimum, the following-waypoint distance and minimum (if any),
+// and whether auto-arrival is enabled. Cheap — no side effects on poller
+// state.
 func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{}, error) {
 	out := map[string]interface{}{
 		"auto_arrival_enabled": s.ms != nil && s.arrivalCancel != nil,
-		"radius_m":             s.arrivalRadiusMeters,
+		"arrival_distance_m":   arrivalDistanceMeters,
+		"near_waypoint_m":      nearWaypointMeters,
 		"check_interval":       arrivalCheckInterval.String(),
 	}
 	if s.ms == nil {
@@ -472,25 +507,27 @@ func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{
 		return out, nil
 	}
 
-	next := wps[0]
-	distNext := pt.GreatCircleDistance(geo.NewPoint(next.Lat, next.Long))
-	out["next_id"] = next.ID.Hex()
-	out["next_lat"] = next.Lat
-	out["next_lng"] = next.Long
-	out["next_dist_m"] = distNext * 1000
+	waypoint := wps[0]
+	distanceToWaypoint := pt.GreatCircleDistance(geo.NewPoint(waypoint.Lat, waypoint.Long)) * 1000
+	out["waypoint_id"] = waypoint.ID.Hex()
+	out["waypoint_lat"] = waypoint.Lat
+	out["waypoint_lng"] = waypoint.Long
+	out["distance_to_waypoint_m"] = distanceToWaypoint
 
-	// If state is for this target, expose it; otherwise just current dist.
-	if s.arrivalState.targetID == next.ID {
-		out["min_dist_m"] = s.arrivalState.minDistance * 1000
-		out["away_from_min_m"] = (distNext - s.arrivalState.minDistance) * 1000
+	if s.arrivalState.waypointID == waypoint.ID {
+		out["min_distance_to_waypoint_m"] = s.arrivalState.minDistanceToWaypoint
+		out["away_from_min_m"] = distanceToWaypoint - s.arrivalState.minDistanceToWaypoint
 	}
 
 	if len(wps) >= 2 {
-		afterNext := wps[1]
-		distAfter := pt.GreatCircleDistance(geo.NewPoint(afterNext.Lat, afterNext.Long))
-		out["after_next_id"] = afterNext.ID.Hex()
-		out["after_next_dist_m"] = distAfter * 1000
-		out["closer_to_after_next"] = distAfter < distNext
+		following := wps[1]
+		distanceToFollowingWaypoint := pt.GreatCircleDistance(geo.NewPoint(following.Lat, following.Long)) * 1000
+		out["following_waypoint_id"] = following.ID.Hex()
+		out["distance_to_following_waypoint_m"] = distanceToFollowingWaypoint
+		if s.arrivalState.followingWaypointID == following.ID {
+			out["min_distance_to_following_waypoint_m"] = s.arrivalState.minDistanceToFollowingWaypoint
+			out["max_distance_to_following_waypoint_m"] = s.arrivalState.maxDistanceToFollowingWaypoint
+		}
 	}
 	return out, nil
 }
