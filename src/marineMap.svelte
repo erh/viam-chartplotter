@@ -2696,7 +2696,354 @@
   let hasSensorData = $derived(
     sog != null || hdg != null || cog != null || depth != null
   );
-  let hasDataPanel = $derived(hasSensorData || !!routeStats || !!cursorInfo);
+  let hasDataPanel = $derived(
+    hasSensorData || !!routeStats || !!cursorInfo || !!tideInfo
+  );
+
+  // Sparkline geometry. Computed off the current tide series so the SVG
+  // template stays a flat list of attributes (no inline {@const} math).
+  // Recomputed on a 1-min tick to keep the "now" marker drifting.
+  let sparkClock = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => (sparkClock = Date.now()), 60 * 1000);
+    return () => clearInterval(id);
+  });
+  const sparkW = 180;
+  const sparkH = 44;
+  let tideSpark = $derived.by(() => {
+    if (!tideInfo || tideInfo.series.length < 2) return null;
+    const pad = 3;
+    const tStart = tideInfo.seriesStart;
+    const tEnd = tideInfo.seriesEnd;
+    const tRange = Math.max(tEnd - tStart, 1);
+    const vMin = tideInfo.seriesMin;
+    const vRange = Math.max(tideInfo.seriesMax - vMin, 0.01);
+    const xOf = (t: number) => pad + ((sparkW - 2 * pad) * (t - tStart)) / tRange;
+    const yOf = (v: number) => pad + (sparkH - 2 * pad) * (1 - (v - vMin) / vRange);
+    const points = tideInfo.series
+      .map((p) => `${xOf(p.t.getTime()).toFixed(1)},${yOf(p.v).toFixed(1)}`)
+      .join(" ");
+    const now = sparkClock;
+    const inRange = now >= tStart && now <= tEnd;
+    const nowX = inRange ? xOf(now) : null;
+    const nowY =
+      inRange && tideInfo.currentLevel !== null ? yOf(tideInfo.currentLevel) : null;
+    return { points, nowX, nowY };
+  });
+
+  // ---- Tide data (NOAA Tides & Currents API, fetched directly from browser).
+  // We download the full tide-prediction station list once per session
+  // (cached in sessionStorage), find the nearest station to the boat's
+  // current location, then fetch high/low predictions + current level.
+  // Refetched every 10 min, or sooner if the boat moves enough to change
+  // the rounded-key lat/lng (~6 nm).
+  type TideStation = { id: string; name: string; lat: number; lng: number };
+  type TidePoint = { tStr: string; t: Date; v: number; type: "H" | "L" };
+  type TideSeriesPoint = { t: Date; v: number };
+  let tideInfo = $state<{
+    station: { id: string; name: string; distNm: number };
+    currentLevel: number | null;
+    nextHigh: TidePoint | null;
+    nextLow: TidePoint | null;
+    /** Hourly predictions spanning roughly the past 12h to the next 12h.
+     *  Used to draw the sparkline showing where we are in the cycle. */
+    series: TideSeriesPoint[];
+    seriesStart: number;
+    seriesEnd: number;
+    seriesMin: number;
+    seriesMax: number;
+  } | null>(null);
+  let tideStationCache: TideStation[] | null = null;
+  let lastTideFetchKey = "";
+  let tideRefetchTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function loadTideStations(): Promise<TideStation[]> {
+    if (tideStationCache) return tideStationCache;
+    try {
+      const cached = sessionStorage.getItem("noaaTideStations");
+      if (cached) {
+        const parsed = JSON.parse(cached) as TideStation[];
+        if (parsed && parsed.length > 0) {
+          tideStationCache = parsed;
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore parse errors / storage disabled
+    }
+    const r = await fetch(
+      "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions"
+    );
+    if (!r.ok) throw new Error(`station list http ${r.status}`);
+    const data = await r.json();
+    const list: TideStation[] = (data.stations ?? []).map((s: any) => ({
+      id: String(s.id),
+      name: String(s.name),
+      lat: Number(s.lat),
+      lng: Number(s.lng),
+    }));
+    tideStationCache = list;
+    try {
+      sessionStorage.setItem("noaaTideStations", JSON.stringify(list));
+    } catch {
+      // sessionStorage may be full or disabled; in-memory cache is enough
+    }
+    return list;
+  }
+
+  function nearestTideStation(
+    stations: TideStation[],
+    lat: number,
+    lng: number
+  ): { station: TideStation; distNm: number } | null {
+    let best: TideStation | null = null;
+    let bestNm = Infinity;
+    const R = 3440.065; // earth radius in nautical miles
+    const lat1 = (lat * Math.PI) / 180;
+    for (const s of stations) {
+      const lat2 = (s.lat * Math.PI) / 180;
+      const dLat = lat2 - lat1;
+      const dLng = ((s.lng - lng) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (d < bestNm) {
+        bestNm = d;
+        best = s;
+      }
+    }
+    return best ? { station: best, distNm: bestNm } : null;
+  }
+
+  // Format a JS Date as NOAA's "yyyyMMdd" using the browser's local
+  // wall-clock time. With time_zone=lst_ldt NOAA interprets the date in
+  // the station's local time; for nearby stations this matches.
+  function fmtNoaaDate(d: Date): string {
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const da = String(d.getDate()).padStart(2, "0");
+    return `${y}${mo}${da}`;
+  }
+
+  async function fetchTidePredictions(stationId: string): Promise<{
+    hilo: TidePoint[];
+    series: TideSeriesPoint[];
+  }> {
+    const base = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+    const common = `application=viam-chartplotter&station=${stationId}&datum=MLLW&time_zone=lst_ldt&units=english&format=json`;
+    // Fetch a 3-day window starting yesterday so we have plenty of points
+    // both before and after "now". The sparkline window itself is set in
+    // refreshTide and the polyline gets clipped to it there.
+    const begin = fmtNoaaDate(new Date(Date.now() - 24 * 3600 * 1000));
+    const [hiloRes, seriesRes] = await Promise.all([
+      fetch(`${base}?product=predictions&interval=hilo&begin_date=${begin}&range=72&${common}`),
+      fetch(`${base}?product=predictions&interval=h&begin_date=${begin}&range=72&${common}`),
+    ]);
+    if (!hiloRes.ok) throw new Error(`hilo http ${hiloRes.status}`);
+    if (!seriesRes.ok) throw new Error(`series http ${seriesRes.status}`);
+    const hiloData = await hiloRes.json();
+    const seriesData = await seriesRes.json();
+    // NOAA returns 200 with { error: { message } } for many "no data"
+    // conditions (e.g., subordinate station + interval=h). Log and treat
+    // as empty rather than throwing.
+    if (hiloData?.error?.message) console.warn("tide hilo:", hiloData.error.message);
+    if (seriesData?.error?.message) console.warn("tide series:", seriesData.error.message);
+    const hilo: TidePoint[] = (hiloData.predictions ?? []).map((p: any) => ({
+      tStr: p.t,
+      t: new Date(p.t.replace(" ", "T")),
+      v: parseFloat(p.v),
+      type: p.type,
+    }));
+    const series: TideSeriesPoint[] = (seriesData.predictions ?? []).map((p: any) => ({
+      t: new Date(p.t.replace(" ", "T")),
+      v: parseFloat(p.v),
+    }));
+    return { hilo, series };
+  }
+
+  // Clip a series to [tStart, tEnd]. Linearly interpolates endpoints at
+  // tStart and tEnd so the resulting polyline reaches both window edges
+  // (rather than snapping to the nearest sample inside the window).
+  function clipSeries(
+    series: TideSeriesPoint[],
+    tStart: number,
+    tEnd: number
+  ): TideSeriesPoint[] {
+    if (series.length === 0) return [];
+    const sorted = [...series].sort((a, b) => a.t.getTime() - b.t.getTime());
+    const interpAt = (t: number): number | null => {
+      if (sorted.length < 2) return null;
+      if (t <= sorted[0].t.getTime()) return sorted[0].v;
+      if (t >= sorted[sorted.length - 1].t.getTime()) return sorted[sorted.length - 1].v;
+      for (let i = 1; i < sorted.length; i++) {
+        const t1 = sorted[i - 1].t.getTime();
+        const t2 = sorted[i].t.getTime();
+        if (t >= t1 && t <= t2) {
+          const f = (t - t1) / Math.max(t2 - t1, 1);
+          return sorted[i - 1].v + f * (sorted[i].v - sorted[i - 1].v);
+        }
+      }
+      return null;
+    };
+    const out: TideSeriesPoint[] = [];
+    const startV = interpAt(tStart);
+    if (startV !== null) out.push({ t: new Date(tStart), v: startV });
+    for (const p of sorted) {
+      const t = p.t.getTime();
+      if (t > tStart && t < tEnd) out.push(p);
+    }
+    const endV = interpAt(tEnd);
+    if (endV !== null) out.push({ t: new Date(tEnd), v: endV });
+    return out;
+  }
+
+  // Linear interpolation of the hourly series at "now" for the current level.
+  function interpCurrent(series: TideSeriesPoint[]): number | null {
+    if (series.length === 0) return null;
+    const now = Date.now();
+    if (series.length === 1) return series[0].v;
+    if (now <= series[0].t.getTime()) return series[0].v;
+    if (now >= series[series.length - 1].t.getTime()) return series[series.length - 1].v;
+    for (let i = 1; i < series.length; i++) {
+      const t1 = series[i - 1].t.getTime();
+      const t2 = series[i].t.getTime();
+      if (now >= t1 && now <= t2) {
+        const f = (now - t1) / Math.max(t2 - t1, 1);
+        return series[i - 1].v + f * (series[i].v - series[i - 1].v);
+      }
+    }
+    return null;
+  }
+
+  // Build a synthetic tide series from hi/lo points using half-cosine
+  // interpolation between adjacent peaks. Used when NOAA returns no hourly
+  // data (subordinate stations only publish hi/lo). Samples every 15 min
+  // across the window — dense enough for a smooth sparkline.
+  function synthSeriesFromHilo(
+    hilo: TidePoint[],
+    windowStart: number,
+    windowEnd: number
+  ): TideSeriesPoint[] {
+    if (hilo.length < 2) return [];
+    const sorted = [...hilo].sort((a, b) => a.t.getTime() - b.t.getTime());
+    const out: TideSeriesPoint[] = [];
+    const stepMs = 15 * 60 * 1000;
+    for (let t = windowStart; t <= windowEnd; t += stepMs) {
+      // Find adjacent pair (p1, p2) such that p1.t <= t <= p2.t.
+      let p1: TidePoint | null = null;
+      let p2: TidePoint | null = null;
+      for (let i = 0; i < sorted.length - 1; i++) {
+        if (sorted[i].t.getTime() <= t && t <= sorted[i + 1].t.getTime()) {
+          p1 = sorted[i];
+          p2 = sorted[i + 1];
+          break;
+        }
+      }
+      if (!p1 || !p2) continue;
+      const f = (t - p1.t.getTime()) / Math.max(p2.t.getTime() - p1.t.getTime(), 1);
+      const mid = (p1.v + p2.v) / 2;
+      const half = (p1.v - p2.v) / 2;
+      out.push({ t: new Date(t), v: mid + half * Math.cos(Math.PI * f) });
+    }
+    return out;
+  }
+
+  async function refreshTide(lat: number, lng: number): Promise<void> {
+    try {
+      const stations = await loadTideStations();
+      const nearest = nearestTideStation(stations, lat, lng);
+      if (!nearest) {
+        console.warn("tide: no nearest station found");
+        return;
+      }
+      console.log(
+        `tide: nearest station ${nearest.station.id} (${nearest.station.name}), ` +
+          `${nearest.distNm.toFixed(1)} nm`
+      );
+      const { hilo, series: hourly } = await fetchTidePredictions(nearest.station.id);
+      console.log(`tide: got ${hilo.length} hi/lo points, ${hourly.length} hourly points`);
+
+      // Sparkline window is fixed at [now-6h, now+18h] so "now" always
+      // sits at the 25% mark, regardless of NOAA's hourly grid alignment.
+      const now = Date.now();
+      const winStart = now - 6 * 3600 * 1000;
+      const winEnd = now + 18 * 3600 * 1000;
+
+      // If hourly is empty (subordinate station), synthesize from hi/lo.
+      const baseSeries =
+        hourly.length >= 2 ? hourly : synthSeriesFromHilo(hilo, winStart, winEnd);
+
+      // Clip series to the window. Inject endpoints at winStart/winEnd by
+      // linear interp so the polyline actually reaches both edges of the
+      // SVG (rather than starting at the first hourly point ≥ winStart).
+      const series = clipSeries(baseSeries, winStart, winEnd);
+
+      const future = hilo.filter((p) => p.t.getTime() > now);
+      const nextHigh = future.find((p) => p.type === "H") ?? null;
+      const nextLow = future.find((p) => p.type === "L") ?? null;
+      const currentLevel = interpCurrent(baseSeries);
+
+      // Min/max over the visible window, including any hi/lo peaks that
+      // fall inside it (so the curve doesn't clip through the top or bottom).
+      const windowedHilo = hilo.filter(
+        (p) => p.t.getTime() >= winStart && p.t.getTime() <= winEnd
+      );
+      const allV = [...series.map((p) => p.v), ...windowedHilo.map((p) => p.v)];
+      const seriesMin = allV.length > 0 ? Math.min(...allV) : 0;
+      const seriesMax = allV.length > 0 ? Math.max(...allV) : 1;
+      tideInfo = {
+        station: {
+          id: nearest.station.id,
+          name: nearest.station.name,
+          distNm: nearest.distNm,
+        },
+        currentLevel,
+        nextHigh,
+        nextLow,
+        series,
+        seriesStart: winStart,
+        seriesEnd: winEnd,
+        seriesMin,
+        seriesMax,
+      };
+    } catch (e) {
+      console.warn("tide fetch failed", e);
+    }
+  }
+
+  // Trigger refetch when location changes by ~6 nm (0.1° lat). Also kicks
+  // a 10-minute background refresh so predictions stay current at anchor.
+  $effect(() => {
+    if (!myBoat?.location) return;
+    const [lat, lng] = myBoat.location;
+    if (lat === 0 && lng === 0) return;
+    const key = `${Math.round(lat * 10) / 10},${Math.round(lng * 10) / 10}`;
+    if (key === lastTideFetchKey) return;
+    lastTideFetchKey = key;
+    refreshTide(lat, lng);
+    if (tideRefetchTimer) clearInterval(tideRefetchTimer);
+    tideRefetchTimer = setInterval(
+      () => {
+        const loc = myBoat?.location;
+        if (loc && !(loc[0] === 0 && loc[1] === 0)) {
+          refreshTide(loc[0], loc[1]);
+        }
+      },
+      10 * 60 * 1000
+    );
+    return () => {
+      if (tideRefetchTimer) {
+        clearInterval(tideRefetchTimer);
+        tideRefetchTimer = null;
+      }
+    };
+  });
+
+  // Render "2024-01-15 14:23" -> "14:23" in the station's local time
+  // (the t string is already in lst_ldt, so don't reparse to JS Date).
+  function tideTimeFmt(p: TidePoint): string {
+    return p.tStr.split(" ")[1]?.slice(0, 5) ?? p.tStr;
+  }
 
   function handleMapContainerClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
@@ -3256,23 +3603,83 @@
           {/if}
         </div>
       {/if}
-      {#if cursorInfo}
-        <div class="data-panel-section data-panel-cursor">
-          <div class="data-panel-row">
-            <span class="data-panel-label">Cursor Position</span>
-            <span class="data-panel-value">
-              {formatCoord(cursorInfo.lat, true)}, {formatCoord(cursorInfo.lng, false)}
-            </span>
+      {#if tideInfo}
+        <div class="data-panel-section data-panel-tide">
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Tide</span>
+            <span class="data-panel-station">{tideInfo.station.name}</span>
+            <span class="data-panel-station">{tideInfo.station.distNm.toFixed(1)} nm away</span>
           </div>
-          {#if cursorInfo.nm !== null && cursorInfo.brg !== null}
+          {#if tideSpark}
+            <svg
+              class="tide-spark"
+              viewBox="0 0 {sparkW} {sparkH}"
+              preserveAspectRatio="none"
+            >
+              <polyline
+                points={tideSpark.points}
+                fill="none"
+                stroke="#4ade80"
+                stroke-width="1.5"
+              />
+              {#if tideSpark.nowX !== null}
+                <line
+                  x1={tideSpark.nowX}
+                  y1="0"
+                  x2={tideSpark.nowX}
+                  y2={sparkH}
+                  stroke="#fff"
+                  stroke-width="1"
+                  stroke-dasharray="2,2"
+                  opacity="0.7"
+                />
+                {#if tideSpark.nowY !== null}
+                  <circle cx={tideSpark.nowX} cy={tideSpark.nowY} r="2.5" fill="#fff" />
+                {/if}
+              {/if}
+            </svg>
+          {/if}
+          {#if tideInfo.currentLevel !== null}
             <div class="data-panel-row">
-              <span class="data-panel-label">From Boat</span>
+              <span class="data-panel-label">Now</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
-                · {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
+                <span class="data-panel-bold">{tideInfo.currentLevel.toFixed(2)}</span><sup>ft</sup>
               </span>
             </div>
           {/if}
+          {#if tideInfo.nextHigh}
+            <div class="data-panel-row">
+              <span class="data-panel-label">High</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{tideInfo.nextHigh.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideInfo.nextHigh)}
+              </span>
+            </div>
+          {/if}
+          {#if tideInfo.nextLow}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Low</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{tideInfo.nextLow.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideInfo.nextLow)}
+              </span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+      {#if cursorInfo}
+        <div class="data-panel-section data-panel-cursor">
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Cursor</span>
+            <span class="data-panel-value">{formatCoord(cursorInfo.lat, true)}</span>
+            <span class="data-panel-value">{formatCoord(cursorInfo.lng, false)}</span>
+            {#if cursorInfo.nm !== null && cursorInfo.brg !== null}
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
+                @ {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -3351,6 +3758,31 @@
   }
   .data-panel-cursor .data-panel-label {
     color: #7dd3fc;
+  }
+  .data-panel-tide {
+    color: #bbf7d0;
+  }
+  .data-panel-tide .data-panel-label {
+    color: #4ade80;
+  }
+  /* Stacked label-above-value group, used by Cursor and Tide sections to
+     keep the panel narrow. */
+  .data-panel-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+  }
+  .data-panel-station {
+    font-size: 0.78em;
+    opacity: 0.85;
+    line-height: 1.1;
+  }
+  .tide-spark {
+    display: block;
+    margin-top: 6px;
+    width: 180px;
+    height: 44px;
   }
   .data-panel.edit {
     border-color: #f59e0b;
