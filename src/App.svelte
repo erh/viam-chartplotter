@@ -494,6 +494,12 @@
             typeof rawBoat.Length === "number" && rawBoat.Length > 0
               ? rawBoat.Length
               : undefined;
+          const beam =
+            typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
+              ? rawBoat.Beam
+              : typeof rawBoat.Width === "number" && rawBoat.Width > 0
+                ? rawBoat.Width
+                : undefined;
           const destination =
             typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
               ? rawBoat.Destination.trim()
@@ -506,6 +512,7 @@
               heading: rawBoat.Heading || 0,
               cog,
               length,
+              beam,
               destination,
               mmsi: mmsi,
             },

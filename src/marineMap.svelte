@@ -37,7 +37,7 @@
     parent?: string; // Parent layer name for hierarchical layers
   }
 
-  let boatImage = "boat3.jpg";
+  let boatImage = "topdown-boat.svg";
 
   // myBoat-only icon override. The Go module exposes /myboat-icon when the
   // operator sets `myboat_icon_path` in config; we probe once on mount and
@@ -45,10 +45,44 @@
   // using the bundled boatImage above.
   let myBoatImage = $state<string>(boatImage);
   // Natural pixel dimensions of the override icon, captured after preload.
-  // The createBoatStyle scale (0.6 etc.) was tuned to boat3.jpg's 16x49, so
-  // we remap by the height ratio to keep rendered size consistent across
-  // any source image.
-  const BOAT_IMAGE_NATURAL_HEIGHT = 49;
+  // The createBoatStyle scale was tuned to topdown-boat.svg's 24x73; we
+  // remap by the height ratio so a configured override renders at the same
+  // pixel size as the bundled icon regardless of the override's resolution.
+  const BOAT_IMAGE_NATURAL_HEIGHT = 73;
+
+  // Boat icons scale relative to an 80 ft "default" vessel (~6 m beam).
+  // Length scales the icon's long axis; the cross-axis only scales when we
+  // have a beam value, otherwise it stays at the default width (so an 800 ft
+  // tanker just looks longer, not also wider, when no beam is reported).
+  // sqrt curve dampens the scaling so a 200 ft boat is ~1.6x not 2.5x.
+  const DEFAULT_BOAT_LENGTH_M = 24.38; // 80 ft
+  const DEFAULT_BOAT_BEAM_M = 6.0; // typical 80 ft motoryacht beam
+  const BOAT_SCALE_MIN = 0.6;
+  const BOAT_SCALE_MAX = 2.5;
+
+  function dimScaleFactor(
+    valueMeters: number | null | undefined,
+    referenceMeters: number
+  ): number {
+    if (!valueMeters || !Number.isFinite(valueMeters) || valueMeters <= 0) {
+      return 1;
+    }
+    const f = Math.sqrt(valueMeters / referenceMeters);
+    return Math.max(BOAT_SCALE_MIN, Math.min(BOAT_SCALE_MAX, f));
+  }
+
+  // Returns [scaleX, scaleY] — X is across the boat (beam), Y is along (length).
+  // When beam is unknown we leave X at 1 so only the long axis grows.
+  function boatScaleAxes(
+    lengthMeters: number | null | undefined,
+    beamMeters: number | null | undefined
+  ): [number, number] {
+    const sy = dimScaleFactor(lengthMeters, DEFAULT_BOAT_LENGTH_M);
+    const sx = beamMeters
+      ? dimScaleFactor(beamMeters, DEFAULT_BOAT_BEAM_M)
+      : 1;
+    return [sx, sy];
+  }
   // Floor on rendered width for the override icon. Some PNGs are very
   // narrow (tall thin silhouette) and the height-ratio remap can leave
   // them only a few pixels wide on screen — too small to spot on a busy
@@ -835,6 +869,8 @@
             v.set("heading", boat.heading);
             v.set("name", boat.name);
             v.set("visible", isVisible);
+            v.set("length", boat.length);
+            v.set("beam", boat.beam);
             return;
           }
         }
@@ -846,6 +882,8 @@
             mmsi: mmsi,
             speed: boat.speed,
             heading: boat.heading,
+            length: boat.length,
+            beam: boat.beam,
             visible: isVisible,
             geometry: new Point(boatPos),
           })
@@ -1276,7 +1314,7 @@
   // bundled icon regardless of the override's source resolution.
   function createBoatStyle(
     heading: number,
-    scale: number,
+    scale: number | [number, number],
     visible: boolean,
     src: string = boatImage
   ): Style {
@@ -1285,18 +1323,23 @@
     }
 
     const rotation = (heading / 360) * Math.PI * 2;
+    let sx = typeof scale === "number" ? scale : scale[0];
+    let sy = typeof scale === "number" ? scale : scale[1];
 
-    let effectiveScale = scale;
     if (src !== boatImage && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
-      effectiveScale = scale * (BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight);
+      const ratio = BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight;
+      sx *= ratio;
+      sy *= ratio;
       // Enforce a minimum rendered width so a narrow override doesn't end
-      // up as a sliver on the chart. Bumps scale up uniformly — aspect
+      // up as a sliver on the chart. Bumps both axes uniformly — aspect
       // ratio is preserved, the icon just grows past the height-matched
       // size when its width would otherwise be below the floor.
       if (myBoatImageNaturalWidth && myBoatImageNaturalWidth > 0) {
-        const renderedWidth = myBoatImageNaturalWidth * effectiveScale;
+        const renderedWidth = myBoatImageNaturalWidth * sx;
         if (renderedWidth < MYBOAT_MIN_RENDERED_WIDTH_PX) {
-          effectiveScale = MYBOAT_MIN_RENDERED_WIDTH_PX / myBoatImageNaturalWidth;
+          const bump = MYBOAT_MIN_RENDERED_WIDTH_PX / renderedWidth;
+          sx *= bump;
+          sy *= bump;
         }
       }
     }
@@ -1304,7 +1347,7 @@
     return new Style({
       image: new Icon({
         src: src,
-        scale: effectiveScale,
+        scale: [sx, sy],
         rotation: rotation,
         rotateWithView: true,
       }),
@@ -1898,9 +1941,10 @@
           features: myBoatFeatures,
         }),
         style: function (_feature) {
+          const [sx, sy] = boatScaleAxes(myBoat.length, myBoat.beam);
           return createBoatStyle(
             myBoat.heading,
-            0.6,
+            [0.6 * sx, 0.6 * sy],
             effectiveVisibleBoats.has("myBoat"),
             myBoatImage
           );
@@ -2027,7 +2071,10 @@
       style: function (feature) {
         const heading = feature.get("heading") ?? 0;
         const visible = feature.get("visible") ?? false;
-        return createBoatStyle(heading, 0.35, visible);
+        const length = feature.get("length") as number | undefined;
+        const beam = feature.get("beam") as number | undefined;
+        const [sx, sy] = boatScaleAxes(length, beam);
+        return createBoatStyle(heading, [0.35 * sx, 0.35 * sy], visible);
       },
       zIndex: 100,
     });
