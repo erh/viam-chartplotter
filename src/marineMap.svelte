@@ -453,6 +453,10 @@
     detectionConfig,
     airstreamConfigured = false,
     onAirstreamBboxChange,
+    sog,
+    hdg,
+    cog,
+    depth,
   }: {
     myBoat?: BoatInfo;
     zoomModifier?: number;
@@ -461,6 +465,15 @@
     depthColorTrack?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    /** Speed-over-ground (knots). When provided, shown in the combined data
+     *  panel at the top-right of the map. */
+    sog?: number | null;
+    /** Compass heading (degrees). When provided, shown in the data panel. */
+    hdg?: number | null;
+    /** Course-over-ground (degrees). When provided, shown in the data panel. */
+    cog?: number | null;
+    /** Water depth (ft). When provided, shown in the data panel. */
+    depth?: number | null;
     /** Ordered waypoints from a navigation service. The route is drawn from the boat's
      *  current position through each waypoint in order. */
     navWaypoints?: { id: string; lat: number; lng: number }[];
@@ -620,7 +633,12 @@
   // the pointer isn't over the map or when there's no usable boat fix.
   // Rendered as a fixed-position box in the bottom-left of the map (above
   // the scale line) so it doesn't move around as the user moves the mouse.
-  let cursorInfo = $state<{ nm: number; brg: number } | null>(null);
+  let cursorInfo = $state<{
+    lat: number;
+    lng: number;
+    nm: number | null;
+    brg: number | null;
+  } | null>(null);
 
   let mapInternalState: {
     lastZoom: number;
@@ -2508,23 +2526,29 @@
         depthTooltipOverlay.setPosition(undefined);
       }
 
-      // Cursor-info: distance + bearing from boat to mouse position. Hide
-      // if we have no boat fix or it's at null-island. evt.coordinate is
-      // [lng, lat] under useGeographic(); our helpers want [lat, lng].
-      if (
-        myBoat &&
-        myBoat.location &&
-        !(myBoat.location[0] === 0 && myBoat.location[1] === 0) &&
-        evt.coordinate
-      ) {
+      // Cursor-info: GPS position of the mouse, plus distance + bearing
+      // from boat to mouse position when we have a usable boat fix.
+      // evt.coordinate is [lng, lat] under useGeographic(); our helpers
+      // want [lat, lng].
+      if (evt.coordinate) {
         const cursorLngLat = evt.coordinate as [number, number];
-        const boatLatLng: [number, number] = [myBoat.location[0], myBoat.location[1]];
         const cursorLatLng: [number, number] = [cursorLngLat[1], cursorLngLat[0]];
-        const meters = getDistance(
-          [myBoat.location[1], myBoat.location[0]], // [lng, lat]
-          cursorLngLat
-        );
-        cursorInfo = { nm: meters / 1852, brg: bearingDeg(boatLatLng, cursorLatLng) };
+        let nm: number | null = null;
+        let brg: number | null = null;
+        if (
+          myBoat &&
+          myBoat.location &&
+          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
+        ) {
+          const boatLatLng: [number, number] = [myBoat.location[0], myBoat.location[1]];
+          const meters = getDistance(
+            [myBoat.location[1], myBoat.location[0]], // [lng, lat]
+            cursorLngLat
+          );
+          nm = meters / 1852;
+          brg = bearingDeg(boatLatLng, cursorLatLng);
+        }
+        cursorInfo = { lat: cursorLatLng[0], lng: cursorLatLng[1], nm, brg };
       } else {
         cursorInfo = null;
       }
@@ -2661,6 +2685,19 @@
     return Math.abs(val).toFixed(4) + "° " + dir;
   }
 
+  // Compass format: 14 -> "014°", null -> "—". Normalises into [0, 360).
+  function compassFmt(deg: number | null | undefined): string {
+    if (deg == null || !Number.isFinite(deg)) return "—";
+    const norm = ((deg % 360) + 360) % 360;
+    return Math.round(norm).toString().padStart(3, "0") + "°";
+  }
+
+  // True when the data panel has at least one row to show.
+  let hasSensorData = $derived(
+    sog != null || hdg != null || cog != null || depth != null
+  );
+  let hasDataPanel = $derived(hasSensorData || !!routeStats || !!cursorInfo);
+
   function handleMapContainerClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
 
@@ -2794,16 +2831,6 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
-  <!-- Cursor-info: distance + bearing from boat to current mouse position.
-       Pinned to bottom-left of the map (just above OL's scale line) so the
-       readout doesn't move as the mouse moves. Hidden when the pointer
-       isn't over the map or there's no boat fix. -->
-  {#if cursorInfo}
-    <div class="cursor-info" class:with-route-stats={!!routeStats}>
-      <div>{cursorInfo.nm.toFixed(2)}<sup>nm</sup></div>
-      <div>{cursorInfo.brg.toFixed(0).padStart(3, "0")}°</div>
-    </div>
-  {/if}
 
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
@@ -3168,26 +3195,85 @@
     </div>
   {/if}
 
-  {#if routeStats}
-    <div class="route-stats" class:edit={addWaypointActive}>
-      <div class="route-stats-row">
-        <span class="route-stats-label">Next</span>
-        <span class="route-stats-value">{routeStats.next.distNm.toFixed(2)} nm</span>
-        <span class="route-stats-value">{routeStats.next.headingDeg.toFixed(0)}°</span>
-        <span class="route-stats-value">{formatDurationMin(routeStats.next.minutes)}</span>
-        <span class="route-stats-value">ETA {formatEta(routeStats.next.minutes)}</span>
-      </div>
-      {#if routeStats.final.waypointCount > 1}
-        <div class="route-stats-row">
-          <span class="route-stats-label">Final</span>
-          <span class="route-stats-value">{routeStats.final.distNm.toFixed(2)} nm</span>
-          <span class="route-stats-value route-stats-spacer"></span>
-          <span class="route-stats-value">{formatDurationMin(routeStats.final.minutes)}</span>
-          <span class="route-stats-value">ETA {formatEta(routeStats.final.minutes)}</span>
+  <!-- Combined data panel: sensors (SOG/HDG/COG/Depth), nav (route stats),
+       and cursor (lat/lng + bearing/distance from boat). Pinned to top-right
+       of the map below the toolbar. Sections are separated by dividers and
+       only render when their data is present. -->
+  {#if hasDataPanel}
+    <div class="data-panel" class:edit={addWaypointActive}>
+      {#if hasSensorData}
+        <div class="data-panel-section">
+          {#if sog != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">SOG</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{sog.toFixed(2)}</span><sup>kn</sup>
+              </span>
+            </div>
+          {/if}
+          {#if hdg != null || cog != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">HDG/COG</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{compassFmt(hdg)}</span> /
+                <span class="data-panel-bold">{compassFmt(cog)}</span>
+              </span>
+            </div>
+          {/if}
+          {#if depth != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Depth</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{depth.toFixed(1)}</span><sup>ft</sup>
+              </span>
+            </div>
+          {/if}
         </div>
       {/if}
-      {#if addWaypointActive}
-        <div class="route-stats-hint">click to add · drag waypoints to move</div>
+      {#if routeStats}
+        <div class="data-panel-section data-panel-nav">
+          <div class="data-panel-row">
+            <span class="data-panel-label">Next</span>
+            <span class="data-panel-value">
+              <span class="data-panel-bold">{routeStats.next.distNm.toFixed(2)}</span><sup>nm</sup>
+              · {routeStats.next.headingDeg.toFixed(0)}°
+              · {formatDurationMin(routeStats.next.minutes)}
+              · ETA {formatEta(routeStats.next.minutes)}
+            </span>
+          </div>
+          {#if routeStats.final.waypointCount > 1}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Final</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup>nm</sup>
+                · {formatDurationMin(routeStats.final.minutes)}
+                · ETA {formatEta(routeStats.final.minutes)}
+              </span>
+            </div>
+          {/if}
+          {#if addWaypointActive}
+            <div class="data-panel-hint">click to add · drag waypoints to move</div>
+          {/if}
+        </div>
+      {/if}
+      {#if cursorInfo}
+        <div class="data-panel-section data-panel-cursor">
+          <div class="data-panel-row">
+            <span class="data-panel-label">Cursor Position</span>
+            <span class="data-panel-value">
+              {formatCoord(cursorInfo.lat, true)}, {formatCoord(cursorInfo.lng, false)}
+            </span>
+          </div>
+          {#if cursorInfo.nm !== null && cursorInfo.brg !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">From Boat</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
+                · {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
+              </span>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
@@ -3204,39 +3290,76 @@
     pointer-events: none;
   }
 
-  /* Mouse-on-map cursor-info box: distance + bearing from the boat to the
-     mouse pointer. Pinned at bottom-left of the map, just above OL's
-     scale line (which sits at bottom:8px left:8px). z-index above the
-     scale line so it overlays cleanly when both are present. Style
-     matches the SOG/Depth panel (semi-transparent black, white text,
-     rounded). pointer-events:none so it never blocks click-through. */
-  .cursor-info {
+  /* Combined data panel: SOG/HDG/COG/Depth, route stats, and cursor info.
+     Pinned to top-right of the map, below the toolbar row. Sections are
+     separated by horizontal dividers. pointer-events:none so it never
+     blocks click-through to the map. */
+  .data-panel {
     position: absolute;
-    bottom: 36px;
-    left: 8px;
+    top: 50px;
+    right: 10px;
     z-index: 1002;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.7);
     color: white;
-    padding: 4px 8px;
     border: 1px solid #6b7280;
-    border-radius: 3px;
-    font-size: 12px;
-    line-height: 1.25;
+    border-radius: 4px;
+    font-size: 16px;
+    line-height: 1.3;
     white-space: nowrap;
     pointer-events: none;
-    text-align: right;
     font-variant-numeric: tabular-nums;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    max-width: calc(100% - 20px);
   }
-  /* When the route-stats overlay is also showing, lift cursor-info above
-     it so the two don't overlap. route-stats can be 1-3 rows tall (~30-70 px
-     plus padding); 110 px is enough headroom for all variants including
-     the add-waypoint edit-mode hint. */
-  .cursor-info.with-route-stats {
-    bottom: 110px;
+  .data-panel-section {
+    padding: 8px 12px;
   }
-  .cursor-info sup {
-    font-size: 9px;
+  .data-panel-section + .data-panel-section {
+    border-top: 1px solid #6b7280;
+  }
+  .data-panel-row {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .data-panel-label {
+    color: #9ca3af;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .data-panel-value {
+    text-align: right;
+  }
+  .data-panel-bold {
+    font-weight: 700;
+  }
+  .data-panel sup {
+    font-size: 0.7em;
     margin-left: 1px;
+    color: #d1d5db;
+  }
+  .data-panel-nav {
+    color: #fde68a;
+  }
+  .data-panel-nav .data-panel-label {
+    color: #f59e0b;
+  }
+  .data-panel-cursor {
+    color: #bae6fd;
+  }
+  .data-panel-cursor .data-panel-label {
+    color: #7dd3fc;
+  }
+  .data-panel.edit {
+    border-color: #f59e0b;
+  }
+  .data-panel-hint {
+    margin-top: 4px;
+    color: #fef3c7;
+    font-size: 0.75em;
+    opacity: 0.85;
   }
 
   .tile-url-popup {
@@ -3873,60 +3996,6 @@
     color: white;
   }
 
-  /* Next/final waypoint overlay. Sits above the bottom-left stop-panning area
-     so it stays visible whether the data panel is open or not. */
-  .route-stats {
-    position: absolute;
-    bottom: 10px;
-    left: 10px;
-    padding: 6px 10px;
-    background: rgba(15, 23, 42, 0.92);
-    color: #fde68a;
-    border: 1px solid rgba(245, 158, 11, 0.6);
-    border-radius: 4px;
-    font-size: 12px;
-    font-family:
-      system-ui,
-      -apple-system,
-      sans-serif;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-    z-index: 1001;
-    pointer-events: none;
-    line-height: 1.35;
-  }
-
-  .route-stats.edit {
-    border-color: #f59e0b;
-    background: rgba(120, 53, 15, 0.92);
-  }
-
-  .route-stats-row {
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
-    white-space: nowrap;
-  }
-
-  .route-stats-label {
-    font-weight: 600;
-    color: #f59e0b;
-    min-width: 38px;
-  }
-
-  .route-stats-value {
-    font-variant-numeric: tabular-nums;
-  }
-
-  .route-stats-spacer {
-    visibility: hidden;
-  }
-
-  .route-stats-hint {
-    margin-top: 4px;
-    color: #fef3c7;
-    font-size: 11px;
-    opacity: 0.8;
-  }
 
   /* Boats panel (bottom-right, next to Layers) */
   .boats-controls {

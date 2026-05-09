@@ -1674,6 +1674,10 @@
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
       airstreamConfigured={globalConfig.airstreamName !== ""}
       onAirstreamBboxChange={globalConfig.airstreamName !== "" ? onAirstreamBboxChange : undefined}
+      sog={globalConfig.movementSensorProps.linearVelocitySupported ? globalData.speed : null}
+      hdg={globalConfig.movementSensorProps.compassHeadingSupported ? globalData.heading : null}
+      cog={globalConfig.movementSensorProps.compassHeadingSupported ? globalData.cog : null}
+      depth={globalConfig.depthSensorName !== "" ? globalData.depth : null}
     ></MarineMap>
 
     {#if !globalData.hideDataPanel}
@@ -1966,31 +1970,6 @@
     >
       {globalData.hideDataPanel ? "◀" : "▶"}
     </button>
-
-    {#if globalData.hideDataPanel}
-      <div
-        class="fixed top-12 right-2 z-[9998] flex flex-col gap-1 items-end px-3 py-2 bg-black bg-opacity-60 border border-gray-500 text-white rounded text-sm pointer-events-none"
-      >
-        {#if globalConfig.movementSensorProps.linearVelocitySupported}
-          <div>
-            SOG <span class="font-bold">{globalData.speed.toFixed(2)}</span>
-            <sup>kn</sup>
-          </div>
-        {/if}
-        {#if globalConfig.movementSensorProps.compassHeadingSupported}
-          <div>
-            HDG/COG <span class="font-bold">{compassFmt(globalData.heading)}</span> /
-            <span class="font-bold">{compassFmt(globalData.cog)}</span>
-          </div>
-        {/if}
-        {#if globalConfig.depthSensorName != ""}
-          <div>
-            Depth <span class="font-bold">{globalData.depth.toFixed(1)}</span>
-            <sup>ft</sup>
-          </div>
-        {/if}
-      </div>
-    {/if}
 
     {#if globalData.enlargedImage}
       <div
