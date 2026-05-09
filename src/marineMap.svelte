@@ -38,6 +38,7 @@
   }
 
   let boatImage = "topdown-boat.svg";
+  let aisBoatImage = "topdown-boat-ais.svg";
 
   // myBoat-only icon override. The Go module exposes /myboat-icon when the
   // operator sets `myboat_icon_path` in config; we probe once on mount and
@@ -1326,7 +1327,12 @@
     let sx = typeof scale === "number" ? scale : scale[0];
     let sy = typeof scale === "number" ? scale : scale[1];
 
-    if (src !== boatImage && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
+    // The override-resize branch only applies to the user-configured myBoat
+    // icon (when an override has actually loaded), not to the bundled AIS
+    // variant which already matches the default natural dimensions.
+    const isOverride =
+      src === myBoatImage && myBoatImage !== boatImage;
+    if (isOverride && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
       const ratio = BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight;
       sx *= ratio;
       sy *= ratio;
@@ -2074,7 +2080,20 @@
         const length = feature.get("length") as number | undefined;
         const beam = feature.get("beam") as number | undefined;
         const [sx, sy] = boatScaleAxes(length, beam);
-        return createBoatStyle(heading, [0.35 * sx, 0.35 * sy], visible);
+        // Cap AIS render size to myBoat's render size — no other vessel
+        // should appear larger on screen than ourselves, regardless of
+        // its real-world dimensions.
+        const [mx, my] = boatScaleAxes(myBoat?.length, myBoat?.beam);
+        const maxAisSx = (0.6 * mx) / 0.35;
+        const maxAisSy = (0.6 * my) / 0.35;
+        const cappedSx = Math.min(sx, maxAisSx);
+        const cappedSy = Math.min(sy, maxAisSy);
+        return createBoatStyle(
+          heading,
+          [0.35 * cappedSx, 0.35 * cappedSy],
+          visible,
+          aisBoatImage
+        );
       },
       zIndex: 100,
     });
