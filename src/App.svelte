@@ -1647,7 +1647,10 @@
         name: "me",
         location: [globalData.pos.getLat(), globalData.pos.getLng()],
         speed: globalData.speed,
-        heading: globalData.cog ?? globalData.heading,
+        heading:
+          globalData.speed > 1 && globalData.cog != null
+            ? globalData.cog
+            : globalData.heading,
         route: globalData.route
           ? {
               destinationLongitude: globalData.route["Destination Longitude"],
