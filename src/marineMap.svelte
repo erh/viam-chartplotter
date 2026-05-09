@@ -71,6 +71,10 @@
       host: undefined as string | undefined,
       partId: undefined as string | undefined,
       isOnline: true,
+      length: undefined as number | undefined,
+      destination: undefined as string | undefined,
+      cpaNm: null as number | null,
+      tcpaMin: null as number | null,
     },
   });
 
@@ -559,6 +563,29 @@
         popupState.content.heading = boat.heading;
         popupState.content.lat = boat.location[0];
         popupState.content.lng = boat.location[1];
+        popupState.content.length = boat.length;
+        popupState.content.destination = boat.destination;
+        if (
+          myBoat &&
+          myBoat.location &&
+          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
+        ) {
+          const r = computeCpa(
+            myBoat.location[0],
+            myBoat.location[1],
+            myBoat.heading,
+            myBoat.speed,
+            boat.location[0],
+            boat.location[1],
+            boat.cog ?? boat.heading,
+            boat.speed
+          );
+          popupState.content.cpaNm = r ? r.cpaNm : null;
+          popupState.content.tcpaMin = r ? r.tcpaMin : null;
+        } else {
+          popupState.content.cpaNm = null;
+          popupState.content.tcpaMin = null;
+        }
       }
     }
   });
@@ -2460,6 +2487,29 @@
         } else if (type === "ais") {
           const mmsi = feature.get("mmsi") || "";
           const boat = boats?.find((b) => b.mmsi === mmsi);
+          let cpaNm: number | null = null;
+          let tcpaMin: number | null = null;
+          if (
+            boat &&
+            myBoat &&
+            myBoat.location &&
+            !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
+          ) {
+            const r = computeCpa(
+              myBoat.location[0],
+              myBoat.location[1],
+              myBoat.heading,
+              myBoat.speed,
+              boat.location[0],
+              boat.location[1],
+              boat.cog ?? boat.heading,
+              boat.speed
+            );
+            if (r) {
+              cpaNm = r.cpaNm;
+              tcpaMin = r.tcpaMin;
+            }
+          }
           popupState.content = {
             name: feature.get("name") || "Unknown",
             mmsi,
@@ -2471,6 +2521,10 @@
             host: boat?.host,
             partId: boat?.partId,
             isOnline: boat?.isOnline ?? false,
+            length: boat?.length,
+            destination: boat?.destination,
+            cpaNm,
+            tcpaMin,
           };
         }
         popupState.visible = true;
@@ -2683,6 +2737,44 @@
   function formatCoord(val: number, isLat: boolean): string {
     const dir = isLat ? (val >= 0 ? "N" : "S") : val >= 0 ? "E" : "W";
     return Math.abs(val).toFixed(4) + "° " + dir;
+  }
+
+  // Closest Point of Approach. Flat-earth approx (good to ~1% within typical
+  // AIS range) — projects positions to local north/east meters around own
+  // boat, then solves for the time t that minimises |(P_tgt + V_tgt*t) -
+  // (P_own + V_own*t)|. Returns null if relative velocity is ~0 (parallel
+  // tracks, no closing) or if any input is missing/invalid.
+  function computeCpa(
+    ownLat: number,
+    ownLng: number,
+    ownCogDeg: number | null | undefined,
+    ownSpdKn: number,
+    tgtLat: number,
+    tgtLng: number,
+    tgtCogDeg: number | null | undefined,
+    tgtSpdKn: number
+  ): { cpaNm: number; tcpaMin: number } | null {
+    if (ownCogDeg == null || tgtCogDeg == null) return null;
+    if (!Number.isFinite(ownSpdKn) || !Number.isFinite(tgtSpdKn)) return null;
+    const lat0 = (ownLat * Math.PI) / 180;
+    const mPerDegLat = 111132.92 - 559.82 * Math.cos(2 * lat0);
+    const mPerDegLng = 111412.84 * Math.cos(lat0);
+    const dN = (tgtLat - ownLat) * mPerDegLat;
+    const dE = (tgtLng - ownLng) * mPerDegLng;
+    const knToMs = 0.514444;
+    const ownVN = ownSpdKn * knToMs * Math.cos((ownCogDeg * Math.PI) / 180);
+    const ownVE = ownSpdKn * knToMs * Math.sin((ownCogDeg * Math.PI) / 180);
+    const tgtVN = tgtSpdKn * knToMs * Math.cos((tgtCogDeg * Math.PI) / 180);
+    const tgtVE = tgtSpdKn * knToMs * Math.sin((tgtCogDeg * Math.PI) / 180);
+    const dvN = tgtVN - ownVN;
+    const dvE = tgtVE - ownVE;
+    const dvSq = dvN * dvN + dvE * dvE;
+    if (dvSq < 1e-6) return null; // no relative motion
+    const tcpaSec = -(dN * dvN + dE * dvE) / dvSq;
+    const futN = dN + dvN * tcpaSec;
+    const futE = dE + dvE * tcpaSec;
+    const cpaM = Math.sqrt(futN * futN + futE * futE);
+    return { cpaNm: cpaM / 1852, tcpaMin: tcpaSec / 60 };
   }
 
   // Compass format: 14 -> "014°", null -> "—". Normalises into [0, 360).
@@ -3170,6 +3262,28 @@
           <span class="popup-label">LNG</span>
           <span class="popup-value">{formatCoord(popupState.content.lng, false)}</span>
         </div>
+        {#if popupState.content.length != null}
+          <div class="popup-row">
+            <span class="popup-label">LEN</span>
+            <span class="popup-value">{popupState.content.length.toFixed(0)} m</span>
+          </div>
+        {/if}
+        {#if popupState.content.destination}
+          <div class="popup-row">
+            <span class="popup-label">DST</span>
+            <span class="popup-value">{popupState.content.destination}</span>
+          </div>
+        {/if}
+        {#if popupState.content.cpaNm !== null && popupState.content.tcpaMin !== null && popupState.content.tcpaMin >= 0}
+          <div class="popup-row">
+            <span class="popup-label">CPA</span>
+            <span class="popup-value"
+              >{popupState.content.cpaNm.toFixed(2)} nm in {popupState.content.tcpaMin < 1
+                ? "<1"
+                : popupState.content.tcpaMin.toFixed(0)} min</span
+            >
+          </div>
+        {/if}
       </div>
     </div>
     <div class="popup-arrow"></div>

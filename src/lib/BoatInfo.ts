@@ -21,6 +21,9 @@ export interface BoatInfo {
   location: [number, number]; // [latitude, longitude]
   speed: number;
   heading: number; // degrees (0-360)
+  cog?: number; // course over ground (degrees) — preferred over heading for CPA
+  length?: number; // overall length in meters (AIS static data, type 5)
+  destination?: string; // free-text destination (AIS static data, type 5)
   mmsi?: string; // MMSI identifier
   host?: string; // Viam machine host
   partId?: string; // Viam machine part ID

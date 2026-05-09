@@ -480,12 +480,33 @@
             const parsed = Date.parse(rawBoat.Timestamp);
             if (!Number.isNaN(parsed)) ts = parsed;
           }
+          // Field names vary slightly between AIS sources (Cog vs COG, etc).
+          // Try the common variants and skip whatever the sensor doesn't set.
+          const cog =
+            typeof rawBoat.Cog === "number"
+              ? rawBoat.Cog
+              : typeof rawBoat.COG === "number"
+                ? rawBoat.COG
+                : typeof rawBoat.Course === "number"
+                  ? rawBoat.Course
+                  : undefined;
+          const length =
+            typeof rawBoat.Length === "number" && rawBoat.Length > 0
+              ? rawBoat.Length
+              : undefined;
+          const destination =
+            typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
+              ? rawBoat.Destination.trim()
+              : undefined;
           out.push({
             boat: {
               name: rawBoat.Name || "",
               location: rawBoat.Location,
               speed: rawBoat.Speed || 0,
               heading: rawBoat.Heading || 0,
+              cog,
+              length,
+              destination,
               mmsi: mmsi,
             },
             ts,
