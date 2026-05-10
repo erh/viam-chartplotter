@@ -2336,7 +2336,7 @@
       localParams.set("osm", "1");
       mapGlobal.layerOptions.push({
         name: "noaa-local",
-        on: false,
+        on: true,
         layer: new TileLayer({
           opacity: 1,
           preload: 2,
