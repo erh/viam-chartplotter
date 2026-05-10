@@ -2958,7 +2958,7 @@
     sog != null || hdg != null || cog != null || depth != null
   );
   let hasDataPanel = $derived(
-    hasSensorData || !!routeStats || !!cursorInfo || !!tideInfo
+    hasSensorData || !!routeStats || !!cursorInfo || !!tideInfo || !!weatherInfo
   );
 
   // Sparkline geometry. Computed off the current tide series so the SVG
@@ -3305,6 +3305,114 @@
   function tideTimeFmt(p: TidePoint): string {
     return p.tStr.split(" ")[1]?.slice(0, 5) ?? p.tStr;
   }
+
+  // ---- Weather (Open-Meteo, no API key needed). Fetched directly from
+  // the browser; refetched when the boat moves ~6 nm or every 30 minutes.
+  let weatherInfo = $state<{
+    tempNowF: number | null;
+    tempMinF: number;
+    tempMaxF: number;
+    windNowKn: number | null;
+    windNowDirDeg: number | null;
+    windMaxKn: number;
+    rainTotalIn: number;
+    rainHoursAny: number;
+    sunriseLocal: string | null;
+    sunsetLocal: string | null;
+  } | null>(null);
+  let lastWeatherFetchKey = "";
+  let weatherRefetchTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function refreshWeather(lat: number, lng: number): Promise<void> {
+    try {
+      const url =
+        `https://api.open-meteo.com/v1/forecast` +
+        `?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}` +
+        `&current=temperature_2m,wind_speed_10m,wind_direction_10m` +
+        `&hourly=temperature_2m,precipitation,wind_speed_10m` +
+        `&daily=sunrise,sunset` +
+        `&temperature_unit=fahrenheit&wind_speed_unit=kn&precipitation_unit=inch` +
+        `&timezone=auto&forecast_hours=4&forecast_days=2`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`weather http ${r.status}`);
+      const j = await r.json();
+
+      const cur = j.current ?? {};
+      const hourly = j.hourly ?? {};
+      const daily = j.daily ?? {};
+
+      const temps: number[] = (hourly.temperature_2m ?? [])
+        .filter((v: any) => typeof v === "number");
+      const winds: number[] = (hourly.wind_speed_10m ?? [])
+        .filter((v: any) => typeof v === "number");
+      const rains: number[] = (hourly.precipitation ?? [])
+        .filter((v: any) => typeof v === "number");
+
+      // Pick today's sunrise/sunset relative to "now". Open-Meteo returns an
+      // array indexed by day; the [0] entry is today in the requested tz, but
+      // if today's sunset has already passed we'd rather show tomorrow's so
+      // the panel stays useful all night.
+      const nowMs = Date.now();
+      const sunriseArr: string[] = daily.sunrise ?? [];
+      const sunsetArr: string[] = daily.sunset ?? [];
+      let dayIdx = 0;
+      if (sunsetArr[0] && new Date(sunsetArr[0]).getTime() < nowMs) dayIdx = 1;
+
+      const fmtLocalTime = (iso: string | undefined): string | null => {
+        if (!iso) return null;
+        // Open-Meteo's ISO strings come without a tz suffix, so JS treats
+        // them as local — which is what we want since timezone=auto already
+        // returned them in the boat's local time.
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return null;
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      };
+
+      weatherInfo = {
+        tempNowF: typeof cur.temperature_2m === "number" ? cur.temperature_2m : null,
+        tempMinF: temps.length ? Math.min(...temps) : 0,
+        tempMaxF: temps.length ? Math.max(...temps) : 0,
+        windNowKn: typeof cur.wind_speed_10m === "number" ? cur.wind_speed_10m : null,
+        windNowDirDeg:
+          typeof cur.wind_direction_10m === "number" ? cur.wind_direction_10m : null,
+        windMaxKn: winds.length ? Math.max(...winds) : 0,
+        rainTotalIn: rains.reduce((a, b) => a + b, 0),
+        rainHoursAny: rains.filter((v) => v > 0).length,
+        sunriseLocal: fmtLocalTime(sunriseArr[dayIdx]),
+        sunsetLocal: fmtLocalTime(sunsetArr[dayIdx]),
+      };
+    } catch (e) {
+      console.warn("weather fetch failed", e);
+    }
+  }
+
+  // Same trigger pattern as tide: refetch on ~6 nm location change, plus a
+  // 30-minute background timer so the forecast stays fresh at anchor.
+  $effect(() => {
+    if (!myBoat?.location) return;
+    const [lat, lng] = myBoat.location;
+    if (lat === 0 && lng === 0) return;
+    const key = `${Math.round(lat * 10) / 10},${Math.round(lng * 10) / 10}`;
+    if (key === lastWeatherFetchKey) return;
+    lastWeatherFetchKey = key;
+    refreshWeather(lat, lng);
+    if (weatherRefetchTimer) clearInterval(weatherRefetchTimer);
+    weatherRefetchTimer = setInterval(
+      () => {
+        const loc = myBoat?.location;
+        if (loc && !(loc[0] === 0 && loc[1] === 0)) {
+          refreshWeather(loc[0], loc[1]);
+        }
+      },
+      30 * 60 * 1000
+    );
+    return () => {
+      if (weatherRefetchTimer) {
+        clearInterval(weatherRefetchTimer);
+        weatherRefetchTimer = null;
+      }
+    };
+  });
 
   function handleMapContainerClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
@@ -3898,7 +4006,13 @@
         </div>
       {/if}
       {#if tideInfo}
-        <div class="data-panel-section data-panel-tide">
+        <a
+          class="data-panel-section data-panel-tide data-panel-link"
+          href={`https://tidesandcurrents.noaa.gov/stationhome.html?id=${tideInfo.station.id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open NOAA tide station page"
+        >
           <div class="data-panel-stack">
             <span class="data-panel-label">Tide</span>
             <span class="data-panel-station">{tideInfo.station.name}</span>
@@ -3959,7 +4073,60 @@
               </span>
             </div>
           {/if}
-        </div>
+        </a>
+      {/if}
+      {#if weatherInfo && myBoat?.location}
+        <a
+          class="data-panel-section data-panel-weather data-panel-link"
+          href={`https://www.windy.com/?${myBoat.location[0].toFixed(4)},${myBoat.location[1].toFixed(4)},10`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open Windy.com forecast"
+        >
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Wx · next 4h</span>
+          </div>
+          {#if weatherInfo.tempNowF !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Temp</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{weatherInfo.tempNowF.toFixed(0)}</span><sup>°F</sup>
+                · {weatherInfo.tempMinF.toFixed(0)}–{weatherInfo.tempMaxF.toFixed(0)}°
+              </span>
+            </div>
+          {/if}
+          {#if weatherInfo.windNowKn !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Wind</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{weatherInfo.windNowKn.toFixed(0)}</span><sup>kn</sup>
+                {#if weatherInfo.windNowDirDeg !== null}
+                  · {compassFmt(weatherInfo.windNowDirDeg)}
+                {/if}
+                · max {weatherInfo.windMaxKn.toFixed(0)}
+              </span>
+            </div>
+          {/if}
+          <div class="data-panel-row">
+            <span class="data-panel-label">Rain</span>
+            <span class="data-panel-value">
+              {#if weatherInfo.rainTotalIn > 0}
+                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup>in</sup>
+                · {weatherInfo.rainHoursAny}h
+              {:else}
+                <span class="data-panel-bold">none</span>
+              {/if}
+            </span>
+          </div>
+          {#if weatherInfo.sunriseLocal && weatherInfo.sunsetLocal}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Sun</span>
+              <span class="data-panel-value">
+                ↑ {weatherInfo.sunriseLocal} · ↓ {weatherInfo.sunsetLocal}
+              </span>
+            </div>
+          {/if}
+        </a>
       {/if}
       {#if cursorInfo}
         <div class="data-panel-section data-panel-cursor">
@@ -4058,6 +4225,23 @@
   }
   .data-panel-tide .data-panel-label {
     color: #4ade80;
+  }
+  .data-panel-weather {
+    color: #fde68a;
+  }
+  .data-panel-weather .data-panel-label {
+    color: #facc15;
+  }
+  /* Re-enable clicks on the linkable sections (parent .data-panel disables
+     pointer events so the chart stays draggable underneath). */
+  .data-panel-link {
+    pointer-events: auto;
+    cursor: pointer;
+    text-decoration: none;
+    display: block;
+  }
+  .data-panel-link:hover {
+    background: rgba(255, 255, 255, 0.05);
   }
   /* Stacked label-above-value group, used by Cursor and Tide sections to
      keep the panel narrow. */
