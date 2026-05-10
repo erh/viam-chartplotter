@@ -4117,30 +4117,8 @@
   </div>
 
   <div class="bottom-controls">
-    <button
-      class="layers-toggle"
-      onclick={() => (layersExpanded = !layersExpanded)}
-      aria-label="Toggle map layers"
-    >
-      {#if layersExpanded}
-        ▼ Layers
-      {:else}
-        ▲ Layers
-      {/if}
-    </button>
-
-    <button
-      class="tile-url-toggle"
-      class:active={tileUrlActive}
-      onclick={() => (tileUrlActive = !tileUrlActive)}
-      title="When on, click the map to copy the noaa-local tile URL for that location"
-      aria-label="Tile URL debug mode"
-    >
-      {"{}"}
-    </button>
-
     {#if enableBoatsPanel}
-      <!-- Boats Panel (bottom-right, next to Layers) -->
+      <!-- Boats panel anchors to the boats-toggle button in .left-toolbar -->
       <div class="boats-panel">
         <div class="boats-controls">
           <button class="select-btn" onclick={selectAllBoats} title="Select all boats"
@@ -4213,26 +4191,87 @@
         <button class="fit-all-btn" onclick={fitToVisibleBoats}> Fit All Visible </button>
       </div>
 
-      <button
-        class="boats-toggle"
-        onclick={() => (boatsExpanded = !boatsExpanded)}
-        aria-label="Toggle boats panel"
-      >
-        {#if boatsExpanded}
-          ▼ Boats
-        {:else}
-          ▲ Boats
-        {/if}
-      </button>
     {/if}
   </div>
 
-  <button
+  <!-- Left-side toolbar: every map control stacks here under the OL
+       zoom +/- buttons so the toolbar reads top-to-bottom in one place
+       instead of being scattered across the corners. Buttons are flex
+       children — conditional ones (add waypoint, clear waypoints, boats)
+       appear and disappear without the others jumping around. -->
+  <div class="left-toolbar">
+    <button
+      class="layers-toggle"
+      class:active={layersExpanded}
+      onclick={() => (layersExpanded = !layersExpanded)}
+      data-tip="Layers"
+      aria-label="Toggle map layers"
+      aria-pressed={layersExpanded}
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+        <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+        <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+      </svg>
+    </button>
+
+    {#if enableBoatsPanel}
+      <button
+        class="boats-toggle"
+        class:active={boatsExpanded}
+        onclick={() => (boatsExpanded = !boatsExpanded)}
+        data-tip="Boats"
+        aria-label="Toggle boats panel"
+        aria-pressed={boatsExpanded}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+          <path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.34 2.81 7.76" />
+          <path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6" />
+          <path d="M12 10v4" />
+          <path d="M12 2v3" />
+        </svg>
+      </button>
+    {/if}
+
+    <button
+      class="tile-url-toggle"
+      class:active={tileUrlActive}
+      onclick={() => (tileUrlActive = !tileUrlActive)}
+      data-tip="When on, click the map to copy the noaa-local tile URL for that location"
+      aria-label="Tile URL debug mode"
+    >
+      {"{}"}
+    </button>
+
+    <button
     class="measure-toggle"
     class:active={measureActive}
     onclick={toggleMeasure}
     aria-pressed={measureActive}
-    title="Measure distance"
+    data-tip="Measure distance"
     aria-label="Measure distance"
   >
     <svg
@@ -4255,45 +4294,50 @@
   </button>
 
   {#if onAddWaypoint}
-    <button
-      class="add-waypoint-toggle"
-      class:active={addWaypointActive}
-      onclick={toggleAddWaypoint}
-      aria-pressed={addWaypointActive}
-      title={addWaypointActive
-        ? "Click on the chart to add a waypoint (active)"
-        : "Add a route waypoint from current position"}
-      aria-label="Add waypoint"
-    >
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="15"
-        height="15"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
-        <circle cx="12" cy="9" r="2.5" />
-      </svg>
-    </button>
-    {#if navWaypoints && navWaypoints.length > 0}
+    <!-- Horizontal pair: pin (add) + ✕ (clear). Clear only renders when
+         a route exists, so the pin is alone otherwise. The wrapper keeps
+         them on the same row inside the otherwise-vertical toolbar. -->
+    <div class="toolbar-row">
       <button
-        class="clear-waypoints-btn"
-        class:armed={clearConfirmArmed}
-        onclick={clearWaypoints}
-        title={clearConfirmArmed
-          ? "Click again to confirm clearing all waypoints"
-          : "Clear all route waypoints"}
-        aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+        class="add-waypoint-toggle"
+        class:active={addWaypointActive}
+        onclick={toggleAddWaypoint}
+        aria-pressed={addWaypointActive}
+        data-tip={addWaypointActive
+          ? "Click on the chart to add a waypoint (active)"
+          : "Add a route waypoint from current position"}
+        aria-label="Add waypoint"
       >
-        {clearConfirmArmed ? "?" : "✕"}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
+          <circle cx="12" cy="9" r="2.5" />
+        </svg>
       </button>
-    {/if}
+      {#if navWaypoints && navWaypoints.length > 0}
+        <button
+          class="clear-waypoints-btn"
+          class:armed={clearConfirmArmed}
+          onclick={clearWaypoints}
+          data-tip={clearConfirmArmed
+            ? "Click again to confirm clearing all waypoints"
+            : "Clear all route waypoints"}
+          aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+        >
+          {clearConfirmArmed ? "?" : "✕"}
+        </button>
+      {/if}
+    </div>
   {/if}
 
   <button
@@ -4302,7 +4346,7 @@
     onclick={toggleHeadsUp}
     aria-pressed={headsUpActive}
     disabled={!myBoat}
-    title={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
+    data-tip={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
     aria-label="Toggle heads-up orientation"
   >
     <svg
@@ -4328,7 +4372,7 @@
     onclick={toggleBoatPosition}
     aria-pressed={boatPositionMode === "bottom"}
     disabled={!myBoat}
-    title={boatPositionMode === "bottom"
+    data-tip={boatPositionMode === "bottom"
       ? "Boat position: bottom 20% (click for centered)"
       : "Boat position: centered (click for bottom 20%)"}
     aria-label="Toggle boat position on screen"
@@ -4359,7 +4403,7 @@
     class:active={autoZoomActive}
     onclick={toggleAutoZoom}
     aria-pressed={autoZoomActive}
-    title={autoZoomActive
+    data-tip={autoZoomActive
       ? "Auto-zoom (on): zoom follows boat speed"
       : "Auto-zoom (off): manual zoom"}
     aria-label="Toggle auto-zoom"
@@ -4382,6 +4426,7 @@
       <line x1="11" y1="8" x2="11" y2="14" />
     </svg>
   </button>
+  </div>
 
   {#if measureActive && measureDistance !== null}
     <div class="measure-result">
@@ -4780,13 +4825,69 @@
     text-decoration: underline;
   }
 
-  .tile-url-toggle {
+  /* Left-side toolbar: vertical stack of map controls anchored just
+     below OpenLayers' built-in zoom +/- buttons (which sit at top:5,
+     left:5 and run ~75px tall). Children are flex items so conditional
+     buttons (add waypoint, clear waypoints, boats) can appear/disappear
+     without breaking the layout. */
+  .left-toolbar {
     position: absolute;
-    /* Slot in below OpenLayers' zoom +/- controls (top-left) so we don't
-       overlap any of the user-facing buttons. OL's zoom control sits at
-       ~5px / 5px and is ~75px tall. */
     top: 90px;
     left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    z-index: 1001;
+  }
+
+  /* Sub-row for paired buttons inside the otherwise-vertical toolbar.
+     Used for add-waypoint (pin) + clear-waypoints (✕) so the cancel
+     button sits to the right of the add button instead of below it. */
+  .toolbar-row {
+    display: flex;
+    flex-direction: row;
+    gap: 5px;
+  }
+
+  /* Custom tooltips: show instantly to the right of any toolbar button
+     that has a data-tip attribute. Native `title` has a ~700 ms delay
+     and inconsistent styling, so we use data-tip + pseudo-element
+     instead. aria-label still drives screen readers. */
+  .left-toolbar button {
+    position: relative;
+  }
+  .left-toolbar button[data-tip]:hover::after,
+  .left-toolbar button[data-tip]:focus-visible::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: 50%;
+    left: calc(100% + 8px);
+    transform: translateY(-50%);
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 1100;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  .left-toolbar button[data-tip]:hover::before,
+  .left-toolbar button[data-tip]:focus-visible::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: calc(100% + 2px);
+    transform: translateY(-50%);
+    border: 6px solid transparent;
+    border-right-color: rgba(0, 0, 0, 0.85);
+    pointer-events: none;
+    z-index: 1100;
+  }
+
+  .tile-url-toggle {
     width: 26px;
     height: 26px;
     padding: 0;
@@ -4935,10 +5036,15 @@
   }
 
   /* Layer controls panel - hidden by default */
+  /* Layers / Boats panels pop out to the right of their toolbar
+     buttons in .left-toolbar. Both are anchored at the same
+     top:90px (matching .left-toolbar's top); when both are open
+     they stack visually side-by-side because the boats panel uses
+     a wider left offset. */
   .layer-controls {
     position: absolute;
-    bottom: 45px;
-    right: 10px;
+    top: 90px;
+    left: 48px;
     background: rgba(255, 255, 255, 0.95);
     padding: 10px 14px;
     border-radius: 4px;
@@ -5029,35 +5135,6 @@
   }
 
   .layers-toggle {
-    position: absolute;
-    bottom: 10px;
-    right: 10px;
-    padding: 6px 12px;
-    background: rgba(255, 255, 255, 0.95);
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family:
-      system-ui,
-      -apple-system,
-      sans-serif;
-    color: #333;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
-  }
-
-  .layers-toggle:hover {
-    background: white;
-    border-color: #999;
-  }
-
-  /* Measure toggle button (top-right, all screen sizes) */
-  .measure-toggle {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    bottom: auto;
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5067,7 +5144,39 @@
     cursor: pointer;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .layers-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .layers-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .layers-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
+  /* Map-control buttons share a base style and stack vertically inside
+     .left-toolbar; per-button rules below only override colour/active
+     states. */
+  .measure-toggle {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5089,9 +5198,6 @@
   }
 
   .heads-up-toggle {
-    position: absolute;
-    top: 10px;
-    right: calc(10px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5101,7 +5207,6 @@
     cursor: pointer;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5128,9 +5233,6 @@
   }
 
   .boat-position-toggle {
-    position: absolute;
-    top: 10px;
-    right: calc(10px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5140,7 +5242,6 @@
     cursor: pointer;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5166,11 +5267,7 @@
     background: #1d4ed8;
   }
 
-  /* Auto-zoom toggle: sits to the left of the boat-position toggle. */
   .auto-zoom-toggle {
-    position: absolute;
-    top: 10px;
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5180,7 +5277,6 @@
     cursor: pointer;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5201,11 +5297,7 @@
     background: #1d4ed8;
   }
 
-  /* Add-waypoint toggle: sits to the left of the auto-zoom toggle. */
   .add-waypoint-toggle {
-    position: absolute;
-    top: 10px;
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5215,7 +5307,6 @@
     cursor: pointer;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5236,11 +5327,7 @@
     background: #d97706;
   }
 
-  /* Sits directly below the add-waypoint toggle when waypoints exist. */
   .clear-waypoints-btn {
-    position: absolute;
-    top: calc(10px + 30px + 6px);
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px);
     width: 30px;
     height: 30px;
     padding: 0;
@@ -5252,7 +5339,6 @@
     font-size: 14px;
     font-weight: bold;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5274,27 +5360,11 @@
     background: #b91c1c;
   }
 
-  /* When the data panel is hidden, the map is full-width and its top-right
-     buttons collide with the page-level fullscreen / drawer-toggle buttons.
-     Shift the map's top-right cluster left to clear them. */
-  #map-container.full-width .measure-toggle {
-    right: calc(10px + 85px);
-  }
-  #map-container.full-width .heads-up-toggle {
-    right: calc(10px + 30px + 6px + 85px);
-  }
-  #map-container.full-width .boat-position-toggle {
-    right: calc(10px + 30px + 6px + 30px + 6px + 85px);
-  }
-  #map-container.full-width .auto-zoom-toggle {
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
-  }
-  #map-container.full-width .add-waypoint-toggle {
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
-  }
-  #map-container.full-width .clear-waypoints-btn {
-    right: calc(10px + 30px + 6px + 30px + 6px + 30px + 6px + 30px + 6px + 85px);
-  }
+  /* When the data panel is hidden, the map is full-width. Only
+     .measure-result still uses an absolute right-anchored position
+     and needs to dodge the page-level fullscreen/drawer buttons. The
+     toolbar buttons are now flex children of .left-toolbar, so their
+     position is independent of the data panel. */
   #map-container.full-width .measure-result {
     right: calc(10px + 85px);
   }
@@ -5415,8 +5485,11 @@
 
   .boats-panel {
     position: absolute;
-    bottom: 45px;
-    right: calc(10px + 70px + 0.5rem); /* Match boats-toggle position */
+    top: 90px;
+    /* Offset further right than .layer-controls (which sits at left:48px,
+       ~200px wide) so both panels can be open simultaneously without
+       overlapping. */
+    left: 260px;
     background: rgba(255, 255, 255, 0.95);
     padding: 0;
     border-radius: 4px;
@@ -5550,24 +5623,19 @@
     background: #004080;
   }
 
-  /* Boats toggle button (bottom-right, next to Layers) */
   .boats-toggle {
-    position: absolute;
-    bottom: 10px;
-    right: calc(10px + 70px + 0.5rem); /* 10px margin + layers button + gap */
-    padding: 6px 12px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ccc;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 12px;
-    font-family:
-      system-ui,
-      -apple-system,
-      sans-serif;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .boats-toggle:hover {
@@ -5575,27 +5643,20 @@
     border-color: #999;
   }
 
+  .boats-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .boats-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
   @media (max-width: 639px) {
-    .bottom-controls {
-      position: absolute;
-      bottom: 10px;
-      right: 10px;
-      left: auto;
-      display: flex;
-      gap: 8px;
-      z-index: 1001;
-      align-items: center;
-    }
-
-    .bottom-controls .layers-toggle,
-    .bottom-controls .boats-toggle {
-      position: static;
-    }
-
     .boats-panel {
-      right: 10px;
-      left: auto;
-      width: calc(100vw - 20px);
+      left: 48px;
+      width: calc(100vw - 60px);
       max-width: 320px;
       max-height: 60vh;
     }
