@@ -368,6 +368,22 @@
     return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
   }
 
+  // Hover-time tooltip formatter. Shows time-of-day if the segment is
+  // from today, otherwise prepends a short date so the user can tell at
+  // a glance whether they're looking at this morning or last week.
+  function formatTrackTime(ts: number): string {
+    const d = new Date(ts);
+    const now = new Date();
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    if (sameDay) return time;
+    const date = d.toLocaleDateString([], { month: "short", day: "numeric" });
+    return `${date} ${time}`;
+  }
+
   function formatDurationMin(min: number): string {
     if (!isFinite(min) || min <= 0) return "—";
     if (min < 60) return `${Math.round(min)} min`;
@@ -1625,7 +1641,8 @@
     g: Geometry,
     boatId: string = "myBoat",
     isGap: boolean = false,
-    depth?: number
+    depth?: number,
+    ts?: number
   ) {
     const { featureIds, features, type } = getTrackCollections(boatId);
 
@@ -1643,6 +1660,9 @@
         geometry: g,
         isGap: isGap,
         depth: depth,
+        // Millis. Records when the boat arrived at the *end* of this
+        // segment so the hover tooltip can answer "what time was I here?"
+        ts: ts,
       })
     );
 
@@ -1674,6 +1694,10 @@
           type: type,
           boatId: boatId,
           geometry: new LineString([lastPos, position]),
+          // Time the boat arrived at `position`. Powers the hover-time
+          // tooltip; the realtime tail array tracked just below is for
+          // a different purpose (deduping vs historical render).
+          ts: Date.now(),
         })
       );
 
@@ -1793,7 +1817,8 @@
             new LineString([prev, pp]),
             boatId,
             isGap,
-            p.depth
+            p.depth,
+            ts ?? undefined
           );
         }
       }
@@ -3010,6 +3035,17 @@
     });
     mapGlobal.map.addOverlay(navaidTooltipOverlay);
 
+    // Setup my-boat track-time tooltip overlay (mirrors depth tooltip).
+    // Hovering over a my-boat track segment shows when the boat passed
+    // through that point.
+    const trackTimeTooltipElement = document.getElementById("track-time-tooltip");
+    const trackTimeTooltipOverlay = new Overlay({
+      element: trackTimeTooltipElement || undefined,
+      positioning: "bottom-center",
+      offset: [0, -10],
+    });
+    mapGlobal.map.addOverlay(trackTimeTooltipOverlay);
+
 
     // Setup measure layer
     measureSource = new VectorSource();
@@ -3243,6 +3279,29 @@
       }
       if (!navaidFound) {
         navaidTooltipOverlay.setPosition(undefined);
+      }
+
+      // My-boat track-time tooltip: if the cursor is on a segment of the
+      // user's own track, show when the boat was at that point. AIS
+      // tracks are skipped — the user asked for "my track line" only.
+      let timeFound = false;
+      mapGlobal.map!.forEachFeatureAtPixel(
+        evt.pixel,
+        (feature) => {
+          if (timeFound) return;
+          if (feature.get("boatId") !== "myBoat") return;
+          const ts = feature.get("ts");
+          if (typeof ts !== "number") return;
+          timeFound = true;
+          if (trackTimeTooltipElement) {
+            trackTimeTooltipElement.textContent = formatTrackTime(ts);
+          }
+          trackTimeTooltipOverlay.setPosition(evt.coordinate);
+        },
+        { hitTolerance: 3 }
+      );
+      if (!timeFound) {
+        trackTimeTooltipOverlay.setPosition(undefined);
       }
 
       // Cursor-info: GPS position of the mouse, plus distance + bearing
@@ -4080,6 +4139,9 @@
   <!-- Navaid Hover Tooltip -->
   <div id="navaid-tooltip" class="navaid-tooltip"></div>
 
+  <!-- My-boat track-time Tooltip -->
+  <div id="track-time-tooltip" class="track-time-tooltip"></div>
+
 
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
@@ -4757,6 +4819,19 @@
     font-size: 12px;
     white-space: nowrap;
     pointer-events: none;
+  }
+
+  .track-time-tooltip {
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .track-time-tooltip:empty {
+    display: none;
   }
 
   .navaid-tooltip {
