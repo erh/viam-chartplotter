@@ -4464,7 +4464,7 @@
       system-ui,
       -apple-system,
       sans-serif;
-    z-index: 1000;
+    z-index: 1003;
     color: #333;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     border: 1px solid #ccc;
