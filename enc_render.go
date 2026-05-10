@@ -1025,8 +1025,19 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	//   z=10+ → 2.0 (chart-detail; balances coastline cleanness vs feature
 	//           density)
 	div := 2.0
-	if z <= 9 {
+	switch {
+	case z <= 9:
 		div = 8.0
+	case z == 12 || z == 13:
+		// At z=12-13 the displayScale/2 floor lands above 1:20 000, so the
+		// Harbor-scale cells with detailed channel DEPARE polygons get
+		// dropped — Reynolds Channel and similar reads as shaded because
+		// only the coarser Approach cell's wide-depth-range polygon paints
+		// here. Bumping the divisor pulls 1:20k cells in (their CScale is
+		// above displayScale/3) so channels colour correctly at z=13. The
+		// extra symbology stays gated by minZoomForFeature, so we don't
+		// flood the tile with z=15+ detail.
+		div = 3.0
 	}
 	min := int(displayScale / div)
 	if min < 0 {
