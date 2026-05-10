@@ -15,6 +15,8 @@
   import TileLayer from "ol/layer/Tile";
   import Point from "ol/geom/Point.js";
   import LineString from "ol/geom/LineString.js";
+  import GeoJSON from "ol/format/GeoJSON.js";
+  import { bbox as bboxStrategy } from "ol/loadingstrategy.js";
   import TileWMS from "ol/source/TileWMS.js";
   import Feature from "ol/Feature.js";
   import VectorSource from "ol/source/Vector.js";
@@ -695,6 +697,7 @@
     // Track layer references for refreshing styles
     trackLayer: null as Vector<any> | null,
     aisTrackLayer: null as Vector<any> | null,
+    navaidLayer: null as Vector<any> | null,
 
     layerOptions: [] as LayerOption[],
     onLayers: new Collection<BaseLayer>(),
@@ -983,6 +986,377 @@
       features: isAis ? mapGlobal.aisTrackFeatures : mapGlobal.trackFeatures,
       type: isAis ? "ais-track" : "track",
     };
+  }
+
+  // S-57 COLOUR codes (csv string of "1".."13") -> CSS hex.
+  function s57ColourToCss(code: string): string {
+    switch (code.trim()) {
+      case "1": return "#ffffff"; // white
+      case "2": return "#000000"; // black
+      case "3": return "#d9263a"; // red
+      case "4": return "#1f9e49"; // green
+      case "5": return "#1446cc"; // blue
+      case "6": return "#f5d011"; // yellow
+      case "7": return "#888888"; // grey
+      case "8": return "#8b5a2b"; // brown
+      case "9": return "#ffa500"; // amber
+      case "10": return "#8246c8"; // violet
+      case "11": return "#ff6e00"; // orange
+      case "12": return "#c850c8"; // magenta
+      case "13": return "#ffb4d2"; // pink
+      default: return "#888888";
+    }
+  }
+
+  function navaidColours(props: any): string[] {
+    const raw = props?.COLOUR;
+    if (typeof raw !== "string" || !raw) return ["#888888"];
+    return raw.split(",").map(s57ColourToCss);
+  }
+
+  // S-52 magenta — the colour libS52 / NOAA charts use for light flares.
+  const NAVAID_LIGHT_MAGENTA = "#c850c8";
+
+  // Build an SVG marker for a buoy/beacon/light. Cached by composite key
+  // (class + shape + colours + lighted) so repeated renders reuse the
+  // already-built data URL.
+  //
+  // SVG canvas is 24×24; the structure's "footprint" sits at (12, 18) —
+  // OL Icon anchor below maps that pixel to the chart fix. The upper-right
+  // quadrant is reserved for a magenta light flare when the buoy/beacon is
+  // co-located with a LIGHTS feature (server-side join).
+  const navaidIconCache: Record<string, string> = {};
+  function navaidIconSrc(class_: string, props: any): string {
+    const colours = navaidColours(props);
+    const lighted = props?.lighted === true;
+    const shape = Number(
+      class_.startsWith("BCN") ? props?.BCNSHP : props?.BOYSHP
+    );
+    const key = `${class_}|${shape || 0}|${colours.join(",")}|L${lighted ? 1 : 0}`;
+    if (navaidIconCache[key]) return navaidIconCache[key];
+
+    const W = 24,
+      H = 24;
+    const ax = 12, // anchor x in svg pixels
+      ay = 18; // anchor y in svg pixels
+    const stroke = "#000";
+    const sw = 1;
+
+    const isLight = class_ === "LIGHTS";
+    const isBeacon = class_.startsWith("BCN");
+    const isDay = class_ === "DAYMAR";
+
+    let body = "";
+    if (isLight) {
+      // Standalone light (lighthouse / sector light): magenta starburst.
+      const c = colours[0] === "#888888" ? NAVAID_LIGHT_MAGENTA : colours[0];
+      body =
+        `<polygon points="${ax},${ay - 8} ${ax + 1.2},${ay - 1.5} ${ax + 7},${ay} ${ax + 1.2},${ay + 1.5} ${ax},${ay + 7} ${ax - 1.2},${ay + 1.5} ${ax - 7},${ay} ${ax - 1.2},${ay - 1.5}" ` +
+        `fill="${c}" stroke="${stroke}" stroke-width="0.6"/>`;
+    } else if (isBeacon) {
+      body = beaconBody(colours, ax, ay, stroke, sw);
+    } else if (isDay) {
+      // Daymark: small filled diamond.
+      const c = colours[0];
+      body =
+        `<polygon points="${ax},${ay - 7} ${ax + 5},${ay - 2} ${ax},${ay + 3} ${ax - 5},${ay - 2}" ` +
+        `fill="${c}" stroke="${stroke}" stroke-width="${sw}"/>`;
+    } else {
+      // Buoy — silhouette per BOYSHP enum.
+      body = buoyBody(shape, colours, ax, ay, stroke, sw);
+    }
+
+    // Lighted overlay: magenta wedge "flag" extending up-and-right from
+    // the structure. S-52 draws a filled triangle in the same hue —
+    // unmistakable on a chart even at small symbol size.
+    let flare = "";
+    if (lighted && !isLight) {
+      flare =
+        `<polygon points="${ax - 1},${ay - 9} ${ax + 9},${ay - 12} ${ax + 1},${ay - 6}" ` +
+        `fill="${NAVAID_LIGHT_MAGENTA}" stroke="${stroke}" stroke-width="0.5"/>`;
+    }
+
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+      body +
+      flare +
+      `</svg>`;
+    const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+    navaidIconCache[key] = src;
+    return src;
+  }
+
+  // Buoy silhouette per S-57 BOYSHP enum, anchored bottom-centre at (ax, ay).
+  // Two-colour bands: vertical halves for round shapes, horizontal bands for
+  // tall shapes — matches how banded buoys read off a chart.
+  function buoyBody(
+    shape: number,
+    colours: string[],
+    ax: number,
+    ay: number,
+    stroke: string,
+    sw: number
+  ): string {
+    const c1 = colours[0];
+    const c2 = colours[1] ?? colours[0];
+    switch (shape) {
+      case 1: {
+        // Conical, point up.
+        const h = 11,
+          w = 8;
+        return (
+          `<defs><clipPath id="b"><polygon points="${ax},${ay - h} ${ax + w / 2},${ay} ${ax - w / 2},${ay}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h / 2}" fill="${c1}"/>` +
+          `<rect x="${ax - w / 2}" y="${ay - h / 2}" width="${w}" height="${h / 2}" fill="${c2}"/>` +
+          `</g>` +
+          `<polygon points="${ax},${ay - h} ${ax + w / 2},${ay} ${ax - w / 2},${ay}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 2: {
+        // Can / cylindrical.
+        const h = 9,
+          w = 8;
+        return (
+          `<defs><clipPath id="b"><rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h / 2}" fill="${c1}"/>` +
+          `<rect x="${ax - w / 2}" y="${ay - h / 2}" width="${w}" height="${h / 2}" fill="${c2}"/>` +
+          `</g>` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 3: {
+        // Spherical.
+        const r = 5;
+        return (
+          `<defs><clipPath id="b"><circle cx="${ax}" cy="${ay - r}" r="${r}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - r}" y="${ay - 2 * r}" width="${r}" height="${2 * r}" fill="${c1}"/>` +
+          `<rect x="${ax}" y="${ay - 2 * r}" width="${r}" height="${2 * r}" fill="${c2}"/>` +
+          `</g>` +
+          `<circle cx="${ax}" cy="${ay - r}" r="${r}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 4: {
+        // Pillar.
+        const h = 13,
+          w = 6;
+        return (
+          `<defs><clipPath id="b"><rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h / 2}" fill="${c1}"/>` +
+          `<rect x="${ax - w / 2}" y="${ay - h / 2}" width="${w}" height="${h / 2}" fill="${c2}"/>` +
+          `</g>` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 5: {
+        // Spar.
+        const h = 14,
+          w = 3;
+        return (
+          `<defs><clipPath id="b"><rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h / 2}" fill="${c1}"/>` +
+          `<rect x="${ax - w / 2}" y="${ay - h / 2}" width="${w}" height="${h / 2}" fill="${c2}"/>` +
+          `</g>` +
+          `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 6: {
+        // Barrel.
+        const ry = 4,
+          rx = 6;
+        return (
+          `<ellipse cx="${ax}" cy="${ay - ry}" rx="${rx}" ry="${ry}" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      case 7: {
+        // Super-buoy.
+        const r = 7;
+        return (
+          `<defs><clipPath id="b"><circle cx="${ax}" cy="${ay - r}" r="${r}"/></clipPath></defs>` +
+          `<g clip-path="url(#b)">` +
+          `<rect x="${ax - r}" y="${ay - 2 * r}" width="${r}" height="${2 * r}" fill="${c1}"/>` +
+          `<rect x="${ax}" y="${ay - 2 * r}" width="${r}" height="${2 * r}" fill="${c2}"/>` +
+          `</g>` +
+          `<circle cx="${ax}" cy="${ay - r}" r="${r}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+      default: {
+        // Unknown / unspecified shape — small filled circle in primary
+        // colour. Most cells set BOYSHP; falling back to a generic dot
+        // keeps the chart usable when they don't.
+        return (
+          `<circle cx="${ax}" cy="${ay - 4}" r="4" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
+        );
+      }
+    }
+  }
+
+  // Beacons render as an upright bar with a chart-black footprint dot —
+  // visually distinct from buoys (which sit on the water surface). BCNSHP
+  // distinctions live in the topmark; we don't draw topmarks at this size.
+  function beaconBody(
+    colours: string[],
+    ax: number,
+    ay: number,
+    stroke: string,
+    sw: number
+  ): string {
+    const c1 = colours[0];
+    const c2 = colours[1] ?? colours[0];
+    const h = 13,
+      w = 4;
+    return (
+      `<defs><clipPath id="bc"><rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}"/></clipPath></defs>` +
+      `<g clip-path="url(#bc)">` +
+      `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h / 2}" fill="${c1}"/>` +
+      `<rect x="${ax - w / 2}" y="${ay - h / 2}" width="${w}" height="${h / 2}" fill="${c2}"/>` +
+      `</g>` +
+      `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>` +
+      `<circle cx="${ax}" cy="${ay}" r="1" fill="${stroke}"/>`
+    );
+  }
+
+  function navaidStyleFunction(feature: Feature<Geometry>): Style {
+    const props = feature.getProperties();
+    const class_ = (props.class as string) ?? "";
+    return new Style({
+      image: new Icon({
+        src: navaidIconSrc(class_, props),
+        // Anchor at the structure's footprint inside the SVG: x=12/24,
+        // y=18/24 → puts the chart fix at the buoy's bottom and lets the
+        // light flare float above.
+        anchor: [0.5, 0.75],
+      }),
+    });
+  }
+
+  // Human-readable label for an S-57 class code. Used in hover tooltips.
+  function navaidClassLabel(c: string): string {
+    switch (c) {
+      case "BOYLAT": return "Lateral buoy";
+      case "BOYCAR": return "Cardinal buoy";
+      case "BOYISD": return "Isolated-danger buoy";
+      case "BOYSAW": return "Safe-water buoy";
+      case "BOYSPP": return "Special-purpose buoy";
+      case "BOYINB": return "Installation buoy";
+      case "BCNLAT": return "Lateral beacon";
+      case "BCNCAR": return "Cardinal beacon";
+      case "BCNISD": return "Isolated-danger beacon";
+      case "BCNSAW": return "Safe-water beacon";
+      case "BCNSPP": return "Special-purpose beacon";
+      case "LIGHTS": return "Light";
+      case "DAYMAR": return "Daymark";
+      default:       return c;
+    }
+  }
+
+  // S-57 LITCHR enum -> short S-52 code (F, Fl, Q, Iso, Oc, …).
+  function lightCharLabel(code: number): string {
+    switch (code) {
+      case 1: return "F";
+      case 2: return "Fl";
+      case 3: return "Fl";
+      case 4: return "Q";
+      case 5: return "VQ";
+      case 6: return "UQ";
+      case 7: return "Iso";
+      case 8: return "Iso";
+      case 9: return "Oc";
+      case 10: return "Oc";
+      case 11: return "Mo";
+      case 12: return "FFl";
+      case 13: return "FFl";
+      default: return "";
+    }
+  }
+
+  // S-57 COLOUR csv -> single-letter code list (W/R/G/Y/etc).
+  function colourLetters(csv: string): string {
+    const map: Record<string, string> = {
+      "1": "W", "2": "Bk", "3": "R", "4": "G", "5": "Bu",
+      "6": "Y", "7": "Gy", "8": "Br", "9": "Am", "10": "Vi",
+      "11": "Or", "12": "Mg", "13": "Pk",
+    };
+    return csv
+      .split(",")
+      .map((c) => map[c.trim()] ?? "")
+      .filter(Boolean)
+      .join("");
+  }
+
+  function escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function formatNavaidTooltip(props: any): string {
+    const class_ = String(props.class ?? "");
+    const lines: string[] = [];
+    const title = props.OBJNAM
+      ? escapeHtml(String(props.OBJNAM))
+      : navaidClassLabel(class_);
+    lines.push(`<div class="navaid-tt-title">${title}</div>`);
+    lines.push(
+      `<div class="navaid-tt-sub">${escapeHtml(navaidClassLabel(class_))}</div>`
+    );
+
+    // Light characteristic line: e.g. "Fl R 5s 65ft 12nm". For a buoy
+    // that's been server-side joined to a co-located LIGHTS feature the
+    // attributes live under LIGHT_*; standalone LIGHTS features carry the
+    // attributes directly.
+    const litchr = props.LITCHR ?? props.LIGHT_LITCHR;
+    const isLighted = class_ === "LIGHTS" || props.lighted === true;
+    if (isLighted) {
+      const parts: string[] = [];
+      const litchrVal = litchr != null ? Number(litchr) : null;
+      if (litchrVal !== null) {
+        const lc = lightCharLabel(litchrVal);
+        if (lc) parts.push(lc);
+      }
+      const siggrp = props.SIGGRP ?? props.LIGHT_SIGGRP;
+      if (siggrp) parts.push(escapeHtml(String(siggrp)));
+      const litColour = props.LIGHT_COLOUR ?? props.COLOUR;
+      if (typeof litColour === "string") {
+        const letters = colourLetters(litColour);
+        if (letters) parts.push(letters);
+      }
+      const sigper = props.SIGPER ?? props.LIGHT_SIGPER;
+      if (sigper != null) parts.push(`${sigper}s`);
+      const height = props.HEIGHT ?? props.LIGHT_HEIGHT;
+      if (height != null) {
+        const ft = Math.round(Number(height) * 3.28084);
+        parts.push(`${ft}ft`);
+      }
+      const valnmr = props.VALNMR ?? props.LIGHT_VALNMR;
+      if (valnmr != null) parts.push(`${valnmr}nm`);
+      if (parts.length) {
+        lines.push(`<div class="navaid-tt-row">${parts.join(" ")}</div>`);
+      }
+    }
+
+    // Sector range, when reported.
+    const sectr1 = props.SECTR1 ?? props.LIGHT_SECTR1;
+    const sectr2 = props.SECTR2 ?? props.LIGHT_SECTR2;
+    if (sectr1 != null && sectr2 != null) {
+      lines.push(
+        `<div class="navaid-tt-row">Sector ${sectr1}°–${sectr2}°</div>`
+      );
+    }
+
+    if (props.INFORM) {
+      lines.push(
+        `<div class="navaid-tt-info">${escapeHtml(String(props.INFORM))}</div>`
+      );
+    }
+
+    return lines.join("");
   }
 
   function createDetectionStyle(): Style {
@@ -1911,11 +2285,48 @@
       const sharedParams = new URLSearchParams();
       sharedParams.set("v", tileGenVersion);
       if (safeDepthParam) sharedParams.set("sd", safeDepthParam);
+
+      // Vector layer of navaid features (buoys, beacons, lights, daymarks).
+      // Loaded from /noaa-enc/navaids on demand per visible bbox; rendered
+      // as simple S-52-flavoured icons with a hover popup for full metadata.
+      const navaidSource = new VectorSource({
+        format: new GeoJSON(),
+        strategy: bboxStrategy,
+        loader: function (extent, _res, _proj, success, failure) {
+          const [minLon, minLat, maxLon, maxLat] = extent;
+          const url =
+            `/noaa-enc/navaids?` +
+            `minLon=${minLon}&minLat=${minLat}` +
+            `&maxLon=${maxLon}&maxLat=${maxLat}`;
+          fetch(url)
+            .then((r) => r.json())
+            .then((j) => {
+              const feats = navaidSource
+                .getFormat()!
+                .readFeatures(j) as Feature[];
+              navaidSource.addFeatures(feats);
+              success?.(feats);
+            })
+            .catch((e) => {
+              console.warn("navaids fetch failed", e);
+              failure?.();
+            });
+        },
+      });
+      var navaidLayer = new Vector({
+        source: navaidSource,
+        style: navaidStyleFunction,
+        zIndex: 7,
+      });
+      mapGlobal.navaidLayer = navaidLayer;
       // noaa-local: tuned to mirror NOAA's WMS look as closely as possible.
       // Use this for offline use that should look interchangeable with the
-      // live WMS layer.
+      // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
+      // the tile PNG — those render in the noaa-navaids OL vector layer
+      // below so they can be interactive (hover for metadata).
       const localParams = new URLSearchParams(sharedParams);
       localParams.set("style", "wms");
+      localParams.set("navaids", "0");
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: false,
@@ -1928,6 +2339,13 @@
             transition: 300,
           }),
         }),
+      });
+      mapGlobal.layerOptions.push({
+        name: "noaa-navaids",
+        displayName: "navaids",
+        on: true,
+        layer: navaidLayer,
+        parent: "noaa-local",
       });
       // noaa-ecdis: same renderer + cells, but with S-52 conditional
       // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
@@ -2482,6 +2900,15 @@
     });
     mapGlobal.map.addOverlay(depthTooltipOverlay);
 
+    // Setup navaid hover tooltip overlay
+    const navaidTooltipElement = document.getElementById("navaid-tooltip");
+    const navaidTooltipOverlay = new Overlay({
+      element: navaidTooltipElement || undefined,
+      positioning: "bottom-center",
+      offset: [0, -12],
+    });
+    mapGlobal.map.addOverlay(navaidTooltipOverlay);
+
 
     // Setup measure layer
     measureSource = new VectorSource();
@@ -2684,6 +3111,37 @@
       }
       if (!depthFound) {
         depthTooltipOverlay.setPosition(undefined);
+      }
+
+      // Navaid hover tooltip — only checks the navaid layer so it doesn't
+      // collide with the AIS/myBoat click-popup behaviour.
+      let navaidFound = false;
+      if (mapGlobal.navaidLayer) {
+        mapGlobal.map!.forEachFeatureAtPixel(
+          evt.pixel,
+          (feature) => {
+            if (navaidFound) return;
+            const props = (feature as Feature).getProperties();
+            if (!props || !props.class) return;
+            navaidFound = true;
+            if (navaidTooltipElement) {
+              navaidTooltipElement.innerHTML = formatNavaidTooltip(props);
+            }
+            const geom = (feature as Feature).getGeometry();
+            if (geom && geom.getType() === "Point") {
+              navaidTooltipOverlay.setPosition(
+                (geom as Point).getCoordinates()
+              );
+            }
+          },
+          {
+            hitTolerance: 4,
+            layerFilter: (layer) => layer === mapGlobal.navaidLayer,
+          }
+        );
+      }
+      if (!navaidFound) {
+        navaidTooltipOverlay.setPosition(undefined);
       }
 
       // Cursor-info: GPS position of the mouse, plus distance + bearing
@@ -3518,6 +3976,9 @@
   <!-- Depth Tooltip -->
   <div id="depth-tooltip" class="depth-tooltip"></div>
 
+  <!-- Navaid Hover Tooltip -->
+  <div id="navaid-tooltip" class="navaid-tooltip"></div>
+
 
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
@@ -4094,6 +4555,44 @@
     font-size: 12px;
     white-space: nowrap;
     pointer-events: none;
+  }
+
+  .navaid-tooltip {
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    padding: 6px 10px;
+    border: 1px solid #6b7280;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.3;
+    pointer-events: none;
+    max-width: 280px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  .navaid-tooltip:empty {
+    display: none;
+  }
+  .navaid-tooltip :global(.navaid-tt-title) {
+    font-weight: 600;
+    color: #fde68a;
+    margin-bottom: 2px;
+  }
+  .navaid-tooltip :global(.navaid-tt-sub) {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .navaid-tooltip :global(.navaid-tt-row) {
+    font-variant-numeric: tabular-nums;
+  }
+  .navaid-tooltip :global(.navaid-tt-info) {
+    margin-top: 4px;
+    color: rgba(255, 255, 255, 0.75);
+    font-style: italic;
+    font-size: 11px;
+    white-space: normal;
   }
 
   /* Combined data panel: SOG/HDG/COG/Depth, route stats, and cursor info.

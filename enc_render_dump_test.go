@@ -165,7 +165,10 @@ func renderMosaic(t *testing.T, renderer *ENCRenderer, centerLon, centerLat floa
 			for j := range jobs {
 				tx := x0 + j.col
 				ty := y0 + j.row
-				pngBytes, err := renderer.RenderTile(z, tx, ty, 8.0/feetPerMetre, StyleWMS)
+				pngBytes, err := renderer.RenderTile(z, tx, ty, RenderOptions{
+					SafeDepthM: 8.0 / feetPerMetre,
+					Style:      StyleWMS,
+				})
 				if err != nil {
 					atomic.AddInt64(&failed, 1)
 					t.Logf("  z=%d/%d/%d: %v", z, tx, ty, err)

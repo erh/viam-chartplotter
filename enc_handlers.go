@@ -58,6 +58,7 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
 	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
+	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
 }
 
 type encPrefetchRequest struct {
@@ -138,6 +139,62 @@ func (h *ENCHandlers) handleDebug(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(report)
 }
 
+// handleNavaids returns navaid features (buoys, beacons, lights, daymarks)
+// inside the bbox as GeoJSON. Used by the frontend to render an interactive
+// vector layer with hover popups instead of baking the symbols and labels
+// into the chart tile PNG.
+//
+//	GET /noaa-enc/navaids?minLon=...&minLat=...&maxLon=...&maxLat=...
+func (h *ENCHandlers) handleNavaids(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	parse := func(name string) (float64, bool) {
+		v, err := strconv.ParseFloat(q.Get(name), 64)
+		return v, err == nil
+	}
+	minLon, ok1 := parse("minLon")
+	minLat, ok2 := parse("minLat")
+	maxLon, ok3 := parse("maxLon")
+	maxLat, ok4 := parse("maxLat")
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		http.Error(w, "need ?minLon&minLat&maxLon&maxLat as floats", http.StatusBadRequest)
+		return
+	}
+	navaids, err := h.renderer.Navaids(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// GeoJSON FeatureCollection with point geometries — OL's GeoJSON format
+	// reads this directly into Feature objects with a "properties" bag.
+	type geoFeature struct {
+		Type       string         `json:"type"`
+		Geometry   map[string]any `json:"geometry"`
+		Properties map[string]any `json:"properties"`
+	}
+	feats := make([]geoFeature, 0, len(navaids))
+	for _, n := range navaids {
+		props := map[string]any{
+			"class": n.Class,
+		}
+		for k, v := range n.Properties {
+			props[k] = v
+		}
+		feats = append(feats, geoFeature{
+			Type:       "Feature",
+			Geometry:   map[string]any{"type": "Point", "coordinates": []float64{n.Lon, n.Lat}},
+			Properties: props,
+		})
+	}
+	w.Header().Set("Content-Type", "application/geo+json")
+	// Short cache — navaids don't change often, but the cell set on disk
+	// might (background SyncBBox), and the frontend re-fetches per pan.
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":     "FeatureCollection",
+		"features": feats,
+	})
+}
+
 // handleTile renders a 256x256 PNG for the given XYZ tile from any ENC cells we
 // have on disk that overlap. Tiles outside our coverage come back as transparent
 // PNGs so the layer composes cleanly with the basemap.
@@ -169,9 +226,17 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	safeDepthM := float64(bucket) / feetPerMetre
 
 	style := ParseRenderStyle(r.URL.Query().Get("style"))
+	skipNavaids := r.URL.Query().Get("navaids") == "0"
+	// Two variants per style — with and without navaid symbols — get
+	// independent cache shards so a request with ?navaids=0 doesn't
+	// invalidate the rendered-with-navaids tile (or vice versa).
+	cacheKey := style.String()
+	if skipNavaids {
+		cacheKey += "-nonavaids"
+	}
 
 	if h.tileCache != nil {
-		if cached, ok := h.tileCache.Get(style.String(), bucket, z, x, y); ok {
+		if cached, ok := h.tileCache.Get(cacheKey, bucket, z, x, y); ok {
 			w.Header().Set("Content-Type", "image/png")
 			w.Header().Set("Cache-Control", "public, max-age=86400")
 			_, _ = w.Write(cached)
@@ -179,7 +244,11 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pngBytes, err := h.renderer.RenderTile(z, x, y, safeDepthM, style)
+	pngBytes, err := h.renderer.RenderTile(z, x, y, RenderOptions{
+		SafeDepthM:  safeDepthM,
+		Style:       style,
+		SkipNavaids: skipNavaids,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -192,7 +261,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	// empty tile is cheap, so it's safe to skip caching them.
 	const minCacheableTileBytes = 1024
 	if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
-		if err := h.tileCache.Put(style.String(), bucket, z, x, y, pngBytes); err != nil {
+		if err := h.tileCache.Put(cacheKey, bucket, z, x, y, pngBytes); err != nil {
 			// Cache write failures shouldn't fail the request; the next render
 			// will just have to redo the work.
 			_ = err
@@ -238,7 +307,10 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	safeDepthM := float64(safeDepthBucket(safeDepthFt)) / feetPerMetre
 
-	ourPNG, err := h.renderer.RenderTile(z, x, y, safeDepthM, ParseRenderStyle(r.URL.Query().Get("style")))
+	ourPNG, err := h.renderer.RenderTile(z, x, y, RenderOptions{
+		SafeDepthM: safeDepthM,
+		Style:      ParseRenderStyle(r.URL.Query().Get("style")),
+	})
 	if err != nil {
 		http.Error(w, "render: "+err.Error(), http.StatusInternalServerError)
 		return

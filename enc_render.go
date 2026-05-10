@@ -223,6 +223,178 @@ func (r *ENCRenderer) DebugBBox(minLon, minLat, maxLon, maxLat float64) ([]Debug
 	return reports, nil
 }
 
+// Navaid is a single buoy/beacon/light/daymark extracted from the ENC cells
+// in a bbox. Position is [lon, lat]. Properties carries every S-57 attribute
+// the original feature had — stripped of internal lib types — so the frontend
+// can format them as it sees fit.
+type Navaid struct {
+	Class      string         `json:"class"`
+	Lon        float64        `json:"lon"`
+	Lat        float64        `json:"lat"`
+	Properties map[string]any `json:"properties"`
+}
+
+// IsNavaidClass reports whether an S-57 object class is one of the navaid
+// classes the navaids endpoint and the renderer's "skip navaids" mode care
+// about. Centralised so the two places stay in sync.
+func IsNavaidClass(class string) bool {
+	switch class {
+	case "BOYLAT", "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB",
+		"BCNLAT", "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP",
+		"LIGHTS", "DAYMAR":
+		return true
+	}
+	return false
+}
+
+// NavaidAttributeKeys are the S-57 attributes worth surfacing on a navaid
+// hover popup. The list is conservative — chart-critical attrs only — so the
+// JSON payload stays small and the popup doesn't drown the user in metadata.
+var NavaidAttributeKeys = []string{
+	"OBJNAM", // common name (e.g. "Buoy 5", "Frying Pan Shoal Light")
+	"COLOUR", // S-57 colour code(s) — comma-separated string
+	"COLPAT", // colour pattern (horizontal/vertical stripes, etc.)
+	"BOYSHP", // buoy shape enum (1=conical, 2=can, 3=spherical, 4=pillar, …)
+	"BCNSHP", // beacon shape
+	"CATLAM", // category of lateral mark (port/starboard etc.)
+	"CATCAM", // category of cardinal mark (N/E/S/W)
+	"CATSPM", // category of special purpose mark
+	"LITCHR", // light character (1=Fixed, 2=Flashing, …)
+	"SIGGRP", // signal group (e.g. "(2+1)")
+	"SIGPER", // signal period (s)
+	"SIGSEQ", // signal sequence
+	"HEIGHT", // height in metres
+	"VALNMR", // nominal range in nautical miles
+	"SECTR1", // sector start bearing
+	"SECTR2", // sector end bearing
+	"ORIENT", // orientation (degrees)
+	"INFORM", // free-text remarks
+	"NINFOM", // ditto, national language
+	"NATCON", // nature of construction
+	"CONRAD", // conspicuous, radar
+	"CONVIS", // conspicuous, visual
+	"STATUS", // status
+}
+
+// Navaids returns deduped navaid features (buoys, beacons, lights, daymarks)
+// whose position falls inside the given lon/lat box. Cell scale is not
+// filtered: the same physical buoy may appear in several overlapping cells
+// (overview + harbour), so we coalesce duplicates by class + rounded
+// coordinate. The most attribute-rich appearance wins ties.
+//
+// Standalone LIGHTS features are spatially joined onto a co-located buoy or
+// beacon (within ~15 m); when matched, the light's properties are merged
+// into the structure's bag under "LIGHT_*" prefixed keys plus a "lighted"
+// flag, and the LIGHTS feature is dropped from the output. Lights with no
+// nearby structure (sector lights, lighthouses) are returned standalone.
+func (r *ENCRenderer) Navaids(minLon, minLat, maxLon, maxLat float64) ([]Navaid, error) {
+	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+
+	type key struct {
+		class string
+		lonQ  int64
+		latQ  int64
+	}
+	// Round to ~1 metre (~5e-6 deg lat) so the same buoy from two cells
+	// dedupes even if their coords differ by sub-metre rounding.
+	const q = 1e5
+	seen := make(map[key]Navaid)
+	var lights []Navaid
+
+	for _, cell := range cells {
+		chart, err := r.chartFor(cell.Name)
+		if err != nil || chart == nil {
+			continue
+		}
+		for _, f := range chart.FeaturesInBounds(bbox) {
+			class := f.ObjectClass()
+			if !IsNavaidClass(class) {
+				continue
+			}
+			geom := f.Geometry()
+			if geom.Type != s57.GeometryTypePoint || len(geom.Coordinates) == 0 {
+				continue
+			}
+			c := geom.Coordinates[0]
+			if len(c) < 2 {
+				continue
+			}
+			lon, lat := c[0], c[1]
+			if lon < minLon || lon > maxLon || lat < minLat || lat > maxLat {
+				continue
+			}
+			props := map[string]any{}
+			for _, k := range NavaidAttributeKeys {
+				if v, ok := f.Attribute(k); ok {
+					props[k] = v
+				}
+			}
+			n := Navaid{Class: class, Lon: lon, Lat: lat, Properties: props}
+			if class == "LIGHTS" {
+				// Defer until after buoys/beacons are gathered so we can
+				// try to attach each light to a structure.
+				lights = append(lights, n)
+				continue
+			}
+			k := key{class: class, lonQ: int64(lon * q), latQ: int64(lat * q)}
+			if existing, ok := seen[k]; !ok || len(props) > len(existing.Properties) {
+				seen[k] = n
+			}
+		}
+	}
+
+	// Spatial join: try to attach each LIGHTS feature to a co-located
+	// buoy/beacon. ~15 m tolerance: tighter than a chart's typical
+	// position uncertainty but loose enough that sub-cell rounding
+	// differences between the BOY/BCN feature and its sibling LIGHTS
+	// don't miss a real match. Coordinates are in degrees; convert the
+	// tolerance to a per-degree budget at this latitude so the test is
+	// roughly isotropic away from the equator.
+	const tolMetres = 15.0
+	out := make([]Navaid, 0, len(seen)+len(lights))
+	// Build a flat slice we can index for the join; map iteration order
+	// is non-deterministic but the indices are local to this function.
+	structures := make([]Navaid, 0, len(seen))
+	for _, n := range seen {
+		structures = append(structures, n)
+	}
+	attached := make([]bool, len(structures))
+	for _, light := range lights {
+		latRad := light.Lat * math.Pi / 180
+		mPerDegLat := 111132.92 - 559.82*math.Cos(2*latRad)
+		mPerDegLon := 111412.84 * math.Cos(latRad)
+		bestIdx := -1
+		bestSq := math.MaxFloat64
+		for i, s := range structures {
+			dN := (s.Lat - light.Lat) * mPerDegLat
+			dE := (s.Lon - light.Lon) * mPerDegLon
+			d2 := dN*dN + dE*dE
+			if d2 < bestSq {
+				bestSq = d2
+				bestIdx = i
+			}
+		}
+		if bestIdx >= 0 && bestSq <= tolMetres*tolMetres {
+			s := structures[bestIdx]
+			s.Properties["lighted"] = true
+			for k, v := range light.Properties {
+				s.Properties["LIGHT_"+k] = v
+			}
+			structures[bestIdx] = s
+			attached[bestIdx] = true
+		} else {
+			// Standalone light (lighthouse, sector light, etc.).
+			out = append(out, light)
+		}
+	}
+	for _, s := range structures {
+		out = append(out, s)
+	}
+	_ = attached // kept for clarity; structures slice already updated
+	return out, nil
+}
+
 // RenderTile draws a 256x256 PNG for the given XYZ tile. If no cells overlap, a
 // transparent tile is returned so the layer composes cleanly with the basemap.
 // safeDepthM is the boat's safety contour in metres; depth-area shading uses a
@@ -261,7 +433,20 @@ func ParseRenderStyle(s string) RenderStyle {
 	return StyleWMS
 }
 
-func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderStyle) ([]byte, error) {
+// RenderOptions bundles per-tile render knobs that aren't part of the
+// (z,x,y) coordinate. SkipNavaids drops buoys/beacons/lights/daymarks from
+// the tile so the frontend can render them as interactive vector features
+// in a separate OL layer.
+type RenderOptions struct {
+	SafeDepthM  float64
+	Style       RenderStyle
+	SkipNavaids bool
+}
+
+func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error) {
+	safeDepthM := opts.SafeDepthM
+	style := opts.Style
+	skipNavaids := opts.SkipNavaids
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
@@ -331,6 +516,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, safeDepthM float64, style RenderSt
 
 	drawCell := func(chart *s57.Chart, pass drawPass) {
 		for _, f := range chart.FeaturesInBounds(bbox) {
+			if skipNavaids && IsNavaidClass(f.ObjectClass()) {
+				continue
+			}
 			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z, style)
 		}
 	}

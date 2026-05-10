@@ -146,7 +146,10 @@ func TestCompareWithWMS(t *testing.T) {
 		// the WMS-matched output. ECDIS-style rendering deliberately diverges
 		// from NOAA WMS (bold safety contour, two-tone soundings, topmarks)
 		// and would skew the diff numbers.
-		ourBytes, err := renderer.RenderTile(tile.z, tile.x, tile.y, safeDepthM, StyleWMS)
+		ourBytes, err := renderer.RenderTile(tile.z, tile.x, tile.y, RenderOptions{
+			SafeDepthM: safeDepthM,
+			Style:      StyleWMS,
+		})
 		if err != nil {
 			t.Errorf("z=%d x=%d y=%d render: %v", tile.z, tile.x, tile.y, err)
 			continue
