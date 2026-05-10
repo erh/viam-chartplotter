@@ -2,7 +2,9 @@ package vc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"image"
 	"image/color"
 	"image/png"
 	"math"
@@ -27,6 +29,7 @@ import (
 type ENCRenderer struct {
 	catalog *ENCCatalog
 	store   *ENCStore
+	osm     *OSMTileCache // optional; nil disables the OSM-underlay option
 	logger  logging.Logger
 
 	mu     sync.Mutex
@@ -57,6 +60,11 @@ func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger)
 		charts:  map[string]*chartEntry{},
 	}
 }
+
+// SetOSMCache attaches an OSM tile cache so RenderTile can draw OSM raster
+// data as the underlay when RenderOptions.OSMUnderlay is set. Optional —
+// when nil, OSMUnderlay is silently a no-op.
+func (r *ENCRenderer) SetOSMCache(c *OSMTileCache) { r.osm = c }
 
 // chartFor returns the parsed chart for a cell, parsing once and reusing the
 // result until the on-disk .000 file's mtime changes.
@@ -232,6 +240,19 @@ type Navaid struct {
 	Lon        float64        `json:"lon"`
 	Lat        float64        `json:"lat"`
 	Properties map[string]any `json:"properties"`
+}
+
+// isLandClass reports whether an S-57 object class is a land/built-up area
+// fill — the polygons we drop under TransparentLand mode so the OSM
+// basemap shows through. Coastline (COALNE) is intentionally NOT included
+// here: it's a separate line feature and the chart's authoritative water/
+// land boundary is still useful even when fill is off.
+func isLandClass(class string) bool {
+	switch class {
+	case "LNDARE", "BUAARE", "BUISGL":
+		return true
+	}
+	return false
 }
 
 // IsNavaidClass reports whether an S-57 object class is one of the navaid
@@ -436,17 +457,29 @@ func ParseRenderStyle(s string) RenderStyle {
 // RenderOptions bundles per-tile render knobs that aren't part of the
 // (z,x,y) coordinate. SkipNavaids drops buoys/beacons/lights/daymarks from
 // the tile so the frontend can render them as interactive vector features
-// in a separate OL layer.
+// in a separate OL layer. TransparentLand drops LNDARE/BUAARE/BUISGL fills
+// so whatever's underneath shows through where the chart says "land".
+// OSMUnderlay fetches the matching OSM tile and paints it as the chart
+// tile's background, so the rendered PNG already includes harbour
+// detail (roads, buildings, parks) without the frontend having to stack
+// two layers. Implies TransparentLand-equivalent behaviour for
+// LNDARE/BUAARE/BUISGL — those classes would otherwise overpaint the OSM
+// detail with a flat tan.
 type RenderOptions struct {
-	SafeDepthM  float64
-	Style       RenderStyle
-	SkipNavaids bool
+	SafeDepthM      float64
+	Style           RenderStyle
+	SkipNavaids     bool
+	TransparentLand bool
+	OSMUnderlay     bool
 }
 
 func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error) {
 	safeDepthM := opts.SafeDepthM
 	style := opts.Style
 	skipNavaids := opts.SkipNavaids
+	// OSMUnderlay implies transparent land — otherwise LNDARE/BUAARE/BUISGL
+	// would paint a flat tan over the OSM detail we just baked in.
+	transparentLand := opts.TransparentLand || (opts.OSMUnderlay && r.osm != nil)
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
@@ -504,6 +537,28 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// Transparent background so the OSM/seachart base layers below show through
 	// where we have no chart coverage.
 
+	// OSM raster underlay. Painted before any chart features so navaids,
+	// coastline and depth bands sit on top. Failure here is non-fatal —
+	// we just leave the chart background transparent and let the frontend
+	// basemap fill in (same behaviour as when OSMUnderlay is off).
+	//
+	// OSM's standard tiles render water in light blue (~#aad3df) — that
+	// would compete with our chart's depth bands and show through where
+	// our cells don't have DEPARE coverage. Strip it out before drawing,
+	// replacing water pixels with the chart's deep-water white so the
+	// composite always shows water in our scheme.
+	if opts.OSMUnderlay && r.osm != nil {
+		if osmBytes, err := r.osm.Fetch(context.Background(), z, x, y); err == nil {
+			if img, _, err := image.Decode(bytes.NewReader(osmBytes)); err == nil {
+				dc.DrawImage(stripOSMWater(img), 0, 0)
+			} else if r.logger != nil {
+				r.logger.Warnf("osm decode z=%d x=%d y=%d: %v", z, x, y, err)
+			}
+		} else if r.logger != nil {
+			r.logger.Warnf("osm fetch z=%d x=%d y=%d: %v", z, x, y, err)
+		}
+	}
+
 	project := func(lon, lat float64) (float64, float64) {
 		mx, my := lonLatToMerc(lon, lat)
 		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
@@ -516,7 +571,11 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 
 	drawCell := func(chart *s57.Chart, pass drawPass) {
 		for _, f := range chart.FeaturesInBounds(bbox) {
-			if skipNavaids && IsNavaidClass(f.ObjectClass()) {
+			class := f.ObjectClass()
+			if skipNavaids && IsNavaidClass(class) {
+				continue
+			}
+			if transparentLand && isLandClass(class) {
 				continue
 			}
 			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z, style)
@@ -527,19 +586,23 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// us shoreline coverage even when the scale-filtered set is missing
 	// LNDARE/BUAARE. Land features only — water polygons are handled in
 	// the regular passAreas below so they only paint from in-scale cells.
-	for _, cell := range allCells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
-			class := f.ObjectClass()
-			switch class {
-			case "LNDARE", "BUAARE", "BUISGL":
-			default:
+	// Skipped entirely under TransparentLand — the basemap (OSM) is what
+	// the user wants to see for land in that mode.
+	if !transparentLand {
+		for _, cell := range allCells {
+			chart, err := r.chartFor(cell.Name)
+			if err != nil || chart == nil {
 				continue
 			}
-			drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z, style)
+			for _, f := range chart.FeaturesInBounds(bbox) {
+				class := f.ObjectClass()
+				switch class {
+				case "LNDARE", "BUAARE", "BUISGL":
+				default:
+					continue
+				}
+				drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z, style)
+			}
 		}
 	}
 
@@ -2168,4 +2231,46 @@ func lonLatToMerc(lon, lat float64) (x, y float64) {
 	rad := lat * math.Pi / 180.0
 	y = math.Log(math.Tan(math.Pi/4+rad/2)) / math.Pi * mercatorMax
 	return
+}
+
+// stripOSMWater rebuilds the input image with water-coloured pixels swapped
+// out for chart deep-water white. OSM's standard tiles paint water in a
+// narrow blue range — sea/ocean ~#aad3df, rivers/lakes very close to the
+// same — so a Euclidean colour-distance check around that anchor catches
+// most water without nuking unrelated light-blue features. Coastline edges
+// (anti-aliased darker pixels) and built-up labels fall outside the
+// threshold and are preserved.
+//
+// Replacement colour matches s52DEPDW so even areas where our chart has no
+// DEPARE polygon read as "deep water" rather than transparent gaps.
+func stripOSMWater(src image.Image) *image.RGBA {
+	bounds := src.Bounds()
+	out := image.NewRGBA(bounds)
+	const (
+		// OSM's standard layer water hue. Sampled from a current
+		// tile.openstreetmap.org tile in open ocean.
+		waterR, waterG, waterB = 0xAA, 0xD3, 0xDF
+		// Squared-distance threshold. Chosen empirically: catches sea +
+		// river/lake variants without consuming light-blue UI features
+		// (route lines, etc.) that may live in an OSM tile. Loose enough
+		// to swallow the anti-aliased water-side of a coastline pixel,
+		// tight enough to leave the darker land-side intact.
+		threshSq = 50 * 50
+	)
+	white := color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := src.At(x, y).RGBA()
+			r8, g8, b8, a8 := uint8(r>>8), uint8(g>>8), uint8(b>>8), uint8(a>>8)
+			dr := int(r8) - waterR
+			dg := int(g8) - waterG
+			db := int(b8) - waterB
+			if dr*dr+dg*dg+db*db < threshSq {
+				out.SetRGBA(x, y, white)
+				continue
+			}
+			out.SetRGBA(x, y, color.RGBA{r8, g8, b8, a8})
+		}
+	}
+	return out
 }

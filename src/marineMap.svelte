@@ -2324,14 +2324,21 @@
       // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
       // the tile PNG — those render in the noaa-navaids OL vector layer
       // below so they can be interactive (hover for metadata).
+      // osm=1 has the renderer fetch the matching tile.openstreetmap.org
+      // PNG and paint it as the chart's background, so harbour roads,
+      // building footprints, parks etc come baked into the chart. That
+      // also implies LNDARE/BUAARE/BUISGL fills are dropped — they'd
+      // otherwise overpaint the OSM detail with a flat tan. Tile opacity
+      // is full (1.0) since the OSM underlay is already in the PNG.
       const localParams = new URLSearchParams(sharedParams);
       localParams.set("style", "wms");
       localParams.set("navaids", "0");
+      localParams.set("osm", "1");
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: false,
         layer: new TileLayer({
-          opacity: 0.7,
+          opacity: 1,
           preload: 2,
           zIndex: 5,
           source: new XYZ({

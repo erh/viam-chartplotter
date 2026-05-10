@@ -107,6 +107,17 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
+	// Optional OSM raster underlay. Cached to disk under the same root as
+	// the ENC store so a single bbox prefetch warms both. Initialisation
+	// failure is non-fatal — RenderTile silently skips OSM when the cache
+	// is nil, so chart rendering still works.
+	osmCache, err := NewOSMTileCache(filepath.Join(root, "osm"), "", logger.Sublogger("osmCache"))
+	if err != nil {
+		logger.Warnf("osm cache disabled: %v", err)
+	} else {
+		encRenderer.SetOSMCache(osmCache)
+		logger.Infof("osm tile cache: %s", osmCache.cacheDir)
+	}
 	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, safeDepthFt).Register(mux)
 	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
 

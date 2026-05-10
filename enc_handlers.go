@@ -227,12 +227,20 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 
 	style := ParseRenderStyle(r.URL.Query().Get("style"))
 	skipNavaids := r.URL.Query().Get("navaids") == "0"
-	// Two variants per style — with and without navaid symbols — get
-	// independent cache shards so a request with ?navaids=0 doesn't
-	// invalidate the rendered-with-navaids tile (or vice versa).
+	transparentLand := r.URL.Query().Get("landfill") == "0"
+	osmUnderlay := r.URL.Query().Get("osm") == "1"
+	// Each render-option variant (navaids on/off, landfill on/off, osm
+	// on/off) gets its own cache shard so URLs that differ only in those
+	// params don't stomp on each other's cached PNGs.
 	cacheKey := style.String()
 	if skipNavaids {
 		cacheKey += "-nonavaids"
+	}
+	if transparentLand {
+		cacheKey += "-noland"
+	}
+	if osmUnderlay {
+		cacheKey += "-osm"
 	}
 
 	if h.tileCache != nil {
@@ -245,9 +253,11 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pngBytes, err := h.renderer.RenderTile(z, x, y, RenderOptions{
-		SafeDepthM:  safeDepthM,
-		Style:       style,
-		SkipNavaids: skipNavaids,
+		SafeDepthM:      safeDepthM,
+		Style:           style,
+		SkipNavaids:     skipNavaids,
+		TransparentLand: transparentLand,
+		OSMUnderlay:     osmUnderlay,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
