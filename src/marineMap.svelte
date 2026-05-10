@@ -4324,7 +4324,7 @@
           <circle cx="12" cy="9" r="2.5" />
         </svg>
       </button>
-      {#if navWaypoints && navWaypoints.length > 0}
+      {#if addWaypointActive && navWaypoints && navWaypoints.length > 0}
         <button
           class="clear-waypoints-btn"
           class:armed={clearConfirmArmed}
