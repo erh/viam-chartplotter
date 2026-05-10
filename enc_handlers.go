@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"image/png"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -57,9 +58,79 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/stats", h.handleStats)
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
+	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
 	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
+	mux.HandleFunc("/noaa-enc/osm-tile/", h.handleOSMTile)
 }
+
+// handleOSMTile serves a 256×256 PNG containing only the OSM vector
+// underlay (highways + buildings) for the given XYZ tile. Used as a
+// stand-alone OL TileLayer so the frontend can toggle OSM detail on/off
+// without re-rendering the chart, and so a cold Overpass fetch only
+// blocks the OSM layer's tiles — the chart layer keeps painting at full
+// speed regardless.
+//
+//	GET /noaa-enc/osm-tile/{z}/{x}/{y}.png
+func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/noaa-enc/osm-tile/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 {
+		http.Error(w, "bad path: expected /noaa-enc/osm-tile/{z}/{x}/{y}.png", http.StatusBadRequest)
+		return
+	}
+	yp := strings.TrimSuffix(parts[2], ".png")
+	z, errZ := strconv.Atoi(parts[0])
+	x, errX := strconv.Atoi(parts[1])
+	y, errY := strconv.Atoi(yp)
+	if errZ != nil || errX != nil || errY != nil {
+		http.Error(w, "bad coords", http.StatusBadRequest)
+		return
+	}
+
+	// Debug mode: render the water mask itself instead of the masked
+	// OSM tile. Bypasses cache so the user can iterate.
+	if r.URL.Query().Get("debug") == "mask" {
+		pngBytes, err := h.renderer.RenderOSMTileDebugMask(z, x, y)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(pngBytes)
+		return
+	}
+
+	// Reuse the chart tile cache with a distinct style key so OSM tiles
+	// share eviction policy and disk layout with chart tiles. The depth
+	// bucket is irrelevant for OSM — pin it to 0. Bump the suffix when
+	// the rendering changes so stale PNGs from a prior implementation
+	// get auto-superseded.
+	const cacheKey = "osm-raster-1"
+	if h.tileCache != nil {
+		if cached, ok := h.tileCache.Get(cacheKey, 0, z, x, y); ok {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			_, _ = w.Write(cached)
+			return
+		}
+	}
+
+	pngBytes, err := h.renderer.RenderOSMTile(z, x, y)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	const minCacheableTileBytes = 1024
+	if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
+		_ = h.tileCache.Put(cacheKey, 0, z, x, y, pngBytes)
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(pngBytes)
+}
+
 
 type encPrefetchRequest struct {
 	MinLon   float64 `json:"minLon"`
@@ -137,6 +208,45 @@ func (h *ENCHandlers) handleDebug(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(report)
+}
+
+// handleDebugTile is a convenience wrapper around /debug that takes XYZ tile
+// coords directly. Computes the tile's lon/lat bbox and forwards to
+// DebugBBox so the response shape is identical.
+//
+//	GET /noaa-enc/debug-tile/{z}/{x}/{y}
+func (h *ENCHandlers) handleDebugTile(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/noaa-enc/debug-tile/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 {
+		http.Error(w, "bad path: expected /noaa-enc/debug-tile/{z}/{x}/{y}", http.StatusBadRequest)
+		return
+	}
+	// Strip an optional trailing extension so debug-tile/14/4822/6159.png
+	// works the same as ...6159 — easier to retype from a tile URL.
+	yp := strings.TrimSuffix(parts[2], ".png")
+	z, errZ := strconv.Atoi(parts[0])
+	x, errX := strconv.Atoi(parts[1])
+	y, errY := strconv.Atoi(yp)
+	if errZ != nil || errX != nil || errY != nil {
+		http.Error(w, "bad coords", http.StatusBadRequest)
+		return
+	}
+	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+	report, err := h.renderer.DebugBBox(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"tile": map[string]int{"z": z, "x": x, "y": y},
+		"bbox": []float64{minLon, minLat, maxLon, maxLat},
+		"cells": report,
+	})
 }
 
 // handleNavaids returns navaid features (buoys, beacons, lights, daymarks)
@@ -228,10 +338,9 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	style := ParseRenderStyle(r.URL.Query().Get("style"))
 	skipNavaids := r.URL.Query().Get("navaids") == "0"
 	transparentLand := r.URL.Query().Get("landfill") == "0"
-	osmUnderlay := r.URL.Query().Get("osm") == "1"
-	// Each render-option variant (navaids on/off, landfill on/off, osm
-	// on/off) gets its own cache shard so URLs that differ only in those
-	// params don't stomp on each other's cached PNGs.
+	skipClasses := parseSkipClasses(r.URL.Query().Get("skip"))
+	// Each render-option variant gets its own cache shard so URLs that
+	// differ only in those params don't stomp on each other's cached PNGs.
 	cacheKey := style.String()
 	if skipNavaids {
 		cacheKey += "-nonavaids"
@@ -239,8 +348,8 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	if transparentLand {
 		cacheKey += "-noland"
 	}
-	if osmUnderlay {
-		cacheKey += "-osm"
+	if len(skipClasses) > 0 {
+		cacheKey += "-skip:" + skipKey(skipClasses)
 	}
 
 	if h.tileCache != nil {
@@ -257,7 +366,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		Style:           style,
 		SkipNavaids:     skipNavaids,
 		TransparentLand: transparentLand,
-		OSMUnderlay:     osmUnderlay,
+		SkipClasses:     skipClasses,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -317,9 +426,17 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	safeDepthM := float64(safeDepthBucket(safeDepthFt)) / feetPerMetre
 
+	// Forward the same render-option params as /tile so the compare image
+	// shows exactly what the noaa-local layer is composing in the
+	// browser. Default-on (?navaids=, ?osm=, ?landfill= absent) gives the
+	// raw "match NOAA WMS" render the compare endpoint was originally
+	// designed for; pass any of them to see the live-layer variant.
 	ourPNG, err := h.renderer.RenderTile(z, x, y, RenderOptions{
-		SafeDepthM: safeDepthM,
-		Style:      ParseRenderStyle(r.URL.Query().Get("style")),
+		SafeDepthM:      safeDepthM,
+		Style:           ParseRenderStyle(r.URL.Query().Get("style")),
+		SkipNavaids:     r.URL.Query().Get("navaids") == "0",
+		TransparentLand: r.URL.Query().Get("landfill") == "0",
+		SkipClasses:     parseSkipClasses(r.URL.Query().Get("skip")),
 	})
 	if err != nil {
 		http.Error(w, "render: "+err.Error(), http.StatusInternalServerError)
@@ -346,29 +463,51 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := image.NewRGBA(image.Rect(0, 0, 256*3, 256))
-	// White background so transparent areas of either tile are visible.
+	// Five panels side by side: ours | WMS | diff | OSM (masked) | mask debug.
+	const panelW = 256
+	const numPanels = 5
+	out := image.NewRGBA(image.Rect(0, 0, panelW*numPanels, 256))
+	// White background so transparent areas of any tile are visible.
 	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
-	draw.Draw(out, image.Rect(0, 0, 256, 256), ourImg, image.Point{}, draw.Over)
-	draw.Draw(out, image.Rect(256, 0, 512, 256), wmsImg, image.Point{}, draw.Over)
+	draw.Draw(out, image.Rect(0, 0, panelW, 256), ourImg, image.Point{}, draw.Over)
+	draw.Draw(out, image.Rect(panelW, 0, 2*panelW, 256), wmsImg, image.Point{}, draw.Over)
 
+	// Diff panel: per-pixel RGB distance between ours and WMS, grayscale.
 	for py := range 256 {
 		for px := range 256 {
 			o := color.RGBAModel.Convert(out.At(px, py)).(color.RGBA)
-			n := color.RGBAModel.Convert(out.At(256+px, py)).(color.RGBA)
+			n := color.RGBAModel.Convert(out.At(panelW+px, py)).(color.RGBA)
 			d := absInt(int(o.R)-int(n.R)) + absInt(int(o.G)-int(n.G)) + absInt(int(o.B)-int(n.B))
 			if d > 255 {
 				d = 255
 			}
-			out.SetRGBA(512+px, py, color.RGBA{R: uint8(d), G: uint8(d), B: uint8(d), A: 255})
+			out.SetRGBA(2*panelW+px, py, color.RGBA{R: uint8(d), G: uint8(d), B: uint8(d), A: 255})
+		}
+	}
+
+	// OSM tile (raster + chart-water-mask). Failures are non-fatal so the
+	// rest of the compare image still renders.
+	if osmPNG, err := h.renderer.RenderOSMTile(z, x, y); err == nil {
+		if osmImg, derr := png.Decode(bytes.NewReader(osmPNG)); derr == nil {
+			draw.Draw(out, image.Rect(3*panelW, 0, 4*panelW, 256), osmImg, image.Point{}, draw.Over)
+		}
+	}
+
+	// Mask-debug panel: magenta over chart-water polygons so you can see
+	// exactly which pixels the mask wipes from the OSM panel.
+	if dbgPNG, err := h.renderer.RenderOSMTileDebugMask(z, x, y); err == nil {
+		if dbgImg, derr := png.Decode(bytes.NewReader(dbgPNG)); derr == nil {
+			draw.Draw(out, image.Rect(4*panelW, 0, 5*panelW, 256), dbgImg, image.Point{}, draw.Over)
 		}
 	}
 
 	// Panel labels so anyone looking at /tmp/foo.png or the network response
 	// knows which is which without checking the handler source.
 	annotatePanel(out, 4, 0, "ours")
-	annotatePanel(out, 260, 0, "WMS")
-	annotatePanel(out, 516, 0, fmt.Sprintf("diff z=%d x=%d y=%d", z, x, y))
+	annotatePanel(out, panelW+4, 0, "WMS")
+	annotatePanel(out, 2*panelW+4, 0, fmt.Sprintf("diff z=%d x=%d y=%d", z, x, y))
+	annotatePanel(out, 3*panelW+4, 0, "OSM masked")
+	annotatePanel(out, 4*panelW+4, 0, "mask")
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, out); err != nil {
@@ -407,4 +546,39 @@ func absInt(x int) int {
 		return -x
 	}
 	return x
+}
+
+// parseSkipClasses turns a comma-separated S-57 class list ("COALNE,LIGHTS")
+// into a set the renderer consults to drop those classes entirely. Empty /
+// missing input → nil (no skipping). Values are upper-cased and trimmed.
+func parseSkipClasses(s string) map[string]bool {
+	if s == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(strings.ToUpper(p))
+		if p != "" {
+			out[p] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// skipKey returns a stable, sorted, comma-joined string for a skip set.
+// Used as part of the tile-cache key so two URLs with the same skip set in
+// any order share a cache entry but distinct skip sets don't collide.
+func skipKey(m map[string]bool) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }

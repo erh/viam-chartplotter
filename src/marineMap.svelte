@@ -1234,6 +1234,7 @@
     });
   }
 
+
   // Human-readable label for an S-57 class code. Used in hover tooltips.
   function navaidClassLabel(c: string): string {
     switch (c) {
@@ -2324,16 +2325,12 @@
       // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
       // the tile PNG — those render in the noaa-navaids OL vector layer
       // below so they can be interactive (hover for metadata).
-      // osm=1 has the renderer fetch the matching tile.openstreetmap.org
-      // PNG and paint it as the chart's background, so harbour roads,
-      // building footprints, parks etc come baked into the chart. That
-      // also implies LNDARE/BUAARE/BUISGL fills are dropped — they'd
-      // otherwise overpaint the OSM detail with a flat tan. Tile opacity
-      // is full (1.0) since the OSM underlay is already in the PNG.
+      // landfill=0 drops LNDARE/BUAARE/BUISGL fills so the osm-detail
+      // tile layer (zIndex 4) shows through where the chart says "land".
       const localParams = new URLSearchParams(sharedParams);
       localParams.set("style", "wms");
       localParams.set("navaids", "0");
-      localParams.set("osm", "1");
+      localParams.set("landfill", "0");
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: true,
@@ -2343,6 +2340,30 @@
           zIndex: 5,
           source: new XYZ({
             url: `/noaa-enc/tile/{z}/{x}/{y}.png?${localParams.toString()}`,
+            transition: 300,
+          }),
+        }),
+      });
+
+      // OSM vector underlay as its own tile layer, served from
+      // /noaa-enc/osm-tile/. Renders highways + buildings only; depth
+      // and chart features come from noaa-local on top. Defaults on,
+      // toggleable independently from noaa-local — Overpass cold fetches
+      // can be slow, so isolating it lets the chart keep painting at
+      // full speed and lets the user disable OSM if the latency hurts.
+      const osmTileParams = new URLSearchParams();
+      osmTileParams.set("v", tileGenVersion);
+      mapGlobal.layerOptions.push({
+        name: "osm-detail",
+        displayName: "streets",
+        on: true,
+        parent: "noaa-local",
+        layer: new TileLayer({
+          opacity: 1,
+          preload: 2,
+          zIndex: 4,
+          source: new XYZ({
+            url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
             transition: 300,
           }),
         }),

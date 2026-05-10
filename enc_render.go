@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
@@ -29,7 +30,7 @@ import (
 type ENCRenderer struct {
 	catalog *ENCCatalog
 	store   *ENCStore
-	osm     *OSMTileCache // optional; nil disables the OSM-underlay option
+	osm     *OSMTileCache // optional; nil disables the OSM-underlay tile layer
 	logger  logging.Logger
 
 	mu     sync.Mutex
@@ -61,9 +62,11 @@ func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger)
 	}
 }
 
-// SetOSMCache attaches an OSM tile cache so RenderTile can draw OSM raster
-// data as the underlay when RenderOptions.OSMUnderlay is set. Optional —
-// when nil, OSMUnderlay is silently a no-op.
+// SetOSMCache attaches an OSM raster tile cache. When set,
+// /noaa-enc/osm-tile/ fetches the corresponding tile.openstreetmap.org
+// PNG and rasterises it with water areas masked transparent (per the
+// chart's DEPARE polygons) so it composes cleanly under the chart
+// layer. Optional — when nil, the OSM tile endpoint serves blank.
 func (r *ENCRenderer) SetOSMCache(c *OSMTileCache) { r.osm = c }
 
 // chartFor returns the parsed chart for a cell, parsing once and reusing the
@@ -86,10 +89,15 @@ func (r *ENCRenderer) chartFor(name string) (*s57.Chart, error) {
 		return entry.chart, nil
 	}
 
+	parseStart := time.Now()
 	parser := s57.NewParser()
 	chart, err := parser.Parse(path)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if r.logger != nil {
+		r.logger.Infof("enc parse: cell=%s size=%d bytes feats=%d in %s",
+			name, info.Size(), len(chart.Features()), time.Since(parseStart).Round(time.Millisecond))
 	}
 
 	r.mu.Lock()
@@ -458,28 +466,24 @@ func ParseRenderStyle(s string) RenderStyle {
 // (z,x,y) coordinate. SkipNavaids drops buoys/beacons/lights/daymarks from
 // the tile so the frontend can render them as interactive vector features
 // in a separate OL layer. TransparentLand drops LNDARE/BUAARE/BUISGL fills
-// so whatever's underneath shows through where the chart says "land".
-// OSMUnderlay fetches the matching OSM tile and paints it as the chart
-// tile's background, so the rendered PNG already includes harbour
-// detail (roads, buildings, parks) without the frontend having to stack
-// two layers. Implies TransparentLand-equivalent behaviour for
-// LNDARE/BUAARE/BUISGL — those classes would otherwise overpaint the OSM
-// detail with a flat tan.
+// so whatever's underneath shows through where the chart says "land" —
+// e.g. an OSM raster basemap or our /noaa-enc/osm-tile vector layer.
+// SkipClasses is an arbitrary set of S-57 object classes to drop entirely
+// from the render — debug-only, lets us bisect "what's painting that
+// weird artefact" without chasing it through the styling logic.
 type RenderOptions struct {
 	SafeDepthM      float64
 	Style           RenderStyle
 	SkipNavaids     bool
 	TransparentLand bool
-	OSMUnderlay     bool
+	SkipClasses     map[string]bool
 }
 
 func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error) {
 	safeDepthM := opts.SafeDepthM
 	style := opts.Style
 	skipNavaids := opts.SkipNavaids
-	// OSMUnderlay implies transparent land — otherwise LNDARE/BUAARE/BUISGL
-	// would paint a flat tan over the OSM detail we just baked in.
-	transparentLand := opts.TransparentLand || (opts.OSMUnderlay && r.osm != nil)
+	transparentLand := opts.TransparentLand
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
@@ -537,28 +541,6 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// Transparent background so the OSM/seachart base layers below show through
 	// where we have no chart coverage.
 
-	// OSM raster underlay. Painted before any chart features so navaids,
-	// coastline and depth bands sit on top. Failure here is non-fatal —
-	// we just leave the chart background transparent and let the frontend
-	// basemap fill in (same behaviour as when OSMUnderlay is off).
-	//
-	// OSM's standard tiles render water in light blue (~#aad3df) — that
-	// would compete with our chart's depth bands and show through where
-	// our cells don't have DEPARE coverage. Strip it out before drawing,
-	// replacing water pixels with the chart's deep-water white so the
-	// composite always shows water in our scheme.
-	if opts.OSMUnderlay && r.osm != nil {
-		if osmBytes, err := r.osm.Fetch(context.Background(), z, x, y); err == nil {
-			if img, _, err := image.Decode(bytes.NewReader(osmBytes)); err == nil {
-				dc.DrawImage(stripOSMWater(img), 0, 0)
-			} else if r.logger != nil {
-				r.logger.Warnf("osm decode z=%d x=%d y=%d: %v", z, x, y, err)
-			}
-		} else if r.logger != nil {
-			r.logger.Warnf("osm fetch z=%d x=%d y=%d: %v", z, x, y, err)
-		}
-	}
-
 	project := func(lon, lat float64) (float64, float64) {
 		mx, my := lonLatToMerc(lon, lat)
 		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
@@ -569,13 +551,20 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
 	scale := zoomSymbolScale(z)
 
+	skipAll := opts.SkipClasses != nil && opts.SkipClasses["*"]
 	drawCell := func(chart *s57.Chart, pass drawPass) {
+		if skipAll {
+			return
+		}
 		for _, f := range chart.FeaturesInBounds(bbox) {
 			class := f.ObjectClass()
 			if skipNavaids && IsNavaidClass(class) {
 				continue
 			}
 			if transparentLand && isLandClass(class) {
+				continue
+			}
+			if opts.SkipClasses != nil && opts.SkipClasses[class] {
 				continue
 			}
 			drawFeature(dc, &f, pass, project, scale, safeDepthM, bbox, z, style)
@@ -588,7 +577,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// the regular passAreas below so they only paint from in-scale cells.
 	// Skipped entirely under TransparentLand — the basemap (OSM) is what
 	// the user wants to see for land in that mode.
-	if !transparentLand {
+	if !transparentLand && !skipAll {
 		for _, cell := range allCells {
 			chart, err := r.chartFor(cell.Name)
 			if err != nil || chart == nil {
@@ -599,6 +588,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 				switch class {
 				case "LNDARE", "BUAARE", "BUISGL":
 				default:
+					continue
+				}
+				if opts.SkipClasses != nil && opts.SkipClasses[class] {
 					continue
 				}
 				drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z, style)
@@ -632,7 +624,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// Berthing cells which the scale filter excludes until very high
 	// zoom. NOAA shows these channel lines at z=9 onward; without this
 	// pass we'd be missing the most navigationally-important feature.
-	if z >= 9 {
+	if z >= 9 && !skipAll {
 		raw := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
 		// Coarsest first so finest cell's feature wins.
 		sort.SliceStable(raw, func(i, j int) bool { return raw[i].CScale > raw[j].CScale })
@@ -648,6 +640,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 				default:
 					continue
 				}
+				if opts.SkipClasses != nil && opts.SkipClasses[class] {
+					continue
+				}
 				drawFeature(dc, &f, passLines, project, scale, safeDepthM, bbox, z, style)
 			}
 		}
@@ -659,7 +654,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// collision detection so a tile full of named marshes/coves doesn't
 	// turn into stacked unreadable text. Without this z=11 was painting
 	// 10+ overlapping labels per tile.
-	if z >= 10 {
+	if z >= 10 && !skipAll {
 		type labelCand struct {
 			name              string
 			px, py            float64
@@ -678,6 +673,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 				switch class {
 				case "LNDARE", "LNDRGN", "BUAARE", "SEAARE", "ADMARE", "BUISGL":
 				default:
+					continue
+				}
+				if opts.SkipClasses != nil && opts.SkipClasses[class] {
 					continue
 				}
 				v, ok := f.Attribute("OBJNAM")
@@ -771,6 +769,76 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, dc.Image()); err != nil {
 		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// RenderOSMTileDebugMask returns a magenta-tinted visualisation of the
+// chart-water mask alone — handy for confirming via /osm-tile?debug=mask
+// that the mask actually paints over the regions we expect.
+func (r *ENCRenderer) RenderOSMTileDebugMask(z, x, y int) ([]byte, error) {
+	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+	project := func(lon, lat float64) (float64, float64) {
+		mx, my := lonLatToMerc(lon, lat)
+		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
+		py := (tileYmax - my) / (tileYmax - tileYmin) * 256
+		return px, py
+	}
+	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+	dbg := renderOSMWaterMaskDebug(r, z, x, y, minLon, minLat, maxLon, maxLat, bbox, project)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dbg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// RenderOSMTile draws ONLY the OSM vector underlay (highways + buildings)
+// for the given XYZ tile, on a transparent background. Used by the
+// stand-alone /noaa-enc/osm-tile/ endpoint so the frontend can layer it
+// independently from the chart tile and toggle it without re-rendering
+// the chart. Returns a 1x1 transparent PNG when no Overpass cache is
+// configured, so the layer composes cleanly even when OSM data is
+// unavailable.
+func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, error) {
+	t0 := time.Now()
+	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+
+	dc := gg.NewContext(256, 256)
+	if r.osm != nil {
+		// Fetch the OSM raster for this tile.
+		osmBytes, err := r.osm.Fetch(context.Background(), z, x, y)
+		if err == nil {
+			img, _, decodeErr := image.Decode(bytes.NewReader(osmBytes))
+			if decodeErr == nil {
+				project := func(lon, lat float64) (float64, float64) {
+					mx, my := lonLatToMerc(lon, lat)
+					px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
+					py := (tileYmax - my) / (tileYmax - tileYmin) * 256
+					return px, py
+				}
+				bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+				masked := maskOSMWater(img, r, z, x, y, minLon, minLat, maxLon, maxLat, bbox, project)
+				dc.DrawImage(masked, 0, 0)
+			} else if r.logger != nil {
+				r.logger.Warnf("osm-tile decode z=%d x=%d y=%d: %v", z, x, y, decodeErr)
+			}
+		} else if r.logger != nil {
+			r.logger.Warnf("osm-tile fetch z=%d x=%d y=%d: %v", z, x, y, err)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dc.Image()); err != nil {
+		return nil, err
+	}
+	if r.logger != nil && time.Since(t0) > 200*time.Millisecond {
+		r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes)",
+			z, x, y, time.Since(t0).Round(time.Millisecond), buf.Len())
 	}
 	return buf.Bytes(), nil
 }
@@ -913,6 +981,162 @@ func tracePolygonPath(dc *gg.Context, coords [][]float64, project func(lon, lat 
 		}
 		dc.ClosePath()
 	}
+}
+
+// buildOSMWaterMask rasterises a binary water mask: opaque-black pixels
+// where the chart calls "water", transparent elsewhere. Uses ALL
+// overlapping cells (regardless of compilation scale) for both passes so
+// we never miss DEPARE coverage just because the cell falls outside the
+// chart's scale-render window — e.g. at z=14 the 1:12k Harbor cells that
+// carry detailed mid-Hudson DEPARE polygons sit just below the chart's
+// scale floor and would otherwise leave a hole in the mask.
+//
+// Two passes:
+//  1. Paint DEPARE / DRGARE / LOKBSN polygons opaque (water).
+//  2. Subtract LNDARE / BUAARE / BUISGL polygons (land) so overview-cell
+//     DEPARE polygons with imprecise hole rings (a known offender at the
+//     southern tip of Manhattan) can't accidentally mask out actual land.
+//
+// Returns the mask image plus per-pass polygon counts for logging.
+func buildOSMWaterMask(
+	r *ENCRenderer,
+	minLon, minLat, maxLon, maxLat float64,
+	bbox s57.Bounds,
+	project func(lon, lat float64) (float64, float64),
+) (image.Image, int, int) {
+	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+
+	// We compose two binary alpha images then combine pixel-wise:
+	//   final = water AND NOT land
+	// gg doesn't expose a "destination-out" composite op, so we paint
+	// each pass to its own context and merge in a small loop.
+	waterCtx := gg.NewContext(256, 256)
+	waterCtx.SetColor(color.RGBA{0, 0, 0, 0})
+	waterCtx.Clear()
+	waterCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
+
+	landCtx := gg.NewContext(256, 256)
+	landCtx.SetColor(color.RGBA{0, 0, 0, 0})
+	landCtx.Clear()
+	landCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
+
+	waterPolys, landPolys := 0, 0
+	for _, cell := range cells {
+		chart, err := r.chartFor(cell.Name)
+		if err != nil || chart == nil {
+			continue
+		}
+		for _, f := range chart.FeaturesInBounds(bbox) {
+			class := f.ObjectClass()
+			geom := f.Geometry()
+			if geom.Type != s57.GeometryTypePolygon {
+				continue
+			}
+			if isOversizedPolygon(geom.Coordinates, bbox, 200) {
+				continue
+			}
+			if isDegeneratePixelPolygon(geom.Coordinates, project) {
+				continue
+			}
+			switch class {
+			case "DEPARE", "DRGARE", "LOKBSN":
+				tracePolygonPath(waterCtx, geom.Coordinates, project)
+				waterCtx.SetFillRuleEvenOdd()
+				waterCtx.Fill()
+				waterPolys++
+			case "LNDARE", "BUAARE", "BUISGL":
+				tracePolygonPath(landCtx, geom.Coordinates, project)
+				landCtx.SetFillRuleEvenOdd()
+				landCtx.Fill()
+				landPolys++
+			}
+		}
+	}
+
+	// Compose: pixel is water iff waterCtx is opaque AND landCtx is
+	// transparent at that point.
+	water := waterCtx.Image()
+	land := landCtx.Image()
+	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+	for py := 0; py < 256; py++ {
+		for px := 0; px < 256; px++ {
+			_, _, _, wa := water.At(px, py).RGBA()
+			if wa == 0 {
+				continue
+			}
+			_, _, _, la := land.At(px, py).RGBA()
+			if la > 0 {
+				continue // land wins
+			}
+			out.SetNRGBA(px, py, color.NRGBA{R: 0, G: 0, B: 0, A: 0xFF})
+		}
+	}
+	return out, waterPolys, landPolys
+}
+
+// maskOSMWater returns a copy of `src` with pixels covered by the chart's
+// water polygons made fully transparent. The result composes cleanly
+// under our chart layer.
+func maskOSMWater(
+	src image.Image,
+	r *ENCRenderer,
+	z, x, y int,
+	minLon, minLat, maxLon, maxLat float64,
+	bbox s57.Bounds,
+	project func(lon, lat float64) (float64, float64),
+) image.Image {
+	mask, waterPolys, landPolys := buildOSMWaterMask(r, minLon, minLat, maxLon, maxLat, bbox, project)
+	if r.logger != nil {
+		r.logger.Infof("osm-tile mask: z=%d x=%d y=%d water=%d land=%d", z, x, y, waterPolys, landPolys)
+	}
+	bounds := src.Bounds()
+	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+	for py := 0; py < 256; py++ {
+		for px := 0; px < 256; px++ {
+			_, _, _, ma := mask.At(px, py).RGBA()
+			if ma > 0 {
+				// Water pixel — leave fully transparent.
+				continue
+			}
+			sx := bounds.Min.X + px
+			sy := bounds.Min.Y + py
+			r8, g8, b8, a8 := src.At(sx, sy).RGBA()
+			out.SetNRGBA(px, py, color.NRGBA{
+				R: uint8(r8 >> 8),
+				G: uint8(g8 >> 8),
+				B: uint8(b8 >> 8),
+				A: uint8(a8 >> 8),
+			})
+		}
+	}
+	return out
+}
+
+// renderOSMWaterMaskDebug returns a debug PNG showing the water mask
+// directly: bright magenta where the mask is set (water), transparent
+// elsewhere. Hit /noaa-enc/osm-tile/{z}/{x}/{y}.png?debug=mask to see
+// exactly which pixels the mask is wiping.
+func renderOSMWaterMaskDebug(
+	r *ENCRenderer,
+	z, x, y int,
+	minLon, minLat, maxLon, maxLat float64,
+	bbox s57.Bounds,
+	project func(lon, lat float64) (float64, float64),
+) image.Image {
+	mask, waterPolys, landPolys := buildOSMWaterMask(r, minLon, minLat, maxLon, maxLat, bbox, project)
+	if r.logger != nil {
+		r.logger.Infof("osm-tile mask DEBUG: z=%d x=%d y=%d water=%d land=%d", z, x, y, waterPolys, landPolys)
+	}
+	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+	for py := 0; py < 256; py++ {
+		for px := 0; px < 256; px++ {
+			_, _, _, ma := mask.At(px, py).RGBA()
+			if ma > 0 {
+				out.SetNRGBA(px, py, color.NRGBA{R: 0xFF, G: 0x00, B: 0xFF, A: 0xC0})
+			}
+		}
+	}
+	return out
 }
 
 // isOversizedPolygon returns true if the polygon's lon/lat bbox is more than
@@ -1168,14 +1392,14 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		return
 	}
 
-	// Place-name labels for major area features. Done before the geometry
-	// switch because the polygon path returns early on the points pass —
-	// labels live conceptually in the points pass even though the feature
-	// itself is a polygon.
-	if pass == passPoints && z >= 13 {
+	// Place-name labels for major area features are handled by the
+	// tile-level dedup pass in RenderTile (z≥10), which picks the best
+	// instance per name across all overlapping cells. We used to also
+	// paint them per-cell here at z≥13, but that double-rendered every
+	// label once that dedup pass kicked in.
+	if pass == passPoints {
 		switch class {
 		case "LNDARE", "LNDRGN", "BUAARE", "SEAARE", "ADMARE", "BUISGL":
-			drawAreaLabel(dc, f, project, scale, tileBbox, z)
 			return
 		}
 	}
@@ -1364,63 +1588,6 @@ func drawLightLabel(dc *gg.Context, f *s57.Feature, px, py, scale float64) {
 	dc.Pop()
 }
 
-// drawAreaLabel paints OBJNAM at the polygon centroid in chart black, but
-// only if the polygon is small enough that a single tile-centred label makes
-// sense (a continent-sized polygon's centroid is meaningless for a tile) and
-// the centroid lands well inside the tile so the text isn't half-cut.
-//
-// At low zoom (z <= 12) the label is rendered at a bumped font scale so
-// place names actually read at overview — a 7-px font on a 256-px tile that
-// covers ~30 nm of coast is unreadable, and the user is looking at the
-// chart specifically to find named features.
-func drawAreaLabel(dc *gg.Context, f *s57.Feature, project func(lon, lat float64) (float64, float64), scale float64, tileBbox s57.Bounds, z int) {
-	v, ok := f.Attribute("OBJNAM")
-	if !ok {
-		return
-	}
-	name, _ := v.(string)
-	if name == "" {
-		return
-	}
-	geom := f.Geometry()
-	if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
-		return
-	}
-	// Skip polygons whose own bbox is much bigger than the tile — the
-	// centroid is somewhere far away and the label would either render off
-	// this tile or end up where it doesn't make sense.
-	if isOversizedPolygon(geom.Coordinates, tileBbox, 4) {
-		return
-	}
-	cx, cy := polygonCentroid(geom.Coordinates)
-	px, py := project(cx, cy)
-	dc.SetFontFace(basicfont.Face7x13)
-	// Boost label scale at low zoom — base `scale` is 1.0 at z<14, which
-	// puts a 7-px label on tiles that cover huge geographic extents and
-	// makes them invisible. Tighten back to 1.0 at chart-detail zooms.
-	labelScale := scale
-	switch {
-	case z <= 10:
-		labelScale = scale * 1.7
-	case z == 11:
-		labelScale = scale * 1.5
-	case z == 12:
-		labelScale = scale * 1.25
-	}
-	// Rough text-width estimate so a label doesn't run past the tile edge:
-	// 7 px per char in the basicfont, then scaled.
-	labelHalfW := float64(len(name)) * 7 * labelScale / 2
-	const halfH = 6.5
-	if px-labelHalfW < 2 || px+labelHalfW > 254 || py-halfH*labelScale < 2 || py+halfH*labelScale > 254 {
-		return
-	}
-	dc.SetColor(s52CHBLK)
-	dc.Push()
-	dc.ScaleAbout(labelScale, labelScale, px, py)
-	dc.DrawStringAnchored(name, px, py, 0.5, 0.5)
-	dc.Pop()
-}
-
 // drawContourLabel paints the depth value on a DEPCNT line at the line's
 // arc-length midpoint, in feet, in the contour stroke color. Short-fragment
 // guard skips labeling tiny pieces that would just clutter the tile, but
@@ -1601,8 +1768,12 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 	case "LOKBSN":
 		return s52DEPVS
 	case "UNSARE":
-		// Unsurveyed area: pale grey, mostly transparent.
-		return color.RGBA{0xE0, 0xE0, 0xE0, 0xC0}
+		// Unsurveyed area: pale grey, mostly transparent. Use NRGBA
+		// (non-premultiplied) because color.RGBA is alpha-premultiplied
+		// and 0xE0 > 0xC0 would be an invalid premultiplied value —
+		// gg's blender renders that as black when multiple polygons
+		// stack (e.g. dense harbour-cell UNSARE in NY harbor).
+		return color.NRGBA{0xE0, 0xE0, 0xE0, 0xC0}
 	}
 	return nil
 }
@@ -2244,44 +2415,3 @@ func lonLatToMerc(lon, lat float64) (x, y float64) {
 	return
 }
 
-// stripOSMWater rebuilds the input image with water-coloured pixels swapped
-// out for chart deep-water white. OSM's standard tiles paint water in a
-// narrow blue range — sea/ocean ~#aad3df, rivers/lakes very close to the
-// same — so a Euclidean colour-distance check around that anchor catches
-// most water without nuking unrelated light-blue features. Coastline edges
-// (anti-aliased darker pixels) and built-up labels fall outside the
-// threshold and are preserved.
-//
-// Replacement colour matches s52DEPDW so even areas where our chart has no
-// DEPARE polygon read as "deep water" rather than transparent gaps.
-func stripOSMWater(src image.Image) *image.RGBA {
-	bounds := src.Bounds()
-	out := image.NewRGBA(bounds)
-	const (
-		// OSM's standard layer water hue. Sampled from a current
-		// tile.openstreetmap.org tile in open ocean.
-		waterR, waterG, waterB = 0xAA, 0xD3, 0xDF
-		// Squared-distance threshold. Chosen empirically: catches sea +
-		// river/lake variants without consuming light-blue UI features
-		// (route lines, etc.) that may live in an OSM tile. Loose enough
-		// to swallow the anti-aliased water-side of a coastline pixel,
-		// tight enough to leave the darker land-side intact.
-		threshSq = 50 * 50
-	)
-	white := color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			r, g, b, a := src.At(x, y).RGBA()
-			r8, g8, b8, a8 := uint8(r>>8), uint8(g>>8), uint8(b>>8), uint8(a>>8)
-			dr := int(r8) - waterR
-			dg := int(g8) - waterG
-			db := int(b8) - waterB
-			if dr*dr+dg*dg+db*db < threshSq {
-				out.SetRGBA(x, y, white)
-				continue
-			}
-			out.SetRGBA(x, y, color.RGBA{r8, g8, b8, a8})
-		}
-	}
-	return out
-}

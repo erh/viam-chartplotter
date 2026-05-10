@@ -107,10 +107,12 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	// Optional OSM raster underlay. Cached to disk under the same root as
-	// the ENC store so a single bbox prefetch warms both. Initialisation
-	// failure is non-fatal — RenderTile silently skips OSM when the cache
-	// is nil, so chart rendering still works.
+	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, safeDepthFt)
+	// OSM raster tile cache for the /noaa-enc/osm-tile/ endpoint. We
+	// fetch tile.openstreetmap.org PNGs and mask out water (per the
+	// chart's DEPARE polygons) so OSM's water labels and tones don't
+	// fight with our chart's depth bands. Disk-cached so each (z,x,y)
+	// is fetched at most once per cache lifetime.
 	osmCache, err := NewOSMTileCache(filepath.Join(root, "osm"), "", logger.Sublogger("osmCache"))
 	if err != nil {
 		logger.Warnf("osm cache disabled: %v", err)
@@ -118,7 +120,7 @@ func StartChartplotterServer(
 		encRenderer.SetOSMCache(osmCache)
 		logger.Infof("osm tile cache: %s", osmCache.cacheDir)
 	}
-	NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, safeDepthFt).Register(mux)
+	encHandlers.Register(mux)
 	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
 
 	// Per-process instance ID. The frontend polls /version and reloads when it
