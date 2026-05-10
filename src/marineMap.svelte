@@ -2743,6 +2743,15 @@
     const myBoatPopupForceTrack =
       popupState.visible && popupState.content.isMyBoat;
 
+    // noaa-local already paints OSM detail under its chart (osm-detail child
+     // layer) — the global OSM base layer underneath is redundant and bleeds
+     // through where noaa-local has transparent water/land. Suppress it
+     // whenever noaa-local is on.
+    const noaaLocalLayer = mapGlobal.layerOptions.find(
+      (p) => p.name === "noaa-local",
+    );
+    const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
+
     for (var l of mapGlobal.layerOptions) {
       var idx = findOnLayerIndexOfName(l.name);
 
@@ -2754,8 +2763,12 @@
         (l.name === "ais-track" && aisPopupForceTrack) ||
         (l.name === "track" && myBoatPopupForceTrack);
 
+      const suppressedByNoaaLocal =
+        l.name === "open street map" && noaaLocalOn;
+
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      const shouldBeVisible = (l.on || popupForcesOn) && !isParentOff;
+      const shouldBeVisible =
+        (l.on || popupForcesOn) && !isParentOff && !suppressedByNoaaLocal;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -4041,12 +4054,17 @@
   {/if}
 
   <div class="layer-controls">
+    {@const noaaLocalActive = !!mapGlobal.layerOptions.find(
+      (p) => p.name === "noaa-local" && p.on,
+    )}
     {#each mapGlobal.layerOptions as l, idx}
       {@const parentLayer = l.parent
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {@const isHidden =
+        (l.name === "airstream" && !airstreamConfigured) ||
+        (l.name === "open street map" && noaaLocalActive)}
       {#if !isHidden}
       <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
