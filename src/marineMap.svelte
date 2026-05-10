@@ -92,6 +92,18 @@
   let myBoatImageNaturalWidth = $state<number | null>(null);
   let myBoatImageNaturalHeight = $state<number | null>(null);
 
+  // Base maps are mutually exclusive — only one can be active at a time.
+  // The layer panel renders these (and their children) above a divider as
+  // radio buttons; everything else (boat, ais, airstream + their children)
+  // renders below as independent checkboxes.
+  const BASE_LAYER_NAMES = ["open street map", "noaa", "noaa-local", "noaa-ecdis"];
+  function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
+    return (
+      BASE_LAYER_NAMES.includes(l.name) ||
+      (!!l.parent && BASE_LAYER_NAMES.includes(l.parent))
+    );
+  }
+
   let popupState = $state({
     overlay: null as Overlay | null,
     visible: false,
@@ -4054,36 +4066,74 @@
   {/if}
 
   <div class="layer-controls">
-    {@const noaaLocalActive = !!mapGlobal.layerOptions.find(
-      (p) => p.name === "noaa-local" && p.on,
-    )}
+    <!--
+      Layers are split into two groups:
+        1. Base maps (open street map / noaa / noaa-local / noaa-ecdis)
+           and their children — mutually exclusive radio buttons. Picking
+           one auto-disables the others so we never paint two raster
+           bases on top of each other.
+        2. Overlays (boat / ais / airstream) and their children —
+           independent checkboxes that ride on top of whichever base
+           map is selected.
+      The two groups are separated by a horizontal divider.
+      BASE_LAYER_NAMES / isBaseLayerGroup are defined in the script.
+    -->
     {#each mapGlobal.layerOptions as l, idx}
       {@const parentLayer = l.parent
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      {@const isHidden =
-        (l.name === "airstream" && !airstreamConfigured) ||
-        (l.name === "open street map" && noaaLocalActive)}
-      {#if !isHidden}
+      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {@const isBaseLayer = BASE_LAYER_NAMES.includes(l.name)}
+      {#if !isHidden && isBaseLayerGroup(l)}
+      <label class:child-layer={l.parent} class:disabled={isParentOff}>
+        <input
+          type={isBaseLayer ? "radio" : "checkbox"}
+          name={isBaseLayer ? "base-layer" : undefined}
+          checked={mapGlobal.layerOptions[idx].on}
+          onchange={(e) => {
+            const checked = (e.currentTarget as HTMLInputElement).checked;
+            mapGlobal.layerOptions[idx].on = checked;
+            // Radio behaviour for base layers: turning one on flips
+            // every other base layer off so we never have two
+            // simultaneously selected.
+            if (isBaseLayer && checked) {
+              for (var other of mapGlobal.layerOptions) {
+                if (other.name !== l.name && BASE_LAYER_NAMES.includes(other.name)) {
+                  other.on = false;
+                }
+              }
+            }
+            saveLayerStates();
+            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
+              lastNoaaPrefetchKey = "";
+              maybePrefetchNoaaTiles();
+            }
+          }}
+          disabled={isParentOff}
+        />
+        {l.displayName || l.name}
+      </label>
+      {/if}
+    {/each}
+
+    <hr class="layer-divider" />
+
+    {#each mapGlobal.layerOptions as l, idx}
+      {@const parentLayer = l.parent
+        ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
+        : null}
+      {@const isParentOff = parentLayer && !parentLayer.on}
+      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {#if !isHidden && !isBaseLayerGroup(l)}
       <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
           type="checkbox"
           checked={mapGlobal.layerOptions[idx].on}
           onchange={(e) => {
-            // Explicit assignment instead of bind:checked so saveLayerStates()
-            // sees the new value synchronously — Svelte 5's bind/onchange
-            // ordering would otherwise save the previous click's state.
             const checked = (e.currentTarget as HTMLInputElement).checked;
             mapGlobal.layerOptions[idx].on = checked;
             saveLayerStates();
-            // When the local-NOAA layer is enabled, force a prefetch for the
-            // current viewport — otherwise the user has to pan before any
-            // cells are downloaded.
-            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
-              lastNoaaPrefetchKey = "";
-              maybePrefetchNoaaTiles();
-            }
             if (l.name === "airstream") {
               if (checked) {
                 lastAirstreamBboxKey = "";
@@ -5072,6 +5122,12 @@
     padding: 3px 0;
     cursor: pointer;
     white-space: nowrap;
+  }
+
+  .layer-controls > .layer-divider {
+    border: 0;
+    border-top: 1px solid #ccc;
+    margin: 6px 0;
   }
 
   .layer-controls > label.child-layer {
