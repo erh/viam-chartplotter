@@ -1024,12 +1024,25 @@
   }
 
   async function getDataViaMQL(dc, g, startTime, shortRange) {
+    // Gauges from remote parts come through with a "<remote>:<name>" form.
+    // The TabularData rows are keyed by the leaf component_name and the
+    // remote part's own location/robot/org, not the host robot's — so resolve
+    // those the same way positionHistoryMQLNamed does.
+    var name = g.split(":");
+    var orgId = globalClientCloudMetaData.primaryOrgId;
     var match = {
       location_id: globalClientCloudMetaData.locationId,
       robot_id: globalClientCloudMetaData.machineId,
-      component_name: g,
+      component_name: name[name.length - 1],
       time_received: { $gte: startTime },
     };
+
+    var compStatus = findComponentStatus(g);
+    if (compStatus) {
+      match.location_id = compStatus.locationId;
+      match.robot_id = compStatus.machineId;
+      orgId = compStatus.primaryOrgId;
+    }
 
     var minuteExpr;
     var limit;
@@ -1072,7 +1085,7 @@
       BSON.serialize({ $sort: { ts: 1 } }),
     ];
 
-    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, true);
+    var data = await dc.tabularDataByMQL(orgId, query, true);
 
     return data;
   }
@@ -1179,12 +1192,20 @@
   async function depthHistoryMQL(dc, startTime) {
     var name = globalConfig.depthSensorName.split(":");
 
+    var orgId = globalClientCloudMetaData.primaryOrgId;
     var match = {
       location_id: globalClientCloudMetaData.locationId,
       robot_id: globalClientCloudMetaData.machineId,
       component_name: name[name.length - 1],
       time_received: { $gte: startTime },
     };
+
+    var compStatus = findComponentStatus(globalConfig.depthSensorName);
+    if (compStatus) {
+      match.location_id = compStatus.locationId;
+      match.robot_id = compStatus.machineId;
+      orgId = compStatus.primaryOrgId;
+    }
 
     var group = {
       _id: {
@@ -1211,7 +1232,7 @@
       BSON.serialize({ $sort: { ts: -1 } }),
     ];
 
-    var data = await dc.tabularDataByMQL(globalClientCloudMetaData.primaryOrgId, query, false);
+    var data = await dc.tabularDataByMQL(orgId, query, false);
     console.log(
       "got " +
         data.length +
