@@ -34,7 +34,10 @@
     name: string;
     displayName?: string; // Optional display name for UI (defaults to name)
     on: boolean;
-    layer: TileLayer<any> | Vector<any>;
+    // Optional: virtual entries (e.g. ais-projection) appear in the
+    // layers panel as toggles but don't correspond to a real OL layer —
+    // their style is rendered inline by another layer's style function.
+    layer?: TileLayer<any> | Vector<any>;
     parent?: string; // Parent layer name for hierarchical layers
   }
 
@@ -161,6 +164,7 @@
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
+  const COOKIE_AIS_PROJECTION_MIN = "mapAisProjectionMin";
   const COOKIE_BOAT_POSITION = "mapBoatPosition";
   const COOKIE_AUTO_ZOOM = "mapAutoZoom";
   const COOKIE_VIEW_ZOOM = "mapViewZoom";
@@ -178,6 +182,7 @@
   }
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
+  const AIS_PROJECTION_OPTIONS = [1, 2, 5, 10];
 
   // Cache-busting tile version. Appended as a `v=` query param on every tile
   // URL. Default is the build-time git short hash (injected by Vite via the
@@ -230,6 +235,21 @@
     headingLineLengthNm = nm;
     setCookie(COOKIE_HEADING_LINE_LENGTH, String(nm), COOKIE_OPTS);
     updateHeadingLine();
+  }
+
+  function loadAisProjectionMin(): number {
+    var raw = getCookie(COOKIE_AIS_PROJECTION_MIN);
+    var parsed = raw ? Number(raw) : NaN;
+    return AIS_PROJECTION_OPTIONS.includes(parsed) ? parsed : 2;
+  }
+  let aisProjectionMinutes = $state(loadAisProjectionMin());
+
+  function setAisProjectionMinutes(min: number) {
+    aisProjectionMinutes = min;
+    setCookie(COOKIE_AIS_PROJECTION_MIN, String(min), COOKIE_OPTS);
+    // Force the AIS layer to redraw so the new projection length takes
+    // effect immediately. OL caches feature renders until told otherwise.
+    mapGlobal.aisLayer?.changed();
   }
 
   function loadSavedLayerStates(): Record<string, boolean> {
@@ -675,13 +695,19 @@
   // Sync layer visibility when layer options change
   $effect(() => {
     // Read all layer states to create dependencies
-    mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
+    const states = mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
     // Re-run when the popup opens/closes on an AIS boat — that case force-
     // shows the AIS-track layer (see updateOnLayers) so the selected boat's
     // history appears even with the user's track toggle off.
     const _popupVisible = popupState.visible;
     const _popupMmsi = popupState.content.mmsi;
     const _popupIsMyBoat = popupState.content.isMyBoat;
+    // Re-render AIS when its projection-line toggle flips. ais-projection
+    // is a virtual layer (no OL layer attached) — toggling it doesn't
+    // hit updateOnLayers' add/remove path, so we have to nudge the AIS
+    // layer ourselves so its style function is re-evaluated.
+    void states.find((s) => s.name === "ais-projection")?.on;
+    mapGlobal.aisLayer?.changed();
 
     updateOnLayers();
   });
@@ -708,6 +734,7 @@
 
     // Track layer references for refreshing styles
     trackLayer: null as Vector<any> | null,
+    aisLayer: null as Vector<any> | null,
     aisTrackLayer: null as Vector<any> | null,
     navaidLayer: null as Vector<any> | null,
 
@@ -1443,22 +1470,25 @@
     ];
 
     if (cog != null && Number.isFinite(cog) && speed != null && speed > 1) {
-      const geom = feature.getGeometry();
-      if (geom && geom.getType() === "Point") {
-        const start = (geom as Point).getCoordinates();
-        const distMeters = speed * 1852 * (2 / 60); // 2 minutes at speed in knots
-        const bearingRad = (cog * Math.PI) / 180;
-        const tip = sphereOffset(start, distMeters, bearingRad);
-        styles.push(
-          new Style({
-            geometry: new LineString([start, tip]),
-            stroke: new Stroke({
-              color: "#1e6fff",
-              width: 2,
-              lineDash: [4, 4],
-            }),
-          })
-        );
+      const projOption = mapGlobal.layerOptions.find((l) => l.name === "ais-projection");
+      if (projOption?.on) {
+        const geom = feature.getGeometry();
+        if (geom && geom.getType() === "Point") {
+          const start = (geom as Point).getCoordinates();
+          const distMeters = speed * 1852 * (aisProjectionMinutes / 60);
+          const bearingRad = (cog * Math.PI) / 180;
+          const tip = sphereOffset(start, distMeters, bearingRad);
+          styles.push(
+            new Style({
+              geometry: new LineString([start, tip]),
+              stroke: new Stroke({
+                color: "#1e6fff",
+                width: 2,
+                lineDash: [4, 4],
+              }),
+            })
+          );
+        }
       }
     }
 
@@ -2578,6 +2608,7 @@
       style: aisStyleFunction,
       zIndex: 100,
     });
+    mapGlobal.aisLayer = aisLayer;
 
     mapGlobal.layerOptions.push({
       name: "ais",
@@ -2591,6 +2622,17 @@
       displayName: "track",
       on: defaultAisVisible,
       layer: aisTrackLayer,
+      parent: "ais",
+    });
+
+    // ais-projection: virtual sub-layer (no real OL layer). The
+    // projection line is drawn inline by aisStyleFunction; this
+    // toggle just gates that draw and the dropdown next to it picks
+    // the projection length in minutes.
+    mapGlobal.layerOptions.push({
+      name: "ais-projection",
+      displayName: "projection line",
+      on: true,
       parent: "ais",
     });
 
@@ -2765,6 +2807,12 @@
     const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
 
     for (var l of mapGlobal.layerOptions) {
+      // Virtual layers (no `layer` field, e.g. ais-projection) are
+      // gated by the parent's style function and never added to the
+      // map directly. When their toggle changes the parent layer
+      // re-renders via the $effect below.
+      if (!l.layer) continue;
+
       var idx = findOnLayerIndexOfName(l.name);
 
       // Check if parent layer exists and is off
@@ -4158,6 +4206,19 @@
           >
             {#each HEADING_LINE_LENGTH_OPTIONS as nm}
               <option value={nm}>{nm} nm</option>
+            {/each}
+          </select>
+        {:else if l.name === "ais-projection"}
+          <select
+            class="heading-line-length"
+            value={aisProjectionMinutes}
+            onchange={(e) => setAisProjectionMinutes(Number(e.currentTarget.value))}
+            disabled={isParentOff || !l.on}
+            onclick={(e) => e.stopPropagation()}
+            aria-label="ais projection length in minutes"
+          >
+            {#each AIS_PROJECTION_OPTIONS as min}
+              <option value={min}>{min} min</option>
             {/each}
           </select>
         {/if}
