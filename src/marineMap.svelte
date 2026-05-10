@@ -27,7 +27,6 @@
   import MouseWheelZoom from "ol/interaction/MouseWheelZoom.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
-  import type { TileCoord } from "ol/tilecoord";
 
   interface LayerOption {
     name: string;
@@ -1465,25 +1464,6 @@
     });
   }
 
-  function getTileUrlFunction(
-    url: string,
-    type: string,
-    coordinates: TileCoord
-  ): string | undefined {
-    var x = coordinates[1];
-    var y = coordinates[2];
-    var z = coordinates[0];
-    var limit = Math.pow(2, z);
-    if (y < 0 || y >= limit) {
-      return undefined;
-    } else {
-      x = ((x % limit) + limit) % limit;
-
-      var path = z + "/" + x + "/" + y + "." + type;
-      return url + path;
-    }
-  }
-
   function toggleMeasure() {
     if (measureActive) {
       stopMeasure();
@@ -1894,48 +1874,6 @@
           url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
           transition: 250, // Faster fade-in
         }),
-      }),
-    });
-
-    // depth data
-    mapGlobal.layerOptions.push({
-      name: "depth",
-      on: false,
-      layer: new TileLayer({
-        opacity: 0.7,
-        preload: 2,
-        zIndex: 2,
-        source: new TileWMS({
-          url: "https://geoserver.openseamap.org/geoserver/gwc/service/wms",
-          params: { LAYERS: "gebco2021:gebco_2021", VERSION: "1.1.1" },
-          serverType: "geoserver",
-          hidpi: false,
-          transition: 300,
-        }),
-      }),
-    });
-
-    // harbors
-    mapGlobal.layerOptions.push({
-      name: "seamark",
-      on: false,
-      layer: new TileLayer({
-        visible: true,
-        maxZoom: 19,
-        preload: 2,
-        zIndex: 3,
-        source: new XYZ({
-          tileUrlFunction: function (coordinate) {
-            return getTileUrlFunction("https://tiles.openseamap.org/seamark/", "png", coordinate);
-          },
-          transition: 300,
-        }),
-        properties: {
-          name: "seamarks",
-          layerId: 3,
-          cookieKey: "SeamarkLayerVisible",
-          checkboxId: "checkLayerSeamark",
-        },
       }),
     });
 
