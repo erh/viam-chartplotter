@@ -1,0 +1,35 @@
+{
+  "comment": "False positive from real run: boat got within 180 m of the active waypoint, never reached the 50 m arrival radius, then turned away (now 317 m out). The following waypoint distance dropped only 0.5 m (1104.7 → 1104.2) — that's GPS jitter, not rounding the corner. The bypass rule shouldn't fire on a sub-meter following-distance improvement.",
+  "input": {
+    "boat_lat": 40.746861599999995,
+    "boat_lng": -74.0096616,
+    "waypoint_id": "6a00c497d486ad97491106f6",
+    "waypoint_lat": 40.74720449721812,
+    "waypoint_lng": -74.01340386155839,
+    "has_following": true,
+    "following_waypoint_id": "6a00bd8cae880abe29f3d65e",
+    "following_waypoint_lat": 40.73850393163812,
+    "following_waypoint_lng": -74.01674011421564
+  },
+  "prev_state": {
+    "waypoint_id": "6a00c497d486ad97491106f6",
+    "following_waypoint_id": "6a00bd8cae880abe29f3d65e",
+    "min_distance_to_waypoint": 180.94651696023755,
+    "min_distance_to_following_waypoint": 1104.7458608550264,
+    "max_distance_to_following_waypoint": 1104.7458608550264
+  },
+  "decision": {
+    "arrived": true,
+    "reason": "passed (moved away from current + new min to following)",
+    "distance_to_waypoint": 317.5497495460138,
+    "distance_to_following_waypoint": 1104.209027586252,
+    "new_state": {
+      "waypoint_id": "6a00c497d486ad97491106f6",
+      "following_waypoint_id": "6a00bd8cae880abe29f3d65e",
+      "min_distance_to_waypoint": 180.94651696023755,
+      "min_distance_to_following_waypoint": 1104.209027586252,
+      "max_distance_to_following_waypoint": 1104.7458608550264
+    }
+  },
+  "expected_arrived": false
+}

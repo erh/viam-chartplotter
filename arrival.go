@@ -133,7 +133,7 @@ func decideArrival(in ArrivalInput, prev ArrivalState) ArrivalDecision {
 		switch {
 		case distanceToWaypoint < nearWaypointMeters &&
 			distanceToWaypoint > state.MinDistanceToWaypoint &&
-			distanceToFollowing < prevMinFollowing:
+			distanceToFollowing+followingClosingMarginMeters < prevMinFollowing:
 			arrived = true
 			reason = "passed (moved away from current + new min to following)"
 		case distanceToWaypoint > state.MinDistanceToWaypoint*lastWaypointPassFactor &&

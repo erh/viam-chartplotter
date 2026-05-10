@@ -85,6 +85,14 @@ const lastWaypointPassFactor = 2.5
 // nearWaypointMeters.
 const followingWaypointApproachMeters = 500.0
 
+// followingClosingMarginMeters is how much the distance to the following
+// waypoint must drop below its previous minimum for the near-bypass rule
+// to count as "closing on the following waypoint". Without a margin, any
+// sub-meter improvement (typical GPS jitter) trips the rule, which we've
+// seen produce false-positive arrivals when the boat got near the active
+// waypoint but turned away without rounding the corner.
+const followingClosingMarginMeters = 50.0
+
 // arrivalLogInterval throttles the periodic "where are we relative to the
 // next waypoint" log line. Logs once per interval at info level when the
 // boat is within arrivalLogProximityMeters of the next waypoint, so an
