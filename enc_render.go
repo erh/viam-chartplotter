@@ -1697,7 +1697,6 @@ var (
 
 	// Land + coast.
 	s52LANDA = color.RGBA{0xF4, 0xE8, 0xC1, 0xFF} // land area (warm pale yellow)
-	s52LANDF = color.RGBA{0xB7, 0xAE, 0x90, 0xFF} // land features (darker tan)
 	s52CSTLN = color.RGBA{0x00, 0x00, 0x00, 0xFF} // coastline (black)
 
 	// Generic chart colours.
@@ -1709,7 +1708,6 @@ var (
 	s52CHGRN = color.RGBA{0x14, 0xB4, 0x14, 0xFF}
 	s52CHYLW = color.RGBA{0xEF, 0xE7, 0x39, 0xFF} // bright chart yellow (navaid accents)
 	s52CHMGD = color.RGBA{0xDB, 0x49, 0x96, 0xFF} // chart magenta — pink, NOT pure magenta
-	s52CHMGF = color.RGBA{0xDB, 0xB5, 0xF2, 0xFF} // magenta (faint, sampled)
 	s52CHBRN = color.RGBA{0x82, 0x5A, 0x23, 0xFF}
 
 	// Soundings + depth contours.
@@ -1719,8 +1717,6 @@ var (
 	s52DEPSC = color.RGBA{0x57, 0x66, 0x70, 0xFF} // safety contour line (bolder)
 
 	// Light/buoy accents.
-	s52LITRD = color.RGBA{0xFF, 0x00, 0x00, 0xFF} // red light flare
-	s52LITGN = color.RGBA{0x00, 0xC0, 0x00, 0xFF} // green light flare
 	s52LITYW = color.RGBA{0xEF, 0xE7, 0x39, 0xFF} // yellow light flare
 )
 
