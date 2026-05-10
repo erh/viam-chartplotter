@@ -38,7 +38,6 @@
   }
 
   let boatImage = "topdown-boat.svg";
-  let aisBoatImage = "topdown-boat-ais.svg";
 
   // myBoat-only icon override. The Go module exposes /myboat-icon when the
   // operator sets `myboat_icon_path` in config; we probe once on mount and
@@ -100,6 +99,7 @@
       mmsi: "",
       speed: 0,
       heading: 0,
+      cog: null as number | null | undefined,
       lat: 0,
       lng: 0,
       isMyBoat: false,
@@ -588,6 +588,7 @@
       // Update my boat popup
       popupState.content.speed = myBoat.speed;
       popupState.content.heading = myBoat.heading;
+      popupState.content.cog = myBoat.cog;
       popupState.content.lat = myBoat.location[0];
       popupState.content.lng = myBoat.location[1];
     } else if (popupState.content.mmsi && boats) {
@@ -596,6 +597,7 @@
       if (boat) {
         popupState.content.speed = boat.speed;
         popupState.content.heading = boat.heading;
+        popupState.content.cog = boat.cog;
         popupState.content.lat = boat.location[0];
         popupState.content.lng = boat.location[1];
         popupState.content.length = boat.length;
@@ -644,7 +646,11 @@
   $effect(() => {
     const _visible = effectiveVisibleKey;
     const _depthColor = depthColorTrack;
-    // Trigger style recalculation by notifying the track layers
+    // Re-style when the popup opens/closes or switches target so the
+    // "show only the selected boat's track" filter takes effect.
+    const _popupVisible = popupState.visible;
+    const _popupMmsi = popupState.content.mmsi;
+    const _popupIsMyBoat = popupState.content.isMyBoat;
     if (mapGlobal.trackLayer) {
       mapGlobal.trackLayer.getSource()?.changed();
     }
@@ -657,6 +663,12 @@
   $effect(() => {
     // Read all layer states to create dependencies
     mapGlobal.layerOptions.map((l) => ({ name: l.name, on: l.on }));
+    // Re-run when the popup opens/closes on an AIS boat — that case force-
+    // shows the AIS-track layer (see updateOnLayers) so the selected boat's
+    // history appears even with the user's track toggle off.
+    const _popupVisible = popupState.visible;
+    const _popupMmsi = popupState.content.mmsi;
+    const _popupIsMyBoat = popupState.content.isMyBoat;
 
     updateOnLayers();
   });
@@ -868,6 +880,7 @@
             v.setGeometry(new Point(boatPos));
             v.set("speed", boat.speed);
             v.set("heading", boat.heading);
+            v.set("cog", boat.cog);
             v.set("name", boat.name);
             v.set("visible", isVisible);
             v.set("length", boat.length);
@@ -883,6 +896,7 @@
             mmsi: mmsi,
             speed: boat.speed,
             heading: boat.heading,
+            cog: boat.cog,
             length: boat.length,
             beam: boat.beam,
             visible: isVisible,
@@ -985,6 +999,86 @@
     });
   }
 
+  // Cache SVG data URLs keyed by length-scale bucket — Icon construction is
+  // cheap but URL-encoding the SVG every render isn't free.
+  const aisTriangleSrcCache: Record<string, string> = {};
+  function aisTriangleSrc(lengthScale: number): string {
+    const key = lengthScale.toFixed(2);
+    if (aisTriangleSrcCache[key]) return aisTriangleSrcCache[key];
+    const baseW = 12;
+    const baseH = 24; // always 2x the base width
+    const sw = 2;
+    const w = baseW;
+    const h = baseH * lengthScale;
+    const inset = sw / 2;
+    const points =
+      `${w / 2},${inset} ` +
+      `${w - inset},${h - inset} ` +
+      `${inset},${h - inset}`;
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" ` +
+      `width="${w}" height="${h}">` +
+      `<polygon points="${points}" fill="none" stroke="#1e6fff" ` +
+      `stroke-width="${sw}" stroke-linejoin="round"/></svg>`;
+    const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+    aisTriangleSrcCache[key] = src;
+    return src;
+  }
+
+  function aisStyleFunction(feature: Feature<Geometry>): Style[] {
+    const visible = feature.get("visible") ?? false;
+    if (!visible) return [];
+
+    const cog = feature.get("cog") as number | null | undefined;
+    const heading = feature.get("heading") as number | null | undefined;
+    const speed = feature.get("speed") as number | null | undefined;
+    const length = feature.get("length") as number | null | undefined;
+    // Heading of exactly 0 from AIS usually means "unknown" rather than
+    // genuinely pointing north — fall back to COG when available.
+    const direction =
+      heading != null && heading !== 0 ? heading : (cog ?? 0);
+    const rotation = (direction * Math.PI) / 180;
+
+    // Triangle is always 2:1 (height:width) at the default vessel length;
+    // longer boats stretch the height further. Capped by myBoat's length
+    // so no AIS target renders longer than the user's own boat.
+    const lengthScale = dimScaleFactor(length, DEFAULT_BOAT_LENGTH_M);
+    const myLengthScale = dimScaleFactor(myBoat?.length, DEFAULT_BOAT_LENGTH_M);
+    const cappedScale = Math.min(lengthScale, myLengthScale);
+
+    const styles: Style[] = [
+      new Style({
+        image: new Icon({
+          src: aisTriangleSrc(cappedScale),
+          rotation: rotation,
+          rotateWithView: true,
+        }),
+      }),
+    ];
+
+    if (cog != null && Number.isFinite(cog) && speed != null && speed > 1) {
+      const geom = feature.getGeometry();
+      if (geom && geom.getType() === "Point") {
+        const start = (geom as Point).getCoordinates();
+        const distMeters = speed * 1852 * (2 / 60); // 2 minutes at speed in knots
+        const bearingRad = (cog * Math.PI) / 180;
+        const tip = sphereOffset(start, distMeters, bearingRad);
+        styles.push(
+          new Style({
+            geometry: new LineString([start, tip]),
+            stroke: new Stroke({
+              color: "#1e6fff",
+              width: 2,
+              lineDash: [4, 4],
+            }),
+          })
+        );
+      }
+    }
+
+    return styles;
+  }
+
   function getPositionAtTime(
     history: PositionPoint[],
     targetTime: Date
@@ -1056,6 +1150,17 @@
       const boatId = feature.get("boatId") || defaultBoatId;
       if (!effectiveVisibleBoats.has(boatId)) {
         return new Style({}); // Hidden - return empty style
+      }
+
+      // When a popup is open on a boat, suppress every other boat's track
+      // (and its detections) so only the selected target's history shows.
+      if (popupState.visible) {
+        const selectedBoatId = popupState.content.isMyBoat
+          ? "myBoat"
+          : popupState.content.mmsi;
+        if (selectedBoatId && boatId !== selectedBoatId) {
+          return new Style({});
+        }
       }
 
       // Detection features get triangle style
@@ -2074,27 +2179,7 @@
       source: new VectorSource({
         features: mapGlobal.aisFeatures,
       }),
-      style: function (feature) {
-        const heading = feature.get("heading") ?? 0;
-        const visible = feature.get("visible") ?? false;
-        const length = feature.get("length") as number | undefined;
-        const beam = feature.get("beam") as number | undefined;
-        const [sx, sy] = boatScaleAxes(length, beam);
-        // Cap AIS render size to myBoat's render size — no other vessel
-        // should appear larger on screen than ourselves, regardless of
-        // its real-world dimensions.
-        const [mx, my] = boatScaleAxes(myBoat?.length, myBoat?.beam);
-        const maxAisSx = (0.6 * mx) / 0.35;
-        const maxAisSy = (0.6 * my) / 0.35;
-        const cappedSx = Math.min(sx, maxAisSx);
-        const cappedSy = Math.min(sy, maxAisSy);
-        return createBoatStyle(
-          heading,
-          [0.35 * cappedSx, 0.35 * cappedSy],
-          visible,
-          aisBoatImage
-        );
-      },
+      style: aisStyleFunction,
       zIndex: 100,
     });
 
@@ -2263,6 +2348,17 @@
   }
 
   function updateOnLayers() {
+    // When the popup is open on an AIS target, force the AIS-track layer on
+    // so the selected boat's history shows even if the user has the toggle
+    // off — the per-feature filter in createTrackStyleFunction hides the
+    // other boats' tracks, so only the selected one renders.
+    const aisPopupForceTrack =
+      popupState.visible &&
+      !popupState.content.isMyBoat &&
+      !!popupState.content.mmsi;
+    const myBoatPopupForceTrack =
+      popupState.visible && popupState.content.isMyBoat;
+
     for (var l of mapGlobal.layerOptions) {
       var idx = findOnLayerIndexOfName(l.name);
 
@@ -2270,8 +2366,12 @@
       const parentLayer = l.parent ? mapGlobal.layerOptions.find((p) => p.name === l.parent) : null;
       const isParentOff = parentLayer && !parentLayer.on;
 
+      const popupForcesOn =
+        (l.name === "ais-track" && aisPopupForceTrack) ||
+        (l.name === "track" && myBoatPopupForceTrack);
+
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      const shouldBeVisible = l.on && !isParentOff;
+      const shouldBeVisible = (l.on || popupForcesOn) && !isParentOff;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -2543,6 +2643,7 @@
             mmsi: "",
             speed: myBoat.speed,
             heading: myBoat.heading,
+            cog: myBoat.cog,
             lat: coords[1],
             lng: coords[0],
             isMyBoat: true,
@@ -2581,6 +2682,7 @@
             mmsi,
             speed: feature.get("speed") || 0,
             heading: feature.get("heading") || 0,
+            cog: feature.get("cog"),
             lat: coords[1],
             lng: coords[0],
             isMyBoat: false,
@@ -2787,6 +2889,7 @@
       mmsi,
       speed: boat.speed,
       heading: boat.heading,
+      cog: boat.cog,
       lat: boat.location[0],
       lng: boat.location[1],
       isMyBoat: false,
@@ -3320,6 +3423,17 @@
             ></span
           >
         </div>
+        {#if popupState.content.cog != null && Number.isFinite(popupState.content.cog)}
+          <div class="popup-row">
+            <span class="popup-label">COG</span>
+            <span class="popup-value"
+              >{popupState.content.cog.toFixed(0)}°<span
+                class="compass-arrow"
+                style="transform: rotate({popupState.content.cog}deg)">↑</span
+              ></span
+            >
+          </div>
+        {/if}
         <div class="popup-row">
           <span class="popup-label">LAT</span>
           <span class="popup-value">{formatCoord(popupState.content.lat, true)}</span>
@@ -4045,14 +4159,13 @@
 
   .boat-popup {
     position: absolute;
-    background: rgba(15, 23, 42, 0.95);
-    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.7);
     color: white;
+    border: 1px solid #6b7280;
     border-radius: 4px;
     padding: 10px 12px 14px;
     min-width: 130px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
     font-family:
       system-ui,
       -apple-system,
@@ -4151,15 +4264,7 @@
   }
 
   .popup-arrow {
-    position: absolute;
-    bottom: -5px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 0;
-    height: 0;
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 5px solid rgba(15, 23, 42, 0.95);
+    display: none;
   }
 
   /* Layer controls panel - hidden by default */

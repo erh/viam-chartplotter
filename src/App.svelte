@@ -490,6 +490,14 @@
                 : typeof rawBoat.Course === "number"
                   ? rawBoat.Course
                   : undefined;
+          const sog =
+            typeof rawBoat.Sog === "number"
+              ? rawBoat.Sog
+              : typeof rawBoat.SOG === "number"
+                ? rawBoat.SOG
+                : typeof rawBoat.Speed === "number"
+                  ? rawBoat.Speed
+                  : 0;
           const length =
             typeof rawBoat.Length === "number" && rawBoat.Length > 0
               ? rawBoat.Length
@@ -508,7 +516,7 @@
             boat: {
               name: rawBoat.Name || "",
               location: rawBoat.Location,
-              speed: rawBoat.Speed || 0,
+              speed: sog,
               heading: rawBoat.Heading || 0,
               cog,
               length,
