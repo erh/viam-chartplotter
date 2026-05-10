@@ -8,6 +8,9 @@
 ** save route
 ** Add: Undo button in case you accidentally delete a route like I just did
 ** Rum lines and courses
+* AIS
+** Friends
+** Load old AIS tracks from history
 
 ## Navigation service
 
