@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { getCookie, setCookie } from "typescript-cookie";
   import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from "./lib/BoatInfo";
+  import { getCountryFromMmsi, flagEmoji } from "./lib/mmsi";
   import RegularShape from "ol/style/RegularShape.js";
 
   import Collection from "ol/Collection.js";
@@ -128,6 +129,11 @@
       tcpaMin: null as number | null,
     },
   });
+
+  // Country flag for the popup title — derived from the popup target's
+  // MMSI (empty for myBoat, populated for AIS clicks). Re-evaluates
+  // automatically when the user clicks a different vessel.
+  const popupCountry = $derived(getCountryFromMmsi(popupState.content.mmsi));
 
   // Popup shown when the user clicks a waypoint or a route segment in edit
   // mode. Mode "insert" offers "add waypoint here" between two existing
@@ -3046,6 +3052,17 @@
     });
     mapGlobal.map.addOverlay(trackTimeTooltipOverlay);
 
+    // AIS hover tooltip — shows the vessel's flag of registration (derived
+    // from the MMSI's MID) and country name. The full popup still opens
+    // on click; this is the at-a-glance "who's that" answer.
+    const aisTooltipElement = document.getElementById("ais-tooltip");
+    const aisTooltipOverlay = new Overlay({
+      element: aisTooltipElement || undefined,
+      positioning: "bottom-center",
+      offset: [0, -18],
+    });
+    mapGlobal.map.addOverlay(aisTooltipOverlay);
+
 
     // Setup measure layer
     measureSource = new VectorSource();
@@ -3279,6 +3296,36 @@
       }
       if (!navaidFound) {
         navaidTooltipOverlay.setPosition(undefined);
+      }
+
+      // AIS hover tooltip — vessel name only. Country/flag lives in the
+      // click popup. Pinned to the vessel position so it doesn't jitter
+      // with the cursor.
+      let aisFound = false;
+      mapGlobal.map!.forEachFeatureAtPixel(
+        evt.pixel,
+        (feature) => {
+          if (aisFound) return;
+          if (feature.get("type") !== "ais") return;
+          const name = (feature.get("name") as string | undefined) || "";
+          const mmsi = feature.get("mmsi") as string | undefined;
+          const label = name.trim() || mmsi || "";
+          if (!label) return;
+          aisFound = true;
+          if (aisTooltipElement) {
+            aisTooltipElement.textContent = label;
+          }
+          const geom = (feature as Feature).getGeometry();
+          if (geom && geom.getType() === "Point") {
+            aisTooltipOverlay.setPosition((geom as Point).getCoordinates());
+          } else {
+            aisTooltipOverlay.setPosition(evt.coordinate);
+          }
+        },
+        { hitTolerance: 3 }
+      );
+      if (!aisFound) {
+        aisTooltipOverlay.setPosition(undefined);
       }
 
       // My-boat track-time tooltip: if the cursor is on a segment of the
@@ -4061,7 +4108,16 @@
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
     <button class="popup-closer" onclick={closePopup}>✕</button>
     <div class="popup-header">
-      <h3 class="popup-title">{popupState.content.name}</h3>
+      <h3 class="popup-title">
+        {#if popupCountry}
+          <span
+            class="popup-flag"
+            title={popupCountry[1]}
+            aria-label={popupCountry[1]}>{flagEmoji(popupCountry[0])}</span
+          >
+        {/if}
+        {popupState.content.name}
+      </h3>
     </div>
     <div class="popup-columns" class:single-column={!popupState.content.isOnline}>
       {#if boatDetailSlot && popupState.content.host && popupState.content.partId}
@@ -4141,6 +4197,9 @@
 
   <!-- My-boat track-time Tooltip -->
   <div id="track-time-tooltip" class="track-time-tooltip"></div>
+
+  <!-- AIS flag/country hover tooltip -->
+  <div id="ais-tooltip" class="ais-tooltip"></div>
 
 
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
@@ -4834,6 +4893,20 @@
     display: none;
   }
 
+  .ais-tooltip {
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 13px;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  .ais-tooltip:empty {
+    display: none;
+  }
+
   .navaid-tooltip {
     background: rgba(0, 0, 0, 0.85);
     color: white;
@@ -5184,6 +5257,16 @@
     padding-right: 16px;
     color: #38bdf8;
     letter-spacing: 0.01em;
+  }
+
+  .popup-flag {
+    margin-right: 4px;
+    font-size: 14px;
+    /* Strip the title's letter-spacing so the two regional-indicator
+       glyphs stay glued into a single flag instead of rendering as a
+       pair of country-letter boxes on platforms with emoji flag
+       support. */
+    letter-spacing: 0;
   }
 
   .popup-row {
