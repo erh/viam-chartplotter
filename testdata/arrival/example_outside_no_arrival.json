@@ -1,0 +1,16 @@
+{
+  "comment": "Boat well away from the waypoint — no rule should fire.",
+  "input": {
+    "boat_lat": 40.6000000,
+    "boat_lng": -74.0000000,
+    "waypoint_id": "wp1",
+    "waypoint_lat": 40.8000000,
+    "waypoint_lng": -74.0000000,
+    "has_following": false
+  },
+  "prev_state": {
+    "waypoint_id": "wp1",
+    "min_distance_to_waypoint": 22000
+  },
+  "expected_arrived": false
+}

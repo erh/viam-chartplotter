@@ -1,0 +1,29 @@
+{
+  "comment": "Lower Hudson approach, ~1.1 km out from a single waypoint (no following). Min approach has been 1103 m and we're still 1104 m out — well outside arrivalDistanceMeters and the last-waypoint overshoot rule needs us to have come within 400 m, so nothing should fire.",
+  "input": {
+    "boat_lat": 40.746845,
+    "boat_lng": -74.00963159999999,
+    "waypoint_id": "6a00bd8cae880abe29f3d65e",
+    "waypoint_lat": 40.73850393163812,
+    "waypoint_lng": -74.01674011421564,
+    "has_following": false
+  },
+  "prev_state": {
+    "waypoint_id": "6a00bd8cae880abe29f3d65e",
+    "min_distance_to_waypoint": 1103.7073569618778,
+    "min_distance_to_following_waypoint": -1,
+    "max_distance_to_following_waypoint": -1
+  },
+  "decision": {
+    "arrived": false,
+    "distance_to_waypoint": 1104.024937769533,
+    "distance_to_following_waypoint": -1,
+    "new_state": {
+      "waypoint_id": "6a00bd8cae880abe29f3d65e",
+      "min_distance_to_waypoint": 1103.7073569618778,
+      "min_distance_to_following_waypoint": -1,
+      "max_distance_to_following_waypoint": -1
+    }
+  },
+  "expected_arrived": false
+}

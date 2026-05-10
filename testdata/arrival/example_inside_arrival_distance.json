@@ -1,0 +1,16 @@
+{
+  "comment": "Boat ~30 m from the waypoint with no following — should fire on the simple inside-arrival-distance rule.",
+  "input": {
+    "boat_lat": 40.7000000,
+    "boat_lng": -74.0000000,
+    "waypoint_id": "wp1",
+    "waypoint_lat": 40.7002700,
+    "waypoint_lng": -74.0000000,
+    "has_following": false
+  },
+  "prev_state": {
+    "min_distance_to_waypoint": 0
+  },
+  "expected_arrived": true,
+  "expected_reason": "inside arrival distance"
+}
