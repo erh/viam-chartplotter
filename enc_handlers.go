@@ -104,10 +104,11 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 
 	// Reuse the chart tile cache with a distinct style key so OSM tiles
 	// share eviction policy and disk layout with chart tiles. The depth
-	// bucket is irrelevant for OSM — pin it to 0. Bump the suffix when
-	// the rendering changes so stale PNGs from a prior implementation
-	// get auto-superseded.
-	const cacheKey = "osm-raster-1"
+	// bucket is irrelevant for OSM — pin it to 0. The version suffix is
+	// driven by OSMRenderRulesVersion (enc_render.go); bump that const
+	// whenever the OSM rasteriser logic changes so stale PNGs from a
+	// prior implementation get auto-superseded.
+	cacheKey := "osm-raster-v" + strconv.Itoa(OSMRenderRulesVersion)
 	if h.tileCache != nil {
 		if cached, ok := h.tileCache.Get(cacheKey, 0, z, x, y); ok {
 			w.Header().Set("Content-Type", "image/png")
@@ -341,7 +342,11 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	skipClasses := parseSkipClasses(r.URL.Query().Get("skip"))
 	// Each render-option variant gets its own cache shard so URLs that
 	// differ only in those params don't stomp on each other's cached PNGs.
-	cacheKey := style.String()
+	// The "vN-" prefix comes from ENCRenderRulesVersion (enc_render.go) and
+	// is bumped whenever code changes alter the rendered pixels without a
+	// URL change — old vN directories then become inert and re-rendering
+	// happens on the next request.
+	cacheKey := "v" + strconv.Itoa(ENCRenderRulesVersion) + "-" + style.String()
 	if skipNavaids {
 		cacheKey += "-nonavaids"
 	}

@@ -446,6 +446,22 @@ const (
 	StyleECDIS
 )
 
+// ENCRenderRulesVersion is baked into every ENC tile cache key. Bump it
+// whenever a code change in this file (or anything it transitively renders
+// through) alters the pixels for an unchanged URL — e.g. new S-52 symbology,
+// a depth-shading tweak, navaid icon redesign, etc. URL params already shard
+// the cache by style/safe-depth/skip flags; this version covers the things
+// the URL doesn't say. After bumping, old vN directories are inert and can
+// be `rm -rf`'d at the operator's leisure.
+const ENCRenderRulesVersion = 1
+
+// OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
+// (RenderOSMTile / RenderOSMTileDebugMask). Bump on any change to the OSM
+// fetch, mask, or compositing logic that should invalidate the on-disk
+// cache. Independent from ENC so an ENC bump doesn't rebuild OSM tiles
+// (and vice versa).
+const OSMRenderRulesVersion = 1
+
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
 		return "ecdis"
