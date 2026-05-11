@@ -12,7 +12,7 @@
 
   import { BSON } from "bsonfy";
 
-  import { LinkedChart, LinkedLabel, LinkedValue } from "svelte-tiny-linked-charts";
+  import { LinkedChart } from "svelte-tiny-linked-charts";
 
   import * as VIAM from "@viamrobotics/sdk";
 
@@ -1483,6 +1483,51 @@
     return a;
   }
 
+  // Reorganize the flat gauges dict into a sequence that puts each
+  // `<type>-All` aggregate row at the bottom of its type group, marks
+  // the sibling non-aggregate rows as "compact" so they render at a
+  // smaller scale, and falls back to plain rendering when a type has
+  // no aggregate (or has only the aggregate, with no siblings to roll
+  // up). Cross-type order is alphabetical-by-type — within a type the
+  // existing tankSort hints (fwd / mid / aft / main) still apply.
+  function organizeGauges(gauges) {
+    var byType = {};
+    for (var k of Object.keys(gauges)) {
+      var v = gauges[k];
+      var type = (v && v.Type) || "Other";
+      if (!byType[type]) byType[type] = { items: [] };
+      if (/-all$/i.test(k)) {
+        byType[type].agg = { key: k, value: v };
+      } else {
+        byType[type].items.push({ key: k, value: v });
+      }
+    }
+    var result = [];
+    for (var t of Object.keys(byType).sort()) {
+      var g = byType[t];
+      var aggActive = !!g.agg && g.items.length > 0;
+      var sortedNames = tankSort(g.items.map((x) => x.key));
+      for (var name of sortedNames) {
+        var item = g.items.find((x) => x.key === name);
+        result.push({
+          key: item.key,
+          value: item.value,
+          isAggregate: false,
+          isCompact: aggActive,
+        });
+      }
+      if (g.agg) {
+        result.push({
+          key: g.agg.key,
+          value: g.agg.value,
+          isAggregate: aggActive,
+          isCompact: false,
+        });
+      }
+    }
+    return result;
+  }
+
   function gauageHistoricalToLinkedChart(data) {
     var res = {};
     for (var d in data.data) {
@@ -1490,6 +1535,40 @@
       res[dd._id] = Math.floor(dd.min);
     }
     return res;
+  }
+
+  // Per-tank hover state, populated from LinkedChart's `hover` event.
+  // Stored as a record so each tank row owns its own readout
+  // independently — peer-hover is per-row, but the captured value/ts
+  // needs to live somewhere reactive.
+  let tankHover = $state<
+    Record<string, { value: number; ts: Date } | null>
+  >({});
+
+  // Map a tank's historical _id (formatted bucket label like "26-5-11
+  // 14:30") back to the bucket's start timestamp, so the hover handler
+  // can show how long ago the reading was without round-tripping the
+  // _id through Date.parse.
+  function gaugeHistoricalTsByKey(historical: { data: any[] }): Record<string, Date> {
+    const map: Record<string, Date> = {};
+    for (const d of historical.data) {
+      map[d._id] = d.ts instanceof Date ? d.ts : new Date(d.ts);
+    }
+    return map;
+  }
+
+  // Compact "X ago" formatter for the tank hover popup. Bucket sizes
+  // are 1-min (short range) or 15-min (24h range), so seconds aren't
+  // useful — start at minutes.
+  function formatAgo(ts: Date): string {
+    const ms = Date.now() - ts.getTime();
+    const minutes = Math.max(0, Math.round(ms / 60000));
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    return `${days}d ago`;
   }
 
   async function addNavWaypoint(lat: number, lng: number) {
@@ -1833,40 +1912,129 @@
           </div>
         {/if}
         <div class="flex flex-col divide-y">
-          {#each dicToArray(globalData.gauges, tankSort) as [key, value]}
-            <section class="overflow-visible flex gap-2 p-2 text-lg">
-              <h2 class="min-w-32 capitalize">{key}</h2>
-              <div class="grow">
-                <div class="flex gap-1 font-bold">
-                  <div>{value.Level.toFixed(0)} %</div>
-                  <div>{((value.Capacity * value.Level * 0.264172) / 100).toFixed(0)}</div>
-                  <div>/ {(value.Capacity * 0.264172).toFixed(0)}</div>
-                </div>
-                {#if globalData.gaugesToHistorical[key] && globalData.gaugesToHistorical[key].data.length >= 5}
-                  <div class="relative">
-                    <div role="article" tabindex="-1" class="peer bg-dark hover:cursor-pointer">
-                      <LinkedChart
-                        data={gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
-                        style="width: 100%;"
-                        width="100"
-                        type="line"
-                        lineColor="#0000ff"
-                        scaleMax={100}
-                        linked={key}
-                        uid={key}
-                        barMinWidth="1"
-                        grow
-                      />
-                    </div>
-                    <div
-                      class="hidden peer-hover:block z-10 text-nowrap -bottom-8 right-1 absolute border border-medium px-2 w-fit"
-                    >
-                      <LinkedValue uid={key} />
-                      <LinkedLabel linked={key} />
-                    </div>
-                  </div>
-                {/if}
+          {#each organizeGauges(globalData.gauges) as { key, value, isAggregate, isCompact }}
+            {@const gallons = (value.Capacity * value.Level * 0.264172) / 100}
+            {@const capacityGal = value.Capacity * 0.264172}
+            {@const pct = value.Level}
+            {@const levelClass =
+              pct < 15
+                ? "text-red-400"
+                : pct < 30
+                  ? "text-amber-300"
+                  : "text-sky-300"}
+            <!-- Display name: the aggregate row strips the "-All" suffix
+                 since the visual treatment (border accent below + bold
+                 name) already signals it's the rollup. -->
+            {@const displayName = isAggregate ? key.replace(/-all$/i, "") : key}
+            <!-- Tank row: header line (name on the left, % + volume on the
+                 right) above a full-width sparkline. Header columns are
+                 fixed-width and right-aligned so the percent and volume
+                 numbers stack at the same x across every row, regardless
+                 of how long the tank name is. Sparkline gets the whole
+                 panel width.
+                 - isCompact: this row is one of N siblings of an
+                   aggregate, so render it smaller to make the cluster
+                   read like a sub-group.
+                 - isAggregate: the "-All" rollup for this type — render
+                   at full size with a stronger top border so it visually
+                   anchors the bottom of the group. -->
+            <section
+              class="overflow-visible px-2"
+              class:py-1.5={!isCompact}
+              class:py-0.5={isCompact}
+              class:tank-aggregate={isAggregate}
+            >
+              <div
+                class="flex items-baseline gap-3"
+                class:mb-1={!isCompact}
+                class:mb-0.5={isCompact}
+              >
+                <h2
+                  class="capitalize flex-1 truncate"
+                  class:text-sm={!isCompact}
+                  class:text-xs={isCompact}
+                  class:font-medium={!isAggregate}
+                  class:font-semibold={isAggregate}
+                  class:text-gray-200={!isAggregate}
+                  class:text-sky-200={isAggregate}>{displayName}</h2
+                >
+                <span
+                  class={`font-bold tabular-nums w-12 text-right ${levelClass}`}
+                  class:text-base={!isCompact}
+                  class:text-sm={isCompact}
+                  >{pct.toFixed(0)}%</span
+                >
+                <span
+                  class="text-gray-300 tabular-nums w-28 text-right"
+                  class:text-sm={!isCompact}
+                  class:text-xs={isCompact}
+                >
+                  {gallons.toFixed(0)} / {capacityGal.toFixed(0)}
+                  <span class="text-gray-500 text-xs">gal</span>
+                </span>
               </div>
+              {#if globalData.gaugesToHistorical[key] && globalData.gaugesToHistorical[key].data.length >= 5}
+                {@const tankData = gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
+                {@const tsByKey = gaugeHistoricalTsByKey(globalData.gaugesToHistorical[key])}
+                <!-- viewBox width has to grow with bucket count or the
+                     right-aligned bars overflow past x=0 and only the
+                     tail fits in view. Each bucket needs at least
+                     barMinWidth + gap = 4 units; +4 of slack keeps the
+                     last bar clear of the right edge. The CSS
+                     `width: 100%` still stretches the SVG to fill the
+                     panel; this just changes the internal coordinate
+                     scale so all data lands inside the viewBox. -->
+                {@const chartViewWidth = Math.max(100, Object.keys(tankData).length * 4 + 4)}
+                <div class="relative">
+                  <div
+                    role="article"
+                    tabindex="-1"
+                    class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
+                  >
+                    <LinkedChart
+                      data={tankData}
+                      style="width: 100%;"
+                      width={chartViewWidth}
+                      height={isCompact ? 16 : 26}
+                      type="line"
+                      lineColor="#38bdf8"
+                      fill="#38bdf8"
+                      scaleMax={100}
+                      linked={key}
+                      uid={key}
+                      barMinWidth="3"
+                      grow
+                      dispatchEvents={true}
+                      on:hover={(e) => {
+                        const ts = tsByKey[e.detail.key];
+                        if (ts) {
+                          tankHover[key] = { value: e.detail.value, ts };
+                        }
+                      }}
+                      on:value-update={(e) => {
+                        if (e.detail.value == null) tankHover[key] = null;
+                      }}
+                    />
+                  </div>
+                  <!-- Hover readout: floats above the chart's top-right.
+                       Gated on tankHover[key] (populated by the chart's
+                       hover event) instead of peer-hover so the contents
+                       can never appear empty. z-10 keeps it above
+                       sibling tank rows. -->
+                  {#if tankHover[key]}
+                    <div
+                      class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
+                    >
+                      <span class="font-semibold text-sky-300"
+                        >{tankHover[key]!.value}%</span
+                      >
+                      <span class="text-gray-400"
+                        >{formatAgo(tankHover[key]!.ts)}</span
+                      >
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </section>
           {/each}
         </div>
@@ -2004,3 +2172,29 @@
     {/if}
   </main>
 {/if}
+
+<style>
+  /* svelte-tiny-linked-charts renders a 1px polyline for line charts and
+     gives no stroke-width prop. Style it directly so the sparkline reads
+     a bit bolder against the dark panel background. :global() is needed
+     because the SVG is rendered inside the third-party component and
+     wouldn't otherwise pick up our scoped styles. */
+  .tank-chart :global(svg polyline) {
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  /* Smooth out the hover dot so it doesn't look pixel-y. */
+  .tank-chart :global(svg circle) {
+    transition: r 100ms ease-out;
+  }
+
+  /* Aggregate row ("X-All") sits at the bottom of its type cluster.
+     A heavier top border + faint sky tint makes the rollup visually
+     distinct from the compact siblings above it without needing a
+     separate header element. */
+  .tank-aggregate {
+    border-top: 1px solid rgba(56, 189, 248, 0.35);
+    background: rgba(56, 189, 248, 0.04);
+  }
+</style>
