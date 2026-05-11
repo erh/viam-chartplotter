@@ -87,6 +87,11 @@
     vicDoors: {},
     acPowerData: false,
     gaugesToHistorical: {},
+    // Water-temperature history (15-min buckets, last 24h). Same shape
+    // as gaugesToHistorical entries: { ts: <fetched-at>, data: [{_id,
+    // ts, temp}] }. Filled by updateSeaTempHistory; rendered as a
+    // sparkline next to the live Water Temp readout when populated.
+    seaTempHistorical: null as { ts: Date; data: any[] } | null,
 
     allResources: [],
     machineStatus: {
@@ -1242,6 +1247,109 @@
     return data;
   }
 
+  // Fetches sea-temp readings, bucketed to 15 minutes, scoped to the
+  // tabular data window. Mirrors getDataViaMQL's long-range bucketing
+  // (24h history at 15-min resolution → 96 points). Returns rows of
+  // {_id, ts, temp} where temp is degrees Fahrenheit, matching the
+  // unit used for the live readout.
+  async function seaTempHistoryMQL(dc, startTime) {
+    if (!globalConfig.seatempSensorName) return [];
+    var name = globalConfig.seatempSensorName.split(":");
+
+    var orgId = globalClientCloudMetaData.primaryOrgId;
+    var match = {
+      location_id: globalClientCloudMetaData.locationId,
+      robot_id: globalClientCloudMetaData.machineId,
+      component_name: name[name.length - 1],
+      time_received: { $gte: startTime },
+    };
+
+    var compStatus = findComponentStatus(globalConfig.seatempSensorName);
+    if (compStatus) {
+      match.location_id = compStatus.locationId;
+      match.robot_id = compStatus.machineId;
+      orgId = compStatus.primaryOrgId;
+    }
+
+    var minuteExpr = {
+      $toString: {
+        $multiply: [15, { $floor: { $divide: [{ $minute: "$time_received" }, 15] } }],
+      },
+    };
+
+    var group = {
+      _id: {
+        $concat: [
+          { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
+          "-",
+          { $toString: { $month: "$time_received" } },
+          "-",
+          { $toString: { $dayOfMonth: "$time_received" } },
+          " ",
+          { $toString: { $hour: "$time_received" } },
+          ":",
+          minuteExpr,
+        ],
+      },
+      ts: { $min: "$time_received" },
+      // Average within each 15-min bucket so a single noisy reading
+      // doesn't spike the line. Convert from Celsius to Fahrenheit
+      // outside the query (avoids embedding the conversion in MQL).
+      tempC: { $avg: "$data.readings.Temperature" },
+    };
+
+    var query = [
+      BSON.serialize({ $match: match }),
+      BSON.serialize({ $group: group }),
+      BSON.serialize({ $sort: { ts: -1 } }),
+      BSON.serialize({ $limit: 24 * 4 }),
+      BSON.serialize({ $sort: { ts: 1 } }),
+    ];
+
+    // Try hot first for low latency; fall back to cold when hot
+    // returns nothing or throws. On this user's setup seatemp lives in
+    // cold, but other deployments may route the data manager output
+    // differently — the fallback keeps the chart working in either
+    // case at the cost of a second query only on a hot miss.
+    var source = "hot";
+    var hotFailReason: string | null = null;
+    var data: any[] = [];
+    var t0 = performance.now();
+    try {
+      data = await dc.tabularDataByMQL(orgId, query, true);
+      if (data.length === 0) {
+        hotFailReason = "hot returned 0 rows";
+      }
+    } catch (e: any) {
+      hotFailReason = "hot threw: " + (e?.message || String(e));
+    }
+    if (hotFailReason) {
+      source = "cold";
+      try {
+        data = await dc.tabularDataByMQL(orgId, query, false);
+      } catch (e: any) {
+        console.log(
+          "seaTempHistoryMQL: cold also failed:",
+          e?.message || String(e)
+        );
+        data = [];
+      }
+    }
+    var elapsed = Math.round(performance.now() - t0);
+    console.log(
+      "seaTempHistoryMQL: " +
+        data.length +
+        " rows in " +
+        elapsed +
+        "ms from " +
+        source +
+        (hotFailReason ? " (hot fallback reason: " + hotFailReason + ")" : "")
+    );
+    return data
+      .filter((d) => typeof d.tempC === "number" && !isNaN(d.tempC))
+      .map((d) => ({ _id: d._id, ts: d.ts, temp: 32 + d.tempC * 1.8 }));
+  }
+
   async function updatePositionHistory(dc, robotName, startTime) {
     if (!globalConfig.movementSensorName) {
       return;
@@ -1349,6 +1457,17 @@
 
       h = { ts: new Date(), data: data };
       globalData.gaugesToHistorical[g] = h;
+    }
+
+    // Sea-temp history piggybacks on the gauge poll cycle (same 60s
+    // dedupe + same window). Skip when no sensor is configured or the
+    // last fetch is fresh enough.
+    if (globalConfig.seatempSensorName) {
+      var st = globalData.seaTempHistorical;
+      if (!st || new Date() - st.ts >= 60000) {
+        var seaTempData = await seaTempHistoryMQL(dc, gaugeStartTime);
+        globalData.seaTempHistorical = { ts: new Date(), data: seaTempData };
+      }
     }
   }
 
@@ -1531,6 +1650,18 @@
     for (var d in data.data) {
       var dd = data.data[d];
       res[dd._id] = Math.floor(dd.min);
+    }
+    return res;
+  }
+
+  // Sea-temp variant: keeps one decimal of precision (water temperature
+  // typically varies in fractions of a degree, and floor-ing would
+  // erase the visible detail in the sparkline).
+  function seaTempToLinkedChart(data) {
+    var res = {};
+    for (var d in data.data) {
+      var dd = data.data[d];
+      res[dd._id] = Math.round(dd.temp * 10) / 10;
     }
     return res;
   }
@@ -1831,12 +1962,71 @@
         {/if}
 
         {#if globalConfig.seatempSensorName != ""}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Water Temp</div>
-            <div>
-              <span class="font-bold">{globalData.temp.toFixed(2)}</span>
-              <sup>f</sup>
+          <div class="p-2 text-lg">
+            <div class="flex gap-2">
+              <div class="min-w-32">Water Temp</div>
+              <div>
+                <span class="font-bold">{globalData.temp.toFixed(2)}</span>
+                <sup>f</sup>
+              </div>
             </div>
+            {#if globalData.seaTempHistorical && globalData.seaTempHistorical.data.length >= 5}
+              {@const stData = seaTempToLinkedChart(globalData.seaTempHistorical)}
+              {@const stTsByKey = gaugeHistoricalTsByKey(globalData.seaTempHistorical)}
+              <!-- Auto-fit the y-range to the actual reading window so a
+                   small variation (~5°F) reads as a real curve rather
+                   than a flat line near the chart's top. Pad ±0.5°F so
+                   the line never touches the edges. -->
+              {@const stValues = Object.values(stData) as number[]}
+              {@const stMin = Math.floor(Math.min(...stValues) - 0.5)}
+              {@const stMax = Math.ceil(Math.max(...stValues) + 0.5)}
+              {@const stViewWidth = Math.max(100, Object.keys(stData).length * 4 + 4)}
+              <div class="relative mt-1">
+                <div
+                  role="article"
+                  tabindex="-1"
+                  class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
+                >
+                  <LinkedChart
+                    data={stData}
+                    style="width: 100%;"
+                    width={stViewWidth}
+                    height={26}
+                    type="line"
+                    lineColor="#fb923c"
+                    fill="#fb923c"
+                    scaleMin={stMin}
+                    scaleMax={stMax}
+                    linked="seatemp"
+                    uid="seatemp"
+                    barMinWidth="3"
+                    grow
+                    dispatchEvents={true}
+                    on:hover={(e) => {
+                      const ts = stTsByKey[e.detail.key];
+                      if (ts) {
+                        tankHover["seatemp"] = { value: e.detail.value, ts };
+                      }
+                    }}
+                    on:value-update={(e) => {
+                      if (e.detail.value == null) tankHover["seatemp"] = null;
+                    }}
+                  />
+                </div>
+                {#if tankHover["seatemp"]}
+                  <div
+                    class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
+                  >
+                    <span class="font-semibold text-amber-300"
+                      >{tankHover["seatemp"]!.value.toFixed(1)}°F</span
+                    >
+                    <span class="text-gray-400"
+                      >{formatAgo(tankHover["seatemp"]!.ts)}</span
+                    >
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/if}
         <div class="flex gap-2 p-2 text-lg">
