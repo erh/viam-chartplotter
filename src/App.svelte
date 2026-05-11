@@ -112,6 +112,15 @@
     hideDataPanel: getCookie("hideDataPanel") === "1",
   });
 
+  // When the depth-colour-track toggle flips (now controlled from the
+  // map's layers panel), force a refetch of the position history so
+  // the depth field is filled in (or cleared) on every track point.
+  // Fires once on mount too — harmless, the next poll just refetches.
+  $effect(() => {
+    void globalData.showDepthOnTrack;
+    globalData.posHistoryLastCheck = 0;
+  });
+
   const SETTINGS_COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
   function toggleHideDataPanel() {
@@ -151,17 +160,6 @@
 
   function gotNewData() {
     globalData.lastData = new Date();
-  }
-
-  // compassFmt renders a heading/COG as a 3-digit zero-padded degree
-  // string, e.g. 14 -> "014°". Returns "—" when the value is null/NaN so
-  // the UI stays readable while we wait for a fix. Bearings are normalised
-  // into [0, 360) before formatting so a stale 360+ value doesn't render
-  // as "360°".
-  function compassFmt(deg: number | null | undefined): string {
-    if (deg == null || !Number.isFinite(deg)) return "—";
-    const norm = ((deg % 360) + 360) % 360;
-    return Math.round(norm).toString().padStart(3, "0") + "°";
   }
 
   function errorHandlerMaker(m) {
@@ -1759,7 +1757,8 @@
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
       positionHistorical={globalData.posHistory}
-      depthColorTrack={globalData.showDepthOnTrack}
+      bind:depthColorTrack={globalData.showDepthOnTrack}
+      depthSensorAvailable={globalConfig.depthSensorName !== ""}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
       navWaypoints={globalData.navWaypoints}
@@ -1791,38 +1790,11 @@
       {/if}
 
       <div id="navData" class="flex flex-col divide-y">
-        {#if globalConfig.movementSensorProps.linearVelocitySupported}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">SOG<br /></div>
-            <div>
-              <span class="font-bold">{globalData.speed.toFixed(2)}</span>
-              <sup>knots</sup>
-            </div>
-          </div>
-        {/if}
-        {#if globalConfig.depthSensorName != ""}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Depth</div>
-            <div>
-              <span class="font-bold">{globalData.depth.toFixed(1)}</span>
-              <sup>ft</sup>
-            </div>
-          </div>
-          <label class="flex items-center gap-2 px-2 pb-2 text-sm cursor-pointer">
-            <input
-              type="checkbox"
-              bind:checked={globalData.showDepthOnTrack}
-              onchange={() => {
-                globalData.posHistoryLastCheck = 0;
-              }}
-            />
-            Color track by depth
-            <span
-              style="background: linear-gradient(to right, red, green); width: 60px; height: 10px; display: inline-block; border-radius: 2px;"
-            ></span>
-            <span class="text-xs text-gray-400">0ft — 10ft+</span>
-          </label>
-        {/if}
+        <!-- SOG / Depth / Heading / COG render in the map's top-right
+             overlay (MarineMap's data-panel). The "color track by
+             depth" toggle moved into MarineMap's layers panel — the
+             $effect on showDepthOnTrack handles the cache reset
+             whichever side flips it. -->
         {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">Next Waypoint</div>
@@ -1871,15 +1843,8 @@
           <div class="min-w-32">Location</div>
           <span><small>{globalData.posString}</small></span>
         </div>
-        {#if globalConfig.movementSensorProps.compassHeadingSupported}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Heading / COG</div>
-            <div>
-              <span class="font-bold">{compassFmt(globalData.heading)}</span> /
-              <span class="font-bold">{compassFmt(globalData.cog)}</span>
-            </div>
-          </div>
-        {/if}
+        <!-- Heading / COG also moved to MarineMap's data panel — same
+             reason as SOG / Depth above. -->
         {#if globalConfig.spotZeroFWSensorName != ""}
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">SpotZero F/S</div>

@@ -528,7 +528,10 @@
     zoomModifier,
     boats,
     positionHistorical,
-    depthColorTrack = false,
+    // $bindable so the in-map layers panel can flip the toggle and the
+    // parent (App.svelte) sees the change reactively.
+    depthColorTrack = $bindable(false),
+    depthSensorAvailable = false,
     enableBoatsPanel = false,
     externalVisibilityControl = false,
     showOfflineBoatsInPanel = true,
@@ -557,6 +560,9 @@
     boats?: BoatInfo[];
     positionHistorical?: PositionPoint[];
     depthColorTrack?: boolean;
+    /** True when a depth sensor is configured. Gates whether the
+     *  "color track by depth" toggle is shown in the layers panel. */
+    depthSensorAvailable?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
     /** Speed-over-ground (knots). When provided, shown in the combined data
@@ -4346,6 +4352,25 @@
       </label>
       {/if}
     {/each}
+
+    {#if depthSensorAvailable}
+      <hr class="layer-divider" />
+      <!-- Track-rendering option (not a layer of its own). Lives outside
+           the each loop because it's a style toggle for the existing
+           "track" layer rather than a toggleable layer. The legend
+           gradient mirrors the colour ramp drawn on the track itself
+           so the user can map colour to depth at a glance. -->
+      <label class="depth-color-toggle">
+        <input
+          type="checkbox"
+          checked={depthColorTrack}
+          onchange={(e) => (depthColorTrack = (e.currentTarget as HTMLInputElement).checked)}
+        />
+        color track by depth
+        <span class="depth-color-legend"></span>
+        <span class="depth-color-legend-label">0–10 ft</span>
+      </label>
+    {/if}
   </div>
 
   <div class="bottom-controls">
@@ -5347,6 +5372,29 @@
     border: 0;
     border-top: 1px solid #ccc;
     margin: 6px 0;
+  }
+
+  /* Depth-colour track toggle. Sits below the overlays divider; the
+     gradient swatch matches the colour ramp the track itself uses so
+     the legend doubles as the visual key. */
+  .layer-controls > .depth-color-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .depth-color-legend {
+    display: inline-block;
+    width: 50px;
+    height: 8px;
+    border-radius: 2px;
+    background: linear-gradient(to right, red, green);
+  }
+  .depth-color-legend-label {
+    font-size: 10px;
+    color: #6b7280;
   }
 
   .layer-controls > label.child-layer {
