@@ -3602,24 +3602,58 @@
   });
   const sparkW = 180;
   const sparkH = 44;
+  // Live tide view: rebuilt every sparkClock tick from the raw 72h
+  // series and hi/lo list so the "now" marker, the visible 24h window
+  // (now-6h .. now+18h, keeping "now" at the 25% mark), the next
+  // high/low predictions, and the current level all slide in real
+  // time between 10-min refetches.
+  let tideView = $derived.by(() => {
+    if (!tideInfo) return null;
+    const now = sparkClock;
+    const winStart = now - 6 * 3600 * 1000;
+    const winEnd = now + 18 * 3600 * 1000;
+    const series = clipSeries(tideInfo.seriesAll, winStart, winEnd);
+    const future = tideInfo.hiloAll.filter((p) => p.t.getTime() > now);
+    const nextHigh = future.find((p) => p.type === "H") ?? null;
+    const nextLow = future.find((p) => p.type === "L") ?? null;
+    const currentLevel = interpCurrent(tideInfo.seriesAll, now);
+    const windowedHilo = tideInfo.hiloAll.filter(
+      (p) => p.t.getTime() >= winStart && p.t.getTime() <= winEnd
+    );
+    const allV = [...series.map((p) => p.v), ...windowedHilo.map((p) => p.v)];
+    const seriesMin = allV.length > 0 ? Math.min(...allV) : 0;
+    const seriesMax = allV.length > 0 ? Math.max(...allV) : 1;
+    return {
+      now,
+      seriesStart: winStart,
+      seriesEnd: winEnd,
+      series,
+      seriesMin,
+      seriesMax,
+      currentLevel,
+      nextHigh,
+      nextLow,
+    };
+  });
+
   let tideSpark = $derived.by(() => {
-    if (!tideInfo || tideInfo.series.length < 2) return null;
+    if (!tideView || tideView.series.length < 2) return null;
     const pad = 3;
-    const tStart = tideInfo.seriesStart;
-    const tEnd = tideInfo.seriesEnd;
+    const tStart = tideView.seriesStart;
+    const tEnd = tideView.seriesEnd;
     const tRange = Math.max(tEnd - tStart, 1);
-    const vMin = tideInfo.seriesMin;
-    const vRange = Math.max(tideInfo.seriesMax - vMin, 0.01);
+    const vMin = tideView.seriesMin;
+    const vRange = Math.max(tideView.seriesMax - vMin, 0.01);
     const xOf = (t: number) => pad + ((sparkW - 2 * pad) * (t - tStart)) / tRange;
     const yOf = (v: number) => pad + (sparkH - 2 * pad) * (1 - (v - vMin) / vRange);
-    const points = tideInfo.series
+    const points = tideView.series
       .map((p) => `${xOf(p.t.getTime()).toFixed(1)},${yOf(p.v).toFixed(1)}`)
       .join(" ");
-    const now = sparkClock;
+    const now = tideView.now;
     const inRange = now >= tStart && now <= tEnd;
     const nowX = inRange ? xOf(now) : null;
     const nowY =
-      inRange && tideInfo.currentLevel !== null ? yOf(tideInfo.currentLevel) : null;
+      inRange && tideView.currentLevel !== null ? yOf(tideView.currentLevel) : null;
     return { points, nowX, nowY };
   });
 
@@ -3632,18 +3666,16 @@
   type TideStation = { id: string; name: string; lat: number; lng: number };
   type TidePoint = { tStr: string; t: Date; v: number; type: "H" | "L" };
   type TideSeriesPoint = { t: Date; v: number };
+  // Raw tide data: station info + the unclipped 72h hourly series and
+  // full hi/lo list NOAA returned. We keep these unclipped so the
+  // visible window (and "now" marker) can slide with real time without
+  // needing to refetch every minute. The displayed view — current
+  // level, next high/low, the 24h window — is recomputed by tideView
+  // on every sparkClock tick.
   let tideInfo = $state<{
     station: { id: string; name: string; distNm: number };
-    currentLevel: number | null;
-    nextHigh: TidePoint | null;
-    nextLow: TidePoint | null;
-    /** Hourly predictions spanning roughly the past 12h to the next 12h.
-     *  Used to draw the sparkline showing where we are in the cycle. */
-    series: TideSeriesPoint[];
-    seriesStart: number;
-    seriesEnd: number;
-    seriesMin: number;
-    seriesMax: number;
+    hiloAll: TidePoint[];
+    seriesAll: TideSeriesPoint[];
   } | null>(null);
   let tideStationCache: TideStation[] | null = null;
   let lastTideFetchKey = "";
@@ -3790,9 +3822,8 @@
   }
 
   // Linear interpolation of the hourly series at "now" for the current level.
-  function interpCurrent(series: TideSeriesPoint[]): number | null {
+  function interpCurrent(series: TideSeriesPoint[], now: number = Date.now()): number | null {
     if (series.length === 0) return null;
-    const now = Date.now();
     if (series.length === 1) return series[0].v;
     if (now <= series[0].t.getTime()) return series[0].v;
     if (now >= series[series.length - 1].t.getTime()) return series[series.length - 1].v;
@@ -3857,46 +3888,25 @@
 
       // Sparkline window is fixed at [now-6h, now+18h] so "now" always
       // sits at the 25% mark, regardless of NOAA's hourly grid alignment.
+      // Store the raw 72h hi/lo + hourly series unclipped. The visible
+      // window, current level, and next-high/low are derived in
+      // tideView each sparkClock tick so they slide with real time
+      // between 10-min refetches. If NOAA returned no hourly data
+      // (subordinate station), synthesise the series from the hi/lo
+      // peaks spanning the same window we'll be displaying.
       const now = Date.now();
-      const winStart = now - 6 * 3600 * 1000;
-      const winEnd = now + 18 * 3600 * 1000;
-
-      // If hourly is empty (subordinate station), synthesize from hi/lo.
-      const baseSeries =
-        hourly.length >= 2 ? hourly : synthSeriesFromHilo(hilo, winStart, winEnd);
-
-      // Clip series to the window. Inject endpoints at winStart/winEnd by
-      // linear interp so the polyline actually reaches both edges of the
-      // SVG (rather than starting at the first hourly point ≥ winStart).
-      const series = clipSeries(baseSeries, winStart, winEnd);
-
-      const future = hilo.filter((p) => p.t.getTime() > now);
-      const nextHigh = future.find((p) => p.type === "H") ?? null;
-      const nextLow = future.find((p) => p.type === "L") ?? null;
-      const currentLevel = interpCurrent(baseSeries);
-
-      // Min/max over the visible window, including any hi/lo peaks that
-      // fall inside it (so the curve doesn't clip through the top or bottom).
-      const windowedHilo = hilo.filter(
-        (p) => p.t.getTime() >= winStart && p.t.getTime() <= winEnd
-      );
-      const allV = [...series.map((p) => p.v), ...windowedHilo.map((p) => p.v)];
-      const seriesMin = allV.length > 0 ? Math.min(...allV) : 0;
-      const seriesMax = allV.length > 0 ? Math.max(...allV) : 1;
+      const seriesAll =
+        hourly.length >= 2
+          ? hourly
+          : synthSeriesFromHilo(hilo, now - 24 * 3600 * 1000, now + 48 * 3600 * 1000);
       tideInfo = {
         station: {
           id: nearest.station.id,
           name: nearest.station.name,
           distNm: nearest.distNm,
         },
-        currentLevel,
-        nextHigh,
-        nextLow,
-        series,
-        seriesStart: winStart,
-        seriesEnd: winEnd,
-        seriesMin,
-        seriesMax,
+        hiloAll: hilo,
+        seriesAll,
       };
     } catch (e) {
       console.warn("tide fetch failed", e);
@@ -4816,29 +4826,29 @@
               {/if}
             </svg>
           {/if}
-          {#if tideInfo.currentLevel !== null}
+          {#if tideView && tideView.currentLevel !== null}
             <div class="data-panel-row">
               <span class="data-panel-label">Now</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{tideInfo.currentLevel.toFixed(2)}</span><sup>ft</sup>
+                <span class="data-panel-bold">{tideView.currentLevel.toFixed(2)}</span><sup>ft</sup>
               </span>
             </div>
           {/if}
-          {#if tideInfo.nextHigh}
+          {#if tideView?.nextHigh}
             <div class="data-panel-row">
               <span class="data-panel-label">High</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{tideInfo.nextHigh.v.toFixed(2)}</span><sup>ft</sup>
-                · {tideTimeFmt(tideInfo.nextHigh)}
+                <span class="data-panel-bold">{tideView.nextHigh.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideView.nextHigh)}
               </span>
             </div>
           {/if}
-          {#if tideInfo.nextLow}
+          {#if tideView?.nextLow}
             <div class="data-panel-row">
               <span class="data-panel-label">Low</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{tideInfo.nextLow.v.toFixed(2)}</span><sup>ft</sup>
-                · {tideTimeFmt(tideInfo.nextLow)}
+                <span class="data-panel-bold">{tideView.nextLow.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideView.nextLow)}
               </span>
             </div>
           {/if}
