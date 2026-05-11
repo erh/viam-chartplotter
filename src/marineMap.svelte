@@ -2406,10 +2406,18 @@
       // below so they can be interactive (hover for metadata).
       // landfill=0 drops LNDARE/BUAARE/BUISGL fills so the osm-detail
       // tile layer (zIndex 4) shows through where the chart says "land".
-      const localParams = new URLSearchParams(sharedParams);
-      localParams.set("style", "wms");
-      localParams.set("navaids", "0");
-      localParams.set("landfill", "0");
+      const wmsParams = new URLSearchParams(sharedParams);
+      wmsParams.set("style", "wms");
+      wmsParams.set("navaids", "0");
+      wmsParams.set("landfill", "0");
+      // At overview zoom (tile z <= 10) the vector navaid layer is hidden
+      // (see updateNavaidVectorVisibility) so the chart would otherwise have
+      // no navaids at all. Bake them into the tile using the ECDIS style so
+      // major buoys/beacons/lights stay visible at coastal scale.
+      const overviewParams = new URLSearchParams(sharedParams);
+      overviewParams.set("style", "ecdis");
+      overviewParams.set("landfill", "0");
+      const NAVAID_VECTOR_MIN_TILE_Z = 11;
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: true,
@@ -2418,7 +2426,12 @@
           preload: 2,
           zIndex: 5,
           source: new XYZ({
-            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${localParams.toString()}`,
+            tileUrlFunction: (tileCoord) => {
+              const [z, x, y] = tileCoord;
+              const params =
+                z < NAVAID_VECTOR_MIN_TILE_Z ? overviewParams : wmsParams;
+              return `/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`;
+            },
             transition: 300,
           }),
         }),
@@ -2925,12 +2938,21 @@
     // the same level. change:resolution fires for both user-initiated
     // changes (wheel/pinch) and our own setZoom calls in auto-zoom mode —
     // both are correct things to remember.
+    const updateNavaidVectorVisibility = () => {
+      const z = mapGlobal.view?.getZoom();
+      if (mapGlobal.navaidLayer) {
+        const show = typeof z === "number" && z >= 11;
+        mapGlobal.navaidLayer.setVisible(show);
+      }
+    };
     mapGlobal.view.on("change:resolution", () => {
       const z = mapGlobal.view?.getZoom();
       if (typeof z === "number" && Number.isFinite(z)) {
         setCookie(COOKIE_VIEW_ZOOM, String(z), COOKIE_OPTS);
       }
+      updateNavaidVectorVisibility();
     });
+    updateNavaidVectorVisibility();
 
     updateOnLayers();
     updateOnLayers();
