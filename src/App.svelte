@@ -27,6 +27,13 @@
 
   let globalCloudClient: VIAM.ViamClient;
 
+  // Cache of cloud clients for remote parts, keyed by the remote's name
+  // (the prefix segment that components from that remote carry, e.g.
+  // "myremote" in "myremote:seatemp"). Lazily created on first query
+  // for a remote-borne component. Cached for the lifetime of the page
+  // so we don't spin a new client on every poll.
+  let remoteCloudClients: Record<string, Promise<VIAM.ViamClient>> = {};
+
   // Track timeout IDs and blob URLs for cleanup
   let updateLoopTimeout: number | undefined;
   let cloudLoopTimeout: number | undefined;
@@ -1026,71 +1033,120 @@
     return false;
   }
 
-  async function getDataViaMQL(dc, g, startTime, shortRange) {
-    // Gauges from remote parts come through with a "<remote>:<name>" form.
-    // The TabularData rows are keyed by the leaf component_name and the
-    // remote part's own location/robot/org, not the host robot's — so resolve
-    // those the same way positionHistoryMQLNamed does.
-    var name = g.split(":");
-    var orgId = globalClientCloudMetaData.primaryOrgId;
-    var match = {
-      location_id: globalClientCloudMetaData.locationId,
-      robot_id: globalClientCloudMetaData.machineId,
-      component_name: name[name.length - 1],
-      time_received: { $gte: startTime },
+  // The historical sparklines all bucket readings by year-month-day
+  // hour:minute and use the resulting string as the chart's _id key.
+  // `minuteExpr` lets a caller swap in a coarser minute term (e.g.
+  // 15-minute buckets) without rebuilding the surrounding $concat.
+  function bucketIdConcat(minuteExpr?: any) {
+    return {
+      $concat: [
+        { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
+        "-",
+        { $toString: { $month: "$time_received" } },
+        "-",
+        { $toString: { $dayOfMonth: "$time_received" } },
+        " ",
+        { $toString: { $hour: "$time_received" } },
+        ":",
+        minuteExpr ?? { $toString: { $minute: "$time_received" } },
+      ],
     };
+  }
 
-    var compStatus = findComponentStatus(g);
-    if (compStatus) {
-      match.location_id = compStatus.locationId;
-      match.robot_id = compStatus.machineId;
-      orgId = compStatus.primaryOrgId;
-    }
-
-    var minuteExpr;
-    var limit;
-    if (shortRange) {
-      minuteExpr = { $toString: { $minute: "$time_received" } };
-      limit = 4 * 60;
-    } else {
-      minuteExpr = {
-        $toString: {
-          $multiply: [15, { $floor: { $divide: [{ $minute: "$time_received" }, 15] } }],
-        },
-      };
-      limit = 24 * 4;
-    }
-
-    var group = {
-      _id: {
-        $concat: [
-          { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
-          "-",
-          { $toString: { $month: "$time_received" } },
-          "-",
-          { $toString: { $dayOfMonth: "$time_received" } },
-          " ",
-          { $toString: { $hour: "$time_received" } },
-          ":",
-          minuteExpr,
-        ],
-      },
-      ts: { $min: "$time_received" },
-      min: { $min: "$data.readings.Level" },
-      max: { $max: "$data.readings.Level" },
+  // Resolve the data-client scope for a component and pre-serialize a
+  // standard tabular-data pipeline that starts with a $match for that
+  // component. Callers pass the rest of the pipeline (group / sort /
+  // limit) plus optional method_name / time_received filters.
+  async function buildTabularQuery(
+    componentName: string,
+    pipeline: Record<string, any>[],
+    opts: { methodName?: string; startTime?: Date } = {}
+  ): Promise<{ scope: any; query: any[]; leaf: string }> {
+    var scope = await dataClientForComponent(componentName);
+    var leaf = componentName.split(":").pop() || componentName;
+    var match: any = {
+      location_id: scope.locationId,
+      robot_id: scope.robotId,
+      component_name: leaf,
     };
-
+    if (opts.methodName) match.method_name = opts.methodName;
+    if (opts.startTime) match.time_received = { $gte: opts.startTime };
     var query = [
       BSON.serialize({ $match: match }),
-      BSON.serialize({ $group: group }),
-      BSON.serialize({ $sort: { ts: -1 } }),
-      BSON.serialize({ $limit: limit }),
-      BSON.serialize({ $sort: { ts: 1 } }),
+      ...pipeline.map((s) => BSON.serialize(s)),
     ];
+    return { scope, query, leaf };
+  }
 
-    var data = await dc.tabularDataByMQL(orgId, query, true);
-
+  // Run a tabular-data query with optional hot→cold fallback. Logs a
+  // single line per call with row count, elapsed ms, and which path
+  // (hot/cold and host/remote/host-fallback-remote) handled it.
+  async function runTabularQuery(
+    label: string,
+    scope: any,
+    query: any[],
+    opts: { hot?: boolean; coldFallback?: boolean } = {}
+  ): Promise<any[]> {
+    var hot = opts.hot !== false; // default true
+    var t0 = performance.now();
+    var source = hot ? "hot" : "cold";
+    var data: any[] = [];
+    try {
+      data = await scope.dc.tabularDataByMQL(scope.orgId, query, hot);
+    } catch (e: any) {
+      console.log(label + ": " + source + " threw:", e?.message || String(e));
+    }
+    if (data.length === 0 && opts.coldFallback && hot) {
+      source = "cold";
+      try {
+        data = await scope.dc.tabularDataByMQL(scope.orgId, query, false);
+      } catch (e: any) {
+        console.log(label + ": cold fallback threw:", e?.message || String(e));
+      }
+    }
+    var elapsed = Math.round(performance.now() - t0);
+    console.log(
+      label +
+        ": " +
+        data.length +
+        " rows in " +
+        elapsed +
+        "ms (" +
+        source +
+        " via " +
+        scope.source +
+        ")"
+    );
     return data;
+  }
+
+  async function getDataViaMQL(_dc, g, startTime, shortRange) {
+    var minuteExpr = shortRange
+      ? { $toString: { $minute: "$time_received" } }
+      : {
+          $toString: {
+            $multiply: [15, { $floor: { $divide: [{ $minute: "$time_received" }, 15] } }],
+          },
+        };
+    var limit = shortRange ? 4 * 60 : 24 * 4;
+    var built = await buildTabularQuery(
+      g,
+      [
+        {
+          $group: {
+            _id: bucketIdConcat(minuteExpr),
+            ts: { $min: "$time_received" },
+            min: { $min: "$data.readings.Level" },
+            max: { $max: "$data.readings.Level" },
+          },
+        },
+        { $sort: { ts: -1 } },
+        { $limit: limit },
+        { $sort: { ts: 1 } },
+      ],
+      { startTime }
+    );
+    return runTabularQuery("gauge[" + g + "]", built.scope, built.query);
   }
 
   async function positionHistoryMQL(dc, startTime) {
@@ -1123,228 +1179,227 @@
     return null;
   }
 
-  async function positionHistoryMQLNamed(dc, startTime, n) {
-    var name = n.split(":");
-
-    var orgId = globalClientCloudMetaData.primaryOrgId;
-
-    var match = {
-      location_id: globalClientCloudMetaData.locationId,
-      robot_id: globalClientCloudMetaData.machineId,
-      component_name: name[name.length - 1],
-      method_name: "Position",
-      time_received: { $gte: startTime },
-    };
-
-    var compStatus = findComponentStatus(n);
-    if (compStatus) {
-      match.location_id = compStatus.locationId;
-      match.robot_id = compStatus.machineId;
-      orgId = compStatus.primaryOrgId;
-      console.log("newInfo", match, orgId);
-    }
-
-    var group = {
-      _id: {
-        $concat: [
-          { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
-          "-",
-          { $toString: { $month: "$time_received" } },
-          "-",
-          { $toString: { $dayOfMonth: "$time_received" } },
-          " ",
-          { $toString: { $hour: "$time_received" } },
-          ":",
-          { $toString: { $minute: "$time_received" } },
-        ],
-      },
-      ts: { $min: "$time_received" },
-      pos: { $first: "$data" },
-    };
-
-    var query = [
-      BSON.serialize({ $match: match }),
-      BSON.serialize({ $sort: { time_received: -1 } }),
-      BSON.serialize({ $group: group }),
-      BSON.serialize({ $sort: { ts: -1 } }),
-    ];
-
-    var hot = true; //isComponentMethodHot(n, "Position");
-
-    var timeStart = new Date();
-    var data = await dc.tabularDataByMQL(orgId, query, hot);
-    var getDataTime = new Date().getTime() - timeStart.getTime();
-    console.log(
-      "got " +
-        data.length +
-        " history data points from:" +
-        n +
-        " in " +
-        getDataTime +
-        "ms hot: " +
-        hot
-    );
-    /*
-   if (data.length > 0) {
-     console.log("first : " + data[0]._id + " " + data[0].ts.getTime() + " " + data[0].pos.coordinate.latitude);
-   }
-   */
-    return data;
+  // Pull the remote-name prefix off a fully-qualified component name.
+  // Viam exposes a remote's components as "<remote-name>:<component>",
+  // so if the name contains a colon the segment before it is the
+  // remote's name in the main part's `remotes` config block.
+  function remoteNameFromComponent(componentName: string): string | null {
+    var i = componentName.indexOf(":");
+    return i > 0 ? componentName.substring(0, i) : null;
   }
 
-  async function depthHistoryMQL(dc, startTime) {
-    var name = globalConfig.depthSensorName.split(":");
-
-    var orgId = globalClientCloudMetaData.primaryOrgId;
-    var match = {
-      location_id: globalClientCloudMetaData.locationId,
-      robot_id: globalClientCloudMetaData.machineId,
-      component_name: name[name.length - 1],
-      time_received: { $gte: startTime },
+  // The auth.entity for a Viam remote sits at remote.auth.entity (the
+  // API-key ID) and the payload lives under remote.auth.credentials. In
+  // this project's main part config the credentials are a *single*
+  // object, not an array, so we accept either shape. The type is
+  // typically "api-key"; we pass through whatever's stored.
+  function extractRemoteCredential(remote: any): {
+    type: string;
+    payload: string;
+    authEntity: string;
+  } | null {
+    if (!remote || !remote.auth) return null;
+    var raw =
+      (Array.isArray(remote.auth.credentials)
+        ? remote.auth.credentials[0]
+        : remote.auth.credentials) ?? null;
+    if (!raw || !raw.payload) return null;
+    return {
+      type: raw.type || "api-key",
+      payload: raw.payload,
+      authEntity: remote.auth.entity || raw.authEntity || raw.entity || "",
     };
-
-    var compStatus = findComponentStatus(globalConfig.depthSensorName);
-    if (compStatus) {
-      match.location_id = compStatus.locationId;
-      match.robot_id = compStatus.machineId;
-      orgId = compStatus.primaryOrgId;
-    }
-
-    var group = {
-      _id: {
-        $concat: [
-          { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
-          "-",
-          { $toString: { $month: "$time_received" } },
-          "-",
-          { $toString: { $dayOfMonth: "$time_received" } },
-          " ",
-          { $toString: { $hour: "$time_received" } },
-          ":",
-          { $toString: { $minute: "$time_received" } },
-        ],
-      },
-      ts: { $min: "$time_received" },
-      depth: { $first: "$data.readings.Depth" },
-    };
-
-    var query = [
-      BSON.serialize({ $match: match }),
-      BSON.serialize({ $sort: { time_received: -1 } }),
-      BSON.serialize({ $group: group }),
-      BSON.serialize({ $sort: { ts: -1 } }),
-    ];
-
-    var data = await dc.tabularDataByMQL(orgId, query, false);
-    console.log(
-      "got " +
-        data.length +
-        " depth history points from: " +
-        globalConfig.depthSensorName +
-        " component_name: " +
-        name[name.length - 1]
-    );
-    return data;
   }
 
-  // Fetches sea-temp readings, bucketed to 15 minutes, scoped to the
-  // tabular data window. Mirrors getDataViaMQL's long-range bucketing
-  // (24h history at 15-min resolution → 96 points). Returns rows of
+  // Locate the remote entry that hosts components in the given
+  // location. The remote's address embeds its location ID
+  // ("<part-name>.<location-id>.viam.cloud") so matching by the
+  // second dotted segment is the reliable correlation when component
+  // names don't carry a "<remote>:" prefix.
+  function findRemoteForLocation(locationId: string): any | null {
+    var remotes = globalData.partConfig?.remotes;
+    if (!Array.isArray(remotes)) return null;
+    for (var r of remotes) {
+      if (!r || !r.address || r.disabled) continue;
+      var parts = String(r.address).split(".");
+      if (parts.length >= 2 && parts[1] === locationId) return r;
+    }
+    return null;
+  }
+
+  // Build (or return a cached) ViamClient using credentials lifted from
+  // a `remotes[]` entry. The remote section is the only place the main
+  // app has the API key valid for the remote's org. Caches by the
+  // remote's name so we don't spin up a new client every poll.
+  async function getRemoteCloudClient(remote: any): Promise<VIAM.ViamClient | null> {
+    var key = remote?.name || remote?.address;
+    if (!key) return null;
+    if (key in remoteCloudClients) return remoteCloudClients[key];
+    var cred = extractRemoteCredential(remote);
+    if (!cred) {
+      console.log(
+        "getRemoteCloudClient: no usable credential for remote",
+        remote?.name,
+        "auth shape:",
+        remote?.auth
+      );
+      return null;
+    }
+    var promise = VIAM.createViamClient({
+      serviceHost: "https://app.viam.com",
+      credentials: {
+        type: cred.type,
+        payload: cred.payload,
+        authEntity: cred.authEntity,
+      },
+    }).catch((e: any) => {
+      console.log("getRemoteCloudClient: createViamClient failed for", remote?.name, e);
+      delete remoteCloudClients[key];
+      throw e;
+    });
+    remoteCloudClients[key] = promise;
+    return promise;
+  }
+
+  // Resolve which DataClient + scoping IDs to use for a given
+  // component's tabular-data query. For host-local components this is
+  // just the global client with the host's IDs. For components on a
+  // remote part, if we can build a client from the remote's
+  // credentials we use that; otherwise we fall back to the global
+  // client paired with the remote's IDs (works iff the host's API key
+  // can read the remote's org, which is common for same-org setups).
+  async function dataClientForComponent(componentName: string): Promise<{
+    dc: any;
+    orgId: string;
+    locationId: string;
+    robotId: string;
+    source: "host" | "remote" | "host-fallback-remote";
+  }> {
+    var hostScope = {
+      dc: globalCloudClient.dataClient,
+      orgId: globalClientCloudMetaData.primaryOrgId,
+      locationId: globalClientCloudMetaData.locationId,
+      robotId: globalClientCloudMetaData.machineId,
+      source: "host" as const,
+    };
+    var compStatus = findComponentStatus(componentName);
+    if (!compStatus) return hostScope;
+    var isOnRemote =
+      compStatus.machineId !== globalClientCloudMetaData.machineId ||
+      compStatus.locationId !== globalClientCloudMetaData.locationId;
+    if (!isOnRemote) return hostScope;
+    // Try the colon-prefix path first (explicit "<remote>:<name>"),
+    // then fall back to matching by location-id embedded in the
+    // remote's address (handles the flat-name case where the host
+    // exposes the remote's components without the prefix).
+    var remote: any = null;
+    var remoteName = remoteNameFromComponent(componentName);
+    if (remoteName) {
+      var remotes = globalData.partConfig?.remotes;
+      if (Array.isArray(remotes)) {
+        remote = remotes.find((r: any) => r && r.name === remoteName) || null;
+      }
+    }
+    if (!remote) {
+      remote = findRemoteForLocation(compStatus.locationId);
+    }
+    if (remote) {
+      try {
+        var rc = await getRemoteCloudClient(remote);
+        if (rc) {
+          return {
+            dc: rc.dataClient,
+            orgId: compStatus.primaryOrgId,
+            locationId: compStatus.locationId,
+            robotId: compStatus.machineId,
+            source: "remote",
+          };
+        }
+      } catch {
+        // already logged inside getRemoteCloudClient
+      }
+    }
+    return {
+      dc: globalCloudClient.dataClient,
+      orgId: compStatus.primaryOrgId,
+      locationId: compStatus.locationId,
+      robotId: compStatus.machineId,
+      source: "host-fallback-remote",
+    };
+  }
+
+  async function positionHistoryMQLNamed(_dc, startTime, n) {
+    var built = await buildTabularQuery(
+      n,
+      [
+        { $sort: { time_received: -1 } },
+        {
+          $group: {
+            _id: bucketIdConcat(),
+            ts: { $min: "$time_received" },
+            pos: { $first: "$data" },
+          },
+        },
+        { $sort: { ts: -1 } },
+      ],
+      { methodName: "Position", startTime }
+    );
+    return runTabularQuery("position[" + n + "]", built.scope, built.query);
+  }
+
+  async function depthHistoryMQL(_dc, startTime) {
+    var built = await buildTabularQuery(
+      globalConfig.depthSensorName,
+      [
+        { $sort: { time_received: -1 } },
+        {
+          $group: {
+            _id: bucketIdConcat(),
+            ts: { $min: "$time_received" },
+            depth: { $first: "$data.readings.Depth" },
+          },
+        },
+        { $sort: { ts: -1 } },
+      ],
+      { startTime }
+    );
+    return runTabularQuery("depth", built.scope, built.query, { hot: false });
+  }
+
+  // 24h history at 15-min resolution → 96 points. Returns rows of
   // {_id, ts, temp} where temp is degrees Fahrenheit, matching the
-  // unit used for the live readout.
-  async function seaTempHistoryMQL(dc, startTime) {
+  // unit used for the live readout. Hot is tried first; cold is the
+  // documented home for these readings on most deployments, so the
+  // fallback is on by default.
+  async function seaTempHistoryMQL(_dc, startTime) {
     if (!globalConfig.seatempSensorName) return [];
-    var name = globalConfig.seatempSensorName.split(":");
-
-    var orgId = globalClientCloudMetaData.primaryOrgId;
-    var match = {
-      location_id: globalClientCloudMetaData.locationId,
-      robot_id: globalClientCloudMetaData.machineId,
-      component_name: name[name.length - 1],
-      time_received: { $gte: startTime },
-    };
-
-    var compStatus = findComponentStatus(globalConfig.seatempSensorName);
-    if (compStatus) {
-      match.location_id = compStatus.locationId;
-      match.robot_id = compStatus.machineId;
-      orgId = compStatus.primaryOrgId;
-    }
-
     var minuteExpr = {
       $toString: {
         $multiply: [15, { $floor: { $divide: [{ $minute: "$time_received" }, 15] } }],
       },
     };
-
-    var group = {
-      _id: {
-        $concat: [
-          { $toString: { $substr: [{ $year: "$time_received" }, 2, -1] } },
-          "-",
-          { $toString: { $month: "$time_received" } },
-          "-",
-          { $toString: { $dayOfMonth: "$time_received" } },
-          " ",
-          { $toString: { $hour: "$time_received" } },
-          ":",
-          minuteExpr,
-        ],
-      },
-      ts: { $min: "$time_received" },
-      // Average within each 15-min bucket so a single noisy reading
-      // doesn't spike the line. Convert from Celsius to Fahrenheit
-      // outside the query (avoids embedding the conversion in MQL).
-      tempC: { $avg: "$data.readings.Temperature" },
-    };
-
-    var query = [
-      BSON.serialize({ $match: match }),
-      BSON.serialize({ $group: group }),
-      BSON.serialize({ $sort: { ts: -1 } }),
-      BSON.serialize({ $limit: 24 * 4 }),
-      BSON.serialize({ $sort: { ts: 1 } }),
-    ];
-
-    // Try hot first for low latency; fall back to cold when hot
-    // returns nothing or throws. On this user's setup seatemp lives in
-    // cold, but other deployments may route the data manager output
-    // differently — the fallback keeps the chart working in either
-    // case at the cost of a second query only on a hot miss.
-    var source = "hot";
-    var hotFailReason: string | null = null;
-    var data: any[] = [];
-    var t0 = performance.now();
-    try {
-      data = await dc.tabularDataByMQL(orgId, query, true);
-      if (data.length === 0) {
-        hotFailReason = "hot returned 0 rows";
-      }
-    } catch (e: any) {
-      hotFailReason = "hot threw: " + (e?.message || String(e));
-    }
-    if (hotFailReason) {
-      source = "cold";
-      try {
-        data = await dc.tabularDataByMQL(orgId, query, false);
-      } catch (e: any) {
-        console.log(
-          "seaTempHistoryMQL: cold also failed:",
-          e?.message || String(e)
-        );
-        data = [];
-      }
-    }
-    var elapsed = Math.round(performance.now() - t0);
-    console.log(
-      "seaTempHistoryMQL: " +
-        data.length +
-        " rows in " +
-        elapsed +
-        "ms from " +
-        source +
-        (hotFailReason ? " (hot fallback reason: " + hotFailReason + ")" : "")
+    var built = await buildTabularQuery(
+      globalConfig.seatempSensorName,
+      [
+        {
+          $group: {
+            _id: bucketIdConcat(minuteExpr),
+            ts: { $min: "$time_received" },
+            // Average within each 15-min bucket so one noisy reading
+            // doesn't spike the line. Convert from Celsius to
+            // Fahrenheit outside the query.
+            tempC: { $avg: "$data.readings.Temperature" },
+          },
+        },
+        { $sort: { ts: -1 } },
+        { $limit: 24 * 4 },
+        { $sort: { ts: 1 } },
+      ],
+      { startTime }
     );
+    var data = await runTabularQuery("seatemp", built.scope, built.query, {
+      coldFallback: true,
+    });
     return data
       .filter((d) => typeof d.tempC === "number" && !isNaN(d.tempC))
       .map((d) => ({ _id: d._id, ts: d.ts, temp: 32 + d.tempC * 1.8 }));
