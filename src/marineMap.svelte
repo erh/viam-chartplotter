@@ -560,6 +560,7 @@
     hdg,
     cog,
     depth,
+    aisTracksNeeded = $bindable(false),
   }: {
     myBoat?: BoatInfo;
     zoomModifier?: number;
@@ -580,6 +581,11 @@
     cog?: number | null;
     /** Water depth (ft). When provided, shown in the data panel. */
     depth?: number | null;
+    /** Bindable; reflects whether the AIS-track layer (and its parent
+     *  AIS layer) are both currently visible. Parent reads this to
+     *  decide whether to keep fetching per-vessel AIS history — when
+     *  the user has the layer off, the history poll is wasted work. */
+    aisTracksNeeded?: boolean;
     /** Ordered waypoints from a navigation service. The route is drawn from the boat's
      *  current position through each waypoint in order. */
     navWaypoints?: { id: string; lat: number; lng: number }[];
@@ -742,6 +748,14 @@
     // layer ourselves so its style function is re-evaluated.
     void states.find((s) => s.name === "ais-projection")?.on;
     mapGlobal.aisLayer?.changed();
+
+    // Surface "do we need AIS history?" to the parent so it can stop
+    // polling all_history when the user has the track layer turned
+    // off. Both parents must be on — toggling the umbrella "ais" off
+    // hides the tracks even if the child "ais-track" is on.
+    const aisOn = states.find((s) => s.name === "ais")?.on ?? false;
+    const aisTrackOn = states.find((s) => s.name === "ais-track")?.on ?? false;
+    aisTracksNeeded = aisOn && aisTrackOn;
 
     updateOnLayers();
   });
@@ -947,8 +961,12 @@
 
         const boatPos = [boat.location[1], boat.location[0]];
 
-        // Track AIS boat position history
-        recordTrackPoint(mmsi, boatPos);
+        // AIS position history now comes pre-loaded from the viamboat
+        // module's `all_history` DoCommand (see App.svelte's AIS poll)
+        // and lands in boat.positionHistory below — we no longer
+        // accumulate it per-tick in the browser. That accumulation
+        // was the main cause of the AIS tab feeling sluggish with
+        // many vessels in view.
 
         for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
           var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;

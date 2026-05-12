@@ -5,7 +5,7 @@
   import { Icon as PrimeIcon } from "@viamrobotics/prime-core";
 
   import { Logger } from "tslog";
-  import type { BoatInfo } from "./lib/BoatInfo";
+  import type { BoatInfo, PositionPoint } from "./lib/BoatInfo";
 
   import { Coordinate } from "tsgeo/Coordinate";
   import { DecimalMinutes } from "tsgeo/Formatter/Coordinate/DecimalMinutes";
@@ -117,6 +117,19 @@
 
     partConfig: {},
     aisBoats: [] as BoatInfo[],
+    // Module-side AIS position history, keyed by MMSI. Populated by
+    // a 60-second poll of the viamboat AIS sensor's "all_history"
+    // DoCommand — replaces the per-tick in-browser accumulation that
+    // was making the UI sluggish with many vessels. Each tick that
+    // rebuilds aisBoats attaches the matching entry as
+    // BoatInfo.positionHistory, so MarineMap's existing historical
+    // track renderer picks it up unchanged.
+    aisHistoryByMmsi: {} as Record<string, PositionPoint[]>,
+    // Bindable from MarineMap — true when both the "ais" and
+    // "ais-track" layer toggles are on. We skip the all_history poll
+    // when this is false; per-vessel history is still fetched on
+    // popup-open via onBoatPopupOpen regardless of layer state.
+    aisTracksNeeded: false,
     enlargedImage: null,
     shortGraphRange:
       typeof window !== "undefined" &&
@@ -452,10 +465,99 @@
               }
             }
           }
-          globalData.aisBoats = Array.from(byMmsi.values()).map((v) => v.boat);
+          // Attach module-side position history (from the last
+          // all_history poll) by MMSI. Boats with no recorded history
+          // get an empty array — the historical renderer no-ops on
+          // those, matching the previous "no track yet" behaviour.
+          globalData.aisBoats = Array.from(byMmsi.values()).map((v) => ({
+            ...v.boat,
+            positionHistory: globalData.aisHistoryByMmsi[v.boat.mmsi],
+          }));
         });
       }
     }
+
+    // Poll all_history every 10 s, on the same cadence as the AIS
+    // position fetch above (offset by 3 ticks so the two requests
+    // don't pile up). Gated on aisTracksNeeded so toggling the AIS
+    // track layer off stops the network/CPU work — single-vessel
+    // history is still fetched on popup-open via onBoatPopupOpen.
+    if (
+      loopNumber % 10 == 5 &&
+      globalConfig.aisSensorName != "" &&
+      globalData.aisTracksNeeded
+    ) {
+      fetchAisHistory(client, globalConfig.aisSensorName);
+    }
+  }
+
+  // Convert one vessel's raw history samples from the viamboat module
+  // into PositionPoint[] consumable by MarineMap's historical track
+  // renderer. Discards entries missing valid lat/lng. Created is the
+  // wall-clock ingest time; falls back to Timestamp (vessel-reported)
+  // when missing. Either is monotonic enough for the renderer.
+  function aisSamplesToPoints(samples: any[]): PositionPoint[] {
+    const points: PositionPoint[] = [];
+    for (const s of samples) {
+      if (!s || !Array.isArray(s.Location) || s.Location.length < 2) continue;
+      const lat = Number(s.Location[0]);
+      const lng = Number(s.Location[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const tsRaw = s.Created ?? s.Timestamp;
+      const ts = tsRaw ? new Date(tsRaw) : new Date(0);
+      points.push({ lat, lng, ts });
+    }
+    return points;
+  }
+
+  async function fetchAisHistory(client: any, sensorName: string) {
+    try {
+      const result = (await new VIAM.SensorClient(client, sensorName).doCommand(
+        VIAM.Struct.fromJson({ command: "all_history" })
+      )) as Record<string, any>;
+      const byMmsi: Record<string, PositionPoint[]> = {};
+      for (const mmsi in result) {
+        const samples = result[mmsi];
+        if (!Array.isArray(samples)) continue;
+        const points = aisSamplesToPoints(samples);
+        if (points.length > 0) byMmsi[mmsi] = points;
+      }
+      globalData.aisHistoryByMmsi = byMmsi;
+    } catch (e: any) {
+      errorHandler(e, "ais history");
+    }
+  }
+
+  // Fetch one vessel's history on demand — fired when the user clicks
+  // an AIS boat. Avoids the 60s wait for the next all_history poll so
+  // the popup-focused boat's track shows up immediately. The cached
+  // entry is updated and the matching aisBoats row's positionHistory
+  // is replaced so the renderer sees fresh data without a 10s lag.
+  async function fetchAisBoatHistory(mmsi: string) {
+    if (!globalClient || !globalConfig.aisSensorName) return;
+    try {
+      const result = (await new VIAM.SensorClient(globalClient, globalConfig.aisSensorName).doCommand(
+        VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) })
+      )) as Record<string, any>;
+      const samples = result[mmsi];
+      if (!Array.isArray(samples)) return;
+      const points = aisSamplesToPoints(samples);
+      if (points.length === 0) return;
+      globalData.aisHistoryByMmsi[mmsi] = points;
+      globalData.aisBoats = globalData.aisBoats.map((b) =>
+        b.mmsi === mmsi ? { ...b, positionHistory: points } : b
+      );
+    } catch (e: any) {
+      errorHandler(e, "ais boat history");
+    }
+  }
+
+  // MarineMap fires this when the user clicks a boat. AIS passes the
+  // numeric MMSI; myBoat passes a UUID partId. The regex routes only
+  // the AIS case to the per-vessel history fetch.
+  function onBoatPopupOpen(boatId?: string) {
+    if (!boatId || !/^\d+$/.test(boatId)) return;
+    fetchAisBoatHistory(boatId);
   }
 
   // fetchBoatsFromSensor pulls AIS-shaped readings from a viamboat sensor
@@ -1943,6 +2045,8 @@
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
       positionHistorical={globalData.posHistory}
+      onBoatPopupOpen={onBoatPopupOpen}
+      bind:aisTracksNeeded={globalData.aisTracksNeeded}
       bind:depthColorTrack={globalData.showDepthOnTrack}
       depthSensorAvailable={globalConfig.depthSensorName !== ""}
       defaultAisVisible={false}
