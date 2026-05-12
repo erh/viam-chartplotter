@@ -6,6 +6,12 @@
 
   import { Logger } from "tslog";
   import type { BoatInfo, PositionPoint } from "./lib/BoatInfo";
+  // Importing the logo (rather than referencing /viam-logo.png in
+  // public/) routes the URL through Vite's asset pipeline, so it
+  // honours the build's `base` and resolves correctly whether the
+  // bundle is mounted at "/" (local Go module) or "/viam-chartplotter/"
+  // (Viam Cloud module proxy). Asset is hashed in the build output.
+  import viamLogoUrl from "./assets/viam-logo.png";
 
   import { Coordinate } from "tsgeo/Coordinate";
   import { DecimalMinutes } from "tsgeo/Formatter/Coordinate/DecimalMinutes";
@@ -2429,7 +2435,7 @@
       <div>
         <h3>Powered By</h3>
         <img
-          src="/viam-logo.png"
+          src={viamLogoUrl}
           width="250"
           height="49"
           alt="viam logo"
