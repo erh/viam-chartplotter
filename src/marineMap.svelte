@@ -999,7 +999,12 @@
         );
       });
 
-      for (var i = 0; i < mapGlobal.aisFeatures.getLength(); i++) {
+      // Iterate backwards so removeAt(i) doesn't shift items we
+      // haven't checked yet — a forward loop with a removal in the
+      // middle would skip the item that takes the removed slot's
+      // place, leaving stale AIS markers behind when several
+      // vessels disappear in the same tick.
+      for (var i = mapGlobal.aisFeatures.getLength() - 1; i >= 0; i--) {
         var v = mapGlobal.aisFeatures.item(i) as Feature<Geometry>;
         var mmsi = v.get("mmsi") as string;
         if (!seen[mmsi]) {
@@ -2530,6 +2535,24 @@
       sharedParams.set("v", tileGenVersion);
       if (safeDepthParam) sharedParams.set("sd", safeDepthParam);
 
+      // Cap on retained features per chart-overlay vector source.
+      // bboxStrategy accumulates features as the user pans and never
+      // evicts on its own; over a long coastal session that grew
+      // without bound. When we cross the cap, schedule a refresh()
+      // which clears features AND the loaded-extents tracking — the
+      // current viewport then refetches on the next render tick.
+      // Threshold tuned so it rarely triggers in normal harbour use
+      // (a busy harbour view returns ~50-500 features per layer).
+      const VECTOR_FEATURE_CAP = 3000;
+      function capVectorSource(source: VectorSource<any>) {
+        if (source.getFeatures().length > VECTOR_FEATURE_CAP) {
+          // Defer to a microtask so we don't refresh mid-load — that
+          // can race with OL's internal "I'm currently loading this
+          // extent" bookkeeping.
+          Promise.resolve().then(() => source.refresh());
+        }
+      }
+
       // Vector layer of navaid features (buoys, beacons, lights, daymarks).
       // Loaded from /noaa-enc/navaids on demand per visible bbox; rendered
       // as simple S-52-flavoured icons with a hover popup for full metadata.
@@ -2550,6 +2573,7 @@
                 .readFeatures(j) as Feature[];
               navaidSource.addFeatures(feats);
               success?.(feats);
+              capVectorSource(navaidSource);
             })
             .catch((e) => {
               console.warn("navaids fetch failed", e);
@@ -2590,6 +2614,7 @@
                 .readFeatures(j) as Feature[];
               structureSource.addFeatures(feats);
               success?.(feats);
+              capVectorSource(structureSource);
             })
             .catch((e) => {
               console.warn("structures fetch failed", e);
