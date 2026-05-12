@@ -2640,8 +2640,8 @@
       //
       // Bumping a layer's minZoom is now a one-line change here and on
       // the layer registration; no per-layer tileUrlFunction logic.
-      const VECTOR_TILE_NAVAID_MIN_Z = 10;
-      const VECTOR_TILE_STRUCTURE_MIN_Z = 11;
+      const VECTOR_TILE_NAVAID_MIN_Z = 12;
+      const VECTOR_TILE_STRUCTURE_MIN_Z = 13;
 
       // Overview (z < navaidMin): ECDIS style, landfill off — everything
       // baked into the tile so the chart reads at coastal scale.
@@ -2716,9 +2716,12 @@
         on: true,
         layer: navaidLayer,
         parent: "noaa-local",
-        // Below z=10 the icons clutter without adding navigational value;
-        // major navaids are still baked into the chart raster at overview.
-        minZoom: 10,
+        // Below z=12 the icons clutter without adding navigational
+        // value AND every pan at that scale pulls in a wide bbox of
+        // features the user can't read — so we'd be racking up
+        // memory + fetches for nothing. Major navaids stay baked
+        // into the chart raster at overview.
+        minZoom: 12,
       });
       mapGlobal.layerOptions.push({
         name: "noaa-structures",
@@ -2729,7 +2732,7 @@
         // One zoom level tighter than navaids — bridges/cables are
         // denser in busy harbours and would clutter the overview a
         // step before the navaid icons start to.
-        minZoom: 11,
+        minZoom: 13,
       });
       // noaa-ecdis: same renderer + cells, but with S-52 conditional
       // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
