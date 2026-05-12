@@ -1920,7 +1920,7 @@
   </div>
 {:else}
   <main
-    class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-4 grid-rows-3 lg:grid-rows-6 gap-2 bg-black"
+    class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_22rem] grid-rows-3 lg:grid-rows-6 gap-2 bg-black"
   >
     <MarineMap
       myBoat={{
@@ -1962,7 +1962,7 @@
     ></MarineMap>
 
     {#if !globalData.hideDataPanel}
-    <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 min-h-full text-white">
+    <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 lg:pr-2 min-h-full text-white">
       {#if globalData.status === "Connected"}
         <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
           <PrimeIcon name="broadcast" cx="text-success-dark" />
@@ -2093,7 +2093,7 @@
         {#if globalConfig.spotZeroFWSensorName != ""}
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">SpotZero F/S</div>
-            <div>
+            <div class="whitespace-nowrap">
               <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)}</span> /
               <span class="font-bold">{@html globalData.spotZeroSW.toFixed(2)}</span>
               gpm
@@ -2103,7 +2103,7 @@
         {#if globalConfig.seakeeperSensorName != ""}
           <div class="flex gap-2 p-2 text-lg">
             <div class="min-w-32">Seakeeper</div>
-            <div>
+            <div class="whitespace-nowrap">
               <span class="font-bold">
                 {#if globalData.seakeeperData["power_enabled"] >= 1}
                   <button onclick={() => seakeeper("power", false)}>P</button>
