@@ -2316,7 +2316,7 @@
       <div>
         <h3>Powered By</h3>
         <img
-          src="https://app.viam.com/static/images/viam-logo.png"
+          src="/viam-logo.png"
           width="250"
           height="49"
           alt="viam logo"
