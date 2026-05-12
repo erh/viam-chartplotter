@@ -40,6 +40,12 @@
     // their style is rendered inline by another layer's style function.
     layer?: TileLayer<any> | Vector<any>;
     parent?: string; // Parent layer name for hierarchical layers
+    // Optional zoom gate: when the current view zoom is below this
+    // value the layer is hidden (setVisible(false)) regardless of the
+    // user toggle. Used for vector layers whose icons would clutter
+    // at overview scales — navaids, structures, etc. Leave undefined
+    // for layers that should always be visible when toggled on.
+    minZoom?: number;
   }
 
   let boatImage = "topdown-boat.svg";
@@ -765,6 +771,7 @@
     aisLayer: null as Vector<any> | null,
     aisTrackLayer: null as Vector<any> | null,
     navaidLayer: null as Vector<any> | null,
+    structureLayer: null as Vector<any> | null,
 
     layerOptions: [] as LayerOption[],
     onLayers: new Collection<BaseLayer>(),
@@ -1424,6 +1431,145 @@
       );
     }
 
+    return lines.join("");
+  }
+
+  // S-57 CATBRG enum → human-readable bridge category.
+  function bridgeCategoryLabel(code: number): string {
+    switch (code) {
+      case 1: return "Fixed";
+      case 2: return "Opening";
+      case 3: return "Swing";
+      case 4: return "Lifting";
+      case 5: return "Bascule";
+      case 6: return "Pontoon";
+      case 7: return "Drawbridge";
+      case 8: return "Transporter";
+      case 9: return "Footbridge";
+      case 10: return "Viaduct";
+      case 11: return "Aqueduct";
+      case 12: return "Suspension";
+      default: return "";
+    }
+  }
+
+  function structureClassLabel(c: string): string {
+    switch (c) {
+      case "BRIDGE": return "Bridge";
+      case "CBLOHD": return "Overhead cable";
+      case "PIPOHD": return "Overhead pipe";
+      case "CONVYR": return "Conveyor";
+      default:       return c;
+    }
+  }
+
+  // Build the SVG icon for a structure feature (bridges / overhead
+  // cables / overhead pipes / conveyors). Compact 24x24 box with a
+  // class-distinguishing glyph: a stylised bridge arch for BRIDGE,
+  // overhead horizontal line + vertical drop for cables/pipes/conveyors.
+  function structureIconSrc(class_: string): string {
+    const stroke = class_ === "BRIDGE" ? "#854d0e" : "#b45309";
+    const fill = class_ === "BRIDGE" ? "#facc15" : "#fde68a";
+    let glyph: string;
+    if (class_ === "BRIDGE") {
+      // Two arches with a horizontal deck on top.
+      glyph =
+        `<path d="M2 18 H22" stroke="${stroke}" stroke-width="2.5" stroke-linecap="round" fill="none"/>` +
+        `<path d="M4 18 Q4 11 10 11 Q16 11 16 18" stroke="${stroke}" stroke-width="1.5" fill="${fill}"/>` +
+        `<path d="M12 18 Q12 13 16 13 Q20 13 20 18" stroke="${stroke}" stroke-width="1.5" fill="${fill}"/>`;
+    } else {
+      // Overhead utility: horizontal sky line with a vertical drop and a
+      // small "↕" hint inside.
+      const accent = class_ === "PIPOHD" ? "#7c2d12" : stroke;
+      glyph =
+        `<path d="M2 7 H22" stroke="${accent}" stroke-width="2" stroke-linecap="round" fill="none"/>` +
+        `<path d="M6 7 V19 M18 7 V19" stroke="${accent}" stroke-width="1.5" stroke-linecap="round" fill="none"/>` +
+        `<path d="M12 9 V19 M9 12 L12 9 L15 12 M9 16 L12 19 L15 16" stroke="${accent}" stroke-width="1.2" fill="none"/>`;
+    }
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">` +
+      `<circle cx="12" cy="12" r="11" fill="rgba(255,255,255,0.85)" stroke="${stroke}" stroke-width="1"/>` +
+      glyph +
+      `</svg>`;
+    return "data:image/svg+xml;base64," + btoa(svg);
+  }
+
+  function structureStyleFunction(feature: Feature<Geometry>): Style[] {
+    const props = feature.getProperties();
+    const class_ = (props.class as string) ?? "";
+    const geom = feature.getGeometry();
+    const geomType = geom?.getType();
+    const styles: Style[] = [];
+    if (geomType === "LineString" || geomType === "Polygon" || geomType === "MultiLineString") {
+      // Trace lines/polygons in a translucent amber so the structure
+      // is visible at zoom levels where the icon alone would be lost
+      // in the chart detail. The icon (added below) still pins the
+      // hover anchor to the first vertex.
+      styles.push(
+        new Style({
+          stroke: new Stroke({
+            color: class_ === "BRIDGE" ? "rgba(133,77,14,0.85)" : "rgba(180,83,9,0.85)",
+            width: 2,
+          }),
+          fill: new Fill({
+            color: class_ === "BRIDGE"
+              ? "rgba(250,204,21,0.18)"
+              : "rgba(253,230,138,0.15)",
+          }),
+        })
+      );
+    }
+    styles.push(
+      new Style({
+        image: new Icon({
+          src: structureIconSrc(class_),
+          anchor: [0.5, 0.5],
+        }),
+        // For line/polygon features, render the icon at the first
+        // vertex so the hover target is predictable. For point
+        // features, OL uses the point itself.
+        geometry:
+          geomType === "LineString" && geom
+            ? new Point((geom as any).getFirstCoordinate())
+            : geomType === "Polygon" && geom
+              ? new Point((geom as any).getInteriorPoint().getCoordinates())
+              : undefined,
+      })
+    );
+    return styles;
+  }
+
+  function formatStructureTooltip(props: any): string {
+    const class_ = String(props.class ?? "");
+    const lines: string[] = [];
+    const title = props.OBJNAM
+      ? escapeHtml(String(props.OBJNAM))
+      : structureClassLabel(class_);
+    lines.push(`<div class="navaid-tt-title">${title}</div>`);
+    lines.push(
+      `<div class="navaid-tt-sub">${escapeHtml(structureClassLabel(class_))}</div>`
+    );
+    const meta: string[] = [];
+    if (class_ === "BRIDGE" && props.CATBRG != null) {
+      const label = bridgeCategoryLabel(Number(props.CATBRG));
+      if (label) meta.push(label);
+    }
+    // Vertical clearance — VERCLR is the canonical value; specific
+    // variants (closed, open, safe) get their own lines when present.
+    const fmtClr = (v: any) => `${Number(v).toFixed(1)} m`;
+    if (props.VERCLR != null) meta.push(`Vert clr ${fmtClr(props.VERCLR)}`);
+    if (props.VERCCL != null) meta.push(`Closed ${fmtClr(props.VERCCL)}`);
+    if (props.VERCOP != null) meta.push(`Open ${fmtClr(props.VERCOP)}`);
+    if (props.VERCSA != null) meta.push(`Safe ${fmtClr(props.VERCSA)}`);
+    if (props.HORCLR != null) meta.push(`Horz clr ${fmtClr(props.HORCLR)}`);
+    if (meta.length > 0) {
+      lines.push(`<div class="navaid-tt-sub">${escapeHtml(meta.join(" · "))}</div>`);
+    }
+    if (props.INFORM) {
+      lines.push(`<div class="navaid-tt-sub">${escapeHtml(String(props.INFORM))}</div>`);
+    } else if (props.NINFOM) {
+      lines.push(`<div class="navaid-tt-sub">${escapeHtml(String(props.NINFOM))}</div>`);
+    }
     return lines.join("");
   }
 
@@ -2406,18 +2552,75 @@
       // below so they can be interactive (hover for metadata).
       // landfill=0 drops LNDARE/BUAARE/BUISGL fills so the osm-detail
       // tile layer (zIndex 4) shows through where the chart says "land".
-      const wmsParams = new URLSearchParams(sharedParams);
-      wmsParams.set("style", "wms");
-      wmsParams.set("navaids", "0");
-      wmsParams.set("landfill", "0");
-      // At overview zoom (tile z <= 10) the vector navaid layer is hidden
-      // (see updateNavaidVectorVisibility) so the chart would otherwise have
-      // no navaids at all. Bake them into the tile using the ECDIS style so
-      // major buoys/beacons/lights stay visible at coastal scale.
+      // Vector layer of structure features (bridges, overhead cables,
+      // overhead pipes, conveyors). Same pattern as navaids: GeoJSON
+      // loaded per visible bbox; hover popup formats clearance + name.
+      const structureSource = new VectorSource({
+        format: new GeoJSON(),
+        strategy: bboxStrategy,
+        loader: function (extent, _res, _proj, success, failure) {
+          const [minLon, minLat, maxLon, maxLat] = extent;
+          const url =
+            `/noaa-enc/structures?` +
+            `minLon=${minLon}&minLat=${minLat}` +
+            `&maxLon=${maxLon}&maxLat=${maxLat}`;
+          fetch(url)
+            .then((r) => r.json())
+            .then((j) => {
+              const feats = structureSource
+                .getFormat()!
+                .readFeatures(j) as Feature[];
+              structureSource.addFeatures(feats);
+              success?.(feats);
+            })
+            .catch((e) => {
+              console.warn("structures fetch failed", e);
+              failure?.();
+            });
+        },
+      });
+      var structureLayer = new Vector({
+        source: structureSource,
+        style: structureStyleFunction,
+        zIndex: 8,
+      });
+      mapGlobal.structureLayer = structureLayer;
+
+      // Tile param variants, picked per-zoom by tileUrlFunction. The
+      // rule: at each zoom we want exactly one source of truth for a
+      // chart feature. Navaids and structures each have a vector layer
+      // that turns on at their minZoom; the tile must bake the feature
+      // *in* below that and skip it *out* at and above. We render this
+      // as three variants — overview / mid / detail — picked by the
+      // tightest minZoom of any vector layer the current zoom has
+      // crossed.
+      //
+      // Bumping a layer's minZoom is now a one-line change here and on
+      // the layer registration; no per-layer tileUrlFunction logic.
+      const VECTOR_TILE_NAVAID_MIN_Z = 10;
+      const VECTOR_TILE_STRUCTURE_MIN_Z = 11;
+
+      // Overview (z < navaidMin): ECDIS style, landfill off — everything
+      // baked into the tile so the chart reads at coastal scale.
       const overviewParams = new URLSearchParams(sharedParams);
       overviewParams.set("style", "ecdis");
       overviewParams.set("landfill", "0");
-      const NAVAID_VECTOR_MIN_TILE_Z = 11;
+
+      // Mid (navaidMin <= z < structureMin): navaids handled by the
+      // vector layer; bridges/cables still baked into the tile so
+      // they're visible in this band even though the structures vector
+      // hasn't kicked in yet.
+      const midParams = new URLSearchParams(sharedParams);
+      midParams.set("style", "wms");
+      midParams.set("navaids", "0");
+      midParams.set("landfill", "0");
+
+      // Detail (z >= structureMin): both vector layers active; tile
+      // skips both classes so the on-screen feature is exactly one
+      // hover-able icon per real-world object.
+      const detailParams = new URLSearchParams(midParams);
+      detailParams.set("skip", "BRIDGE,CBLOHD,PIPOHD,CONVYR");
+
       mapGlobal.layerOptions.push({
         name: "noaa-local",
         on: true,
@@ -2429,7 +2632,11 @@
             tileUrlFunction: (tileCoord) => {
               const [z, x, y] = tileCoord;
               const params =
-                z < NAVAID_VECTOR_MIN_TILE_Z ? overviewParams : wmsParams;
+                z >= VECTOR_TILE_STRUCTURE_MIN_Z
+                  ? detailParams
+                  : z >= VECTOR_TILE_NAVAID_MIN_Z
+                    ? midParams
+                    : overviewParams;
               return `/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`;
             },
             transition: 300,
@@ -2466,6 +2673,20 @@
         on: true,
         layer: navaidLayer,
         parent: "noaa-local",
+        // Below z=10 the icons clutter without adding navigational value;
+        // major navaids are still baked into the chart raster at overview.
+        minZoom: 10,
+      });
+      mapGlobal.layerOptions.push({
+        name: "noaa-structures",
+        displayName: "structures",
+        on: true,
+        layer: structureLayer,
+        parent: "noaa-local",
+        // One zoom level tighter than navaids — bridges/cables are
+        // denser in busy harbours and would clutter the overview a
+        // step before the navaid icons start to.
+        minZoom: 11,
       });
       // noaa-ecdis: same renderer + cells, but with S-52 conditional
       // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
@@ -2938,11 +3159,18 @@
     // the same level. change:resolution fires for both user-initiated
     // changes (wheel/pinch) and our own setZoom calls in auto-zoom mode —
     // both are correct things to remember.
-    const updateNavaidVectorVisibility = () => {
+    // Zoom-gated visibility: each LayerOption can declare a minZoom;
+    // when the current zoom is below that, the underlying OL layer is
+    // hidden regardless of the user's on/off toggle. Re-run on every
+    // resolution change so panning through scales updates naturally,
+    // and once at startup so the gate is applied on first paint.
+    const applyZoomGates = () => {
       const z = mapGlobal.view?.getZoom();
-      if (mapGlobal.navaidLayer) {
-        const show = typeof z === "number" && z >= 11;
-        mapGlobal.navaidLayer.setVisible(show);
+      if (typeof z !== "number") return;
+      for (const l of mapGlobal.layerOptions) {
+        if (l.layer && typeof l.minZoom === "number") {
+          l.layer.setVisible(z >= l.minZoom);
+        }
       }
     };
     mapGlobal.view.on("change:resolution", () => {
@@ -2950,9 +3178,9 @@
       if (typeof z === "number" && Number.isFinite(z)) {
         setCookie(COOKIE_VIEW_ZOOM, String(z), COOKIE_OPTS);
       }
-      updateNavaidVectorVisibility();
+      applyZoomGates();
     });
-    updateNavaidVectorVisibility();
+    applyZoomGates();
 
     updateOnLayers();
     updateOnLayers();
@@ -3295,34 +3523,46 @@
         depthTooltipOverlay.setPosition(undefined);
       }
 
-      // Navaid hover tooltip — only checks the navaid layer so it doesn't
-      // collide with the AIS/myBoat click-popup behaviour.
-      let navaidFound = false;
-      if (mapGlobal.navaidLayer) {
+      // Navaid + structure hover tooltip. Both layers share one tooltip
+      // element so they don't fight for screen space; the layer the
+      // feature came from selects which formatter (navaid vs bridge/
+      // overhead-structure) runs.
+      let chartFeatureFound = false;
+      if (mapGlobal.navaidLayer || mapGlobal.structureLayer) {
         mapGlobal.map!.forEachFeatureAtPixel(
           evt.pixel,
-          (feature) => {
-            if (navaidFound) return;
+          (feature, layer) => {
+            if (chartFeatureFound) return;
             const props = (feature as Feature).getProperties();
             if (!props || !props.class) return;
-            navaidFound = true;
+            chartFeatureFound = true;
+            const isStructure = layer === mapGlobal.structureLayer;
             if (navaidTooltipElement) {
-              navaidTooltipElement.innerHTML = formatNavaidTooltip(props);
+              navaidTooltipElement.innerHTML = isStructure
+                ? formatStructureTooltip(props)
+                : formatNavaidTooltip(props);
             }
             const geom = (feature as Feature).getGeometry();
             if (geom && geom.getType() === "Point") {
               navaidTooltipOverlay.setPosition(
                 (geom as Point).getCoordinates()
               );
+            } else if (geom) {
+              // Line/polygon (typical for bridges): anchor at the cursor
+              // so the tooltip tracks the hover point rather than the
+              // feature's first vertex.
+              navaidTooltipOverlay.setPosition(evt.coordinate);
             }
           },
           {
             hitTolerance: 4,
-            layerFilter: (layer) => layer === mapGlobal.navaidLayer,
+            layerFilter: (layer) =>
+              layer === mapGlobal.navaidLayer ||
+              layer === mapGlobal.structureLayer,
           }
         );
       }
-      if (!navaidFound) {
+      if (!chartFeatureFound) {
         navaidTooltipOverlay.setPosition(undefined);
       }
 

@@ -276,6 +276,176 @@ func IsNavaidClass(class string) bool {
 	return false
 }
 
+// IsStructureClass reports whether an S-57 object class is one of the
+// overhead/above-water structures we lift into the interactive vector
+// layer. Bridges and overhead cables/pipes carry chart-critical
+// clearance attributes (VERCLR, HORCLR, etc.) that are far more
+// useful in a hover popup than rasterised onto the tile PNG.
+func IsStructureClass(class string) bool {
+	switch class {
+	case "BRIDGE", "CBLOHD", "PIPOHD", "CONVYR":
+		return true
+	}
+	return false
+}
+
+// StructureAttributeKeys are the S-57 attributes worth surfacing on a
+// structure hover popup. Includes the vertical/horizontal clearance
+// fields plus identification and free-text remarks.
+var StructureAttributeKeys = []string{
+	"OBJNAM", // name
+	"CATBRG", // category of bridge (fixed, opening, swing, lift, ...)
+	"VERCLR", // vertical clearance (m)
+	"VERCSA", // safe vertical clearance (m)
+	"VERCCL", // closed-position vertical clearance (m)
+	"VERCOP", // open-position vertical clearance (m)
+	"HORCLR", // horizontal clearance (m)
+	"HORACC", // horizontal accuracy (m)
+	"VERACC", // vertical accuracy (m)
+	"COLOUR",
+	"NATCON", // nature of construction
+	"PRODCT", // product (for pipes)
+	"STATUS",
+	"INFORM",
+	"NINFOM",
+	"CONRAD",
+	"CONVIS",
+}
+
+// Structure is a single bridge / overhead-cable / overhead-pipe /
+// conveyor extracted from the ENC cells in a bbox. Geometry is emitted
+// in GeoJSON-compatible form so the frontend's GeoJSON format reader
+// consumes the response directly.
+type Structure struct {
+	Class      string         `json:"class"`
+	Geometry   StructureGeom  `json:"geometry"`
+	Properties map[string]any `json:"properties"`
+}
+
+// StructureGeom mirrors the GeoJSON geometry object: Type is "Point",
+// "LineString", or "Polygon"; Coordinates' shape follows GeoJSON.
+type StructureGeom struct {
+	Type        string `json:"type"`
+	Coordinates any    `json:"coordinates"`
+}
+
+// Structures returns deduped structure features (bridges, overhead
+// cables, overhead pipes, conveyors) whose footprint overlaps the
+// given lon/lat box. The same physical bridge often appears in
+// multiple overlapping cells with slightly different segmentation;
+// we dedup on class + name (when present) + bbox-rounded centroid so
+// those coalesce to a single feature. The richest attribute bag wins
+// ties.
+func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Structure, error) {
+	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+
+	// dedup grid: ~10 m at mid-latitudes — wider than typical
+	// segmentation drift across overlapping cells but tighter than two
+	// genuinely distinct bridges in the same harbour.
+	const dedupQ = 1e4
+	type key struct {
+		class string
+		name  string
+		lonQ  int64
+		latQ  int64
+	}
+	seen := make(map[key]Structure)
+
+	for _, cell := range cells {
+		chart, err := r.chartFor(cell.Name)
+		if err != nil || chart == nil {
+			continue
+		}
+		for _, f := range chart.FeaturesInBounds(bbox) {
+			class := f.ObjectClass()
+			if !IsStructureClass(class) {
+				continue
+			}
+			geom := f.Geometry()
+			if len(geom.Coordinates) == 0 {
+				continue
+			}
+			// At least one vertex must land inside the bbox so the
+			// feature is actually visible at this zoom — without this
+			// guard a single offshore-spanning cable in the chart
+			// shows up on every harbour tile.
+			inside := false
+			for _, c := range geom.Coordinates {
+				if len(c) >= 2 && c[0] >= minLon && c[0] <= maxLon &&
+					c[1] >= minLat && c[1] <= maxLat {
+					inside = true
+					break
+				}
+			}
+			if !inside {
+				continue
+			}
+			props := map[string]any{}
+			for _, k := range StructureAttributeKeys {
+				if v, ok := f.Attribute(k); ok {
+					props[k] = v
+				}
+			}
+			var sg StructureGeom
+			switch geom.Type {
+			case s57.GeometryTypePoint:
+				sg = StructureGeom{Type: "Point", Coordinates: geom.Coordinates[0]}
+			case s57.GeometryTypeLineString:
+				sg = StructureGeom{Type: "LineString", Coordinates: geom.Coordinates}
+			case s57.GeometryTypePolygon:
+				// Wrap the single ring as GeoJSON Polygon coordinates
+				// expect: [outer-ring, ...holes]. Holes aren't surfaced
+				// by the s57 library at this level so we always emit a
+				// one-ring polygon.
+				sg = StructureGeom{Type: "Polygon", Coordinates: [][][]float64{geom.Coordinates}}
+			default:
+				continue
+			}
+			// Centroid for dedup so the same bridge in two cells (which
+			// often differ in segmentation/first-vertex) maps to the
+			// same key. Plain unweighted mean of vertices — close enough
+			// for grouping; not used for rendering.
+			var sumLon, sumLat float64
+			var n int
+			for _, c := range geom.Coordinates {
+				if len(c) >= 2 {
+					sumLon += c[0]
+					sumLat += c[1]
+					n++
+				}
+			}
+			if n == 0 {
+				continue
+			}
+			cLon := sumLon / float64(n)
+			cLat := sumLat / float64(n)
+			name := ""
+			if v, ok := props["OBJNAM"]; ok {
+				if s, ok := v.(string); ok {
+					name = s
+				}
+			}
+			k := key{
+				class: class,
+				name:  name,
+				lonQ:  int64(cLon * dedupQ),
+				latQ:  int64(cLat * dedupQ),
+			}
+			s := Structure{Class: class, Geometry: sg, Properties: props}
+			if existing, ok := seen[k]; !ok || len(props) > len(existing.Properties) {
+				seen[k] = s
+			}
+		}
+	}
+
+	out := make([]Structure, 0, len(seen))
+	for _, s := range seen {
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 // NavaidAttributeKeys are the S-57 attributes worth surfacing on a navaid
 // hover popup. The list is conservative — chart-critical attrs only — so the
 // JSON payload stays small and the popup doesn't drown the user in metadata.

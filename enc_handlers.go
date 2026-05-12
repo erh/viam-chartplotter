@@ -61,6 +61,7 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
 	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
+	mux.HandleFunc("/noaa-enc/structures", h.handleStructures)
 	mux.HandleFunc("/noaa-enc/osm-tile/", h.handleOSMTile)
 }
 
@@ -299,6 +300,57 @@ func (h *ENCHandlers) handleNavaids(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/geo+json")
 	// Short cache — navaids don't change often, but the cell set on disk
 	// might (background SyncBBox), and the frontend re-fetches per pan.
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":     "FeatureCollection",
+		"features": feats,
+	})
+}
+
+// handleStructures returns bridge / overhead-cable / overhead-pipe /
+// conveyor features inside the bbox as GeoJSON. Used by the frontend
+// to render an interactive vector layer with hover popups (clearance
+// attributes, names, remarks) instead of baking the labels into the
+// chart tile PNG.
+//
+//	GET /noaa-enc/structures?minLon=...&minLat=...&maxLon=...&maxLat=...
+func (h *ENCHandlers) handleStructures(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	parse := func(name string) (float64, bool) {
+		v, err := strconv.ParseFloat(q.Get(name), 64)
+		return v, err == nil
+	}
+	minLon, ok1 := parse("minLon")
+	minLat, ok2 := parse("minLat")
+	maxLon, ok3 := parse("maxLon")
+	maxLat, ok4 := parse("maxLat")
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		http.Error(w, "need ?minLon&minLat&maxLon&maxLat as floats", http.StatusBadRequest)
+		return
+	}
+	structures, err := h.renderer.Structures(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type geoFeature struct {
+		Type       string         `json:"type"`
+		Geometry   StructureGeom  `json:"geometry"`
+		Properties map[string]any `json:"properties"`
+	}
+	feats := make([]geoFeature, 0, len(structures))
+	for _, s := range structures {
+		props := map[string]any{"class": s.Class}
+		for k, v := range s.Properties {
+			props[k] = v
+		}
+		feats = append(feats, geoFeature{
+			Type:       "Feature",
+			Geometry:   s.Geometry,
+			Properties: props,
+		})
+	}
+	w.Header().Set("Content-Type", "application/geo+json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"type":     "FeatureCollection",
