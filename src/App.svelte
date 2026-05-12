@@ -783,6 +783,15 @@
   }
 
   function removeCamera(n) {
+    // Always free the blob URL — the camera may have been dropped via
+    // a fetch error AFTER having posted one image (so cameraBlobUrls
+    // holds a URL) but BEFORE its name was added to cameraNames, or
+    // vice versa. Releasing here regardless catches both paths and
+    // prevents the dict from growing as cameras come and go.
+    if (cameraBlobUrls[n]) {
+      URL.revokeObjectURL(cameraBlobUrls[n]);
+      delete cameraBlobUrls[n];
+    }
     var idx = globalData.cameraNames.indexOf(n);
     if (idx >= 0) {
       globalData.cameraNames.splice(idx, 1);
