@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getCookie, setCookie } from "typescript-cookie";
+  import { getCookie, removeCookie, setCookie } from "typescript-cookie";
+  // Importing the logo (rather than referencing /viam-logo.png in public/)
+  // routes the URL through Vite's asset pipeline, so it honours the build's
+  // `base` and resolves correctly whether the bundle is mounted at "/" or
+  // under the Viam Cloud module proxy.
+  import viamLogoUrl from "./assets/viam-logo.png";
   import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from "./lib/BoatInfo";
   import { getCountryFromMmsi, flagEmoji } from "./lib/mmsi";
   import RegularShape from "ol/style/RegularShape.js";
@@ -180,6 +185,10 @@
   const COOKIE_BOAT_POSITION = "mapBoatPosition";
   const COOKIE_AUTO_ZOOM = "mapAutoZoom";
   const COOKIE_VIEW_ZOOM = "mapViewZoom";
+  // Persisted only while inPanMode: the user's manual pan position, so a
+  // reload lands them back where they were instead of jumping to the boat.
+  // Cleared when the user returns to boat-follow mode.
+  const COOKIE_VIEW_CENTER = "mapViewCenter";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
   // Default zoom used when no cookie value is present (matches the previous
@@ -191,6 +200,25 @@
     if (!raw) return DEFAULT_VIEW_ZOOM;
     var n = Number(raw);
     return Number.isFinite(n) && n > 0 && n <= 22 ? n : DEFAULT_VIEW_ZOOM;
+  }
+
+  function loadViewCenter(): [number, number] | null {
+    var raw = getCookie(COOKIE_VIEW_CENTER);
+    if (!raw) return null;
+    try {
+      var parsed = JSON.parse(raw);
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === 2 &&
+        Number.isFinite(parsed[0]) &&
+        Number.isFinite(parsed[1])
+      ) {
+        return [parsed[0], parsed[1]];
+      }
+    } catch {
+      // fall through
+    }
+    return null;
   }
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
@@ -1542,23 +1570,28 @@
         })
       );
     }
-    styles.push(
-      new Style({
-        image: new Icon({
-          src: structureIconSrc(class_),
-          anchor: [0.5, 0.5],
-        }),
-        // For line/polygon features, render the icon at the first
-        // vertex so the hover target is predictable. For point
-        // features, OL uses the point itself.
-        geometry:
-          geomType === "LineString" && geom
-            ? new Point((geom as any).getFirstCoordinate())
-            : geomType === "Polygon" && geom
-              ? new Point((geom as any).getInteriorPoint().getCoordinates())
-              : undefined,
-      })
-    );
+    // hideIcon: backend has flagged this feature as a duplicate of (or
+    // info-equivalent to) another same-named structure, so the trace
+    // above still draws but the icon belongs to the canonical entry.
+    if (props.hideIcon !== true) {
+      styles.push(
+        new Style({
+          image: new Icon({
+            src: structureIconSrc(class_),
+            anchor: [0.5, 0.5],
+          }),
+          // For line/polygon features, render the icon at the first
+          // vertex so the hover target is predictable. For point
+          // features, OL uses the point itself.
+          geometry:
+            geomType === "LineString" && geom
+              ? new Point((geom as any).getFirstCoordinate())
+              : geomType === "Polygon" && geom
+                ? new Point((geom as any).getInteriorPoint().getCoordinates())
+                : undefined,
+        })
+      );
+    }
     return styles;
   }
 
@@ -2314,6 +2347,7 @@
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
     inPanMode = false;
+    removeCookie(COOKIE_VIEW_CENTER, COOKIE_OPTS);
   }
 
   function updateHeadingLine() {
@@ -2435,6 +2469,7 @@
     mapInternalState.lastZoom = 0;
     mapInternalState.lastCenter = [0, 0];
     inPanMode = false;
+    removeCookie(COOKIE_VIEW_CENTER, COOKIE_OPTS);
   }
 
   function toggleAutoZoom() {
@@ -2641,7 +2676,12 @@
       // Bumping a layer's minZoom is now a one-line change here and on
       // the layer registration; no per-layer tileUrlFunction logic.
       const VECTOR_TILE_NAVAID_MIN_Z = 12;
-      const VECTOR_TILE_STRUCTURE_MIN_Z = 13;
+      // The structures vector layer turns on at z=13 (hover icons), but
+      // the tile keeps drawing structures through z=13 too — the user
+      // wants the chart-style bridge rendering at that band, with the
+      // hover icon overlaid. Only at z >= 14 do we cut the tile out and
+      // let the vector layer be the sole renderer.
+      const VECTOR_TILE_STRUCTURE_MIN_Z = 14;
 
       // Overview (z < navaidMin): ECDIS style, landfill off — everything
       // baked into the tile so the chart reads at coastal scale.
@@ -3195,11 +3235,18 @@
     await probeNoaaCache();
     setupLayers();
 
+    const savedCenter = loadViewCenter();
     mapGlobal.view = new View({
-      center: [0, 0],
+      center: savedCenter ?? [0, 0],
       zoom: loadViewZoom(),
       maxZoom: 19,
     });
+    // Restoring a manual pan position implies the user was browsing away from
+    // the boat — keep that mode on reload so the boat tracker doesn't yank
+    // the view back the moment a fix arrives.
+    if (savedCenter) {
+      inPanMode = true;
+    }
 
     // Persist whatever zoom the view ends up at so reloads come back at
     // the same level. change:resolution fires for both user-initiated
@@ -3301,6 +3348,15 @@
       maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
       maybeReanchorOnBoat();
+      // Only persist when the user is intentionally off-boat; otherwise the
+      // boat-follow tracker would constantly overwrite the cookie with the
+      // current boat position.
+      if (inPanMode) {
+        const c = mapGlobal.view?.getCenter();
+        if (c && Number.isFinite(c[0]) && Number.isFinite(c[1])) {
+          setCookie(COOKIE_VIEW_CENTER, JSON.stringify([c[0], c[1]]), COOKIE_OPTS);
+        }
+      }
     });
 
     // Setup popup overlay
@@ -3581,6 +3637,12 @@
             if (chartFeatureFound) return;
             const props = (feature as Feature).getProperties();
             if (!props || !props.class) return;
+            // Backend-flagged uninformative / duplicate-icon structures
+            // still draw a trace line but have no icon — the canonical
+            // same-named entry carries the popup. Skip them here so
+            // hovering the line doesn't open an empty (or redundant)
+            // tooltip.
+            if (props.uninformative === true || props.hideIcon === true) return;
             chartFeatureFound = true;
             const isStructure = layer === mapGlobal.structureLayer;
             if (navaidTooltipElement) {
@@ -4427,6 +4489,17 @@
   class:full-width={fullWidth}
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
+
+  <!-- Tiny "Powered By Viam" overlay anchored above the OL ScaleLine so it
+       doesn't fight for the same bottom-left corner. Pointer-events off so
+       it can't swallow map clicks. -->
+  <img
+    class="viam-logo-overlay"
+    src={viamLogoUrl}
+    alt="Powered by Viam"
+    width="80"
+    height="16"
+  />
 
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
@@ -5425,6 +5498,23 @@
 
   .tile-url-popup :global(a:hover) {
     text-decoration: underline;
+  }
+
+  /* Tiny Viam logo superimposed on the map bottom-left. Sits above OL's
+     ScaleLine (which defaults to bottom-left ~18 px tall, ~8 px inset)
+     and below toolbar tooltips. White invert + reduced opacity so the
+     dark wordmark reads against the chart without dominating it. */
+  .viam-logo-overlay {
+    position: absolute;
+    /* Sits above OL's ScaleLine (bar mode is ~30 px tall, 8 px inset) so
+       the wordmark doesn't collide with the distance scale. */
+    bottom: 44px;
+    left: 8px;
+    z-index: 1000;
+    opacity: 0.7;
+    filter: invert(1) drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+    pointer-events: none;
+    user-select: none;
   }
 
   /* Left-side toolbar: vertical stack of map controls anchored just

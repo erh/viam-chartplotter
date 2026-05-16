@@ -440,10 +440,146 @@ func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Stru
 	}
 
 	out := make([]Structure, 0, len(seen))
+	// byName tracks which entry currently "owns" the hover icon for a
+	// given (class, OBJNAM). Same-named bridges across overlapping cells
+	// (e.g. "Henry Hudson Bridge" encoded once per cell with materially
+	// different vertex sets, beyond the grid-dedup tolerance above) are
+	// all kept in the output so each cell's line trace still draws on
+	// the map; only one of them gets the icon — the rest are flagged
+	// hideIcon so the frontend skips the icon + hover popup.
+	byName := make(map[string]int, len(seen))
 	for _, s := range seen {
+		uninformative := isUninformativeStructure(s)
+		if uninformative {
+			// Uninformative bridges: keep the trace, suppress the icon
+			// and hover popup. Don't participate in same-name dedup;
+			// empty/generic names would collapse distinct bridges.
+			s.Properties["uninformative"] = true
+			s.Properties["hideIcon"] = true
+			out = append(out, s)
+			continue
+		}
 		out = append(out, s)
+		name := strFromProp(s.Properties, "OBJNAM")
+		if name == "" {
+			continue
+		}
+		idx := len(out) - 1
+		nameKey := strings.ToLower(s.Class) + "|" + name
+		ownerIdx, owned := byName[nameKey]
+		if !owned {
+			byName[nameKey] = idx
+			continue
+		}
+		// Already have an owner for this name. Keep the entry with the
+		// larger attribute bag as the icon-owner — the tooltip is only
+		// as informative as what we send for the icon-bearing feature.
+		if len(out[idx].Properties) > len(out[ownerIdx].Properties) {
+			out[ownerIdx].Properties["hideIcon"] = true
+			byName[nameKey] = idx
+		} else {
+			out[idx].Properties["hideIcon"] = true
+		}
 	}
 	return out, nil
+}
+
+// genericBridgeNames are OBJNAM values that add nothing beyond what the class
+// label "Bridge" already conveys — used by isUninformativeStructure to decide
+// whether a bridge feature deserves an interactive hover target. Match is
+// case-insensitive and whitespace-trimmed.
+var genericBridgeNames = map[string]struct{}{
+	"bridge":             {},
+	"footbridge":         {},
+	"foot bridge":        {},
+	"pedestrian bridge":  {},
+	"railway bridge":     {},
+	"rail bridge":        {},
+	"rr bridge":          {},
+	"r.r. bridge":        {},
+	"road bridge":        {},
+	"highway bridge":     {},
+	"hwy bridge":         {},
+}
+
+// isUninformativeStructure reports whether a BRIDGE feature would render as
+// nothing but boilerplate ("Bridge / Fixed", "Bridge / Railway Bridge / Fixed")
+// — no clearances, no remarks, no distinctive name, and either no CATBRG or
+// CATBRG=Fixed. Any clearance value, remark, non-Fixed category, or unique
+// name keeps the feature.
+func isUninformativeStructure(s Structure) bool {
+	if s.Class != "BRIDGE" {
+		return false
+	}
+	p := s.Properties
+	name := ""
+	if v, ok := p["OBJNAM"]; ok {
+		if str, ok := v.(string); ok {
+			name = strings.ToLower(strings.TrimSpace(str))
+		}
+	}
+	// Footbridges (CATBRG=9 or named as such) are pedestrian-only and
+	// carry no navigational meaning for a boat — suppress the info icon
+	// regardless of what other attributes they happen to have. The tile
+	// still renders the bridge geometry underneath.
+	if v, ok := p["CATBRG"]; ok && v != nil {
+		if n, ok := toFloat(v); ok && n == 9 {
+			return true
+		}
+	}
+	if strings.Contains(name, "footbridge") || strings.Contains(name, "foot bridge") {
+		return true
+	}
+	for _, k := range []string{"INFORM", "NINFOM", "VERCLR", "VERCCL", "VERCOP", "VERCSA", "HORCLR"} {
+		if v, ok := p[k]; ok && v != nil && fmt.Sprintf("%v", v) != "" {
+			return false
+		}
+	}
+	// CATBRG: anything other than Fixed (1) is itself informative.
+	if v, ok := p["CATBRG"]; ok && v != nil {
+		if n, ok := toFloat(v); ok && n != 1 {
+			return false
+		}
+	}
+	if name == "" {
+		return true
+	}
+	_, generic := genericBridgeNames[name]
+	return generic
+}
+
+func strFromProp(p map[string]any, k string) string {
+	v, ok := p[k]
+	if !ok || v == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+}
+
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case string:
+		var f float64
+		_, err := fmt.Sscanf(n, "%g", &f)
+		return f, err == nil
+	}
+	return 0, false
 }
 
 // NavaidAttributeKeys are the S-57 attributes worth surfacing on a navaid
@@ -623,7 +759,7 @@ const (
 // the cache by style/safe-depth/skip flags; this version covers the things
 // the URL doesn't say. After bumping, old vN directories are inert and can
 // be `rm -rf`'d at the operator's leisure.
-const ENCRenderRulesVersion = 1
+const ENCRenderRulesVersion = 2
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile / RenderOSMTileDebugMask). Bump on any change to the OSM
@@ -1549,11 +1685,19 @@ func minZoomForFeature(class string) int {
 	// Linear features.
 	case "RIVERS", "BRIDGE", "CAUSWY":
 		return 11
+	// Overhead structures: cables, pipes, conveyors. The structures
+	// vector layer kicks in at z >= 13 and is responsible for the
+	// hover-able icon; below that the tile must draw the structure
+	// itself, otherwise it would disappear off the chart between
+	// coastal and harbour zoom. Same z=11 threshold as BRIDGE so all
+	// four classes show up together when the vector layer is off.
+	case "CBLOHD", "PIPOHD", "CONVYR":
+		return 11
 	// Channel limits / fairways / restricted areas — magenta lines show
 	// at z=9 in NOAA charts (busy in our renders below that).
 	case "FAIRWY", "RECTRC", "NAVLNE", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
 		return 9
-	case "PIPSOL", "CBLSUB", "CBLOHD":
+	case "PIPSOL", "CBLSUB":
 		return 15
 	case "DAMCON", "PONTON":
 		return 14
