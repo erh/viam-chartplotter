@@ -759,7 +759,7 @@ const (
 // the cache by style/safe-depth/skip flags; this version covers the things
 // the URL doesn't say. After bumping, old vN directories are inert and can
 // be `rm -rf`'d at the operator's leisure.
-const ENCRenderRulesVersion = 2
+const ENCRenderRulesVersion = 3
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile / RenderOSMTileDebugMask). Bump on any change to the OSM
@@ -2069,6 +2069,15 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
 		}
+		// Shallow-edge override: if the polygon's shallowest edge is under
+		// 10 ft (~3 m), shade DEPVS regardless of the deep edge. At coarse
+		// zooms (z≤12) the cell selector picks overview-cell DEPARE
+		// polygons that span "0 to 30 m" — DRVAL2 keying paints them white
+		// and hides shallow channels like Cape Fear Slue that NOAA's WMS
+		// clearly shades blue.
+		if !math.IsNaN(min) && min < s52ShallowShadeM {
+			return s52DEPVS
+		}
 		key := max
 		if math.IsNaN(key) {
 			key = min
@@ -2112,6 +2121,10 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 const (
 	s52ShallowContourM = 2.0
 	s52DeepContourM    = 7.5
+	// s52ShallowShadeM forces saturated DEPVS on any DEPARE whose shallow
+	// edge sits above this depth, at every zoom. 10 ft (~3.05 m) — the
+	// rule of thumb a recreational sailor would treat as "stay out".
+	s52ShallowShadeM = 10.0 / feetPerMetre
 )
 
 // depthFill returns the water fill for a DEPARE polygon.
