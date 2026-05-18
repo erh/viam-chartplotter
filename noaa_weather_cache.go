@@ -127,11 +127,22 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 	wc.serveModel(w, r, m)
 }
 
+// weatherCacheVersion is bumped whenever the decoder logic changes in a
+// way that would invalidate previously-cached JSON. Old files (without
+// the version suffix, or with a lower version) are simply ignored —
+// the cache layer treats them as a MISS and refetches. This keeps a
+// stale buggy run (e.g. the pre-fix HRRR "57 kt uniformly" output)
+// from haunting the deployment until the soft TTL expires.
+//
+// v2: sign+magnitude decode for signed GRIB2 integer fields (binary /
+//     decimal scale factors, surface + earth-radius scales).
+const weatherCacheVersion = "v2"
+
 // cachePath returns the on-disk cache location for one (model, fh)
 // combination. Model names are validated URL-safe at init time so we
 // can drop them straight into a filename.
 func (wc *WeatherCache) cachePath(modelName string, fh int) string {
-	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-f%03d.json", modelName, fh))
+	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-%s-f%03d.json", modelName, weatherCacheVersion, fh))
 }
 
 // parseForecastHour pulls `?fh=N` off the request and snaps it to the
