@@ -59,6 +59,7 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
 	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
+	mux.HandleFunc("/noaa-enc/compare/test", h.handleCompareTest)
 	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
 	mux.HandleFunc("/noaa-enc/structures", h.handleStructures)
@@ -446,6 +447,62 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(pngBytes)
+}
+
+// handleCompareTest serves an HTML page that stacks /compare panels for the
+// same lat/lon at z=7..16, so you can eyeball shading consistency across
+// zooms without juggling tile coords by hand.
+//
+//	GET /noaa-enc/compare/test[?lat=32.77&lon=-79.93]
+func (h *ENCHandlers) handleCompareTest(w http.ResponseWriter, r *http.Request) {
+	// Default: Charleston Harbor — the area we've been iterating on.
+	lat := 32.7700
+	lon := -79.8800
+	if v := r.URL.Query().Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat = f
+		}
+	}
+	if v := r.URL.Query().Get("lon"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lon = f
+		}
+	}
+	q := r.URL.Query()
+	q.Del("lat")
+	q.Del("lon")
+	suffix := ""
+	if e := q.Encode(); e != "" {
+		suffix = "?" + e
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, `<!doctype html>
+<html><head><meta charset="utf-8"><title>compare z=7..16 @ %.4f,%.4f</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:1em;background:#222;color:#ddd}
+ .row{margin-bottom:1em;border-bottom:1px solid #444;padding-bottom:.5em}
+ .row h2{margin:.2em 0;font-size:14px;font-weight:normal;color:#aaa}
+ .row img{display:block;background:#000;image-rendering:pixelated}
+ input{font-family:inherit;padding:2px 6px}
+ form{margin-bottom:1em}
+</style></head><body>
+<form method="get">
+ lat <input name="lat" value="%.4f" size="10">
+ lon <input name="lon" value="%.4f" size="10">
+ <button>go</button>
+ <span style="color:#888;margin-left:1em">panels: ours | WMS | diff | OSM masked | mask</span>
+</form>
+`, lat, lon, lat, lon)
+	for z := 7; z <= 16; z++ {
+		x, y := lonLatToTile(lon, lat, z)
+		fmt.Fprintf(&buf, `<div class="row"><h2>z=%d  x=%d y=%d</h2><img src="/noaa-enc/compare/%d/%d/%d.png%s"></div>`+"\n",
+			z, x, y, z, x, y, suffix)
+	}
+	buf.WriteString("</body></html>\n")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(buf.Bytes())
 }
 
 // handleCompare renders a side-by-side debug image — our render | NOAA WMS |

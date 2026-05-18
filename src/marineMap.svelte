@@ -2498,8 +2498,10 @@
     const origin = window.location.origin;
     const tileUrl = `${origin}/noaa-enc/tile/${z}/${x}/${y}.png`;
     const compareUrl = `${origin}/noaa-enc/compare/${z}/${x}/${y}.png`;
+    const compareAllUrl = `${origin}/noaa-enc/compare/test?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
     console.log("tile:    ", tileUrl);
     console.log("compare: ", compareUrl);
+    console.log("compare all zooms: ", compareAllUrl);
     if (navigator.clipboard) {
       void navigator.clipboard.writeText(tileUrl).catch(() => {});
     }
@@ -2507,7 +2509,7 @@
     // boats, so reuse its element with our text — saves another overlay.
     const el = document.getElementById("tile-url-popup");
     if (el) {
-      el.innerHTML = `<a href="${tileUrl}" target="_blank">tile z=${z} x=${x} y=${y}</a><br><a href="${compareUrl}" target="_blank">compare</a>`;
+      el.innerHTML = `<a href="${tileUrl}" target="_blank">tile z=${z} x=${x} y=${y}</a><br><a href="${compareUrl}" target="_blank">compare</a><br><a href="${compareAllUrl}" target="_blank">compare all zooms</a>`;
       el.style.display = "block";
       window.setTimeout(() => {
         el.style.display = "none";

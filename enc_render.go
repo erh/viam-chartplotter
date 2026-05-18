@@ -848,7 +848,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	allCells := allCellsRaw
 	if z < 10 {
 		// Only continent-scale (≥1:800 k) cells to avoid coverage-edge
-		// seams between adjacent finer cells.
+		// seams between adjacent finer cells. Applies to land area fills
+		// — for DEPARE we use allCellsRaw below so harbour-cell
+		// narrow-band polygons can still drive shading at z=7..9.
 		filtered := allCells[:0]
 		for _, c := range allCellsRaw {
 			if c.CScale >= 800_000 {
@@ -858,6 +860,14 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 		allCells = filtered
 	}
 	sort.SliceStable(allCells, func(i, j int) bool { return allCells[i].CScale > allCells[j].CScale })
+	// Separate ordering for the DEPARE base pass — coarsest first so
+	// fine-cell harbour polygons land on top across all zooms (matches
+	// the allCells sort but always over the unfiltered set).
+	allCellsForDEPARE := make([]ENCCell, len(allCellsRaw))
+	copy(allCellsForDEPARE, allCellsRaw)
+	sort.SliceStable(allCellsForDEPARE, func(i, j int) bool {
+		return allCellsForDEPARE[i].CScale > allCellsForDEPARE[j].CScale
+	})
 
 	dc := gg.NewContext(256, 256)
 	// Transparent background so the OSM/seachart base layers below show through
@@ -886,6 +896,16 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 			if transparentLand && isLandClass(class) {
 				continue
 			}
+			// Area fills are handled by the all-cells base pass above so
+			// the finest cell's polygon wins. Skip here to avoid letting
+			// a coarser in-scale-window cell stomp on it.
+			if pass == passAreas {
+				switch class {
+				case "LNDARE", "BUAARE", "BUISGL",
+					"DEPARE", "DRGARE", "LOKBSN", "UNSARE":
+					continue
+				}
+			}
 			if opts.SkipClasses != nil && opts.SkipClasses[class] {
 				continue
 			}
@@ -893,10 +913,10 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 		}
 	}
 
-	// First, the land/built-up area base layer from ALL cells. This gives
-	// us shoreline coverage even when the scale-filtered set is missing
-	// LNDARE/BUAARE. Land features only — water polygons are handled in
-	// the regular passAreas below so they only paint from in-scale cells.
+	// Land area-fill base pass from the (possibly seam-filtered) cell set,
+	// coarsest first. Uses allCells so at z<10 only continent-scale cells
+	// paint LNDARE/BUAARE — adjacent finer cells with bbox-aligned
+	// coverage extents would otherwise show as seams across the land mask.
 	// Skipped entirely under TransparentLand — the basemap (OSM) is what
 	// the user wants to see for land in that mode.
 	if !transparentLand && !skipAll {
@@ -909,6 +929,33 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 				class := f.ObjectClass()
 				switch class {
 				case "LNDARE", "BUAARE", "BUISGL":
+				default:
+					continue
+				}
+				if opts.SkipClasses != nil && opts.SkipClasses[class] {
+					continue
+				}
+				drawFeature(dc, &f, passAreas, project, scale, safeDepthM, bbox, z, style)
+			}
+		}
+	}
+
+	// Water area-fill base pass from the UNFILTERED cell set, coarsest
+	// first. The finest cell's narrow-band DEPARE polygons land on top
+	// regardless of zoom, so deep channels render as DEPDW even at
+	// z=7..12 where the regular scale filter excludes harbour cells. The
+	// main pass below skips these classes so we don't double-paint with
+	// a stale coarser polygon. Skipped under TransparentLand.
+	if !transparentLand && !skipAll {
+		for _, cell := range allCellsForDEPARE {
+			chart, err := r.chartFor(cell.Name)
+			if err != nil || chart == nil {
+				continue
+			}
+			for _, f := range chart.FeaturesInBounds(bbox) {
+				class := f.ObjectClass()
+				switch class {
+				case "DEPARE", "DRGARE", "LOKBSN", "UNSARE":
 				default:
 					continue
 				}
@@ -1574,15 +1621,25 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	switch {
 	case z <= 9:
 		div = 8.0
-	case z == 12 || z == 13:
-		// At z=12-13 the displayScale/2 floor lands above 1:20 000, so the
-		// Harbor-scale cells with detailed channel DEPARE polygons get
-		// dropped — Reynolds Channel and similar reads as shaded because
-		// only the coarser Approach cell's wide-depth-range polygon paints
-		// here. Bumping the divisor pulls 1:20k cells in (their CScale is
-		// above displayScale/3) so channels colour correctly at z=13. The
-		// extra symbology stays gated by minZoomForFeature, so we don't
-		// flood the tile with z=15+ detail.
+	case z == 12:
+		// displayScale/2 floor at z=12 lands above 1:20 000, dropping
+		// Harbor-scale cells with detailed channel DEPARE polygons —
+		// Reynolds Channel and similar reads as shaded because only the
+		// coarser Approach cell's wide-depth-range polygon paints here.
+		// div=3 pulls 1:20k cells in.
+		div = 3.0
+	case z == 13:
+		// Same issue, but at z=13 we also want NOAA's 1:12 000 city-harbor
+		// cells (Charleston US5CHSDD/DE etc.) to load — their narrow-band
+		// DEPARE polygons are what makes deep channels render as DEPDW
+		// (white) instead of getting blanketed by the 1:45k Approach
+		// cell's single "0–6 ft" polygon. 1:12 000 requires div≥5.
+		div = 5.0
+	case z == 14:
+		// At z=14 displayScale ≈ 30 000, so div=2 floors minScale at
+		// ~15k — excludes the 1:12 000 city-harbor cells whose
+		// narrow-band polygons are needed for proper channel shading.
+		// div=3 lowers minScale to ~10k, pulling them in.
 		div = 3.0
 	}
 	min := int(displayScale / div)
@@ -1597,14 +1654,24 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	// coverage from the same overview cell still reaches the tile via the
 	// all-cells area-fill base pass.
 	//
+	// At z≥14 we tighten further (×4) so coastal cells (~1:80–150 k) are
+	// also excluded from DEPARE rendering. Their wide-range "0–6 ft"
+	// polygon otherwise paints blanket DEPMS over Charleston-style
+	// harbours where harbour cells have varied narrow-band polygons that
+	// should mostly read as DEPDW (white) — matches the z=15 cell-window
+	// shape and gives consistent z=14/z=15 shading.
+	//
 	// Below z=12 we don't cap — at z=10/11 those overview cells are the
 	// primary source of any land or water coverage at all.
 	max := 0
-	if z >= 12 {
+	switch {
+	case z >= 14:
+		max = int(displayScale * 4)
+	case z >= 12:
 		max = int(displayScale * 8)
-		if max < 0 {
-			max = 0
-		}
+	}
+	if max < 0 {
+		max = 0
 	}
 	return min, max
 }
@@ -2069,13 +2136,14 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
 		}
-		// Shallow-edge override: if the polygon's shallowest edge is under
-		// 10 ft (~3 m), shade DEPVS regardless of the deep edge. At coarse
-		// zooms (z≤12) the cell selector picks overview-cell DEPARE
-		// polygons that span "0 to 30 m" — DRVAL2 keying paints them white
-		// and hides shallow channels like Cape Fear Slue that NOAA's WMS
-		// clearly shades blue.
-		if !math.IsNaN(min) && min < s52ShallowShadeM {
+		// At very coarse zoom (z≤11) NOAA harbour and approach cells aren't
+		// loaded — only overview/coastal cells with wide-range DEPARE
+		// polygons (e.g. "0 to 30 m") cover the tile. DRVAL2 keying paints
+		// these white and hides shallow channels like Cape Fear Slue that
+		// NOAA's WMS shades blue from its own harbour-cell data. Force
+		// DEPVS when the shallow edge is under 10 ft. At z≥12 we use the
+		// four-band depthFill scheme uniformly so z=12–15 look consistent.
+		if z <= 11 && !math.IsNaN(min) && min < s52ShallowShadeM {
 			return s52DEPVS
 		}
 		key := max
@@ -2119,11 +2187,24 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 // sampling shows polygons with DRVAL2 ≥ ~9 m painted as DEPDW (white),
 // which only happens with DEEP < 9.
 const (
-	s52ShallowContourM = 2.0
-	s52DeepContourM    = 7.5
-	// s52ShallowShadeM forces saturated DEPVS on any DEPARE whose shallow
-	// edge sits above this depth, at every zoom. 10 ft (~3.05 m) — the
-	// rule of thumb a recreational sailor would treat as "stay out".
+	// s52ShallowContourM is the DEPVS/DEPMS boundary. At 1 m, a "0–6 ft"
+	// NOAA harbour-cell polygon (DRVAL2 ≈ 1.83 m) lands in DEPMS (lighter
+	// blue) instead of DEPVS (saturated). NOAA's own WMS paints those
+	// polygons DEPVS, but we deliberately go lighter at chart-detail zoom
+	// — reserve DEPVS for drying-edge polygons and the z≤11 shallow-edge
+	// override (where shallow channels need to stand out from coarse-cell
+	// wide-range polygons painted white).
+	s52ShallowContourM = 1.0
+	// s52DeepContourM is the hard "safe water" threshold: any DEPARE with
+	// DRVAL2 ≥ this paints DEPDW (white) at z≥12. Set to 10 ft so the
+	// chart matches the recreational-boater rule of thumb: shaded under
+	// 10 ft, white above.
+	s52DeepContourM = 10.0 / feetPerMetre
+	// s52ShallowShadeM is the "shallow edge" threshold used by the z≤11
+	// coarse-zoom override in areaFill: when DRVAL1 sits below this depth,
+	// the polygon paints DEPVS so coastal-cell wide-range polygons still
+	// show shallow channels NOAA's WMS reveals from harbour-cell data.
+	// 10 ft (~3.05 m).
 	s52ShallowShadeM = 10.0 / feetPerMetre
 )
 
@@ -2137,12 +2218,12 @@ const (
 //   - safety ≤ depth < DEEP          → DEPMD (DDEAF7, safe but mid-depth)
 //   - depth ≥ DEEP                   → DEPDW (white)
 //
-// At coarser zooms (z≤12) NOAA's WMS collapses to roughly two-colour
-// shading — saturated blue for water below safety, plain white past it,
-// with the intermediate bands either absent or much narrower. Sampling
-// NOAA z=12 tiles shows ~50/50 white vs AFCDE1 with the intermediate
-// blues nearly invisible. We match by remapping the DEPMD/DEPMS bands to
-// DEPDW (white) at z≤12.
+// At very coarse zooms (z≤11) NOAA's WMS collapses to roughly two-colour
+// shading — saturated blue for water below safety, plain white past it.
+// Sampling NOAA z=11 tiles shows ~50/50 white vs AFCDE1 with the
+// intermediate blues nearly invisible. We match by remapping the
+// DEPMD/DEPMS bands to DEPDW (white) at z≤11. z=12 and up use the full
+// four-band scheme so chart-detail zooms render consistently.
 func depthFill(depthM, safeDepthM float64, z int) color.Color {
 	if safeDepthM <= 0 {
 		safeDepthM = s52DeepContourM
@@ -2161,13 +2242,11 @@ func depthFill(depthM, safeDepthM float64, z int) color.Color {
 	if depthM < s52ShallowContourM {
 		return s52DEPVS
 	}
-	if z <= 12 {
-		// Two-colour shading at coarse zoom. NOAA's WMS effective threshold
-		// at z=12 lands around 10 m (sampled tiles split ~60/40 white vs
-		// AFCDE1 with the intermediate bands collapsed). Override the
-		// user's per-boat safety here so the chart-display tone matches
-		// NOAA — the per-boat shading is more useful at chart-detail zoom
-		// where channel polygons are visible anyway.
+	if z <= 11 {
+		// Two-colour shading at very coarse zoom. Override the user's
+		// per-boat safety here so the chart-display tone matches NOAA —
+		// per-boat shading is more useful at chart-detail zoom where
+		// channel polygons are visible anyway.
 		threshold := s52DeepContourM
 		if depthM < threshold {
 			return s52DEPVS
