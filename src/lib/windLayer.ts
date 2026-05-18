@@ -32,10 +32,17 @@ export interface WindMapHandle {
 
 /** Handle returned by setupWeatherLayer so the host can drive the layer. */
 export interface WeatherLayerHandle {
-  /** Refetch data at the given forecast hour (0..240, snapped to 3 h). */
+  /** Refetch data at the given forecast hour (snapped to the model's step). */
   setForecastHour(hour: number): Promise<void>;
-  /** Current forecast hour (in hours from the GFS run time). */
+  /** Current forecast hour (in hours from the model run time). */
   getForecastHour(): number;
+  /** Switch to a different upstream model (e.g. "gfs" → "hrrr"). Refetches
+   *  at the current forecast hour and updates the underlying field. Returns
+   *  null on success, or an error string if the upstream rejected the
+   *  request (e.g. disabled stub) so the picker can show *why*. */
+  setModel(modelName: string): Promise<string | null>;
+  /** Current model identifier. */
+  getModel(): string;
   /** Run-time metadata of the currently loaded data. */
   getRunTime(): string | null;
   /**
@@ -58,8 +65,12 @@ export interface SetupWeatherOptions {
   displayName: string;
   /** Optional parent layer name (e.g. "weather"). */
   parent?: string;
-  /** Backend endpoint that returns the GFS-shape JSON. fh is appended as ?fh=N. */
-  dataUrl: string;
+  /** Initial model identifier (must match a backend registry entry, e.g. "gfs"). */
+  initialModel: string;
+  /** Builds the backend URL for a given model + forecast hour. Returning
+   *  null means the model is frontend-rendered (no JSON fetch) and the
+   *  caller should swap renderers instead. */
+  dataUrlFor: (modelName: string, fh: number) => string | null;
   /** ol-wind colour scale (15 colours typical, mapped linearly across [0, maxVelocity]). */
   colorScale: string[];
   /** Lower bound of the colour scale (m/s). */
@@ -80,13 +91,19 @@ export interface SetupWeatherOptions {
   zIndex?: number;
 }
 
-async function fetchJSON(url: string, fh: number): Promise<any | null> {
+/** Fetch the JSON. Returns `{ data }` on success or `{ error }` with the
+ *  upstream's error body so the caller can surface "model X is disabled
+ *  because Y" in the UI rather than just blanking the layer. */
+async function fetchJSON(url: string, fh: number): Promise<{ data?: any; error?: string }> {
   try {
     const resp = await fetch(`${url}?fh=${fh}`, { cache: "no-store" });
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch {
-    return null;
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { error: body.trim() || `HTTP ${resp.status}` };
+    }
+    return { data: await resp.json() };
+  } catch (e: any) {
+    return { error: String(e?.message ?? e) };
   }
 }
 
@@ -103,8 +120,17 @@ export async function setupWeatherLayer(
   }
 
   let currentFh = Math.max(0, opts.initialForecastHour ?? 0);
-  let data: any = await fetchJSON(opts.dataUrl, currentFh);
-  if (!data) return null;
+  let currentModel = opts.initialModel;
+  const urlFor = (model: string, fh: number) => opts.dataUrlFor(model, fh);
+  const initialUrl = urlFor(currentModel, currentFh);
+  if (!initialUrl) {
+    // The initial model has no fetch URL (frontend-rendered, e.g. WMS).
+    // We can't set up a particle layer for that; bail.
+    return null;
+  }
+  const first = await fetchJSON(initialUrl, currentFh);
+  if (!first.data) return null;
+  let data: any = first.data;
 
   const windLayer = new WindLayer(data, {
     forceRender: true,
@@ -158,9 +184,39 @@ export async function setupWeatherLayer(
 
   installProjectionPatches(windLayer);
 
+  // Common path used by both setForecastHour and setModel — re-fetches
+  // the JSON for the requested (model, fh) pair and re-binds the
+  // ol-wind layer's data. Returns an error string on failure so the
+  // UI can surface "this model is disabled because Y" instead of just
+  // blanking the layer.
+  async function loadInto(model: string, fh: number): Promise<string | null> {
+    const url = urlFor(model, fh);
+    if (!url) {
+      return `model ${model} has no data endpoint (frontend-only)`;
+    }
+    const result = await fetchJSON(url, fh);
+    if (!result.data) return result.error ?? "fetch failed";
+    currentModel = model;
+    currentFh = fh;
+    currentRunTime = result.data[0]?.header?.refTime ?? null;
+    windLayer.setData(result.data, {
+      translateX: true,
+      wrapX: true,
+      flipY: true,
+    });
+    // setData rebinds the field but ol-wind doesn't re-patch its
+    // projection methods — re-install ours and re-seed particles.
+    installProjectionPatches(windLayer);
+    console.log(
+      `${opts.layerName} layer updated model=${model} fh=${fh} refTime=${currentRunTime}`,
+    );
+    return null;
+  }
+
   return {
     layer: windLayer,
     getForecastHour: () => currentFh,
+    getModel: () => currentModel,
     getRunTime: () => currentRunTime,
     sampleAt(lon: number, lat: number) {
       const field = windLayer.getData?.();
@@ -182,23 +238,17 @@ export async function setupWeatherLayer(
       };
     },
     async setForecastHour(hour: number) {
-      const fh = Math.max(0, Math.min(240, Math.round(hour / 3) * 3));
+      // Snap to the model's published step (frontend has no way of
+      // knowing the per-model StepFh, so we use a permissive 1 h step
+      // here and let the backend resnap). Older callers passed GFS-
+      // aligned 3 h values, which are already valid for every model.
+      const fh = Math.max(0, Math.round(hour));
       if (fh === currentFh) return;
-      const next = await fetchJSON(opts.dataUrl, fh);
-      if (!next) return;
-      currentFh = fh;
-      currentRunTime = next[0]?.header?.refTime ?? null;
-      windLayer.setData(next, {
-        translateX: true,
-        wrapX: true,
-        flipY: true,
-      });
-      // setData rebinds the field but ol-wind doesn't re-patch its
-      // projection methods — re-install ours and re-seed particles.
-      installProjectionPatches(windLayer);
-      console.log(
-        `${opts.layerName} layer updated fh=${fh} refTime=${currentRunTime}`,
-      );
+      await loadInto(currentModel, fh);
+    },
+    async setModel(modelName: string) {
+      if (modelName === currentModel) return null;
+      return await loadInto(modelName, currentFh);
     },
   };
 }

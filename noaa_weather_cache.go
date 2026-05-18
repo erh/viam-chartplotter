@@ -5,12 +5,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,51 +78,94 @@ func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, err
 	}, nil
 }
 
-// Register attaches the GFS handler to mux.
+// Register attaches the weather handlers to mux. Endpoints:
+//
+//	/noaa-weather/models                       — JSON model registry
+//	/noaa-weather/data/{model}/latest.json     — decoded GRIB as ol-wind JSON
+//	/noaa-weather/stats                        — cache stats
+//	/noaa-weather/gfs/latest.json              — legacy alias for {model}=gfs
+//
+// The /data/{model}/ route lets the frontend switch models with a URL
+// change rather than swapping endpoints. The legacy alias keeps any
+// existing bookmarked tab working through the rename.
 func (wc *WeatherCache) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/noaa-weather/gfs/latest.json", wc.handleGFS)
-	mux.HandleFunc("/noaa-weather/wave/latest.json", wc.handleWave)
+	mux.HandleFunc("/noaa-weather/models", wc.handleModels)
+	mux.HandleFunc("/noaa-weather/data/", wc.handleData)
 	mux.HandleFunc("/noaa-weather/stats", wc.handleStats)
+	// Legacy alias — pre-multi-model code path. Cheap to keep around.
+	mux.HandleFunc("/noaa-weather/gfs/latest.json", func(w http.ResponseWriter, r *http.Request) {
+		wc.serveModel(w, r, findModel("gfs"))
+	})
 }
 
-// cachePath returns the on-disk cache location for one (product, fh)
-// combination. `product` is "gfs" for the GFS wind dataset or "wave"
-// for GFSWAVE.
-func (wc *WeatherCache) cachePath(product string, fh int) string {
-	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-f%03d.json", product, fh))
+func (wc *WeatherCache) handleModels(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_ = json.NewEncoder(w).Encode(modelMetaList())
 }
 
-// parseForecastHour pulls `?fh=N` (forecast hour in hours from the run
-// time) off the request. Defaults to 0 (analysis). Snaps to the nearest
-// 3 h GFS step and clamps to [0, gfsMaxForecastHour].
-func parseForecastHour(r *http.Request) int {
+// handleData parses /noaa-weather/data/{model}/latest.json and dispatches
+// to serveModel. Anything that doesn't match returns 404 with a helpful
+// hint rather than the generic ServeMux "page not found".
+func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/noaa-weather/data/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		http.NotFound(w, r)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, prefix)
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[1] != "latest.json" {
+		http.Error(w, "expected /noaa-weather/data/{model}/latest.json", http.StatusNotFound)
+		return
+	}
+	m := findModel(parts[0])
+	if m == nil {
+		http.Error(w, "unknown weather model: "+parts[0], http.StatusNotFound)
+		return
+	}
+	wc.serveModel(w, r, m)
+}
+
+// cachePath returns the on-disk cache location for one (model, fh)
+// combination. Model names are validated URL-safe at init time so we
+// can drop them straight into a filename.
+func (wc *WeatherCache) cachePath(modelName string, fh int) string {
+	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-f%03d.json", modelName, fh))
+}
+
+// parseForecastHour pulls `?fh=N` off the request and snaps it to the
+// model's StepFh / [MinFh, MaxFh] window. Defaults to MinFh on missing
+// / malformed input.
+func parseForecastHour(r *http.Request, m *WeatherModel) int {
 	v := r.URL.Query().Get("fh")
 	if v == "" {
-		return 0
+		return m.MinFh
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
-		return 0
+		return m.MinFh
 	}
-	// Snap to nearest 3 h step — NOMADS doesn't publish off-step files.
-	n = (n / 3) * 3
-	if n > gfsMaxForecastHour {
-		n = gfsMaxForecastHour
+	return m.snapFh(n)
+}
+
+// serveModel is the per-model HIT/STALE/MISS handler. Used by both
+// /noaa-weather/data/{model}/latest.json and the legacy GFS alias.
+func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *WeatherModel) {
+	if m.Disabled {
+		// Surface the registered Reason verbatim — the picker reads it
+		// out of the error so the user knows why the option is greyed.
+		http.Error(w, "model disabled: "+m.Reason, http.StatusNotImplemented)
+		return
 	}
-	return n
-}
-
-func (wc *WeatherCache) handleGFS(w http.ResponseWriter, r *http.Request) {
-	wc.handleProduct(w, r, "gfs")
-}
-
-func (wc *WeatherCache) handleWave(w http.ResponseWriter, r *http.Request) {
-	wc.handleProduct(w, r, "wave")
-}
-
-func (wc *WeatherCache) handleProduct(w http.ResponseWriter, r *http.Request, product string) {
-	fh := parseForecastHour(r)
-	path := wc.cachePath(product, fh)
+	if m.Fetch == nil {
+		// Frontend-rendered model (e.g. PacIOOS WMS heatmap) — there's
+		// no JSON to serve, the picker uses a different code path.
+		http.Error(w, "model is frontend-rendered, no data endpoint", http.StatusNotImplemented)
+		return
+	}
+	fh := parseForecastHour(r, m)
+	path := wc.cachePath(m.Name, fh)
 	info, statErr := os.Stat(path)
 	fresh := statErr == nil && time.Since(info.ModTime()) <= wc.refresh
 
@@ -136,13 +179,13 @@ func (wc *WeatherCache) handleProduct(w http.ResponseWriter, r *http.Request, pr
 		wc.hits.Add(1)
 		w.Header().Set("X-Cache", "STALE")
 		go func() {
-			if err := wc.refreshNow(context.Background(), product, fh); err != nil {
-				wc.logger.Warnf("weather: background refresh %s fh=%d: %v", product, fh, err)
+			if err := wc.refreshNow(context.Background(), m, fh); err != nil {
+				wc.logger.Warnf("weather: background refresh %s fh=%d: %v", m.Name, fh, err)
 			}
 		}()
 	default:
 		// No cache yet — block on the first fetch.
-		if err := wc.refreshNow(r.Context(), product, fh); err != nil {
+		if err := wc.refreshNow(r.Context(), m, fh); err != nil {
 			http.Error(w, "weather fetch: "+err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -184,38 +227,25 @@ func (wc *WeatherCache) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// refreshNow fetches the latest GRIB2 for `product` (either "gfs" wind
-// data or "wave" GFSWAVE data) at forecast hour `fh`, converts to the
-// ol-wind JSON shape, and atomically replaces the cache file. De-duped
-// via fetchMu — concurrent callers wait for the first one's result.
-func (wc *WeatherCache) refreshNow(ctx context.Context, product string, fh int) error {
+// refreshNow fetches + decodes the model's GRIB at forecast hour `fh`
+// and atomically replaces the cache file. De-duped via fetchMu so
+// concurrent callers for the same (model, fh) wait for the first
+// one's result.
+func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int) error {
 	wc.fetchMu.Lock()
 	defer wc.fetchMu.Unlock()
 	// Re-check freshness after acquiring the lock — another caller may
-	// have just refreshed this same forecast hour.
-	if info, err := os.Stat(wc.cachePath(product, fh)); err == nil && time.Since(info.ModTime()) <= wc.refresh {
+	// have just refreshed this same (model, fh).
+	if info, err := os.Stat(wc.cachePath(m.Name, fh)); err == nil && time.Since(info.ModTime()) <= wc.refresh {
 		return nil
 	}
 
-	grib, runTime, err := wc.fetchLatestGRIB(ctx, product, fh)
+	records, err := m.Fetch(ctx, wc.client, time.Time{}, fh)
 	if err != nil {
 		wc.errs.Add(1)
-		return err
+		return fmt.Errorf("%s fetch: %w", m.Name, err)
 	}
-	var records []windRecord
-	switch product {
-	case "gfs":
-		records, err = parseGFSWind10m(grib, runTime, fh)
-	case "wave":
-		records, err = parseGFSWaveSurface(grib, runTime, fh)
-	default:
-		return fmt.Errorf("unknown product %q", product)
-	}
-	if err != nil {
-		wc.errs.Add(1)
-		return fmt.Errorf("parse %s grib: %w", product, err)
-	}
-	tmp := wc.cachePath(product, fh) + ".tmp"
+	tmp := wc.cachePath(m.Name, fh) + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -230,70 +260,12 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, product string, fh int) 
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, wc.cachePath(product, fh)); err != nil {
+	if err := os.Rename(tmp, wc.cachePath(m.Name, fh)); err != nil {
 		return err
 	}
 	wc.refreshes.Add(1)
-	wc.logger.Infof("weather: refreshed %s run=%s fh=%d size=%d",
-		product, runTime.Format(time.RFC3339), fh, len(grib))
+	wc.logger.Infof("weather: refreshed %s fh=%d records=%d", m.Name, fh, len(records))
 	return nil
-}
-
-// fetchLatestGRIB walks back from "now" in 6 h GFS cycle steps until a
-// run that's actually published (the lag is ~3.5 h) returns 200 for the
-// requested forecast hour. Each attempt is gated on Context for
-// cancellation.
-func (wc *WeatherCache) fetchLatestGRIB(ctx context.Context, product string, fh int) ([]byte, time.Time, error) {
-	// Start from the most recent cycle that should be published by now.
-	now := time.Now().UTC().Add(-gfsPublishLagHours * time.Hour)
-	cycleHour := (now.Hour() / 6) * 6
-	candidate := time.Date(now.Year(), now.Month(), now.Day(), cycleHour, 0, 0, 0, time.UTC)
-
-	var lastErr error
-	for i := 0; i < 4; i++ {
-		url := buildProductURL(product, candidate, fh)
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, time.Time{}, err
-		}
-		resp, err := wc.client.Do(req)
-		if err != nil {
-			lastErr = err
-			candidate = candidate.Add(-6 * time.Hour)
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
-			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return nil, time.Time{}, err
-			}
-			if len(body) < 32 || string(body[:4]) != "GRIB" {
-				lastErr = fmt.Errorf("response is not GRIB2 (size=%d, first=%q)", len(body), string(body[:min(16, len(body))]))
-				candidate = candidate.Add(-6 * time.Hour)
-				continue
-			}
-			return body, candidate, nil
-		}
-		resp.Body.Close()
-		lastErr = fmt.Errorf("upstream %d for run %s", resp.StatusCode, candidate.Format("2006-01-02T15Z"))
-		candidate = candidate.Add(-6 * time.Hour)
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no GFS run available in last 24h")
-	}
-	return nil, time.Time{}, lastErr
-}
-
-func buildProductURL(product string, runTime time.Time, fh int) string {
-	date := runTime.Format("20060102")
-	cc := runTime.Hour()
-	switch product {
-	case "wave":
-		return fmt.Sprintf(nomadsWaveURLTemplate, cc, fh, date, cc)
-	default:
-		return fmt.Sprintf(nomadsGFSURLTemplate, cc, fh, date, cc)
-	}
 }
 
 // --- ol-wind JSON shape ---------------------------------------------------
