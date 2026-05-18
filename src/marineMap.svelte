@@ -62,6 +62,12 @@
     // at overview scales — navaids, structures, etc. Leave undefined
     // for layers that should always be visible when toggled on.
     minZoom?: number;
+    // Inverse zoom gate: hidden when zoom > maxZoom. Used by overlays
+    // whose data resolution stops being useful when zoomed in past a
+    // certain point — e.g. GFS 0.25° wind / wave at chart-detail zoom,
+    // where one model cell spans hundreds of tile pixels and the
+    // particle field becomes a flat coloured wash.
+    maxZoom?: number;
   }
 
   // Weather overlay state. Populated once GFS / GFSWAVE data + ol-wind
@@ -83,6 +89,14 @@
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
   let weatherMinForecastHour = $state(0);
+  // Highest zoom at which the GFS-resolution weather overlay reads as
+  // signal rather than a flat coloured wash. Above this, both the
+  // wind/wave layers and the forecast-hour slider hide automatically.
+  const weatherMaxZoom = 12;
+  // Reactive copy of map zoom so template conditionals (slider / wave
+  // legend / etc.) re-render when the user scrolls past the gate. The
+  // resolution-change listener installed in setupMap writes here.
+  let currentZoom = $state(0);
 
   // Convert a "GFS run time + forecast hour" pair into a Date in local
   // time, so we can show "Tue 14:00" instead of "+12h" on the slider.
@@ -2923,12 +2937,14 @@
         displayName: "wind",
         parent: "weather",
         on: false,
+        maxZoom: weatherMaxZoom,
       });
       mapGlobal.layerOptions.push({
         name: "waves",
         displayName: "waves",
         parent: "weather",
         on: false,
+        maxZoom: weatherMaxZoom,
       });
       const ensureRendered = () => {
         if (mapGlobal.map) {
@@ -3484,18 +3500,25 @@
       const z = mapGlobal.view?.getZoom();
       if (typeof z !== "number") return;
       for (const l of mapGlobal.layerOptions) {
-        if (l.layer && typeof l.minZoom === "number") {
-          l.layer.setVisible(z >= l.minZoom);
+        if (!l.layer) continue;
+        if (typeof l.minZoom !== "number" && typeof l.maxZoom !== "number") {
+          continue;
         }
+        const minOK = typeof l.minZoom !== "number" || z >= l.minZoom;
+        const maxOK = typeof l.maxZoom !== "number" || z <= l.maxZoom;
+        l.layer.setVisible(minOK && maxOK);
       }
     };
     mapGlobal.view.on("change:resolution", () => {
       const z = mapGlobal.view?.getZoom();
       if (typeof z === "number" && Number.isFinite(z)) {
         setCookie(COOKIE_VIEW_ZOOM, String(z), COOKIE_OPTS);
+        currentZoom = z;
       }
       applyZoomGates();
     });
+    const z0 = mapGlobal.view.getZoom();
+    if (typeof z0 === "number" && Number.isFinite(z0)) currentZoom = z0;
     applyZoomGates();
 
     updateOnLayers();
@@ -4745,7 +4768,7 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
-  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
+  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && currentZoom <= weatherMaxZoom}
     <!-- Wave-height legend. Pure-CSS horizontal gradient matched to
          the ncWMS "rainbow" palette the WMS tiles use; feet labels
          beneath. Avoiding the GetLegendGraphic PNG sidesteps a
@@ -4762,7 +4785,7 @@
     </div>
   {/if}
 
-  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on)}
+  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
     {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
     {@const dayMarkers = computeDayMarkers(
       weatherRunTime,
