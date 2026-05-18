@@ -381,6 +381,20 @@ func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Stru
 			if !inside {
 				continue
 			}
+			// Drop structures whose geometry comes back from the s57 lib
+			// with phantom-segment jumps — concatenated raw edges from a
+			// topology-resolution fallback. Their vertex bags include
+			// km-scale jumps to disconnected sub-features, so the centroid
+			// used for the dedup key below lands on neither real bridge
+			// and can coincide with an unrelated bridge's centroid inside
+			// the 10 m dedup grid, collapsing two distinct structures
+			// into one. Finer-scale cells almost always carry a clean
+			// encoding of the same bridge; if every cell's encoding is
+			// phantom the feature drops out of the hover layer, which
+			// beats showing a merged-but-wrong popup.
+			if hasPhantomEdge(geom.Coordinates, structurePhantomJumpM) {
+				continue
+			}
 			props := map[string]any{}
 			for _, k := range StructureAttributeKeys {
 				if v, ok := f.Attribute(k); ok {
@@ -1320,6 +1334,154 @@ func splitRings(coords [][]float64) [][][]float64 {
 	return rings
 }
 
+// structurePhantomJumpM is the consecutive-vertex distance above which a
+// BRIDGE/CBLOHD/PIPOHD/CONVYR/CAUSWY polygon or linestring is treated as the
+// s57 library's edge-concatenation fallback rather than a coherent feature.
+// When polygon topology fails to resolve, that library dumps each edge's
+// raw coords end-to-end with no shared-node bridging — see geometry.go's
+// constructPolygonGeometry fallback path — producing a phantom-diagonal
+// zigzag that splitRings can't unpack because the synthetic "ring" still
+// self-closes vertex-equality at start. Real bridge/cable footprints have
+// vertex spacing under ~100 m even at 1:80k cells, so 300 m is unambiguous.
+const structurePhantomJumpM = 300.0
+
+// overviewClipEdgeM is the per-edge threshold above which a polygon's
+// max-edge counts as "cell-boundary-scale": s57 polygon rings that thread
+// along a cell edge to close the polygon clip carry one or more multi-km
+// straight segments. Real navigation features inside a single ENC cell
+// stay well under this even at coastline detail, so a polygon with an
+// edge this big is almost certainly an overview-cell ring whose detail
+// finer cells should supply.
+const overviewClipEdgeM = 5000.0
+
+// hasCellBoundaryClipEdge reports whether any consecutive pair of vertices in
+// coords share an exact lon (vertical cell-boundary edge) or exact lat
+// (horizontal) and are at least minMeters apart. The signature of an
+// overview-cell polygon whose outer ring was clipped to the ENC cell's
+// bounding box: the ring threads along the boundary at constant lat or lon
+// for kilometres. Real geographic features almost never produce two
+// consecutive vertices with identical lat-or-lon to 6+ decimal places, so
+// this is a much sharper detector than raw edge length — distinguishes
+// "the polygon is honestly long" from "the polygon is honestly long AND
+// includes synthetic cell-clip segments finer cells should supersede".
+func hasCellBoundaryClipEdge(coords [][]float64, minMeters float64) bool {
+	if len(coords) < 2 {
+		return false
+	}
+	minSq := minMeters * minMeters
+	for i := 1; i < len(coords); i++ {
+		if len(coords[i]) < 2 || len(coords[i-1]) < 2 {
+			continue
+		}
+		sameLon := coords[i][0] == coords[i-1][0]
+		sameLat := coords[i][1] == coords[i-1][1]
+		if !sameLon && !sameLat {
+			continue
+		}
+		midLat := (coords[i][1] + coords[i-1][1]) / 2
+		const mPerDegLat = 111_320.0
+		mPerDegLon := mPerDegLat * math.Cos(midLat*math.Pi/180)
+		dlon := (coords[i][0] - coords[i-1][0]) * mPerDegLon
+		dlat := (coords[i][1] - coords[i-1][1]) * mPerDegLat
+		if dlon*dlon+dlat*dlat > minSq {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPhantomEdge reports whether any consecutive pair of vertices in coords
+// exceeds maxMeters of ground distance. Used to decide whether to apply
+// phantom-segment rendering paths (split-and-stroke for line features, skip
+// for fill polygons whose ring topology is too broken to repair).
+func hasPhantomEdge(coords [][]float64, maxMeters float64) bool {
+	if len(coords) < 2 {
+		return false
+	}
+	maxSq := maxMeters * maxMeters
+	for i := 1; i < len(coords); i++ {
+		if len(coords[i]) < 2 || len(coords[i-1]) < 2 {
+			continue
+		}
+		midLat := (coords[i][1] + coords[i-1][1]) / 2
+		const mPerDegLat = 111_320.0
+		mPerDegLon := mPerDegLat * math.Cos(midLat*math.Pi/180)
+		dlon := (coords[i][0] - coords[i-1][0]) * mPerDegLon
+		dlat := (coords[i][1] - coords[i-1][1]) * mPerDegLat
+		if dlon*dlon+dlat*dlat > maxSq {
+			return true
+		}
+	}
+	return false
+}
+
+// splitPathOnLongJumps walks a flat coord list, returning sub-runs split at
+// every pair of consecutive vertices whose ground-distance exceeds maxMeters
+// plus a flag indicating whether any such jump was found. Used to repair
+// s57-lib edge concatenations that left phantom diagonals between
+// disconnected sub-features (see structurePhantomJumpM). Runs shorter than 2
+// vertices are dropped so the caller can stroke each as an open subpath
+// without spurious points; the split flag lets the caller distinguish "no
+// phantom jumps, draw normally" from "every fragment was too short to keep,
+// don't draw at all".
+func splitPathOnLongJumps(coords [][]float64, maxMeters float64) (runs [][][]float64, split bool) {
+	if len(coords) == 0 {
+		return nil, false
+	}
+	maxSq := maxMeters * maxMeters
+	start := 0
+	for i := 1; i < len(coords); i++ {
+		if len(coords[i]) < 2 || len(coords[i-1]) < 2 {
+			continue
+		}
+		midLat := (coords[i][1] + coords[i-1][1]) / 2
+		const mPerDegLat = 111_320.0
+		mPerDegLon := mPerDegLat * math.Cos(midLat*math.Pi/180)
+		dlon := (coords[i][0] - coords[i-1][0]) * mPerDegLon
+		dlat := (coords[i][1] - coords[i-1][1]) * mPerDegLat
+		if dlon*dlon+dlat*dlat > maxSq {
+			split = true
+			if i-start >= 2 {
+				runs = append(runs, coords[start:i])
+			}
+			start = i
+		}
+	}
+	if len(coords)-start >= 2 {
+		runs = append(runs, coords[start:])
+	}
+	return runs, split
+}
+
+// strokeOpenSubpaths traces each run as an open (non-closing) subpath onto dc
+// and emits a single Stroke. Companion to splitPathOnLongJumps for malformed
+// structure features where we want to draw the constituent edge fragments
+// but not paint a closing line that would re-introduce a phantom diagonal.
+func strokeOpenSubpaths(dc *gg.Context, runs [][][]float64, project func(lon, lat float64) (float64, float64), stroke color.Color, width float64) {
+	if len(runs) == 0 {
+		return
+	}
+	for _, run := range runs {
+		started := false
+		dc.NewSubPath()
+		for _, c := range run {
+			if len(c) < 2 {
+				continue
+			}
+			px, py := project(c[0], c[1])
+			if !started {
+				dc.MoveTo(px, py)
+				started = true
+			} else {
+				dc.LineTo(px, py)
+			}
+		}
+	}
+	dc.SetColor(stroke)
+	dc.SetLineWidth(width)
+	dc.Stroke()
+}
+
 // ringSignedArea returns the signed shoelace area of a single ring (positive
 // for CCW, negative for CW under image y-down). Used to pick the dominant ring
 // for centroid seeding.
@@ -1907,6 +2069,33 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 			if fill == nil {
 				return
 			}
+			// Compact built-up-area polygons (BUAARE / BUISGL) and bridge
+			// footprints occasionally come back from the s57 lib as
+			// concatenated raw edges when polygon topology resolution
+			// falls through — the resulting "polygon" self-crosses, and
+			// the even-odd fill paints X-shaped wedges across the chart.
+			// Can't repair the topology from a flat coord list, so skip
+			// the fill entirely when an unmistakable phantom edge is
+			// present. Scope to small compact-area classes so legitimate
+			// long-edged depth/coastline polygons aren't suppressed.
+			switch class {
+			case "BUAARE", "BUISGL":
+				if hasPhantomEdge(geom.Coordinates, structurePhantomJumpM) {
+					return
+				}
+			}
+			// Overview-cell rings get their outer boundary clipped to the
+			// ENC cell's bounding box, threading the polygon along a
+			// constant lat or lon for kilometres. Painting these at chart
+			// zoom leaves triangular fill wedges where the boundary
+			// segments intersect — and finer cells iterated later will
+			// supply the actual coastline detail anyway. Detect the clip
+			// directly via consecutive vertices that share an exact lon
+			// or lat over a multi-km span; that's a fingerprint no real
+			// coastline produces.
+			if hasCellBoundaryClipEdge(geom.Coordinates, overviewClipEdgeM) {
+				return
+			}
 			tracePolygonPath(dc, geom.Coordinates, project)
 			dc.Push()
 			dc.SetFillRuleEvenOdd()
@@ -1915,6 +2104,19 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 			dc.Pop()
 		case passLines:
 			if stroke == nil {
+				return
+			}
+			// Phantom-segment guard: same s57-lib edge concatenation that
+			// breaks fills also paints a long straight stroke joining the
+			// disconnected sub-features. Split on km-scale jumps and
+			// stroke each surviving run as an open subpath. Applied to
+			// every class with a stroke — a real ring with all vertices
+			// spaced under structurePhantomJumpM is unaffected because
+			// split returns false.
+			if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
+				if len(runs) > 0 {
+					strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+				}
 				return
 			}
 			tracePolygonPath(dc, geom.Coordinates, project)
@@ -1941,6 +2143,17 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		}
 		stroke, width := lineStroke(class, f, safeDepthM, style, z)
 		if stroke == nil {
+			return
+		}
+		// Phantom-segment guard: the s57 lib concatenates multi-edge
+		// linestring coords with no separator, so any feature whose edges
+		// aren't topologically chained paints a polyline with a straight
+		// line bridging the gap. Applied to every class — features whose
+		// vertices are all within structurePhantomJumpM are unaffected.
+		if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
+			if len(runs) > 0 {
+				strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+			}
 			return
 		}
 		dc.NewSubPath()

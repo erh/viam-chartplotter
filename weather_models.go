@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,8 +65,7 @@ var allModels = []*WeatherModel{
 	namWindStub(),
 	ecmwfWindStub(),
 	iconGlobalWindStub(),
-	gfswaveModel(),
-	pacioosWaveStub(),
+	pacioosWaveModel(),
 }
 
 // findModel does an O(n) lookup — registry is fixed small (~10 entries).
@@ -495,44 +493,40 @@ func iconEUWindModel() *WeatherModel {
 }
 
 // ----------------------------------------------------------------------
-// GFSWAVE — existing fetch URL + parser. May fail at runtime if the
-// upstream packs as JPEG2000 (template 5.40) which we don't decode.
-// The UI exposes it; if it fails the picker shows the error.
+// Waves — PacIOOS WaveWatch III "best" forecast, fetched via OPeNDAP
+// (binary DODS, not GRIB) so we avoid the JPEG2000-packed GFSWAVE
+// upstream that the in-tree parser can't decode. The hard work
+// (DODS parsing, time-axis lookup, height+direction → u/v vector
+// conversion) lives in noaa_wave_cache.go; this registry entry just
+// wires it into the model picker and forecast-hour slider.
 // ----------------------------------------------------------------------
 
-func gfswaveModel() *WeatherModel {
+func pacioosWaveModel() *WeatherModel {
 	m := &WeatherModel{
-		Name:        "gfswave",
-		DisplayName: "GFSWAVE (NOAA, 0.25° global)",
+		Name:        "pacioos-ww3",
+		DisplayName: "WaveWatch III (PacIOOS, 0.5° global)",
 		Kind:        "wave",
 		Domain:      "global",
+		// PacIOOS exposes ~hourly slices and fetchPacIOOSWave maps to
+		// the nearest one, so we don't really have a "cycle" — we
+		// reuse the GFS cadence so the slider's day-tick alignment
+		// and now-floor share a single source of truth across models.
 		CycleHours:  []int{0, 6, 12, 18},
 		MinFh:       0,
 		MaxFh:       240,
-		StepFh:      3,
-		PublishLagH: 5,
+		StepFh:      1,
+		PublishLagH: 4,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
-		body, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
-			date := t.Format("20060102")
-			cc := t.Hour()
-			url := fmt.Sprintf(nomadsWaveURLTemplate, cc, fh, date, cc)
-			return fetchURL(ctx, client, url)
-		})
-		if err != nil {
-			return nil, err
-		}
-		recs, err := parseGFSWaveSurface(body, runT, fh)
-		if err != nil {
-			// Bubble ErrUnsupportedPacking as-is so the cache surfaces a
-			// distinct "decoder missing" status rather than a generic 502.
-			var unsup *ErrUnsupportedPacking
-			if errors.As(err, &unsup) {
-				return nil, err
-			}
-			return nil, err
-		}
-		return recs, nil
+	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]windRecord, error) {
+		// Reconstruct a "target time" the way the original wave handler
+		// did: most recent GFS cycle + fh hours. PacIOOS picks the
+		// nearest available hourly slice from there.
+		now := time.Now().UTC().Truncate(time.Hour)
+		gfsCycle := now.Add(-time.Duration(gfsPublishLagHours) * time.Hour)
+		gfsCycle = time.Date(gfsCycle.Year(), gfsCycle.Month(), gfsCycle.Day(),
+			(gfsCycle.Hour()/6)*6, 0, 0, 0, time.UTC)
+		target := gfsCycle.Add(time.Duration(fh) * time.Hour)
+		return fetchPacIOOSWave(ctx, client, target)
 	}
 	return m
 }
@@ -572,22 +566,6 @@ func iconGlobalWindStub() *WeatherModel {
 		Domain:      "global",
 		Disabled:    true,
 		Reason:      "needs icosahedral→latlon regrid (DWD ships native unstructured grid)",
-	}
-}
-
-func pacioosWaveStub() *WeatherModel {
-	// PacIOOS WaveWatch III is rendered as a WMS heatmap in the
-	// frontend — it doesn't go through the cache. We register it here
-	// so the wave dropdown can list it alongside the GRIB-based
-	// alternatives. The frontend special-cases this Name and swaps
-	// renderers instead of hitting /noaa-weather/data/pacioos-ww3.
-	return &WeatherModel{
-		Name:        "pacioos-ww3",
-		DisplayName: "PacIOOS WW3 (WMS heatmap)",
-		Kind:        "wave",
-		Domain:      "global",
-		// Not "disabled" — just no Fetch. The frontend dispatches on
-		// Name when it sees this model.
 	}
 }
 

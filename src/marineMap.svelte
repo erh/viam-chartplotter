@@ -19,12 +19,6 @@
     WAVE_COLOR_SCALE,
     type WeatherLayerHandle,
   } from "./lib/windLayer";
-  import {
-    setupWaveLayer,
-    WAVE_RANGE_MAX_M,
-    METERS_TO_FEET,
-    type WaveLayerHandle,
-  } from "./lib/waveLayer";
   import "ol/ol.css";
   import ScaleLine from "ol/control/ScaleLine.js";
   import { defaults as defaultControls } from "ol/control/defaults.js";
@@ -68,19 +62,24 @@
     // at overview scales — navaids, structures, etc. Leave undefined
     // for layers that should always be visible when toggled on.
     minZoom?: number;
+    // Inverse zoom gate: hidden when zoom > maxZoom. Used by overlays
+    // whose data resolution stops being useful when zoomed in past a
+    // certain point — e.g. GFS 0.25° wind / wave at chart-detail zoom,
+    // where one model cell spans hundreds of tile pixels and the
+    // particle field becomes a flat coloured wash.
+    maxZoom?: number;
   }
 
   // Weather overlay state. Populated once GFS / GFSWAVE data + ol-wind
   // import resolve. Drives the shared forecast-hour slider beneath the
   // chart and the cursor wind/wave readout.
   let windHandle: WeatherLayerHandle | null = $state(null);
-  let waveHandle: WaveLayerHandle | null = $state(null);
-  // Last cursor-position wave height pulled from GetFeatureInfo, in
-  // metres (waveLayer.ts owns the unit conversion to feet at display
-  // time). Debounced so we don't hammer the WMS server on every
-  // pointermove.
-  let cursorWaveM = $state<number | null>(null);
-  let waveSampleTimer: ReturnType<typeof setTimeout> | null = null;
+  let waveHandle: WeatherLayerHandle | null = $state(null);
+  // Constants used by the wave-legend UI. ol-wind's Field carries
+  // wave-height magnitude (metres) since we encoded h·sin/h·cos as u/v
+  // on the backend; convert at display time.
+  const WAVE_RANGE_MAX_M = 3;
+  const METERS_TO_FEET = 3.28084;
   // GFS forecast hour the slider is currently displaying. Snapped to a
   // 3 h step so changes line up with both wind + wave file cadences.
   let weatherForecastHour = $state(0);
@@ -90,6 +89,14 @@
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
   let weatherMinForecastHour = $state(0);
+  // Highest zoom at which the GFS-resolution weather overlay reads as
+  // signal rather than a flat coloured wash. Above this, both the
+  // wind/wave layers and the forecast-hour slider hide automatically.
+  const weatherMaxZoom = 12;
+  // Reactive copy of map zoom so template conditionals (slider / wave
+  // legend / etc.) re-render when the user scrolls past the gate. The
+  // resolution-change listener installed in setupMap writes here.
+  let currentZoom = $state(0);
   // The set of wind / wave forecast models the user can switch between
   // — populated from /noaa-weather/models on mount. Each entry carries
   // its own MaxFh / StepFh / Disabled flag so the picker can both
@@ -107,17 +114,10 @@
     reason?: string;
   };
   let weatherModels = $state<WeatherModelMeta[]>([]);
-  // Currently selected model per kind. Defaults match the legacy code
-  // path so behaviour is unchanged until the user pops the dropdown.
+  // Currently selected model per kind. Defaults to the legacy product
+  // names so behaviour is unchanged until the user pops the dropdown.
   let windModel = $state("gfs");
   let waveModel = $state("pacioos-ww3");
-  // GFSWAVE particle layer, lazy-created the first time the user
-  // switches the wave dropdown to GFSWAVE. We hold on to both this
-  // handle and the original PacIOOS layer reference so the swap is
-  // cheap (just flip layerOption.layer + nudge updateOnLayers) and
-  // reversible.
-  let waveParticleHandle: WeatherLayerHandle | null = $state(null);
-  let pacioosWaveLayer: BaseLayer | null = null;
   // Last error from a failed model switch, surfaced under the picker
   // so a user who picks a disabled stub can see *why* it's disabled
   // instead of just seeing the layer blank.
@@ -132,94 +132,16 @@
     return new Date(d.getTime() + fh * 3600_000);
   }
 
-  // Issue a debounced WMS GetFeatureInfo request for the wave-height
-  // value at the cursor's lon/lat. The actual GetFeatureInfo + XML
-  // parse lives in `waveLayer.ts`; this just throttles the pointermove
-  // rate so we don't hammer the upstream WMS.
-  function scheduleWaveSample(lonLat: [number, number], view: View): void {
-    if (waveSampleTimer) clearTimeout(waveSampleTimer);
-    waveSampleTimer = setTimeout(async () => {
-      if (!waveHandle) return;
-      cursorWaveM = await waveHandle.sampleAt(lonLat, view);
-    }, 200);
-  }
-
-  // Swap the rendered wave layer between PacIOOS WMS (raster heatmap)
-  // and GFSWAVE (ol-wind particle layer driven by the backend GRIB
-  // decoder). Both layers coexist as handles, but only one is mounted
-  // in the OL map at a time — we re-point the "waves" layerOption's
-  // .layer and let updateOnLayers() add/remove it from the map.
-  //
-  // Returns null on success or an error string the picker can surface.
-  // GFSWAVE will fail server-side until the JPEG2000 decoder lands;
-  // we revert the dropdown + report the upstream error in that case
-  // so the user isn't left with an empty map.
+  // Switch the wave layer to a different upstream model. Today there's
+  // only one registered wave option (pacioos-ww3) so the dropdown
+  // doesn't render — this stays as a one-liner forwarder so adding a
+  // second wave model (ECMWF WAM, GFSWAVE once we have JPEG2000) just
+  // works without UI changes.
   async function swapWaveModel(next: string): Promise<string | null> {
-    if (next === waveModel) return null;
-    const wavesOption = mapGlobal.layerOptions.find(
-      (l) => l.name === "waves",
-    );
-    if (!wavesOption || !pacioosWaveLayer) {
-      return "wave layer not initialised";
-    }
-    // Drop whatever is currently mounted — updateOnLayers will re-add
-    // whichever layer .layer points to at the end of this function.
-    if (wavesOption.layer) {
-      const layers = mapGlobal.onLayers;
-      for (let i = layers.getLength() - 1; i >= 0; i--) {
-        if (
-          (layers.item(i) as any).ol_uid ===
-          (wavesOption.layer as any).ol_uid
-        ) {
-          layers.removeAt(i);
-        }
-      }
-    }
-    if (next === "gfswave") {
-      if (!waveParticleHandle) {
-        // Lazy-create. Note: we pass layerName: "waves" so
-        // setupWeatherLayer overwrites the existing layerOption.layer
-        // with the new particle layer in-place — no second panel
-        // entry, no duplicate UI affordance.
-        const handle = await setupWeatherLayer(mapGlobal, {
-          layerName: "waves",
-          displayName: "waves",
-          parent: "weather",
-          initialModel: "gfswave",
-          dataUrlFor: (m, fh) => `/noaa-weather/data/${m}/latest.json`,
-          colorScale: WAVE_COLOR_SCALE,
-          minVelocity: 0,
-          // Wave colour scale runs 0 .. 8 m wave height. ol-wind reads
-          // sqrt(u² + v²) so the backend encodes height into u/v
-          // magnitude (parseGFSWaveSurface in noaa_weather_cache.go).
-          maxVelocity: 8,
-          velocityScale: () => {
-            const z = mapGlobal.view?.getZoom() ?? 6;
-            // Slower than wind — waves visually drift, they don't
-            // race. Roughly 1/3 the wind speed at the same magnitude.
-            return 0.05 / Math.pow(2, z);
-          },
-          paths: 1500,
-          initialForecastHour: weatherForecastHour,
-        });
-        if (!handle) {
-          // Restore PacIOOS so the user has SOMETHING.
-          wavesOption.layer = pacioosWaveLayer;
-          updateOnLayers();
-          return "GFSWAVE: data fetch / decode failed (backend probably needs JPEG2000 support)";
-        }
-        waveParticleHandle = handle;
-      }
-      wavesOption.layer = waveParticleHandle.layer as BaseLayer;
-    } else if (next === "pacioos-ww3") {
-      wavesOption.layer = pacioosWaveLayer;
-    } else {
-      return `unknown wave model: ${next}`;
-    }
-    waveModel = next;
-    updateOnLayers();
-    mapGlobal.map?.render();
-    return null;
+    if (next === waveModel || !waveHandle) return null;
+    const err = await waveHandle.setModel(next);
+    if (!err) waveModel = next;
+    return err;
   }
 
   // Compute the smallest 3-h-aligned forecast hour that lands at or
@@ -232,6 +154,41 @@
     if (Number.isNaN(run.getTime())) return 0;
     const hoursFromRun = (Date.now() - run.getTime()) / 3600_000;
     return Math.max(0, Math.ceil(hoursFromRun / 3) * 3);
+  }
+
+  // Forecast hours that land on local midnight inside [minFh, maxFh], with
+  // a weekday label for each. Used to overlay day-boundary ticks on the
+  // weather slider so the user can see at a glance where Tuesday ends and
+  // Wednesday begins, regardless of timezone or run-time alignment.
+  function computeDayMarkers(
+    runTimeIso: string | null,
+    minFh: number,
+    maxFh: number,
+  ): Array<{ pct: number; label: string }> {
+    if (!runTimeIso || maxFh <= minFh) return [];
+    const run = new Date(runTimeIso);
+    if (Number.isNaN(run.getTime())) return [];
+    const sliderEnd = new Date(run.getTime() + maxFh * 3600_000).getTime();
+    // First local midnight strictly after the slider's start; setHours(24,...)
+    // lands on the next calendar day's 00:00 local. From there step by 24 h
+    // (real-clock) — accepts the ~1 px slop on DST-transition days.
+    const sliderStart = new Date(run.getTime() + minFh * 3600_000);
+    const first = new Date(sliderStart);
+    first.setHours(24, 0, 0, 0);
+    const out: Array<{ pct: number; label: string }> = [];
+    for (
+      let t = first.getTime();
+      t <= sliderEnd;
+      t += 24 * 3600_000
+    ) {
+      const fh = (t - run.getTime()) / 3600_000;
+      const pct = ((fh - minFh) / (maxFh - minFh)) * 100;
+      const label = new Date(t).toLocaleDateString(undefined, {
+        weekday: "short",
+      });
+      out.push({ pct, label });
+    }
+    return out;
   }
 
   let boatImage = "topdown-boat.svg";
@@ -3006,15 +2963,24 @@
         displayName: "weather",
         on: true,
       });
-      // Pre-allocate the wind entry so its panel row sits directly
-      // under the weather header — setupWeatherLayer is async and would
-      // otherwise push it last (after boat / ais). The actual OL layer
-      // reference gets filled in once the GFS fetch returns.
+      // Pre-allocate the wind + waves entries so their panel rows sit
+      // directly under the weather header — setupWeatherLayer is async
+      // and would otherwise push them last (after boat / ais). The
+      // actual OL layer reference is filled in by setupWeatherLayer
+      // when each respective fetch returns.
       mapGlobal.layerOptions.push({
         name: "wind",
         displayName: "wind",
         parent: "weather",
         on: false,
+        maxZoom: weatherMaxZoom,
+      });
+      mapGlobal.layerOptions.push({
+        name: "waves",
+        displayName: "waves",
+        parent: "weather",
+        on: false,
+        maxZoom: weatherMaxZoom,
       });
       const ensureRendered = () => {
         if (mapGlobal.map) {
@@ -3054,35 +3020,56 @@
           // Re-fetch at the "now-aligned" hour if the initial f000
           // fetch happened before we knew the run time.
           if (floor > 0 && wind) wind.setForecastHour(floor).catch(() => {});
-          // Seed the wave WMS TIME to match the slider's initial value
-          // so the wave layer and cursor sampling agree with the wind
-          // forecast hour from the very first tile request.
-          const target = weatherDataDate(refTime, floor);
-          if (waveHandle && target) waveHandle.setTime(target);
+          // Bump the wave layer to the same forecast hour the wind
+          // slider settled on, so both display the same future time.
+          if (waveHandle && floor > 0) {
+            waveHandle.setForecastHour(floor).catch(() => {});
+          }
           ensureRendered();
         })
         .catch((err) => {
           console.warn("wind layer disabled:", err);
         });
-      // Significant wave height as a semi-transparent raster overlay.
-      // Source: PacIOOS NOAA WaveWatch III "best" THREDDS WMS. Public,
-      // CORS-open, no key needed; renders coloured boxfill tiles for
-      // `Thgt` (sea_surface_wave_significant_height) at the requested
-      // bbox + zoom. Frontend asks WMS for tiles directly — no server
-      // proxy needed for this layer (vs. wind which needs the GRIB2
-      // parser for cursor sampling).
-      // Wave overlay (PacIOOS NOAA WaveWatch III). Self-contained in
-      // src/lib/waveLayer.ts — owns the TileWMS source, the
-      // GetFeatureInfo cursor sampler, and the colour-scale constants.
-      waveHandle = setupWaveLayer(mapGlobal);
-      // Stash the PacIOOS WMS BaseLayer so swapWaveModel can swap back
-      // to it later. setupWaveLayer pushed a layerOption with this
-      // layer; we read it out rather than re-deriving so future
-      // changes to setupWaveLayer's internal layer choice (e.g. style
-      // tweaks) come through without rewiring.
-      pacioosWaveLayer =
-        (mapGlobal.layerOptions.find((l) => l.name === "waves")
-          ?.layer as BaseLayer | undefined) ?? null;
+      // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
+      // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
+      // and converted to u/v vectors so it shares the same JSON shape
+      // and rendering pipeline as the wind layer. Slower velocityScale
+      // since wave-propagation speed is a fraction of wind speed, and
+      // a different colour ramp keyed to typical wave heights (0..3 m).
+      setupWeatherLayer(mapGlobal, {
+        layerName: "waves",
+        displayName: "waves",
+        parent: "weather",
+        initialModel: waveModel,
+        dataUrlFor: (model) => `/noaa-weather/data/${model}/latest.json`,
+        colorScale: WAVE_COLOR_SCALE,
+        minVelocity: 0,
+        maxVelocity: 3,
+        velocityScale: () => {
+          const z = mapGlobal.view?.getZoom() ?? 6;
+          // Was 0.06 / 2^z; bumped so a 1.5 m wave-height "particle"
+          // drifts visibly each frame — wave-celerity isn't literally
+          // proportional to height, but the eye reads the slow streaks
+          // as "no data" otherwise.
+          return 0.12 / Math.pow(2, z);
+        },
+        paths: 6000,
+        lineWidth: 5,
+        // Brighter strokes than wind — the calm/cyan end of the wave
+        // ramp washes out against the ocean basemap otherwise.
+        globalAlpha: 0.97,
+        initialForecastHour: initialFh,
+        zIndex: 29,
+      })
+        .then((wave) => {
+          waveHandle = wave;
+          if (wave && weatherForecastHour > 0) {
+            wave.setForecastHour(weatherForecastHour).catch(() => {});
+          }
+        })
+        .catch((err) => {
+          console.warn("wave layer disabled:", err);
+        });
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
       // registry endpoint isn't reachable for some reason.
@@ -3560,18 +3547,25 @@
       const z = mapGlobal.view?.getZoom();
       if (typeof z !== "number") return;
       for (const l of mapGlobal.layerOptions) {
-        if (l.layer && typeof l.minZoom === "number") {
-          l.layer.setVisible(z >= l.minZoom);
+        if (!l.layer) continue;
+        if (typeof l.minZoom !== "number" && typeof l.maxZoom !== "number") {
+          continue;
         }
+        const minOK = typeof l.minZoom !== "number" || z >= l.minZoom;
+        const maxOK = typeof l.maxZoom !== "number" || z <= l.maxZoom;
+        l.layer.setVisible(minOK && maxOK);
       }
     };
     mapGlobal.view.on("change:resolution", () => {
       const z = mapGlobal.view?.getZoom();
       if (typeof z === "number" && Number.isFinite(z)) {
         setCookie(COOKIE_VIEW_ZOOM, String(z), COOKIE_OPTS);
+        currentZoom = z;
       }
       applyZoomGates();
     });
+    const z0 = mapGlobal.view.getZoom();
+    if (typeof z0 === "number" && Number.isFinite(z0)) currentZoom = z0;
     applyZoomGates();
 
     updateOnLayers();
@@ -4061,11 +4055,15 @@
             windFromDeg = s.fromDeg;
           }
         }
-        if (layerOn("waves") && cursorWaveM !== null) {
-          waveM = cursorWaveM;
-        }
-        if (layerOn("waves") && waveHandle && mapGlobal.view) {
-          scheduleWaveSample(cursorLngLat, mapGlobal.view);
+        if (layerOn("waves") && waveHandle) {
+          const s = waveHandle.sampleAt(cursorLngLat[0], cursorLngLat[1]);
+          if (s) {
+            // Backend encodes wave HEIGHT as the magnitude slot, so
+            // s.magnitude is in metres. fromDeg is the direction-from
+            // we want to surface.
+            waveM = s.magnitude;
+            waveFromDeg = s.fromDeg;
+          }
         }
         cursorInfo = {
           lat: cursorLatLng[0],
@@ -4817,7 +4815,7 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
-  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
+  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && currentZoom <= weatherMaxZoom}
     <!-- Wave-height legend. Pure-CSS horizontal gradient matched to
          the ncWMS "rainbow" palette the WMS tiles use; feet labels
          beneath. Avoiding the GetLegendGraphic PNG sidesteps a
@@ -4834,10 +4832,15 @@
     </div>
   {/if}
 
-  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on)}
+  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
     {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
     {@const windModelOptions = weatherModels.filter((m) => m.kind === "wind")}
     {@const waveModelOptions = weatherModels.filter((m) => m.kind === "wave")}
+    {@const dayMarkers = computeDayMarkers(
+      weatherRunTime,
+      weatherMinForecastHour,
+      240,
+    )}
     <div class="wind-forecast-bar">
       {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on && windModelOptions.length > 1}
         <!-- Wind model picker. Disabled-stub models stay listed (so the
@@ -4932,11 +4935,21 @@
         {/if}
         {#if weatherLoading}…{/if}
       </label>
-      <input
-        type="range"
-        min={weatherMinForecastHour}
-        max="240"
-        step="3"
+      <div class="wind-forecast-bar-slider-wrap">
+        {#each dayMarkers as m (m.pct)}
+          <span
+            class="wind-forecast-bar-daymark"
+            style="left: {m.pct}%"
+            aria-hidden="true"
+          >
+            <span class="wind-forecast-bar-daymark-label">{m.label}</span>
+          </span>
+        {/each}
+        <input
+          type="range"
+          min={weatherMinForecastHour}
+          max="240"
+          step="3"
         value={weatherForecastHour}
         disabled={weatherLoading}
         oninput={(e) => {
@@ -4965,26 +4978,20 @@
           windLayer?.setVisible?.(false);
           waveLayer?.setVisible?.(false);
           try {
+            // Drive both layers in lockstep — both are now ol-wind
+            // pipelines fed by /noaa-weather/{gfs,wave}/latest.json?fh=N.
             const tasks: Promise<void>[] = [];
             if (windHandle) tasks.push(windHandle.setForecastHour(v));
-            // When the GFSWAVE particle layer is the active wave
-            // renderer, drive its forecast hour the same way as wind.
-            // PacIOOS WMS still listens to setTime below regardless.
-            if (waveModel === "gfswave" && waveParticleHandle) {
-              tasks.push(waveParticleHandle.setForecastHour(v));
-            }
+            if (waveHandle) tasks.push(waveHandle.setForecastHour(v));
             await Promise.all(tasks);
             if (windHandle) {
               weatherForecastHour = windHandle.getForecastHour();
               weatherRunTime = windHandle.getRunTime();
+            } else if (waveHandle) {
+              weatherForecastHour = waveHandle.getForecastHour();
             } else {
               weatherForecastHour = v;
             }
-            // Wave WMS picks the nearest time from its own dataset.
-            // Compute target = GFS run + fh and push as TIME param so
-            // moving the slider actually re-tiles the wave layer too.
-            const target = weatherDataDate(weatherRunTime, weatherForecastHour);
-            if (waveHandle && target) waveHandle.setTime(target);
             mapGlobal.map?.render();
           } finally {
             weatherLoading = false;
@@ -4992,7 +4999,8 @@
             waveLayer?.setVisible?.(true);
           }
         }}
-      />
+        />
+      </div>
       <span class="wind-forecast-bar-runtime">
         {#if weatherRunTime}
           {windModel.toUpperCase()} run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
@@ -5804,9 +5812,10 @@
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
-            {#if cursorInfo.waveM !== null}
+            {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
               <span class="data-panel-value">
                 wave <span class="data-panel-bold">{(cursorInfo.waveM * 3.28084).toFixed(1)}</span><sup>ft</sup>
+                from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
           </div>
@@ -6385,17 +6394,19 @@
     width: 200px;
     height: 14px;
     border: 1px solid rgba(0, 0, 0, 0.2);
-    /* Approximates the ncWMS "rainbow" palette (left=blue → right=red,
-       no purple/magenta) that the WMS tiles use. CSS keeps it strictly
-       horizontal so we can't get tripped up by a stale vertical PNG. */
+    /* Mirrors WAVE_COLOR_SCALE in src/lib/windLayer.ts: near-white at
+       calm (so it reads on a blue basemap), cyan around 2 ft, green
+       around 4–5 ft, yellow/orange around 6–7 ft, deep red at 10 ft. */
     background: linear-gradient(
       to right,
-      #0000ff 0%,
-      #00bfff 20%,
-      #00ff80 40%,
-      #ffff00 60%,
-      #ff8000 80%,
-      #ff0000 100%
+      #f0f7ff 0%,
+      #3eb1ff 20%,
+      #3ed24a 40%,
+      #bde534 50%,
+      #fff200 57%,
+      #ff7a1a 70%,
+      #e51d1d 85%,
+      #6e0606 100%
     );
   }
   .wave-legend-ticks {
@@ -6448,6 +6459,39 @@
   }
   .wind-forecast-bar input[type="range"] {
     width: 240px;
+    display: block;
+  }
+  /* Wraps the slider so day-boundary tick marks can be positioned over the
+     same width as the input. Padding-top reserves space for the weekday
+     labels that sit above the track. */
+  .wind-forecast-bar-slider-wrap {
+    position: relative;
+    width: 240px;
+    padding-top: 14px;
+  }
+  /* One tick per local-midnight forecast hour. The thin vertical bar sits
+     inside the slider's track area; the label centres on the same x. The
+     ~6 px inset on the wrap is half the native range thumb width so
+     ticks line up with the slider's logical 0 % and 100 % positions
+     instead of the input element edges. */
+  .wind-forecast-bar-daymark {
+    position: absolute;
+    top: 14px;
+    bottom: 0;
+    width: 1px;
+    margin-left: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+  }
+  .wind-forecast-bar-daymark-label {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    line-height: 1;
+    color: #555;
+    white-space: nowrap;
   }
   .wind-forecast-bar-runtime {
     font-size: 11px;
