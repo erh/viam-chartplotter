@@ -16,6 +16,7 @@
   import {
     setupWeatherLayer,
     WIND_COLOR_SCALE,
+    WAVE_COLOR_SCALE,
     type WeatherLayerHandle,
   } from "./lib/windLayer";
   import {
@@ -110,6 +111,13 @@
   // path so behaviour is unchanged until the user pops the dropdown.
   let windModel = $state("gfs");
   let waveModel = $state("pacioos-ww3");
+  // GFSWAVE particle layer, lazy-created the first time the user
+  // switches the wave dropdown to GFSWAVE. We hold on to both this
+  // handle and the original PacIOOS layer reference so the swap is
+  // cheap (just flip layerOption.layer + nudge updateOnLayers) and
+  // reversible.
+  let waveParticleHandle: WeatherLayerHandle | null = $state(null);
+  let pacioosWaveLayer: BaseLayer | null = null;
   // Last error from a failed model switch, surfaced under the picker
   // so a user who picks a disabled stub can see *why* it's disabled
   // instead of just seeing the layer blank.
@@ -134,6 +142,84 @@
       if (!waveHandle) return;
       cursorWaveM = await waveHandle.sampleAt(lonLat, view);
     }, 200);
+  }
+
+  // Swap the rendered wave layer between PacIOOS WMS (raster heatmap)
+  // and GFSWAVE (ol-wind particle layer driven by the backend GRIB
+  // decoder). Both layers coexist as handles, but only one is mounted
+  // in the OL map at a time — we re-point the "waves" layerOption's
+  // .layer and let updateOnLayers() add/remove it from the map.
+  //
+  // Returns null on success or an error string the picker can surface.
+  // GFSWAVE will fail server-side until the JPEG2000 decoder lands;
+  // we revert the dropdown + report the upstream error in that case
+  // so the user isn't left with an empty map.
+  async function swapWaveModel(next: string): Promise<string | null> {
+    if (next === waveModel) return null;
+    const wavesOption = mapGlobal.layerOptions.find(
+      (l) => l.name === "waves",
+    );
+    if (!wavesOption || !pacioosWaveLayer) {
+      return "wave layer not initialised";
+    }
+    // Drop whatever is currently mounted — updateOnLayers will re-add
+    // whichever layer .layer points to at the end of this function.
+    if (wavesOption.layer) {
+      const layers = mapGlobal.onLayers;
+      for (let i = layers.getLength() - 1; i >= 0; i--) {
+        if (
+          (layers.item(i) as any).ol_uid ===
+          (wavesOption.layer as any).ol_uid
+        ) {
+          layers.removeAt(i);
+        }
+      }
+    }
+    if (next === "gfswave") {
+      if (!waveParticleHandle) {
+        // Lazy-create. Note: we pass layerName: "waves" so
+        // setupWeatherLayer overwrites the existing layerOption.layer
+        // with the new particle layer in-place — no second panel
+        // entry, no duplicate UI affordance.
+        const handle = await setupWeatherLayer(mapGlobal, {
+          layerName: "waves",
+          displayName: "waves",
+          parent: "weather",
+          initialModel: "gfswave",
+          dataUrlFor: (m, fh) => `/noaa-weather/data/${m}/latest.json`,
+          colorScale: WAVE_COLOR_SCALE,
+          minVelocity: 0,
+          // Wave colour scale runs 0 .. 8 m wave height. ol-wind reads
+          // sqrt(u² + v²) so the backend encodes height into u/v
+          // magnitude (parseGFSWaveSurface in noaa_weather_cache.go).
+          maxVelocity: 8,
+          velocityScale: () => {
+            const z = mapGlobal.view?.getZoom() ?? 6;
+            // Slower than wind — waves visually drift, they don't
+            // race. Roughly 1/3 the wind speed at the same magnitude.
+            return 0.05 / Math.pow(2, z);
+          },
+          paths: 1500,
+          initialForecastHour: weatherForecastHour,
+        });
+        if (!handle) {
+          // Restore PacIOOS so the user has SOMETHING.
+          wavesOption.layer = pacioosWaveLayer;
+          updateOnLayers();
+          return "GFSWAVE: data fetch / decode failed (backend probably needs JPEG2000 support)";
+        }
+        waveParticleHandle = handle;
+      }
+      wavesOption.layer = waveParticleHandle.layer as BaseLayer;
+    } else if (next === "pacioos-ww3") {
+      wavesOption.layer = pacioosWaveLayer;
+    } else {
+      return `unknown wave model: ${next}`;
+    }
+    waveModel = next;
+    updateOnLayers();
+    mapGlobal.map?.render();
+    return null;
   }
 
   // Compute the smallest 3-h-aligned forecast hour that lands at or
@@ -2989,6 +3075,14 @@
       // src/lib/waveLayer.ts — owns the TileWMS source, the
       // GetFeatureInfo cursor sampler, and the colour-scale constants.
       waveHandle = setupWaveLayer(mapGlobal);
+      // Stash the PacIOOS WMS BaseLayer so swapWaveModel can swap back
+      // to it later. setupWaveLayer pushed a layerOption with this
+      // layer; we read it out rather than re-deriving so future
+      // changes to setupWaveLayer's internal layer choice (e.g. style
+      // tweaks) come through without rewiring.
+      pacioosWaveLayer =
+        (mapGlobal.layerOptions.find((l) => l.name === "waves")
+          ?.layer as BaseLayer | undefined) ?? null;
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
       // registry endpoint isn't reachable for some reason.
@@ -4798,15 +4892,22 @@
           <select
             disabled={weatherLoading}
             value={waveModel}
-            onchange={(e) => {
+            onchange={async (e) => {
               const next = (e.currentTarget as HTMLSelectElement).value;
-              waveModel = next;
-              // Wave model switching for now just records the choice —
-              // backend GFSWAVE will fall back gracefully if its
-              // decoder isn't available. The actual renderer swap (WMS
-              // heatmap ↔ ol-wind particles) is a follow-up; today the
-              // PacIOOS WMS continues to render regardless.
-              weatherModelError = "wave model swap is wired but not yet renderer-complete";
+              weatherLoading = true;
+              weatherModelError = null;
+              try {
+                const err = await swapWaveModel(next);
+                if (err) {
+                  // Roll the dropdown back to whatever is actually
+                  // mounted so the UI doesn't claim a model that
+                  // isn't rendering.
+                  weatherModelError = err;
+                  (e.currentTarget as HTMLSelectElement).value = waveModel;
+                }
+              } finally {
+                weatherLoading = false;
+              }
             }}
           >
             {#each waveModelOptions as m}
@@ -4866,6 +4967,12 @@
           try {
             const tasks: Promise<void>[] = [];
             if (windHandle) tasks.push(windHandle.setForecastHour(v));
+            // When the GFSWAVE particle layer is the active wave
+            // renderer, drive its forecast hour the same way as wind.
+            // PacIOOS WMS still listens to setTime below regardless.
+            if (waveModel === "gfswave" && waveParticleHandle) {
+              tasks.push(waveParticleHandle.setForecastHour(v));
+            }
             await Promise.all(tasks);
             if (windHandle) {
               weatherForecastHour = windHandle.getForecastHour();
