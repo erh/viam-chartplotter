@@ -45,9 +45,13 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	port := config.Attributes.Int("port", 8888)
 	cacheDir := config.Attributes.String("noaa_cache_dir")
 	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
-	safeDepthFt := config.Attributes.Float64("safe_depth_ft", 6)
+	// "draft" (feet) drives the depth-shading bands. DEPMS covers
+	// 3.3 ft → draft, DEPMD covers draft → 2×draft, DEPDW (safe water,
+	// white) is ≥ 2×draft. Fall back to legacy "safe_depth_ft" name so
+	// older configs keep working.
+	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, safeDepthFt, myBoatIcon)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon)
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -66,8 +70,9 @@ func resolveCacheRoot(configured string) string {
 
 // StartChartplotterServer wires the static frontend, the NOAA WMS caching proxy, and
 // the ENC catalog/store handlers, and starts an HTTP server on the given port.
-// safeDepthFt is the default safety contour (feet) for tile rendering; the
-// per-request `?sd=` query param overrides it.
+// draftFt is the boat's draft in feet — drives the depth-shading bands at
+// chart-detail zoom (DEPMS up to draft, DEPMD up to 2×draft, DEPDW above).
+// The per-request `?sd=` query param overrides it.
 func StartChartplotterServer(
 	name resource.Name,
 	dist fs.FS,
@@ -75,7 +80,7 @@ func StartChartplotterServer(
 	port int,
 	cacheRoot string,
 	cacheMaxBytes int64,
-	safeDepthFt float64,
+	draftFt float64,
 	myBoatIconPath string,
 ) (resource.Resource, error) {
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
@@ -107,7 +112,7 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, safeDepthFt)
+	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, draftFt)
 	// OSM raster tile cache for the /noaa-enc/osm-tile/ endpoint. We
 	// fetch tile.openstreetmap.org PNGs and mask out water (per the
 	// chart's DEPARE polygons) so OSM's water labels and tones don't
@@ -121,7 +126,7 @@ func StartChartplotterServer(
 		logger.Infof("osm tile cache: %s", osmCache.cacheDir)
 	}
 	encHandlers.Register(mux)
-	logger.Infof("noaa enc store: %s (default safe_depth_ft=%.1f)", encDir, safeDepthFt)
+	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)
 
 	// Per-process instance ID. The frontend polls /version and reloads when it
 	// changes, so the browser picks up a new build/restart without manual refresh.

@@ -759,7 +759,7 @@ const (
 // the cache by style/safe-depth/skip flags; this version covers the things
 // the URL doesn't say. After bumping, old vN directories are inert and can
 // be `rm -rf`'d at the operator's leisure.
-const ENCRenderRulesVersion = 3
+const ENCRenderRulesVersion = 4
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile / RenderOSMTileDebugMask). Bump on any change to the OSM
@@ -945,8 +945,10 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// regardless of zoom, so deep channels render as DEPDW even at
 	// z=7..12 where the regular scale filter excludes harbour cells. The
 	// main pass below skips these classes so we don't double-paint with
-	// a stale coarser polygon. Skipped under TransparentLand.
-	if !transparentLand && !skipAll {
+	// a stale coarser polygon. Runs even under TransparentLand — only
+	// LNDARE is suppressed in that mode (so the OSM basemap shows
+	// through for land), depth shading is the whole point of the chart.
+	if !skipAll {
 		for _, cell := range allCellsForDEPARE {
 			chart, err := r.chartFor(cell.Name)
 			if err != nil || chart == nil {
@@ -2141,9 +2143,9 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 		// polygons (e.g. "0 to 30 m") cover the tile. DRVAL2 keying paints
 		// these white and hides shallow channels like Cape Fear Slue that
 		// NOAA's WMS shades blue from its own harbour-cell data. Force
-		// DEPVS when the shallow edge is under 10 ft. At z≥12 we use the
-		// four-band depthFill scheme uniformly so z=12–15 look consistent.
-		if z <= 11 && !math.IsNaN(min) && min < s52ShallowShadeM {
+		// DEPVS when the shallow edge is under 2×draft so coarse-zoom
+		// shading matches the z≤11 collapse used by depthFill.
+		if z <= 11 && !math.IsNaN(min) && min < 2*safeDepthM {
 			return s52DEPVS
 		}
 		key := max
@@ -2181,79 +2183,56 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 	return nil
 }
 
-// S-52 contour thresholds in metres. SHALLOW separates drying-ish from
-// "covered but shallow"; DEEP separates "safe but mid-depth" from "well past
-// safe". DEEP at 7.5 m matches what NOAA's WMS appears to use — z=13
-// sampling shows polygons with DRVAL2 ≥ ~9 m painted as DEPDW (white),
-// which only happens with DEEP < 9.
-const (
-	// s52ShallowContourM is the DEPVS/DEPMS boundary. At 1 m, a "0–6 ft"
-	// NOAA harbour-cell polygon (DRVAL2 ≈ 1.83 m) lands in DEPMS (lighter
-	// blue) instead of DEPVS (saturated). NOAA's own WMS paints those
-	// polygons DEPVS, but we deliberately go lighter at chart-detail zoom
-	// — reserve DEPVS for drying-edge polygons and the z≤11 shallow-edge
-	// override (where shallow channels need to stand out from coarse-cell
-	// wide-range polygons painted white).
-	s52ShallowContourM = 1.0
-	// s52DeepContourM is the hard "safe water" threshold: any DEPARE with
-	// DRVAL2 ≥ this paints DEPDW (white) at z≥12. Set to 10 ft so the
-	// chart matches the recreational-boater rule of thumb: shaded under
-	// 10 ft, white above.
-	s52DeepContourM = 10.0 / feetPerMetre
-	// s52ShallowShadeM is the "shallow edge" threshold used by the z≤11
-	// coarse-zoom override in areaFill: when DRVAL1 sits below this depth,
-	// the polygon paints DEPVS so coastal-cell wide-range polygons still
-	// show shallow channels NOAA's WMS reveals from harbour-cell data.
-	// 10 ft (~3.05 m).
-	s52ShallowShadeM = 10.0 / feetPerMetre
-)
+// s52ShallowContourM is the DEPVS/DEPMS boundary at z≥12. At 1 m, a
+// "0–6 ft" NOAA harbour-cell polygon (DRVAL2 ≈ 1.83 m) lands in DEPMS
+// (lighter blue) instead of DEPVS (saturated). DEPVS is reserved for
+// drying-edge polygons and the z≤11 shallow-edge override.
+//
+// Everything else is keyed off the boat's `draft` (in metres):
+//
+//	z≥12  DEPVS   < 1 m
+//	      DEPMS   1 m … draft
+//	      DEPMD   draft … 2×draft
+//	      DEPDW   ≥ 2×draft   (safe water, white)
+//	z≤11  DEPVS   < 2×draft
+//	      DEPDW   ≥ 2×draft
+const s52ShallowContourM = 1.0
 
-// depthFill returns the water fill for a DEPARE polygon.
+// depthFill returns the water fill for a DEPARE polygon, keyed off the
+// boat's draft (metres).
 //
-// At chart-detail zoom (z≥13) we use the full four-band scheme:
+//	z≥12  DEPVS   0   … 1 m         (saturated; very shallow / drying-ish)
+//	      DEPMS   1 m … draft       (below the boat's draft — warning)
+//	      DEPMD   draft … 2×draft   (just above draft — caution)
+//	      DEPDW   ≥ 2×draft         (safe water, white)
+//	z≤11  DEPVS   0   … 2×draft     (anything you can't safely cross)
+//	      DEPDW   ≥ 2×draft         (safe water, white)
 //
-//   - depth < 0                      → DEPIT (intertidal / drying)
-//   - 0 ≤ depth < SHALLOW            → DEPVS (AFCDE1, drying-ish saturated)
-//   - SHALLOW ≤ depth < safety       → DEPMS (D1DDEF, below-safety warning)
-//   - safety ≤ depth < DEEP          → DEPMD (DDEAF7, safe but mid-depth)
-//   - depth ≥ DEEP                   → DEPDW (white)
-//
-// At very coarse zooms (z≤11) NOAA's WMS collapses to roughly two-colour
-// shading — saturated blue for water below safety, plain white past it.
-// Sampling NOAA z=11 tiles shows ~50/50 white vs AFCDE1 with the
-// intermediate blues nearly invisible. We match by remapping the
-// DEPMD/DEPMS bands to DEPDW (white) at z≤11. z=12 and up use the full
-// four-band scheme so chart-detail zooms render consistently.
-func depthFill(depthM, safeDepthM float64, z int) color.Color {
-	if safeDepthM <= 0 {
-		safeDepthM = s52DeepContourM
+// The z≤11 collapse keeps the coarse-zoom palette readable when polygons
+// shrink to a handful of pixels.
+func depthFill(depthM, draftM float64, z int) color.Color {
+	if draftM <= 0 {
+		draftM = 6.0 / feetPerMetre // default 6 ft
 	}
-	// Don't let safety creep below SHALLOW — we want a non-empty DEPMS band.
-	if safeDepthM <= s52ShallowContourM {
-		safeDepthM = s52ShallowContourM + 1
+	// Don't let draft underflow our DEPVS band — clamp so DEPMS stays
+	// non-empty at z≥12.
+	if draftM < s52ShallowContourM {
+		draftM = s52ShallowContourM
 	}
-	deep := s52DeepContourM
-	if deep < safeDepthM {
-		deep = safeDepthM * 1.5
-	}
+	deep := 2 * draftM
 	if depthM < 0 {
 		return s52DEPIT
 	}
-	if depthM < s52ShallowContourM {
-		return s52DEPVS
-	}
 	if z <= 11 {
-		// Two-colour shading at very coarse zoom. Override the user's
-		// per-boat safety here so the chart-display tone matches NOAA —
-		// per-boat shading is more useful at chart-detail zoom where
-		// channel polygons are visible anyway.
-		threshold := s52DeepContourM
-		if depthM < threshold {
+		if depthM < deep {
 			return s52DEPVS
 		}
 		return s52DEPDW
 	}
-	if depthM < safeDepthM {
+	if depthM < s52ShallowContourM {
+		return s52DEPVS
+	}
+	if depthM < draftM {
 		return s52DEPMS
 	}
 	if depthM < deep {
