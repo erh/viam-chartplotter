@@ -4889,7 +4889,7 @@
           </select>
         </label>
       {/if}
-      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && waveModelOptions.length > 1}
+      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && waveModelOptions.length > 0}
         <label class="wind-forecast-bar-model">
           <span class="wind-forecast-bar-model-prefix">wave</span>
           <select
