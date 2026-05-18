@@ -1,0 +1,912 @@
+package vc
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.viam.com/rdk/logging"
+)
+
+// WeatherCache fetches NOAA GFS GRIB2 data from NOMADS, parses out 10 m
+// UGRD/VGRD into a 2-record JSON document shaped for the ol-wind
+// frontend layer, and serves the cached result at
+// /noaa-weather/gfs/latest.json. Same disk-cache shape as NoaaCache: a
+// single file on disk, atomically replaced, with stale-while-revalidate.
+type WeatherCache struct {
+	cacheDir string
+	client   *http.Client
+	logger   logging.Logger
+
+	// refresh is the soft TTL — past this, a request triggers a
+	// background refresh (the cached copy is still served immediately).
+	refresh time.Duration
+
+	// fetchMu de-dupes concurrent refreshes; second caller just waits.
+	fetchMu sync.Mutex
+
+	hits    atomic.Uint64
+	refreshes atomic.Uint64
+	errs    atomic.Uint64
+}
+
+const (
+	weatherStaleAfter = 90 * time.Minute
+	// GFS 0.25° runs are typically available ~3.5 h after the cycle hour.
+	gfsPublishLagHours = 4
+	// Hard cap on forecast hour so a typo in `?fh=` can't make us fetch
+	// the 16-day-out run forever (GFS publishes f000..f384 at 3 h steps).
+	gfsMaxForecastHour = 240
+	// NOMADS filter endpoint that lets us subset by variable + level
+	// without downloading the full ~500 MB GRIB2.
+	nomadsGFSURLTemplate = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl" +
+		"?file=gfs.t%02dz.pgrb2.0p25.f%03d" +
+		"&lev_10_m_above_ground=on&var_UGRD=on&var_VGRD=on" +
+		"&dir=%%2Fgfs.%s%%2F%02d%%2Fatmos"
+	// GFSWAVE 0.25° global, HTSGW (significant wave height, m) +
+	// DIRPW (primary wave direction, degrees "from") at the surface.
+	nomadsWaveURLTemplate = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfswave.pl" +
+		"?file=gfswave.t%02dz.global.0p25.f%03d.grib2" +
+		"&var_HTSGW=on&var_DIRPW=on" +
+		"&dir=%%2Fgfs.%s%%2F%02d%%2Fwave%%2Fgridded"
+)
+
+// NewWeatherCache wires a WeatherCache pointing at cacheDir. The
+// directory is created if it doesn't exist.
+func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, error) {
+	if cacheDir == "" {
+		return nil, fmt.Errorf("weather cache: cacheDir required")
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return nil, fmt.Errorf("weather cache: mkdir %q: %w", cacheDir, err)
+	}
+	return &WeatherCache{
+		cacheDir: cacheDir,
+		client:   &http.Client{Timeout: 120 * time.Second},
+		logger:   logger,
+		refresh:  weatherStaleAfter,
+	}, nil
+}
+
+// Register attaches the GFS handler to mux.
+func (wc *WeatherCache) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/noaa-weather/gfs/latest.json", wc.handleGFS)
+	mux.HandleFunc("/noaa-weather/wave/latest.json", wc.handleWave)
+	mux.HandleFunc("/noaa-weather/stats", wc.handleStats)
+}
+
+// cachePath returns the on-disk cache location for one (product, fh)
+// combination. `product` is "gfs" for the GFS wind dataset or "wave"
+// for GFSWAVE.
+func (wc *WeatherCache) cachePath(product string, fh int) string {
+	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-f%03d.json", product, fh))
+}
+
+// parseForecastHour pulls `?fh=N` (forecast hour in hours from the run
+// time) off the request. Defaults to 0 (analysis). Snaps to the nearest
+// 3 h GFS step and clamps to [0, gfsMaxForecastHour].
+func parseForecastHour(r *http.Request) int {
+	v := r.URL.Query().Get("fh")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	// Snap to nearest 3 h step — NOMADS doesn't publish off-step files.
+	n = (n / 3) * 3
+	if n > gfsMaxForecastHour {
+		n = gfsMaxForecastHour
+	}
+	return n
+}
+
+func (wc *WeatherCache) handleGFS(w http.ResponseWriter, r *http.Request) {
+	wc.handleProduct(w, r, "gfs")
+}
+
+func (wc *WeatherCache) handleWave(w http.ResponseWriter, r *http.Request) {
+	wc.handleProduct(w, r, "wave")
+}
+
+func (wc *WeatherCache) handleProduct(w http.ResponseWriter, r *http.Request, product string) {
+	fh := parseForecastHour(r)
+	path := wc.cachePath(product, fh)
+	info, statErr := os.Stat(path)
+	fresh := statErr == nil && time.Since(info.ModTime()) <= wc.refresh
+
+	switch {
+	case statErr == nil && fresh:
+		wc.hits.Add(1)
+		w.Header().Set("X-Cache", "HIT")
+	case statErr == nil && !fresh:
+		// Serve stale immediately, refresh in the background so the next
+		// caller gets fresh data without paying NOMADS' 30-60 s latency.
+		wc.hits.Add(1)
+		w.Header().Set("X-Cache", "STALE")
+		go func() {
+			if err := wc.refreshNow(context.Background(), product, fh); err != nil {
+				wc.logger.Warnf("weather: background refresh %s fh=%d: %v", product, fh, err)
+			}
+		}()
+	default:
+		// No cache yet — block on the first fetch.
+		if err := wc.refreshNow(r.Context(), product, fh); err != nil {
+			http.Error(w, "weather fetch: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("X-Cache", "MISS")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	http.ServeFile(w, r, path)
+}
+
+func (wc *WeatherCache) handleStats(w http.ResponseWriter, r *http.Request) {
+	// Walk the cache dir so we surface every forecast hour we have on
+	// disk rather than just f000.
+	entries, _ := os.ReadDir(wc.cacheDir)
+	files := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, map[string]any{
+			"name":  e.Name(),
+			"size":  info.Size(),
+			"mtime": info.ModTime(),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"cache_dir":   wc.cacheDir,
+		"files":       files,
+		"stale_after": wc.refresh.String(),
+		"hits":        wc.hits.Load(),
+		"refreshes":   wc.refreshes.Load(),
+		"errs":        wc.errs.Load(),
+	})
+}
+
+// refreshNow fetches the latest GRIB2 for `product` (either "gfs" wind
+// data or "wave" GFSWAVE data) at forecast hour `fh`, converts to the
+// ol-wind JSON shape, and atomically replaces the cache file. De-duped
+// via fetchMu — concurrent callers wait for the first one's result.
+func (wc *WeatherCache) refreshNow(ctx context.Context, product string, fh int) error {
+	wc.fetchMu.Lock()
+	defer wc.fetchMu.Unlock()
+	// Re-check freshness after acquiring the lock — another caller may
+	// have just refreshed this same forecast hour.
+	if info, err := os.Stat(wc.cachePath(product, fh)); err == nil && time.Since(info.ModTime()) <= wc.refresh {
+		return nil
+	}
+
+	grib, runTime, err := wc.fetchLatestGRIB(ctx, product, fh)
+	if err != nil {
+		wc.errs.Add(1)
+		return err
+	}
+	var records []windRecord
+	switch product {
+	case "gfs":
+		records, err = parseGFSWind10m(grib, runTime, fh)
+	case "wave":
+		records, err = parseGFSWaveSurface(grib, runTime, fh)
+	default:
+		return fmt.Errorf("unknown product %q", product)
+	}
+	if err != nil {
+		wc.errs.Add(1)
+		return fmt.Errorf("parse %s grib: %w", product, err)
+	}
+	tmp := wc.cachePath(product, fh) + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(records); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, wc.cachePath(product, fh)); err != nil {
+		return err
+	}
+	wc.refreshes.Add(1)
+	wc.logger.Infof("weather: refreshed %s run=%s fh=%d size=%d",
+		product, runTime.Format(time.RFC3339), fh, len(grib))
+	return nil
+}
+
+// fetchLatestGRIB walks back from "now" in 6 h GFS cycle steps until a
+// run that's actually published (the lag is ~3.5 h) returns 200 for the
+// requested forecast hour. Each attempt is gated on Context for
+// cancellation.
+func (wc *WeatherCache) fetchLatestGRIB(ctx context.Context, product string, fh int) ([]byte, time.Time, error) {
+	// Start from the most recent cycle that should be published by now.
+	now := time.Now().UTC().Add(-gfsPublishLagHours * time.Hour)
+	cycleHour := (now.Hour() / 6) * 6
+	candidate := time.Date(now.Year(), now.Month(), now.Day(), cycleHour, 0, 0, 0, time.UTC)
+
+	var lastErr error
+	for i := 0; i < 4; i++ {
+		url := buildProductURL(product, candidate, fh)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		resp, err := wc.client.Do(req)
+		if err != nil {
+			lastErr = err
+			candidate = candidate.Add(-6 * time.Hour)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			if len(body) < 32 || string(body[:4]) != "GRIB" {
+				lastErr = fmt.Errorf("response is not GRIB2 (size=%d, first=%q)", len(body), string(body[:min(16, len(body))]))
+				candidate = candidate.Add(-6 * time.Hour)
+				continue
+			}
+			return body, candidate, nil
+		}
+		resp.Body.Close()
+		lastErr = fmt.Errorf("upstream %d for run %s", resp.StatusCode, candidate.Format("2006-01-02T15Z"))
+		candidate = candidate.Add(-6 * time.Hour)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no GFS run available in last 24h")
+	}
+	return nil, time.Time{}, lastErr
+}
+
+func buildProductURL(product string, runTime time.Time, fh int) string {
+	date := runTime.Format("20060102")
+	cc := runTime.Hour()
+	switch product {
+	case "wave":
+		return fmt.Sprintf(nomadsWaveURLTemplate, cc, fh, date, cc)
+	default:
+		return fmt.Sprintf(nomadsGFSURLTemplate, cc, fh, date, cc)
+	}
+}
+
+// --- ol-wind JSON shape ---------------------------------------------------
+
+// windHeader matches the GRIB-as-JSON header that grib2json (and hence
+// ol-wind) consumes. Field names are camelCase per the schema.
+type windHeader struct {
+	Discipline        int     `json:"discipline"`
+	Center            int     `json:"center"`
+	RefTime           string  `json:"refTime"`
+	ForecastTime      int     `json:"forecastTime"`
+	ParameterCategory int     `json:"parameterCategory"`
+	ParameterNumber   int     `json:"parameterNumber"`
+	ParameterUnit     string  `json:"parameterUnit"`
+	Surface1Type      int     `json:"surface1Type"`
+	Surface1Value     float64 `json:"surface1Value"`
+	GridDefinitionTemplateName string `json:"gridDefinitionTemplateName"`
+	Nx                int     `json:"nx"`
+	Ny                int     `json:"ny"`
+	Lo1               float64 `json:"lo1"`
+	La1               float64 `json:"la1"`
+	Lo2               float64 `json:"lo2"`
+	La2               float64 `json:"la2"`
+	Dx                float64 `json:"dx"`
+	Dy                float64 `json:"dy"`
+	ScanMode          int     `json:"scanMode"`
+}
+
+type windRecord struct {
+	Header windHeader `json:"header"`
+	Data   []float64  `json:"data"`
+}
+
+// --- Minimal GRIB2 parser -------------------------------------------------
+//
+// Just enough to handle GFS 0.25° UGRD/VGRD at 10 m above ground:
+//   - Section 3 grid template 0 (lat/lon, regular_ll)
+//   - Section 5 data representation template 0 (simple packing)
+//   - No bitmap (section 6 indicator = 255)
+//
+// Any other template returns an error so we don't silently mis-decode.
+
+const (
+	gribParamCatMomentum    = 2
+	gribParamUGRD           = 2
+	gribParamVGRD           = 3
+	gribSurfaceHeightAboveG = 103 // "Specified height level above ground (m)"
+	// Oceanography discipline (10) → category 0 (waves) → params 3
+	// (HTSGW, sig wave height m) and 10 (DIRPW, primary wave dir deg).
+	gribDisciplineOceanography = 10
+	gribParamCatWaves          = 0
+	gribParamHTSGW             = 3
+	gribParamDIRPW             = 10
+)
+
+// parseGFSWind10m walks every message in the file, picks out the two
+// matching 10 m UGRD/VGRD records, and emits the ol-wind JSON shape.
+// `forecastHour` is stamped onto each record's header so the frontend
+// can show which forecast hour is currently displayed.
+func parseGFSWind10m(grib []byte, runTime time.Time, forecastHour int) ([]windRecord, error) {
+	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
+		return paramCat == gribParamCatMomentum &&
+			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
+			surfType == gribSurfaceHeightAboveG &&
+			surfValue == 10
+	}
+	var ugrd, vgrd *windRecord
+	for off := 0; off < len(grib); {
+		end, rec, err := parseGRIBMessage(grib[off:], runTime, forecastHour, wantWind)
+		if err != nil {
+			return nil, fmt.Errorf("message @ off=%d: %w", off, err)
+		}
+		if rec != nil {
+			switch {
+			case rec.Header.ParameterCategory == gribParamCatMomentum &&
+				rec.Header.ParameterNumber == gribParamUGRD &&
+				rec.Header.Surface1Type == gribSurfaceHeightAboveG &&
+				rec.Header.Surface1Value == 10:
+				ugrd = rec
+			case rec.Header.ParameterCategory == gribParamCatMomentum &&
+				rec.Header.ParameterNumber == gribParamVGRD &&
+				rec.Header.Surface1Type == gribSurfaceHeightAboveG &&
+				rec.Header.Surface1Value == 10:
+				vgrd = rec
+			}
+		}
+		off += end
+		if end <= 0 {
+			break // defensive against parser bug
+		}
+	}
+	if ugrd == nil || vgrd == nil {
+		return nil, fmt.Errorf("missing UGRD or VGRD@10m (ugrd=%v vgrd=%v)", ugrd != nil, vgrd != nil)
+	}
+	return []windRecord{*ugrd, *vgrd}, nil
+}
+
+// parseGFSWaveSurface walks every message in a GFSWAVE file, picks out
+// the HTSGW (significant wave height, m) and DIRPW (primary wave
+// direction, degrees from-which-waves-come) records at the surface, and
+// converts them into the same 2-record (u, v) JSON shape ol-wind
+// consumes. ol-wind keys data records by parameterCategory=2 + number
+// 2/3, so we re-stamp the wave records as "wind" (param 2/2 and 2/3)
+// even though they represent wave motion.
+//
+// Encoding choice: u = -h · sin(dir·π/180), v = -h · cos(dir·π/180).
+// That makes ol-wind's particle animation drift in the direction the
+// waves are propagating (180° opposite of DIRPW), with magnitude equal
+// to wave height in metres — so wave height drives the colour scale and
+// wave direction drives the particle flow.
+func parseGFSWaveSurface(grib []byte, runTime time.Time, forecastHour int) ([]windRecord, error) {
+	wantWave := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
+		return discipline == gribDisciplineOceanography &&
+			paramCat == gribParamCatWaves &&
+			(paramNum == gribParamHTSGW || paramNum == gribParamDIRPW)
+	}
+	var hRec, dRec *windRecord
+	for off := 0; off < len(grib); {
+		end, rec, err := parseGRIBMessage(grib[off:], runTime, forecastHour, wantWave)
+		if err != nil {
+			return nil, fmt.Errorf("wave message @ off=%d: %w", off, err)
+		}
+		if rec != nil {
+			switch rec.Header.ParameterNumber {
+			case gribParamHTSGW:
+				hRec = rec
+			case gribParamDIRPW:
+				dRec = rec
+			}
+		}
+		off += end
+		if end <= 0 {
+			break
+		}
+	}
+	if hRec == nil || dRec == nil {
+		return nil, fmt.Errorf("missing HTSGW or DIRPW (h=%v d=%v)", hRec != nil, dRec != nil)
+	}
+	if len(hRec.Data) != len(dRec.Data) {
+		return nil, fmt.Errorf("wave grid mismatch: h=%d d=%d", len(hRec.Data), len(dRec.Data))
+	}
+	uData := make([]float64, len(hRec.Data))
+	vData := make([]float64, len(hRec.Data))
+	for i := range hRec.Data {
+		h := hRec.Data[i]
+		// GFSWAVE uses ~9.999e20 to encode "no data" (deep grid, no
+		// waves over land). Zero it so ol-wind's colour scale doesn't
+		// get pulled into the trillions.
+		if math.IsNaN(h) || h > 1e6 || h < 0 {
+			h = 0
+		}
+		d := dRec.Data[i]
+		if math.IsNaN(d) || d < 0 || d > 360 {
+			uData[i] = 0
+			vData[i] = 0
+			continue
+		}
+		rad := d * math.Pi / 180
+		uData[i] = -h * math.Sin(rad)
+		vData[i] = -h * math.Cos(rad)
+	}
+	// Synthesise the two ol-wind records. Copy the height record's
+	// header (grid bounds etc.) and re-stamp param category/number to
+	// the wind convention so wind-core's formatData picks them up.
+	uHdr := hRec.Header
+	uHdr.ParameterCategory = gribParamCatMomentum
+	uHdr.ParameterNumber = gribParamUGRD
+	uHdr.ParameterUnit = "m" // wave height in metres
+	vHdr := uHdr
+	vHdr.ParameterNumber = gribParamVGRD
+	return []windRecord{
+		{Header: uHdr, Data: uData},
+		{Header: vHdr, Data: vData},
+	}, nil
+}
+
+// parseGRIBMessage parses one GRIB2 message starting at b[0] and returns
+// the total bytes consumed plus the decoded record (or nil if the
+// message isn't a parameter we care about). Returns an error only for
+// malformed input or unsupported templates.
+// gribMessageFilter is called with the parameter identification fields
+// extracted from a GRIB2 message so the caller can decide whether to
+// pay the data-unpacking cost. Returns true to keep, false to skip.
+type gribMessageFilter func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool
+
+func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMessageFilter) (int, *windRecord, error) {
+	if len(b) < 16 || string(b[:4]) != "GRIB" {
+		return 0, nil, fmt.Errorf("missing GRIB magic")
+	}
+	discipline := int(b[6])
+	edition := int(b[7])
+	if edition != 2 {
+		return 0, nil, fmt.Errorf("only GRIB2 supported, got edition %d", edition)
+	}
+	totalLen := int(binary.BigEndian.Uint64(b[8:16]))
+	if totalLen <= 0 || totalLen > len(b) {
+		return 0, nil, fmt.Errorf("bogus message length %d (have %d)", totalLen, len(b))
+	}
+	if string(b[totalLen-4:totalLen]) != "7777" {
+		return 0, nil, fmt.Errorf("missing 7777 terminator")
+	}
+
+	var (
+		center                    int
+		paramCat, paramNum        int
+		surfType                  int
+		surfValue                 float64
+		nx, ny                    int
+		lo1, la1, lo2, la2        float64
+		dx, dy                    float64
+		scanMode                  int
+		refValue                  float32
+		binaryScale, decimalScale int
+		bitsPerValue              int
+		dataValuesCount           int
+		packedData                []byte
+		dataTemplate              int
+		gridTemplate              int
+		haveBitmap                bool
+		// Template 5.3 (complex packing + spatial differencing) extras.
+		// These are zero/unused for template 5.0.
+		numGroups               int
+		groupWidthRef           int
+		groupWidthBits          int
+		groupLengthRef          int
+		groupLengthIncrement    int
+		groupLengthLast         int
+		groupLengthBits         int
+		spatialDiffOrder        int
+		spatialDiffExtraOctets  int
+	)
+
+	off := 16
+	for off < totalLen-4 {
+		secLen := int(binary.BigEndian.Uint32(b[off : off+4]))
+		secNum := int(b[off+4])
+		s := b[off : off+secLen]
+		switch secNum {
+		case 1: // Identification
+			center = int(binary.BigEndian.Uint16(s[5:7]))
+			// Reference time begins at byte 12 (year), 14 (month) etc — we
+			// already pass runTime from the caller, so skip parsing it.
+		case 3: // Grid Definition
+			gridTemplate = int(binary.BigEndian.Uint16(s[12:14]))
+			dataValuesCount = int(binary.BigEndian.Uint32(s[6:10]))
+			if gridTemplate != 0 {
+				return 0, nil, fmt.Errorf("grid template %d not supported (need 0/regular_ll)", gridTemplate)
+			}
+			// Template 3.0 layout for the fields we need (1-indexed in
+			// WMO Manual; offsets below are 0-indexed into the section
+			// body, so byte 31 in the manual is s[30]):
+			//   31-34: Ni (Nx)
+			//   35-38: Nj (Ny)
+			//   47-50: La1 (×1e6)
+			//   51-54: Lo1 (×1e6)
+			//   56-59: La2 (×1e6)
+			//   60-63: Lo2 (×1e6)
+			//   64-67: Di (Dx, ×1e6)
+			//   68-71: Dj (Dy, ×1e6)
+			//   72:    scan mode
+			nx = int(binary.BigEndian.Uint32(s[30:34]))
+			ny = int(binary.BigEndian.Uint32(s[34:38]))
+			la1 = signedUint32(binary.BigEndian.Uint32(s[46:50])) / 1e6
+			lo1 = signedUint32(binary.BigEndian.Uint32(s[50:54])) / 1e6
+			la2 = signedUint32(binary.BigEndian.Uint32(s[55:59])) / 1e6
+			lo2 = signedUint32(binary.BigEndian.Uint32(s[59:63])) / 1e6
+			dx = signedUint32(binary.BigEndian.Uint32(s[63:67])) / 1e6
+			dy = signedUint32(binary.BigEndian.Uint32(s[67:71])) / 1e6
+			scanMode = int(s[71])
+		case 4: // Product Definition
+			// Template 4.0 fields (offsets into section body):
+			//   9:  parameter category
+			//   10: parameter number
+			//   23: surface 1 type
+			//   24: surface 1 scale factor
+			//   25-28: surface 1 scaled value
+			paramCat = int(s[9])
+			paramNum = int(s[10])
+			surfType = int(s[22])
+			surfScale := int(int8(s[23]))
+			surfScaled := int(binary.BigEndian.Uint32(s[24:28]))
+			surfValue = float64(surfScaled) * math.Pow10(-surfScale)
+		case 5: // Data Representation
+			dataTemplate = int(binary.BigEndian.Uint16(s[9:11]))
+			// All packing templates share octets 12-21 — pull them once.
+			refValue = math.Float32frombits(binary.BigEndian.Uint32(s[11:15]))
+			binaryScale = int(int16(binary.BigEndian.Uint16(s[15:17])))
+			decimalScale = int(int16(binary.BigEndian.Uint16(s[17:19])))
+			bitsPerValue = int(s[19])
+			switch dataTemplate {
+			case 0:
+				// Simple packing — no extra fields.
+			case 2, 3:
+				// Complex packing (template 2) and complex packing +
+				// spatial differencing (template 3). NOMADS uses 3 for
+				// modern GFS. Field layout — left column is the WMO
+				// 1-indexed octet number, right column is the equivalent
+				// 0-indexed offset into the section body `s`:
+				//   octet 22    →  s[21]   group splitting method
+				//   octet 23    →  s[22]   missing value management
+				//   octets 24-27→  s[23:27] primary missing val substitute
+				//   octets 28-31→  s[27:31] secondary missing val substitute
+				//   octets 32-35→  s[31:35] number of groups (NG)
+				//   octet 36    →  s[35]   reference for group widths
+				//   octet 37    →  s[36]   bits used for group widths
+				//   octets 38-41→  s[37:41] reference for group lengths
+				//   octet 42    →  s[41]   length increment for group lengths
+				//   octets 43-46→  s[42:46] true length of last group
+				//   octet 47    →  s[46]   bits for scaled group lengths
+				// Template 3 adds:
+				//   octet 48    →  s[47]   order of spatial differencing
+				//   octet 49    →  s[48]   octets for spatial-diff descriptors
+				numGroups = int(binary.BigEndian.Uint32(s[31:35]))
+				groupWidthRef = int(s[35])
+				groupWidthBits = int(s[36])
+				groupLengthRef = int(binary.BigEndian.Uint32(s[37:41]))
+				groupLengthIncrement = int(s[41])
+				groupLengthLast = int(binary.BigEndian.Uint32(s[42:46]))
+				groupLengthBits = int(s[46])
+				if dataTemplate == 3 {
+					spatialDiffOrder = int(s[47])
+					spatialDiffExtraOctets = int(s[48])
+				}
+			default:
+				return totalLen, nil, nil // unsupported template (e.g. JPEG2000)
+			}
+		case 6: // Bit Map
+			haveBitmap = s[5] != 0xFF
+			if haveBitmap {
+				return totalLen, nil, nil // unsupported for now
+			}
+		case 7: // Data
+			packedData = s[5:]
+		}
+		off += secLen
+		if secLen <= 0 {
+			return 0, nil, fmt.Errorf("zero-length section at %d", off)
+		}
+	}
+
+	// If the caller doesn't want this parameter, skip the (potentially
+	// expensive) value unpacking.
+	if want != nil && !want(discipline, paramCat, paramNum, surfType, surfValue) {
+		return totalLen, nil, nil
+	}
+
+	if dataValuesCount == 0 {
+		dataValuesCount = nx * ny
+	}
+	var values []float64
+	var err error
+	switch dataTemplate {
+	case 0:
+		values, err = unpackSimple(packedData, refValue, binaryScale, decimalScale, bitsPerValue, dataValuesCount)
+	case 2, 3:
+		values, err = unpackComplex(packedData, refValue, binaryScale, decimalScale, bitsPerValue,
+			numGroups, groupWidthRef, groupWidthBits,
+			groupLengthRef, groupLengthIncrement, groupLengthLast, groupLengthBits,
+			spatialDiffOrder, spatialDiffExtraOctets, dataValuesCount)
+	default:
+		return totalLen, nil, nil
+	}
+	if err != nil {
+		return 0, nil, fmt.Errorf("unpack template %d: %w", dataTemplate, err)
+	}
+
+	rec := &windRecord{
+		Header: windHeader{
+			Discipline:        discipline,
+			Center:            center,
+			RefTime:           runTime.Format("2006-01-02T15:04:05.000Z"),
+			ForecastTime:      forecastHour,
+			ParameterCategory: paramCat,
+			ParameterNumber:   paramNum,
+			ParameterUnit:     "m s**-1",
+			Surface1Type:      surfType,
+			Surface1Value:     surfValue,
+			GridDefinitionTemplateName: "regular_ll",
+			Nx:                nx,
+			Ny:                ny,
+			Lo1:               lo1,
+			La1:               la1,
+			Lo2:               lo2,
+			La2:               la2,
+			Dx:                dx,
+			Dy:                dy,
+			ScanMode:          scanMode,
+		},
+		Data: values,
+	}
+	return totalLen, rec, nil
+}
+
+// signedUint32 decodes GRIB2's "sign + magnitude" 32-bit value: high bit
+// is sign, low 31 bits are magnitude.
+func signedUint32(u uint32) float64 {
+	if u&0x80000000 != 0 {
+		return -float64(u & 0x7FFFFFFF)
+	}
+	return float64(u)
+}
+
+// unpackComplex implements GRIB2 data representation template 5.2 / 5.3
+// (complex packing, with optional first/second-order spatial differencing).
+// This is what NOMADS publishes GFS in. The corresponding data section
+// (template 7.2 / 7.3) layout:
+//
+//	1. For template 3 only: spatial-diff descriptors — `spatialOrder`
+//	   first values plus an overall minimum, each `extraOctets * 8` bits
+//	   wide, stored as sign+magnitude.
+//	2. NG group reference values, each `bitsPerValue` bits, byte-aligned
+//	   after the previous block.
+//	3. NG group widths, each `groupWidthBits` bits.
+//	4. NG group lengths, each `groupLengthBits` bits — actual length is
+//	   `groupLengthRef + length * groupLengthIncrement` (last group is
+//	   pinned to `groupLengthLast`).
+//	5. The packed values themselves — for each group i with width Wi and
+//	   length Li, Li values each (`bitsPerValue + Wi`) bits.
+//
+// Reconstruction:
+//
+//	raw[k] = groupRef[group_of_k] + groupVal[k]            // packed → raw
+//	if spatial-diff: undo the diff using the first values + min          // template 3 only
+//	value = (R + raw * 2^E) * 10^-D                                       // scale
+func unpackComplex(
+	packed []byte,
+	ref float32,
+	binaryScale, decimalScale, bitsPerValue,
+	numGroups, gwRef, gwBits int,
+	glRef, glIncr, glLast, glBits,
+	spatialOrder, extraOctets, nValues int,
+) ([]float64, error) {
+	br := newBitReader(packed)
+
+	// Spatial-diff descriptors (only present for template 3).
+	firstVals := make([]int, spatialOrder)
+	var overallMin int
+	if spatialOrder > 0 && extraOctets > 0 {
+		bits := extraOctets * 8
+		for i := 0; i < spatialOrder; i++ {
+			firstVals[i] = signedFromBits(br.read(bits), bits)
+		}
+		overallMin = signedFromBits(br.read(bits), bits)
+		br.align()
+	}
+
+	groupRef := make([]int, numGroups)
+	for i := 0; i < numGroups; i++ {
+		groupRef[i] = int(br.read(bitsPerValue))
+	}
+	br.align()
+	groupWidth := make([]int, numGroups)
+	for i := 0; i < numGroups; i++ {
+		groupWidth[i] = int(br.read(gwBits)) + gwRef
+	}
+	br.align()
+	groupLength := make([]int, numGroups)
+	for i := 0; i < numGroups; i++ {
+		groupLength[i] = glRef + int(br.read(glBits))*glIncr
+	}
+	if numGroups > 0 {
+		groupLength[numGroups-1] = glLast
+	}
+	br.align()
+
+	raw := make([]int, 0, nValues)
+	for i := 0; i < numGroups; i++ {
+		w := groupWidth[i]
+		l := groupLength[i]
+		r := groupRef[i]
+		for j := 0; j < l; j++ {
+			var v int
+			if w == 0 {
+				v = r
+			} else {
+				v = r + int(br.read(w))
+			}
+			raw = append(raw, v)
+		}
+	}
+	if len(raw) > nValues {
+		raw = raw[:nValues]
+	}
+	if br.err != nil {
+		return nil, br.err
+	}
+
+	// Undo spatial differencing.
+	if spatialOrder > 0 {
+		// raw[0..spatialOrder-1] are the literal first values from the
+		// descriptor block (already in the raw[] array as group-0
+		// entries; we overwrite them).
+		for i := 0; i < spatialOrder && i < len(raw); i++ {
+			raw[i] = firstVals[i]
+		}
+		// Each subsequent value gets `overallMin` added back, then the
+		// difference operator inverted.
+		switch spatialOrder {
+		case 1:
+			for i := spatialOrder; i < len(raw); i++ {
+				raw[i] = raw[i] + overallMin + raw[i-1]
+			}
+		case 2:
+			for i := spatialOrder; i < len(raw); i++ {
+				raw[i] = raw[i] + overallMin + 2*raw[i-1] - raw[i-2]
+			}
+		default:
+			return nil, fmt.Errorf("spatial differencing order %d not supported", spatialOrder)
+		}
+	}
+
+	scaleBin := math.Pow(2, float64(binaryScale))
+	scaleDec := math.Pow10(-decimalScale)
+	out := make([]float64, len(raw))
+	for i, x := range raw {
+		out[i] = (float64(ref) + float64(x)*scaleBin) * scaleDec
+	}
+	return out, nil
+}
+
+// bitReader pulls big-endian bit fields out of a byte stream. NOAA GRIB2
+// data sections are tightly packed bit streams that we walk in order,
+// with byte-alignment between distinct blocks (see template 7.2 / 7.3).
+type bitReader struct {
+	b      []byte
+	bp     int
+	buf    uint64
+	bufLen uint
+	err    error
+}
+
+func newBitReader(b []byte) *bitReader { return &bitReader{b: b} }
+
+func (r *bitReader) read(nBits int) uint64 {
+	if r.err != nil || nBits == 0 {
+		return 0
+	}
+	if nBits < 0 || nBits > 64 {
+		r.err = fmt.Errorf("bitReader: bad nBits %d", nBits)
+		return 0
+	}
+	for r.bufLen < uint(nBits) {
+		if r.bp >= len(r.b) {
+			r.err = fmt.Errorf("bitReader: ran out of bytes at bp=%d", r.bp)
+			return 0
+		}
+		r.buf = (r.buf << 8) | uint64(r.b[r.bp])
+		r.bp++
+		r.bufLen += 8
+	}
+	shift := r.bufLen - uint(nBits)
+	mask := uint64(1)<<uint(nBits) - 1
+	v := (r.buf >> shift) & mask
+	r.bufLen -= uint(nBits)
+	r.buf &= (uint64(1) << r.bufLen) - 1
+	return v
+}
+
+func (r *bitReader) align() {
+	// Drop any leftover bits so the next field starts byte-aligned.
+	r.buf = 0
+	r.bufLen = 0
+}
+
+// signedFromBits decodes a sign+magnitude bit field of arbitrary width.
+// Used for the spatial-differencing descriptors in template 7.3.
+func signedFromBits(u uint64, bits int) int {
+	if bits <= 0 {
+		return 0
+	}
+	signBit := uint64(1) << uint(bits-1)
+	if u&signBit != 0 {
+		return -int(u &^ signBit)
+	}
+	return int(u)
+}
+
+// unpackSimple implements GRIB2 data representation template 5.0
+// (simple packing): value = R + (X * 2^E) * 10^-D, where X is the
+// packed integer and bitsPerValue tells you how many bits per X. NOAA
+// publishes GFS UGRD/VGRD with bitsPerValue=12; smaller bit widths still
+// pack into byte-aligned streams.
+func unpackSimple(packed []byte, ref float32, binaryScale, decimalScale, bitsPerValue, n int) ([]float64, error) {
+	out := make([]float64, n)
+	if bitsPerValue == 0 {
+		// Constant field — every value equals the reference.
+		v := float64(ref)
+		for i := range out {
+			out[i] = v
+		}
+		return out, nil
+	}
+	scaleBin := math.Pow(2, float64(binaryScale))
+	scaleDec := math.Pow10(-decimalScale)
+	mask := uint64(1)<<uint(bitsPerValue) - 1
+
+	var bitBuf uint64
+	var bitsInBuf uint
+	bp := 0
+	for i := 0; i < n; i++ {
+		for bitsInBuf < uint(bitsPerValue) {
+			if bp >= len(packed) {
+				return nil, fmt.Errorf("simple unpack: ran out of bytes (i=%d/%d)", i, n)
+			}
+			bitBuf = (bitBuf << 8) | uint64(packed[bp])
+			bp++
+			bitsInBuf += 8
+		}
+		shift := bitsInBuf - uint(bitsPerValue)
+		x := (bitBuf >> shift) & mask
+		bitsInBuf -= uint(bitsPerValue)
+		bitBuf &= (1 << bitsInBuf) - 1
+		out[i] = (float64(ref) + float64(x)*scaleBin) * scaleDec
+	}
+	return out, nil
+}

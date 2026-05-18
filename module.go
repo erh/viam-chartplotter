@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -68,6 +69,51 @@ func resolveCacheRoot(configured string) string {
 	return filepath.Join(base, "viam-chartplotter")
 }
 
+// withCookiePathRoot wraps an http.Handler so any Set-Cookie headers
+// it writes that don't already specify a Path get `Path=/` appended.
+// Required because vmodutils's cookie middleware doesn't set Path
+// and Go's default-Path-from-request-URL behaviour fans out the same
+// cookie into a copy per tile path.
+func withCookiePathRoot(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&cookiePathRootWriter{ResponseWriter: w}, r)
+	})
+}
+
+type cookiePathRootWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *cookiePathRootWriter) fixCookies() {
+	cookies := w.Header().Values("Set-Cookie")
+	if len(cookies) == 0 {
+		return
+	}
+	w.Header().Del("Set-Cookie")
+	for _, c := range cookies {
+		if !strings.Contains(strings.ToLower(c), "path=") {
+			c = c + "; Path=/"
+		}
+		w.Header().Add("Set-Cookie", c)
+	}
+}
+
+func (w *cookiePathRootWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.fixCookies()
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *cookiePathRootWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
 // StartChartplotterServer wires the static frontend, the NOAA WMS caching proxy, and
 // the ENC catalog/store handlers, and starts an HTTP server on the given port.
 // draftFt is the boat's draft in feet — drives the depth-shading bands at
@@ -87,6 +133,15 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
+	// vmodutils.PrepInModuleServer installs a cookie middleware that
+	// calls http.SetCookie(w, &http.Cookie{Name, Value}) without
+	// setting Path — Go then fills in the request URL's directory as
+	// the default Path. That means every tile URL gets its own copy of
+	// `api-key` / `api-key-id` / `host` cookies, fanning out into
+	// hundreds of duplicates per session. Wrap the server handler so
+	// any outgoing Set-Cookie gets a global Path=/ if it doesn't
+	// already specify one.
+	server.Handler = withCookiePathRoot(server.Handler)
 
 	root := resolveCacheRoot(cacheRoot)
 
@@ -127,6 +182,18 @@ func StartChartplotterServer(
 	}
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)
+
+	// NOAA GFS weather cache. Serves /noaa-weather/gfs/latest.json which
+	// the frontend wind layer (ol-wind) consumes. Disk cache lives under
+	// <root>/noaa-weather/.
+	weatherDir := filepath.Join(root, "noaa-weather")
+	weatherCache, err := NewWeatherCache(weatherDir, logger.Sublogger("weather"))
+	if err != nil {
+		logger.Warnf("weather cache disabled: %v", err)
+	} else {
+		weatherCache.Register(mux)
+		logger.Infof("noaa weather cache: %s", weatherDir)
+	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it
 	// changes, so the browser picks up a new build/restart without manual refresh.

@@ -13,6 +13,18 @@
   import Collection from "ol/Collection.js";
   import { useGeographic } from "ol/proj.js";
   import { boundingExtent } from "ol/extent.js";
+  import {
+    setupWeatherLayer,
+    WIND_COLOR_SCALE,
+    type WeatherLayerHandle,
+  } from "./lib/windLayer";
+  import {
+    setupWaveLayer,
+    WAVE_RANGE_MAX_M,
+    METERS_TO_FEET,
+    WAVE_LEGEND_URL,
+    type WaveLayerHandle,
+  } from "./lib/waveLayer";
   import "ol/ol.css";
   import ScaleLine from "ol/control/ScaleLine.js";
   import { defaults as defaultControls } from "ol/control/defaults.js";
@@ -36,6 +48,11 @@
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
 
+  // ol-wind (sakitam-fdd/wind-layer's OpenLayers build) — optional
+  // weather overlay. Dynamic-imported so the chartplotter still loads
+  // cleanly if the package isn't installed (`npm i ol-wind`) or wind
+  // data isn't reachable.
+
   interface LayerOption {
     name: string;
     displayName?: string; // Optional display name for UI (defaults to name)
@@ -43,7 +60,7 @@
     // Optional: virtual entries (e.g. ais-projection) appear in the
     // layers panel as toggles but don't correspond to a real OL layer —
     // their style is rendered inline by another layer's style function.
-    layer?: TileLayer<any> | Vector<any>;
+    layer?: TileLayer<any> | Vector<any> | BaseLayer;
     parent?: string; // Parent layer name for hierarchical layers
     // Optional zoom gate: when the current view zoom is below this
     // value the layer is hidden (setVisible(false)) regardless of the
@@ -51,6 +68,60 @@
     // at overview scales — navaids, structures, etc. Leave undefined
     // for layers that should always be visible when toggled on.
     minZoom?: number;
+  }
+
+  // Weather overlay state. Populated once GFS / GFSWAVE data + ol-wind
+  // import resolve. Drives the shared forecast-hour slider beneath the
+  // chart and the cursor wind/wave readout.
+  let windHandle: WeatherLayerHandle | null = $state(null);
+  let waveHandle: WaveLayerHandle | null = $state(null);
+  // Last cursor-position wave height pulled from GetFeatureInfo, in
+  // metres (waveLayer.ts owns the unit conversion to feet at display
+  // time). Debounced so we don't hammer the WMS server on every
+  // pointermove.
+  let cursorWaveM = $state<number | null>(null);
+  let waveSampleTimer: ReturnType<typeof setTimeout> | null = null;
+  // GFS forecast hour the slider is currently displaying. Snapped to a
+  // 3 h step so changes line up with both wind + wave file cadences.
+  let weatherForecastHour = $state(0);
+  let weatherRunTime = $state<string | null>(null);
+  let weatherLoading = $state(false);
+  // First forecast hour ≥ "now", computed from the GFS run time. Used
+  // as the slider minimum so the user can't scrub back into already-
+  // expired analysis hours.
+  let weatherMinForecastHour = $state(0);
+
+  // Convert a "GFS run time + forecast hour" pair into a Date in local
+  // time, so we can show "Tue 14:00" instead of "+12h" on the slider.
+  function weatherDataDate(runTimeIso: string | null, fh: number): Date | null {
+    if (!runTimeIso) return null;
+    const d = new Date(runTimeIso);
+    if (Number.isNaN(d.getTime())) return null;
+    return new Date(d.getTime() + fh * 3600_000);
+  }
+
+  // Issue a debounced WMS GetFeatureInfo request for the wave-height
+  // value at the cursor's lon/lat. The actual GetFeatureInfo + XML
+  // parse lives in `waveLayer.ts`; this just throttles the pointermove
+  // rate so we don't hammer the upstream WMS.
+  function scheduleWaveSample(lonLat: [number, number], view: View): void {
+    if (waveSampleTimer) clearTimeout(waveSampleTimer);
+    waveSampleTimer = setTimeout(async () => {
+      if (!waveHandle) return;
+      cursorWaveM = await waveHandle.sampleAt(lonLat, view);
+    }, 200);
+  }
+
+  // Compute the smallest 3-h-aligned forecast hour that lands at or
+  // after "now" — used as the slider floor so the user always starts
+  // from "current" rather than from the GFS analysis (which may be
+  // several hours in the past).
+  function nowForecastHour(runTimeIso: string | null): number {
+    if (!runTimeIso) return 0;
+    const run = new Date(runTimeIso);
+    if (Number.isNaN(run.getTime())) return 0;
+    const hoursFromRun = (Date.now() - run.getTime()) / 3600_000;
+    return Math.max(0, Math.ceil(hoursFromRun / 3) * 3);
   }
 
   let boatImage = "topdown-boat.svg";
@@ -191,9 +262,11 @@
   const COOKIE_VIEW_CENTER = "mapViewCenter";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
-  // Default zoom used when no cookie value is present (matches the previous
-  // hard-coded `new View({ zoom: 15 })`).
-  const DEFAULT_VIEW_ZOOM = 15;
+  // Default view when no cookie is present: centred between NYC and
+  // Hudson Canyon (~40°N, 73°W in user coords because we use
+  // useGeographic()) at a zoom that keeps both on screen.
+  const DEFAULT_VIEW_ZOOM = 7;
+  const DEFAULT_VIEW_CENTER: [number, number] = [-73.0, 40.0];
 
   function loadViewZoom(): number {
     var raw = getCookie(COOKIE_VIEW_ZOOM);
@@ -830,6 +903,10 @@
     lng: number;
     nm: number | null;
     brg: number | null;
+    windKt: number | null;
+    windFromDeg: number | null;
+    waveM: number | null;
+    waveFromDeg: number | null;
   } | null>(null);
 
   let mapInternalState: {
@@ -886,7 +963,15 @@
       var pp = [myBoat.location[1], myBoat.location[0]];
       mapGlobal.myBoatMarker.setGeometry(new Point(pp));
 
-      if (!inPanMode && sz) {
+      // Auto-centre on the boat only when it has a usable fix.
+      // Otherwise the boat reports [0, 0] (null island) and yanks the
+      // view away from the default Hudson-Canyon framing on fresh
+      // loads with no GPS yet.
+      const boatHasFix = isValidCoordinate(
+        myBoat.location[0],
+        myBoat.location[1],
+      );
+      if (!inPanMode && sz && boatHasFix) {
         var boatPx: [number, number] =
           boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
         mapGlobal.view.centerOn(pp, sz, boatPx);
@@ -2517,6 +2602,7 @@
     }
   }
 
+
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
     // order regardless of toggle/insert sequence. Without this, toggling a
@@ -2795,6 +2881,86 @@
           }),
         }),
       });
+
+      // Weather overlays (wind + waves), both backed by NOMADS GFS /
+      // GFSWAVE data via the bundled cache and rendered by ol-wind. The
+      // "weather" parent is a folder toggle so the wind / waves
+      // children can be enabled independently. All three default off.
+      // "weather" is a folder-style parent (no actual layer of its own)
+      // grouping the wind + waves children in the layer panel. Default
+      // ON so the children are immediately togglable — turning weather
+      // off disables both children at once, the standard parent/child
+      // behaviour the panel already implements.
+      mapGlobal.layerOptions.push({
+        name: "weather",
+        displayName: "weather",
+        on: true,
+      });
+      // Pre-allocate the wind entry so its panel row sits directly
+      // under the weather header — setupWeatherLayer is async and would
+      // otherwise push it last (after boat / ais). The actual OL layer
+      // reference gets filled in once the GFS fetch returns.
+      mapGlobal.layerOptions.push({
+        name: "wind",
+        displayName: "wind",
+        parent: "weather",
+        on: false,
+      });
+      const ensureRendered = () => {
+        if (mapGlobal.map) {
+          mapGlobal.map.render();
+          return;
+        }
+        window.setTimeout(ensureRendered, 200);
+      };
+      const initialFh = nowForecastHour(null); // 0 until we know the run time
+      setupWeatherLayer(mapGlobal, {
+        layerName: "wind",
+        displayName: "wind",
+        parent: "weather",
+        dataUrl: "/noaa-weather/gfs/latest.json",
+        colorScale: WIND_COLOR_SCALE,
+        minVelocity: 0,
+        maxVelocity: 15,
+        // Particle motion is in degrees under useGeographic — tune so
+        // a 10 m/s wind moves ~2 px / frame at the current zoom.
+        velocityScale: () => {
+          const z = mapGlobal.view?.getZoom() ?? 6;
+          return 0.3 / Math.pow(2, z);
+        },
+        initialForecastHour: initialFh,
+      })
+        .then((wind) => {
+          windHandle = wind;
+          const refTime = wind?.getRunTime() ?? null;
+          weatherRunTime = refTime;
+          const floor = nowForecastHour(refTime);
+          weatherMinForecastHour = floor;
+          weatherForecastHour = floor;
+          // Re-fetch at the "now-aligned" hour if the initial f000
+          // fetch happened before we knew the run time.
+          if (floor > 0 && wind) wind.setForecastHour(floor).catch(() => {});
+          // Seed the wave WMS TIME to match the slider's initial value
+          // so the wave layer and cursor sampling agree with the wind
+          // forecast hour from the very first tile request.
+          const target = weatherDataDate(refTime, floor);
+          if (waveHandle && target) waveHandle.setTime(target);
+          ensureRendered();
+        })
+        .catch((err) => {
+          console.warn("wind layer disabled:", err);
+        });
+      // Significant wave height as a semi-transparent raster overlay.
+      // Source: PacIOOS NOAA WaveWatch III "best" THREDDS WMS. Public,
+      // CORS-open, no key needed; renders coloured boxfill tiles for
+      // `Thgt` (sea_surface_wave_significant_height) at the requested
+      // bbox + zoom. Frontend asks WMS for tiles directly — no server
+      // proxy needed for this layer (vs. wind which needs the GRIB2
+      // parser for cursor sampling).
+      // Wave overlay (PacIOOS NOAA WaveWatch III). Self-contained in
+      // src/lib/waveLayer.ts — owns the TileWMS source, the
+      // GetFeatureInfo cursor sampler, and the colour-scale constants.
+      waveHandle = setupWaveLayer(mapGlobal);
     }
 
     // Track layer for myBoat (child of boat layer)
@@ -3239,10 +3405,16 @@
 
     const savedCenter = loadViewCenter();
     mapGlobal.view = new View({
-      center: savedCenter ?? [0, 0],
+      center: savedCenter ?? DEFAULT_VIEW_CENTER,
       zoom: loadViewZoom(),
       maxZoom: 19,
     });
+    // Without an explicit "follow my boat" cookie we want the default
+    // Hudson-Canyon view (or whatever savedCenter is) to stick — first
+    // GPS fix would otherwise auto-pan the view to the boat location.
+    // Same flag the existing "restoring saved center" branch sets just
+    // below, applied unconditionally on cold load.
+    inPanMode = true;
     // Restoring a manual pan position implies the user was browsing away from
     // the boat — keep that mode on reload so the boat tracker doesn't yank
     // the view back the moment a fix arrives.
@@ -3751,7 +3923,35 @@
           nm = meters / 1852;
           brg = bearingDeg(boatLatLng, cursorLatLng);
         }
-        cursorInfo = { lat: cursorLatLng[0], lng: cursorLatLng[1], nm, brg };
+        let windKt: number | null = null;
+        let windFromDeg: number | null = null;
+        let waveM: number | null = null;
+        let waveFromDeg: number | null = null;
+        const layerOn = (n: string) =>
+          !!mapGlobal.layerOptions.find((l) => l.name === n)?.on;
+        if (layerOn("wind") && windHandle) {
+          const s = windHandle.sampleAt(cursorLngLat[0], cursorLngLat[1]);
+          if (s) {
+            windKt = s.magnitude * 1.94384;
+            windFromDeg = s.fromDeg;
+          }
+        }
+        if (layerOn("waves") && cursorWaveM !== null) {
+          waveM = cursorWaveM;
+        }
+        if (layerOn("waves") && waveHandle && mapGlobal.view) {
+          scheduleWaveSample(cursorLngLat, mapGlobal.view);
+        }
+        cursorInfo = {
+          lat: cursorLatLng[0],
+          lng: cursorLatLng[1],
+          nm,
+          brg,
+          windKt,
+          windFromDeg,
+          waveM,
+          waveFromDeg,
+        };
       } else {
         cursorInfo = null;
       }
@@ -4492,6 +4692,100 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
+  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
+    <!-- Wave-height legend. Colour strip comes from PacIOOS's
+         GetLegendGraphic (COLORBARONLY=true → just the gradient,
+         no axis labels) so the colours match the rendered tiles
+         exactly; the feet labels alongside it are ours since
+         PacIOOS only knows the data's native metres. -->
+    <div class="wave-legend">
+      <img
+        class="wave-legend-strip"
+        src={WAVE_LEGEND_URL}
+        alt="wave height"
+      />
+      <div class="wave-legend-ticks">
+        {#each [WAVE_RANGE_MAX_M, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.25, 0] as m}
+          <span>{Math.round(m * METERS_TO_FEET)} ft</span>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on)}
+    {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
+    <div class="wind-forecast-bar">
+      <label class="wind-forecast-bar-label">
+        {#if previewDate}
+          {previewDate.toLocaleString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        {:else}
+          +{weatherForecastHour}h
+        {/if}
+        {#if weatherLoading}…{/if}
+      </label>
+      <input
+        type="range"
+        min={weatherMinForecastHour}
+        max="240"
+        step="3"
+        value={weatherForecastHour}
+        disabled={weatherLoading}
+        oninput={(e) => {
+          const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+          weatherForecastHour = v;
+        }}
+        onchange={async (e) => {
+          const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+          weatherLoading = true;
+          // Hide both data layers while we refetch so the user doesn't
+          // see the previous forecast hour's pixels under the new
+          // forecast-hour label — purely visual, the OL layers stay
+          // registered so the toggles stay where the user left them.
+          const windLayer = mapGlobal.layerOptions.find(
+            (l) => l.name === "wind",
+          )?.layer as any;
+          const waveLayer = mapGlobal.layerOptions.find(
+            (l) => l.name === "waves",
+          )?.layer as any;
+          windLayer?.setVisible?.(false);
+          waveLayer?.setVisible?.(false);
+          try {
+            const tasks: Promise<void>[] = [];
+            if (windHandle) tasks.push(windHandle.setForecastHour(v));
+            await Promise.all(tasks);
+            if (windHandle) {
+              weatherForecastHour = windHandle.getForecastHour();
+              weatherRunTime = windHandle.getRunTime();
+            } else {
+              weatherForecastHour = v;
+            }
+            // Wave WMS picks the nearest time from its own dataset.
+            // Compute target = GFS run + fh and push as TIME param so
+            // moving the slider actually re-tiles the wave layer too.
+            const target = weatherDataDate(weatherRunTime, weatherForecastHour);
+            if (waveHandle && target) waveHandle.setTime(target);
+            mapGlobal.map?.render();
+          } finally {
+            weatherLoading = false;
+            windLayer?.setVisible?.(true);
+            waveLayer?.setVisible?.(true);
+          }
+        }}
+      />
+      <span class="wind-forecast-bar-runtime">
+        {#if weatherRunTime}
+          GFS run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
+        {/if}
+      </span>
+    </div>
+  {/if}
+
   <!-- Tiny "Powered By Viam" overlay anchored above the OL ScaleLine so it
        doesn't fight for the same bottom-left corner. Pointer-events off so
        it can't swallow map clicks. -->
@@ -4694,6 +4988,11 @@
       {@const isParentOff = parentLayer && !parentLayer.on}
       {@const isHidden = l.name === "airstream" && !airstreamConfigured}
       {#if !isHidden && !isBaseLayerGroup(l)}
+      {#if l.name === "weather"}
+        <!-- Folder-style section header: no checkbox, just labels the
+             wind/waves rows that follow as a group. -->
+        <div class="layer-section-header">{l.displayName || l.name}</div>
+      {:else}
       <label class:child-layer={l.parent} class:disabled={isParentOff}>
         <input
           type="checkbox"
@@ -4743,6 +5042,7 @@
           </select>
         {/if}
       </label>
+      {/if}
       {/if}
     {/each}
 
@@ -5278,6 +5578,17 @@
               <span class="data-panel-value">
                 <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
                 @ {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+            {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
+              <span class="data-panel-value">
+                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup>
+                from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+            {#if cursorInfo.waveM !== null}
+              <span class="data-panel-value">
+                wave <span class="data-panel-bold">{(cursorInfo.waveM * 3.28084).toFixed(1)}</span><sup>ft</sup>
               </span>
             {/if}
           </div>
@@ -5818,6 +6129,85 @@
 
   .layer-controls > label:hover {
     color: #0066cc;
+  }
+
+  .wave-legend {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    transform: translateY(-50%);
+    z-index: 10;
+    pointer-events: none;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    display: flex;
+    gap: 6px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+    font-size: 10px;
+    color: #444;
+  }
+  .wave-legend-strip {
+    display: block;
+    width: 14px;
+    height: 140px;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    image-rendering: pixelated;
+  }
+  .wave-legend-ticks {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 140px;
+    line-height: 1;
+  }
+
+  .layer-section-header {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #555;
+    padding: 6px 0 2px 2px;
+    border-top: 1px dashed rgba(0, 0, 0, 0.15);
+    margin-top: 4px;
+  }
+  .layer-section-header:first-child {
+    border-top: none;
+    margin-top: 0;
+  }
+
+  .wind-forecast-bar {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+    font-size: 12px;
+    color: #333;
+    z-index: 10;
+    pointer-events: auto;
+  }
+  .wind-forecast-bar-label {
+    font-weight: 600;
+    min-width: 70px;
+    text-align: right;
+  }
+  .wind-forecast-bar input[type="range"] {
+    width: 240px;
+  }
+  .wind-forecast-bar-runtime {
+    font-size: 11px;
+    color: #888;
+    min-width: 150px;
   }
 
   .layer-controls input[type="checkbox"] {

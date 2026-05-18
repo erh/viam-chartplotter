@@ -50,6 +50,7 @@
     "tailwind-merge": "^3.3.1",
     "tsgeo": "^1.2.2",
     "tslog": "^4.9.3",
-    "typescript-cookie": "^1.0.6"
+    "typescript-cookie": "^1.0.6",
+    "ol-wind": "^1.1.9"
   }
 }

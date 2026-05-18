@@ -55,6 +55,35 @@ With the default `draft = 6 ft`:
 | `0 – 2×draft`  | DEPVS | saturated blue      |
 | `≥ 2×draft`    | DEPDW | white (safe water)  |
 
+### Optional wind overlay
+
+The chartplotter can show animated wind particles using
+[sakitam-fdd/wind-layer](https://github.com/sakitam-fdd/wind-layer). It's wired
+up as a togglable layer (off by default) and appears in the layers panel as
+`wind` once the package is installed and wind data is published.
+
+Wind data is served by the bundled NOAA weather cache at
+`/noaa-weather/gfs/latest.json` (see below). The cache fetches the latest
+GFS 0.25° UGRD/VGRD at 10 m above ground from NOMADS, parses the GRIB2
+inline, and writes the JSON shape `ol-wind` consumes. No external
+converter required — `grib2json`, ecCodes, Java, etc. are *not* needed.
+
+To enable:
+
+1. `npm install` (the `ol-wind` package is already listed in `package.json`).
+2. Rebuild the frontend (`npm run build`) and reload — toggle `wind` on
+   from the layers panel.
+
+If `ol-wind` is missing or NOMADS is unreachable the chartplotter logs a
+warning and leaves the layer out — nothing else breaks.
+
+### NOAA weather endpoints
+
+| Path                              | Purpose                                                                                                              |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `/noaa-weather/gfs/latest.json`   | Latest GFS 0.25° UGRD + VGRD at 10 m, two-record JSON shaped for `ol-wind`. Disk-cached under `<root>/noaa-weather/`, soft TTL 90 min with stale-while-revalidate. Fetches the most recent published GFS cycle from NOMADS (walks back in 6 h steps until one returns 200). |
+| `/noaa-weather/stats`             | JSON cache stats: hits, refreshes, errors, current file size and mtime.                                              |
+
 ### Debug endpoints
 
 | Path                                          | Purpose                                                                                                          |
