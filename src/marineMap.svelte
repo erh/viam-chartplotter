@@ -106,6 +106,41 @@
     return Math.max(0, Math.ceil(hoursFromRun / 3) * 3);
   }
 
+  // Forecast hours that land on local midnight inside [minFh, maxFh], with
+  // a weekday label for each. Used to overlay day-boundary ticks on the
+  // weather slider so the user can see at a glance where Tuesday ends and
+  // Wednesday begins, regardless of timezone or run-time alignment.
+  function computeDayMarkers(
+    runTimeIso: string | null,
+    minFh: number,
+    maxFh: number,
+  ): Array<{ pct: number; label: string }> {
+    if (!runTimeIso || maxFh <= minFh) return [];
+    const run = new Date(runTimeIso);
+    if (Number.isNaN(run.getTime())) return [];
+    const sliderEnd = new Date(run.getTime() + maxFh * 3600_000).getTime();
+    // First local midnight strictly after the slider's start; setHours(24,...)
+    // lands on the next calendar day's 00:00 local. From there step by 24 h
+    // (real-clock) — accepts the ~1 px slop on DST-transition days.
+    const sliderStart = new Date(run.getTime() + minFh * 3600_000);
+    const first = new Date(sliderStart);
+    first.setHours(24, 0, 0, 0);
+    const out: Array<{ pct: number; label: string }> = [];
+    for (
+      let t = first.getTime();
+      t <= sliderEnd;
+      t += 24 * 3600_000
+    ) {
+      const fh = (t - run.getTime()) / 3600_000;
+      const pct = ((fh - minFh) / (maxFh - minFh)) * 100;
+      const label = new Date(t).toLocaleDateString(undefined, {
+        weekday: "short",
+      });
+      out.push({ pct, label });
+    }
+    return out;
+  }
+
   let boatImage = "topdown-boat.svg";
 
   // myBoat-only icon override. The Go module exposes /myboat-icon when the
@@ -4729,6 +4764,11 @@
 
   {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on)}
     {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
+    {@const dayMarkers = computeDayMarkers(
+      weatherRunTime,
+      weatherMinForecastHour,
+      240,
+    )}
     <div class="wind-forecast-bar">
       <label class="wind-forecast-bar-label">
         {#if previewDate}
@@ -4744,11 +4784,21 @@
         {/if}
         {#if weatherLoading}…{/if}
       </label>
-      <input
-        type="range"
-        min={weatherMinForecastHour}
-        max="240"
-        step="3"
+      <div class="wind-forecast-bar-slider-wrap">
+        {#each dayMarkers as m (m.pct)}
+          <span
+            class="wind-forecast-bar-daymark"
+            style="left: {m.pct}%"
+            aria-hidden="true"
+          >
+            <span class="wind-forecast-bar-daymark-label">{m.label}</span>
+          </span>
+        {/each}
+        <input
+          type="range"
+          min={weatherMinForecastHour}
+          max="240"
+          step="3"
         value={weatherForecastHour}
         disabled={weatherLoading}
         oninput={(e) => {
@@ -4798,7 +4848,8 @@
             waveLayer?.setVisible?.(true);
           }
         }}
-      />
+        />
+      </div>
       <span class="wind-forecast-bar-runtime">
         {#if weatherRunTime}
           GFS run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
@@ -6254,6 +6305,39 @@
   }
   .wind-forecast-bar input[type="range"] {
     width: 240px;
+    display: block;
+  }
+  /* Wraps the slider so day-boundary tick marks can be positioned over the
+     same width as the input. Padding-top reserves space for the weekday
+     labels that sit above the track. */
+  .wind-forecast-bar-slider-wrap {
+    position: relative;
+    width: 240px;
+    padding-top: 14px;
+  }
+  /* One tick per local-midnight forecast hour. The thin vertical bar sits
+     inside the slider's track area; the label centres on the same x. The
+     ~6 px inset on the wrap is half the native range thumb width so
+     ticks line up with the slider's logical 0 % and 100 % positions
+     instead of the input element edges. */
+  .wind-forecast-bar-daymark {
+    position: absolute;
+    top: 14px;
+    bottom: 0;
+    width: 1px;
+    margin-left: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+  }
+  .wind-forecast-bar-daymark-label {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    line-height: 1;
+    color: #555;
+    white-space: nowrap;
   }
   .wind-forecast-bar-runtime {
     font-size: 11px;
