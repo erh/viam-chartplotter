@@ -7,7 +7,9 @@
   "models": [
     {
       "api": "rdk:component:generic",
-      "model": "erh:viam-chartplotter:chartplotter"
+      "model": "erh:viam-chartplotter:chartplotter",
+      "description": "Chartplotter web UI + NOAA ENC/WMS tile server. Renders S-57 vector charts with draft-keyed depth shading.",
+      "markdown_link": "README.md#viam-chartplotter"
     },
     {
       "api": "rdk:service:navigation",

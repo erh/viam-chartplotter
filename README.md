@@ -1,5 +1,71 @@
 ## Viam Chartplotter
 
+The `erh:viam-chartplotter:chartplotter` model is an `rdk:component:generic`
+that hosts the chartplotter web UI and the NOAA ENC / WMS rendering server.
+It serves the static frontend (`dist/`), proxies and caches NOAA WMS tiles
+under `/noaa-wms/`, and renders ENC vector tiles under `/noaa-enc/`.
+
+### Configuration attributes
+
+| Name                   | Type   | Required | Default | Description                                                                                                                                                                                                                  |
+| ---------------------- | ------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `port`                 | int    | no       | `8888`  | TCP port the embedded HTTP server listens on.                                                                                                                                                                                |
+| `noaa_cache_dir`       | string | no       | OS user-cache dir (`<cache>/viam-chartplotter/`) | Directory under which the NOAA WMS proxy cache (`noaa-wms/`), the ENC store (`noaa-enc/`), and the OSM raster cache (`osm/`) live. Created on first run.                       |
+| `noaa_cache_max_bytes` | int    | no       | `0` (unlimited) | Soft cap for the WMS proxy cache (bytes). When exceeded the oldest tiles get evicted. `0` disables eviction.                                                                                                          |
+| `draft`                | number | no       | `6`     | Boat's draft in feet. Drives depth shading at chart-detail zoom: DEPMS covers 3.3 ft → draft, DEPMD covers draft → 2×draft, DEPDW (safe water, white) is ≥ 2×draft. Per-request override via `?sd=N` on tile URLs.            |
+| `safe_depth_ft`        | number | no       | —       | Legacy alias for `draft`. Used when `draft` is not set.                                                                                                                                                                      |
+| `myboat_icon_path`     | string | no       | bundled icon | Absolute path to a PNG used as the boat marker on the chart. Falls back to the bundled icon when unset.                                                                                                                  |
+
+### Sample config
+
+```json
+{
+  "name": "chartplotter",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:chartplotter",
+  "attributes": {
+    "port": 8888,
+    "draft": 6,
+    "noaa_cache_dir": "/var/lib/viam-chartplotter"
+  }
+}
+```
+
+### Depth shading bands
+
+Both bands key off the polygon's midpoint depth (`(DRVAL1 + DRVAL2) / 2`).
+With the default `draft = 6 ft`:
+
+**z ≥ 12** (chart-detail, four-band):
+
+| Midpoint depth      | Band  | Colour              |
+| ------------------- | ----- | ------------------- |
+| `< 0` (drying)      | DEPIT | tan                 |
+| `0 – 3.3 ft` (< 1 m)| DEPVS | saturated blue      |
+| `3.3 ft – draft`    | DEPMS | light blue          |
+| `draft – 2×draft`   | DEPMD | very light blue     |
+| `≥ 2×draft`         | DEPDW | white (safe water)  |
+
+**z ≤ 11** (coarse, two-band):
+
+| Midpoint depth | Band  | Colour              |
+| -------------- | ----- | ------------------- |
+| `< 0`          | DEPIT | tan                 |
+| `0 – 2×draft`  | DEPVS | saturated blue      |
+| `≥ 2×draft`    | DEPDW | white (safe water)  |
+
+### Debug endpoints
+
+| Path                                          | Purpose                                                                                                          |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `/noaa-enc/tile/{z}/{x}/{y}.png`              | The live ENC vector tile the UI consumes. Supports `?sd=N` (draft override, feet), `?style=`, `?navaids=0`, `?landfill=0`, `?skip=…`. |
+| `/noaa-enc/compare/{z}/{x}/{y}.png`           | Side-by-side panels — `ours` ‖ `NOAA WMS` ‖ `diff` ‖ `OSM masked` ‖ `mask` — for iterating renderer parity.       |
+| `/noaa-enc/compare/test?lat=&lon=`            | HTML page stacking `compare/` panels for the same lat/lon at z=7..16. Defaults to Charleston Harbor.             |
+| `/noaa-enc/debug?minLon=&minLat=&maxLon=&maxLat=` | JSON catalog/feature summary for the bbox.                                                                  |
+| `/noaa-enc/debug-tile/{z}/{x}/{y}`            | JSON listing of the features painted in a tile, sampled.                                                         |
+| `/noaa-enc/stats`                             | Cache and store stats.                                                                                           |
+
 ## ToDo
 
 * Options to select color of: tracks, heading line, route line, ais targets and their tracks
