@@ -858,16 +858,88 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 			}
 		}
 		allCells = filtered
+	} else {
+		// Respect cell coverage hierarchy for LNDARE: walk cells finest-
+		// first, marking their tile-intersection extent on a 32×32
+		// coverage mask. Skip any cell whose own tile-intersection is
+		// fully claimed by finer cells. This prevents a 1:45 k Approach
+		// cell's imprecise "Long Beach east" LANDA from painting yellow
+		// over open water that the 1:22 k Harbour cell (covering the
+		// same tile area, but with no LNDARE because it's all water)
+		// has already claimed authoritative coverage for.
+		const mw = 32
+		var mask [mw * mw]bool
+		cellsFinest := make([]ENCCell, len(allCellsRaw))
+		copy(cellsFinest, allCellsRaw)
+		sort.SliceStable(cellsFinest, func(i, j int) bool {
+			return cellsFinest[i].CScale < cellsFinest[j].CScale
+		})
+		toPxBox := func(c ENCCell) (xmin, ymin, xmax, ymax int) {
+			fx := func(lon float64) int {
+				if lon <= minLon {
+					return 0
+				}
+				if lon >= maxLon {
+					return mw
+				}
+				return int((lon - minLon) / (maxLon - minLon) * mw)
+			}
+			fy := func(lat float64) int {
+				if lat <= minLat {
+					return mw
+				}
+				if lat >= maxLat {
+					return 0
+				}
+				return int((maxLat - lat) / (maxLat - minLat) * mw)
+			}
+			return fx(c.MinLon), fy(c.MaxLat), fx(c.MaxLon), fy(c.MinLat)
+		}
+		filtered := allCells[:0]
+		for _, c := range cellsFinest {
+			xmin, ymin, xmax, ymax := toPxBox(c)
+			if xmin >= xmax || ymin >= ymax {
+				continue
+			}
+			allClaimed := true
+			for y := ymin; y < ymax && allClaimed; y++ {
+				for x := xmin; x < xmax; x++ {
+					if !mask[y*mw+x] {
+						allClaimed = false
+						break
+					}
+				}
+			}
+			if allClaimed {
+				continue
+			}
+			filtered = append(filtered, c)
+			for y := ymin; y < ymax; y++ {
+				for x := xmin; x < xmax; x++ {
+					mask[y*mw+x] = true
+				}
+			}
+		}
+		allCells = filtered
 	}
 	sort.SliceStable(allCells, func(i, j int) bool { return allCells[i].CScale > allCells[j].CScale })
-	// Separate ordering for the DEPARE base pass — coarsest first so
-	// fine-cell harbour polygons land on top across all zooms (matches
-	// the allCells sort but always over the unfiltered set).
-	allCellsForDEPARE := make([]ENCCell, len(allCellsRaw))
-	copy(allCellsForDEPARE, allCellsRaw)
-	sort.SliceStable(allCellsForDEPARE, func(i, j int) bool {
-		return allCellsForDEPARE[i].CScale > allCellsForDEPARE[j].CScale
-	})
+	// DEPARE base-pass cell list. At z≥10 use the same coverage-filtered
+	// set as LNDARE so a coarser cell's "0–1.8 m" polygon (mid=0.9 m →
+	// DEPVS) doesn't paint saturated blue over a finer cell's
+	// authoritative water shading. At z<10 keep the unfiltered set —
+	// harbour cells still need to drive narrow-band shading at z=7..9
+	// without coverage gating (the continent-scale LNDARE filter would
+	// otherwise drop them).
+	var allCellsForDEPARE []ENCCell
+	if z < 10 {
+		allCellsForDEPARE = make([]ENCCell, len(allCellsRaw))
+		copy(allCellsForDEPARE, allCellsRaw)
+		sort.SliceStable(allCellsForDEPARE, func(i, j int) bool {
+			return allCellsForDEPARE[i].CScale > allCellsForDEPARE[j].CScale
+		})
+	} else {
+		allCellsForDEPARE = allCells
+	}
 
 	dc := gg.NewContext(256, 256)
 	// Transparent background so the OSM/seachart base layers below show through
@@ -2130,20 +2202,24 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 	switch class {
 	case "DEPARE":
 		min, max := depthRange(f)
-		// Drying check uses the shallower edge (DRVAL1 < 0). Band
-		// selection uses the deeper edge (DRVAL2) so a "6–16 ft" channel
-		// polygon reads as white at z=11 instead of getting collapsed to
-		// DEPVS by a min-edge override. Harbour cells are pulled into
-		// every zoom by the all-cells DEPARE base pass, so their narrow
-		// polygons drive the shading directly.
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
 		}
-		key := max
-		if math.IsNaN(key) {
+		// Key on the polygon's midpoint depth so a "6.6–16.4 ft" channel
+		// polygon (DRVAL1=2 m, DRVAL2=5 m, mid=3.5 m) lands in the band
+		// that matches a 10 ft depth — DEPMD for default draft — instead
+		// of being collapsed to DEPDW by a DRVAL2-only key. Midpoint also
+		// reads sensibly for wide-range overview polygons (0–18 m mid=9 m
+		// → DEPDW, correctly painting open ocean white).
+		var key float64
+		switch {
+		case !math.IsNaN(min) && !math.IsNaN(max):
+			key = (min + max) / 2
+		case !math.IsNaN(max):
+			key = max
+		case !math.IsNaN(min):
 			key = min
-		}
-		if math.IsNaN(key) {
+		default:
 			return s52DEPDW
 		}
 		return depthFill(key, safeDepthM, z)

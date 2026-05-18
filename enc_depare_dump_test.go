@@ -52,7 +52,10 @@ func TestDumpDEPAREForTile(t *testing.T) {
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale < cells[j].CScale })
 	t.Logf("%d overlapping cells (finest first):", len(cells))
 	for _, c := range cells {
-		t.Logf("  %-12s scale=1:%d", c.Name, c.CScale)
+		inside := c.MinLon <= minLon && c.MaxLon >= maxLon &&
+			c.MinLat <= minLat && c.MaxLat >= maxLat
+		t.Logf("  %-12s scale=1:%-7d bbox=lon[%.4f..%.4f] lat[%.4f..%.4f]  fully-covers-tile=%v",
+			c.Name, c.CScale, c.MinLon, c.MaxLon, c.MinLat, c.MaxLat, inside)
 	}
 
 	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
@@ -62,25 +65,54 @@ func TestDumpDEPAREForTile(t *testing.T) {
 			continue
 		}
 		var depares []string
+		nLND := 0
+		nBUA := 0
 		for _, f := range chart.FeaturesInBounds(bbox) {
-			if f.ObjectClass() != "DEPARE" {
-				continue
+			switch f.ObjectClass() {
+			case "DEPARE":
+				minD := math.NaN()
+				maxD := math.NaN()
+				if v, ok := f.Attribute("DRVAL1"); ok {
+					minD = numAttr(v)
+				}
+				if v, ok := f.Attribute("DRVAL2"); ok {
+					maxD = numAttr(v)
+				}
+				depares = append(depares, fmt.Sprintf("    DRVAL1=%5.2fm DRVAL2=%6.2fm  (%5.1fft - %6.1fft)",
+					minD, maxD, minD*feetPerMetre, maxD*feetPerMetre))
+			case "LNDARE":
+				nLND++
+				coords := f.Geometry().Coordinates
+				if len(coords) == 0 {
+					t.Logf("    LNDARE in %s: <no coords>", cell.Name)
+					break
+				}
+				minLn, maxLn := coords[0][0], coords[0][0]
+				minLt, maxLt := coords[0][1], coords[0][1]
+				for _, p := range coords {
+					if p[0] < minLn {
+						minLn = p[0]
+					}
+					if p[0] > maxLn {
+						maxLn = p[0]
+					}
+					if p[1] < minLt {
+						minLt = p[1]
+					}
+					if p[1] > maxLt {
+						maxLt = p[1]
+					}
+				}
+				t.Logf("    LNDARE in %s: %d pts bbox lon[%.4f..%.4f] lat[%.4f..%.4f]",
+					cell.Name, len(coords), minLn, maxLn, minLt, maxLt)
+			case "BUAARE":
+				nBUA++
 			}
-			minD := math.NaN()
-			maxD := math.NaN()
-			if v, ok := f.Attribute("DRVAL1"); ok {
-				minD = numAttr(v)
-			}
-			if v, ok := f.Attribute("DRVAL2"); ok {
-				maxD = numAttr(v)
-			}
-			depares = append(depares, fmt.Sprintf("    DRVAL1=%5.2fm DRVAL2=%6.2fm  (%5.1fft - %6.1fft)",
-				minD, maxD, minD*feetPerMetre, maxD*feetPerMetre))
 		}
-		if len(depares) == 0 {
+		if len(depares) == 0 && nLND == 0 && nBUA == 0 {
 			continue
 		}
-		t.Logf("cell %s (1:%d) — %d DEPARE polygons:", cell.Name, cell.CScale, len(depares))
+		t.Logf("cell %s (1:%d) — %d DEPARE, %d LNDARE, %d BUAARE polygons:", cell.Name, cell.CScale, len(depares), nLND, nBUA)
 		for _, line := range depares {
 			t.Log(line)
 		}
