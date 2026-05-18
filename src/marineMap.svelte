@@ -16,14 +16,9 @@
   import {
     setupWeatherLayer,
     WIND_COLOR_SCALE,
+    WAVE_COLOR_SCALE,
     type WeatherLayerHandle,
   } from "./lib/windLayer";
-  import {
-    setupWaveLayer,
-    WAVE_RANGE_MAX_M,
-    METERS_TO_FEET,
-    type WaveLayerHandle,
-  } from "./lib/waveLayer";
   import "ol/ol.css";
   import ScaleLine from "ol/control/ScaleLine.js";
   import { defaults as defaultControls } from "ol/control/defaults.js";
@@ -73,13 +68,12 @@
   // import resolve. Drives the shared forecast-hour slider beneath the
   // chart and the cursor wind/wave readout.
   let windHandle: WeatherLayerHandle | null = $state(null);
-  let waveHandle: WaveLayerHandle | null = $state(null);
-  // Last cursor-position wave height pulled from GetFeatureInfo, in
-  // metres (waveLayer.ts owns the unit conversion to feet at display
-  // time). Debounced so we don't hammer the WMS server on every
-  // pointermove.
-  let cursorWaveM = $state<number | null>(null);
-  let waveSampleTimer: ReturnType<typeof setTimeout> | null = null;
+  let waveHandle: WeatherLayerHandle | null = $state(null);
+  // Constants used by the wave-legend UI. ol-wind's Field carries
+  // wave-height magnitude (metres) since we encoded h·sin/h·cos as u/v
+  // on the backend; convert at display time.
+  const WAVE_RANGE_MAX_M = 3;
+  const METERS_TO_FEET = 3.28084;
   // GFS forecast hour the slider is currently displaying. Snapped to a
   // 3 h step so changes line up with both wind + wave file cadences.
   let weatherForecastHour = $state(0);
@@ -99,17 +93,6 @@
     return new Date(d.getTime() + fh * 3600_000);
   }
 
-  // Issue a debounced WMS GetFeatureInfo request for the wave-height
-  // value at the cursor's lon/lat. The actual GetFeatureInfo + XML
-  // parse lives in `waveLayer.ts`; this just throttles the pointermove
-  // rate so we don't hammer the upstream WMS.
-  function scheduleWaveSample(lonLat: [number, number], view: View): void {
-    if (waveSampleTimer) clearTimeout(waveSampleTimer);
-    waveSampleTimer = setTimeout(async () => {
-      if (!waveHandle) return;
-      cursorWaveM = await waveHandle.sampleAt(lonLat, view);
-    }, 200);
-  }
 
   // Compute the smallest 3-h-aligned forecast hour that lands at or
   // after "now" — used as the slider floor so the user always starts
@@ -2895,13 +2878,20 @@
         displayName: "weather",
         on: true,
       });
-      // Pre-allocate the wind entry so its panel row sits directly
-      // under the weather header — setupWeatherLayer is async and would
-      // otherwise push it last (after boat / ais). The actual OL layer
-      // reference gets filled in once the GFS fetch returns.
+      // Pre-allocate the wind + waves entries so their panel rows sit
+      // directly under the weather header — setupWeatherLayer is async
+      // and would otherwise push them last (after boat / ais). The
+      // actual OL layer reference is filled in by setupWeatherLayer
+      // when each respective fetch returns.
       mapGlobal.layerOptions.push({
         name: "wind",
         displayName: "wind",
+        parent: "weather",
+        on: false,
+      });
+      mapGlobal.layerOptions.push({
+        name: "waves",
+        displayName: "waves",
         parent: "weather",
         on: false,
       });
@@ -2942,27 +2932,55 @@
           // Re-fetch at the "now-aligned" hour if the initial f000
           // fetch happened before we knew the run time.
           if (floor > 0 && wind) wind.setForecastHour(floor).catch(() => {});
-          // Seed the wave WMS TIME to match the slider's initial value
-          // so the wave layer and cursor sampling agree with the wind
-          // forecast hour from the very first tile request.
-          const target = weatherDataDate(refTime, floor);
-          if (waveHandle && target) waveHandle.setTime(target);
+          // Bump the wave layer to the same forecast hour the wind
+          // slider settled on, so both display the same future time.
+          if (waveHandle && floor > 0) {
+            waveHandle.setForecastHour(floor).catch(() => {});
+          }
           ensureRendered();
         })
         .catch((err) => {
           console.warn("wind layer disabled:", err);
         });
-      // Significant wave height as a semi-transparent raster overlay.
-      // Source: PacIOOS NOAA WaveWatch III "best" THREDDS WMS. Public,
-      // CORS-open, no key needed; renders coloured boxfill tiles for
-      // `Thgt` (sea_surface_wave_significant_height) at the requested
-      // bbox + zoom. Frontend asks WMS for tiles directly — no server
-      // proxy needed for this layer (vs. wind which needs the GRIB2
-      // parser for cursor sampling).
-      // Wave overlay (PacIOOS NOAA WaveWatch III). Self-contained in
-      // src/lib/waveLayer.ts — owns the TileWMS source, the
-      // GetFeatureInfo cursor sampler, and the colour-scale constants.
-      waveHandle = setupWaveLayer(mapGlobal);
+      // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
+      // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
+      // and converted to u/v vectors so it shares the same JSON shape
+      // and rendering pipeline as the wind layer. Slower velocityScale
+      // since wave-propagation speed is a fraction of wind speed, and
+      // a different colour ramp keyed to typical wave heights (0..3 m).
+      setupWeatherLayer(mapGlobal, {
+        layerName: "waves",
+        displayName: "waves",
+        parent: "weather",
+        dataUrl: "/noaa-weather/wave/latest.json",
+        colorScale: WAVE_COLOR_SCALE,
+        minVelocity: 0,
+        maxVelocity: 3,
+        velocityScale: () => {
+          const z = mapGlobal.view?.getZoom() ?? 6;
+          // Was 0.06 / 2^z; bumped so a 1.5 m wave-height "particle"
+          // drifts visibly each frame — wave-celerity isn't literally
+          // proportional to height, but the eye reads the slow streaks
+          // as "no data" otherwise.
+          return 0.12 / Math.pow(2, z);
+        },
+        paths: 6000,
+        lineWidth: 5,
+        // Brighter strokes than wind — the calm/cyan end of the wave
+        // ramp washes out against the ocean basemap otherwise.
+        globalAlpha: 0.97,
+        initialForecastHour: initialFh,
+        zIndex: 29,
+      })
+        .then((wave) => {
+          waveHandle = wave;
+          if (wave && weatherForecastHour > 0) {
+            wave.setForecastHour(weatherForecastHour).catch(() => {});
+          }
+        })
+        .catch((err) => {
+          console.warn("wave layer disabled:", err);
+        });
     }
 
     // Track layer for myBoat (child of boat layer)
@@ -3932,11 +3950,15 @@
             windFromDeg = s.fromDeg;
           }
         }
-        if (layerOn("waves") && cursorWaveM !== null) {
-          waveM = cursorWaveM;
-        }
-        if (layerOn("waves") && waveHandle && mapGlobal.view) {
-          scheduleWaveSample(cursorLngLat, mapGlobal.view);
+        if (layerOn("waves") && waveHandle) {
+          const s = waveHandle.sampleAt(cursorLngLat[0], cursorLngLat[1]);
+          if (s) {
+            // Backend encodes wave HEIGHT as the magnitude slot, so
+            // s.magnitude is in metres. fromDeg is the direction-from
+            // we want to surface.
+            waveM = s.magnitude;
+            waveFromDeg = s.fromDeg;
+          }
         }
         cursorInfo = {
           lat: cursorLatLng[0],
@@ -4755,20 +4777,20 @@
           windLayer?.setVisible?.(false);
           waveLayer?.setVisible?.(false);
           try {
+            // Drive both layers in lockstep — both are now ol-wind
+            // pipelines fed by /noaa-weather/{gfs,wave}/latest.json?fh=N.
             const tasks: Promise<void>[] = [];
             if (windHandle) tasks.push(windHandle.setForecastHour(v));
+            if (waveHandle) tasks.push(waveHandle.setForecastHour(v));
             await Promise.all(tasks);
             if (windHandle) {
               weatherForecastHour = windHandle.getForecastHour();
               weatherRunTime = windHandle.getRunTime();
+            } else if (waveHandle) {
+              weatherForecastHour = waveHandle.getForecastHour();
             } else {
               weatherForecastHour = v;
             }
-            // Wave WMS picks the nearest time from its own dataset.
-            // Compute target = GFS run + fh and push as TIME param so
-            // moving the slider actually re-tiles the wave layer too.
-            const target = weatherDataDate(weatherRunTime, weatherForecastHour);
-            if (waveHandle && target) waveHandle.setTime(target);
             mapGlobal.map?.render();
           } finally {
             weatherLoading = false;
@@ -5585,9 +5607,10 @@
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
-            {#if cursorInfo.waveM !== null}
+            {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
               <span class="data-panel-value">
                 wave <span class="data-panel-bold">{(cursorInfo.waveM * 3.28084).toFixed(1)}</span><sup>ft</sup>
+                from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
           </div>
@@ -6166,17 +6189,19 @@
     width: 200px;
     height: 14px;
     border: 1px solid rgba(0, 0, 0, 0.2);
-    /* Approximates the ncWMS "rainbow" palette (left=blue → right=red,
-       no purple/magenta) that the WMS tiles use. CSS keeps it strictly
-       horizontal so we can't get tripped up by a stale vertical PNG. */
+    /* Mirrors WAVE_COLOR_SCALE in src/lib/windLayer.ts: near-white at
+       calm (so it reads on a blue basemap), cyan around 2 ft, green
+       around 4–5 ft, yellow/orange around 6–7 ft, deep red at 10 ft. */
     background: linear-gradient(
       to right,
-      #0000ff 0%,
-      #00bfff 20%,
-      #00ff80 40%,
-      #ffff00 60%,
-      #ff8000 80%,
-      #ff0000 100%
+      #f0f7ff 0%,
+      #3eb1ff 20%,
+      #3ed24a 40%,
+      #bde534 50%,
+      #fff200 57%,
+      #ff7a1a 70%,
+      #e51d1d 85%,
+      #6e0606 100%
     );
   }
   .wave-legend-ticks {

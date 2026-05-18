@@ -76,6 +76,14 @@ export interface SetupWeatherOptions {
   particleAge?: number;
   /** Particle line width in CSS pixels. */
   lineWidth?: number;
+  /**
+   * wind-core's `globalAlpha` knob. Doubles as the stroke alpha for new
+   * particles AND the trail-fadeout rate, so higher = brighter strokes
+   * but shorter trails. Default 0.82 reads as "atmospheric" wind;
+   * waves need ~0.95 since the cyan/green low-end of the colour ramp
+   * vanishes into the basemap at the lower alpha.
+   */
+  globalAlpha?: number;
   /** OL z-index. */
   zIndex?: number;
 }
@@ -121,7 +129,7 @@ export async function setupWeatherLayer(
       // Lower globalAlpha lengthens the trails (more is kept frame-to-
       // frame) and softens each particle's per-frame stroke — together
       // that takes the animation from "frantic" to "atmospheric".
-      globalAlpha: 0.82,
+      globalAlpha: opts.globalAlpha ?? 0.82,
       colorScale: opts.colorScale,
       minVelocity: opts.minVelocity,
       maxVelocity: opts.maxVelocity,
@@ -283,24 +291,30 @@ export const WIND_COLOR_SCALE = [
 ];
 
 /**
- * Wave-height colour scale: calm cyan → light/yellow at 2 m → orange at
- * 4 m → red over 6 m. Pinned to [0, 8 m] of "magnitude" (the m/s slot
- * we re-purposed for wave-height-in-metres on the wave records).
+ * Wave-height colour scale, pinned to [0, 3 m] (= 0..~10 ft) of the
+ * "magnitude" slot we re-purposed for wave-height-in-metres.
+ *
+ * High-contrast against an ocean-blue basemap: calm seas read as
+ * near-white rather than a blue that dissolves into the chart. Mid
+ * range goes through saturated cyan → green → yellow → orange so even
+ * thin particle streaks pop, and the top end saturates to deep red for
+ * dangerous heights. 15 evenly-spaced stops so ol-wind's linear sample
+ * lands roughly on the named heights below.
  */
 export const WAVE_COLOR_SCALE = [
-  "#08306b", // 0.0 m
-  "#08519c", // 0.5
-  "#2171b5", // 1.0
-  "#4292c6", // 1.5
-  "#6baed6", // 2.0 m — light blue
-  "#9ecae1", // 2.5
-  "#c6dbef", // 3.0
-  "#fdd49e", // 3.5 — pale orange
-  "#fdae6b", // 4.0 m — orange
-  "#fd8d3c", // 4.5
-  "#f16913", // 5.0
-  "#d94801", // 5.5
-  "#a63603", // 6.0 m — red-brown
-  "#7f2704", // 7.0
-  "#4a0a00", // 8+ m — very dark red
+  "#f0f7ff", // 0.0 m (0 ft) — near-white (visible on blue basemap)
+  "#c8e4ff", // 0.21
+  "#8dcaff", // 0.43 — sky blue
+  "#3eb1ff", // 0.64 (~2 ft, legend tick) — bright cyan
+  "#1ad3c4", // 0.86 — saturated teal
+  "#27d77a", // 1.07
+  "#3ed24a", // 1.29 — bright green
+  "#bde534", // 1.50 (~5 ft, legend tick) — chartreuse
+  "#fff200", // 1.71 — saturated yellow
+  "#ffb627", // 1.93
+  "#ff7a1a", // 2.14 (~7 ft, legend tick) — saturated orange
+  "#ff4d17", // 2.36
+  "#e51d1d", // 2.57 — saturated red
+  "#b51010", // 2.79
+  "#6e0606", // 3.0+ m (~10 ft, legend tick) — deep red
 ];

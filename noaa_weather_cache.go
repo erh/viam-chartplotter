@@ -197,23 +197,44 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, product string, fh int) 
 		return nil
 	}
 
-	grib, runTime, err := wc.fetchLatestGRIB(ctx, product, fh)
-	if err != nil {
-		wc.errs.Add(1)
-		return err
-	}
 	var records []windRecord
+	var runTime time.Time
+	var err error
 	switch product {
 	case "gfs":
+		var grib []byte
+		grib, runTime, err = wc.fetchLatestGRIB(ctx, product, fh)
+		if err != nil {
+			wc.errs.Add(1)
+			return err
+		}
 		records, err = parseGFSWind10m(grib, runTime, fh)
+		if err != nil {
+			wc.errs.Add(1)
+			return fmt.Errorf("parse gfs grib: %w", err)
+		}
 	case "wave":
-		records, err = parseGFSWaveSurface(grib, runTime, fh)
+		// Use the GFS run + forecast hour as the "target time" for the
+		// wave dataset; PacIOOS picks the nearest available hourly
+		// slice. Falls back to "now" if the caller hasn't supplied a
+		// meaningful fh yet (cold start with no wind data).
+		now := time.Now().UTC().Truncate(time.Hour)
+		gfsCycle := now.Add(-time.Duration(gfsPublishLagHours) * time.Hour)
+		gfsCycle = time.Date(gfsCycle.Year(), gfsCycle.Month(), gfsCycle.Day(),
+			(gfsCycle.Hour()/6)*6, 0, 0, 0, time.UTC)
+		target := gfsCycle.Add(time.Duration(fh) * time.Hour)
+		records, err = fetchPacIOOSWave(ctx, wc.client, target)
+		if err != nil {
+			wc.errs.Add(1)
+			return fmt.Errorf("fetch pacioos wave: %w", err)
+		}
+		if t, perr := time.Parse(time.RFC3339, records[0].Header.RefTime); perr == nil {
+			runTime = t
+		} else {
+			runTime = target
+		}
 	default:
 		return fmt.Errorf("unknown product %q", product)
-	}
-	if err != nil {
-		wc.errs.Add(1)
-		return fmt.Errorf("parse %s grib: %w", product, err)
 	}
 	tmp := wc.cachePath(product, fh) + ".tmp"
 	f, err := os.Create(tmp)
@@ -234,8 +255,8 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, product string, fh int) 
 		return err
 	}
 	wc.refreshes.Add(1)
-	wc.logger.Infof("weather: refreshed %s run=%s fh=%d size=%d",
-		product, runTime.Format(time.RFC3339), fh, len(grib))
+	wc.logger.Infof("weather: refreshed %s run=%s fh=%d records=%d",
+		product, runTime.Format(time.RFC3339), fh, len(records))
 	return nil
 }
 
