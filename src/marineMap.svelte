@@ -4735,6 +4735,12 @@
         }}
         onchange={async (e) => {
           const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+          // Commit the new value into reactive state *before* awaiting
+          // anything. Clicking the slider track (vs dragging) skips
+          // `input` in some browsers, so the value prop would otherwise
+          // re-render at the stale old value and snap the thumb back
+          // to the slider's min.
+          weatherForecastHour = v;
           weatherLoading = true;
           // Hide both data layers while we refetch so the user doesn't
           // see the previous forecast hour's pixels under the new
