@@ -115,10 +115,13 @@ export async function setupWeatherLayer(
     },
     windOptions: {
       velocityScale: opts.velocityScale,
-      paths: opts.paths ?? 4000,
-      particleAge: opts.particleAge ?? 120,
-      lineWidth: opts.lineWidth ?? 2.5,
-      globalAlpha: 0.95,
+      paths: opts.paths ?? 2500,
+      particleAge: opts.particleAge ?? 100,
+      lineWidth: opts.lineWidth ?? 1.6,
+      // Lower globalAlpha lengthens the trails (more is kept frame-to-
+      // frame) and softens each particle's per-frame stroke — together
+      // that takes the animation from "frantic" to "atmospheric".
+      globalAlpha: 0.82,
       colorScale: opts.colorScale,
       minVelocity: opts.minVelocity,
       maxVelocity: opts.maxVelocity,

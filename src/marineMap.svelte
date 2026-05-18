@@ -2926,7 +2926,10 @@
         // a 10 m/s wind moves ~2 px / frame at the current zoom.
         velocityScale: () => {
           const z = mapGlobal.view?.getZoom() ?? 6;
-          return 0.3 / Math.pow(2, z);
+          // Was 0.3 / 2^z; halved so a 10 m/s wind drifts ~1 px / frame
+          // instead of ~2, taking the streaks from "darting" to
+          // "creeping" without losing the directional read.
+          return 0.15 / Math.pow(2, z);
         },
         initialForecastHour: initialFh,
       })
