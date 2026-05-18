@@ -3409,12 +3409,6 @@
       zoom: loadViewZoom(),
       maxZoom: 19,
     });
-    // Without an explicit "follow my boat" cookie we want the default
-    // Hudson-Canyon view (or whatever savedCenter is) to stick — first
-    // GPS fix would otherwise auto-pan the view to the boat location.
-    // Same flag the existing "restoring saved center" branch sets just
-    // below, applied unconditionally on cold load.
-    inPanMode = true;
     // Restoring a manual pan position implies the user was browsing away from
     // the boat — keep that mode on reload so the boat tracker doesn't yank
     // the view back the moment a fix arrives.
