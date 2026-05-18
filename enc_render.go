@@ -2130,23 +2130,14 @@ func areaFill(class string, f *s57.Feature, safeDepthM float64, z int) color.Col
 	switch class {
 	case "DEPARE":
 		min, max := depthRange(f)
-		// Drying check uses the shallower edge (DRVAL1 < 0). Band selection
-		// uses the deeper edge (DRVAL2) so an offshore polygon spanning
-		// "5 to 100 ft" reads as deep — matches NOAA's WMS, which paints
-		// such polygons DDEAF7 / white rather than the saturated DEPVS our
-		// shallow-edge keying produced.
+		// Drying check uses the shallower edge (DRVAL1 < 0). Band
+		// selection uses the deeper edge (DRVAL2) so a "6–16 ft" channel
+		// polygon reads as white at z=11 instead of getting collapsed to
+		// DEPVS by a min-edge override. Harbour cells are pulled into
+		// every zoom by the all-cells DEPARE base pass, so their narrow
+		// polygons drive the shading directly.
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
-		}
-		// At very coarse zoom (z≤11) NOAA harbour and approach cells aren't
-		// loaded — only overview/coastal cells with wide-range DEPARE
-		// polygons (e.g. "0 to 30 m") cover the tile. DRVAL2 keying paints
-		// these white and hides shallow channels like Cape Fear Slue that
-		// NOAA's WMS shades blue from its own harbour-cell data. Force
-		// DEPVS when the shallow edge is under 2×draft so coarse-zoom
-		// shading matches the z≤11 collapse used by depthFill.
-		if z <= 11 && !math.IsNaN(min) && min < 2*safeDepthM {
-			return s52DEPVS
 		}
 		key := max
 		if math.IsNaN(key) {
