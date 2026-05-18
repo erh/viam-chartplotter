@@ -66,6 +66,8 @@ var allModels = []*WeatherModel{
 	ecmwfWindStub(),
 	iconGlobalWindStub(),
 	pacioosWaveModel(),
+	pacioosHawaiiWaveModel(),
+	nomadsGFSWaveModel(),
 }
 
 // findModel does an O(n) lookup — registry is fixed small (~10 entries).
@@ -501,34 +503,52 @@ func iconEUWindModel() *WeatherModel {
 // wires it into the model picker and forecast-hour slider.
 // ----------------------------------------------------------------------
 
-func pacioosWaveModel() *WeatherModel {
+// waveModelFor wraps a waveDatasetConfig in a registry-shaped model.
+// The (cycle, fh) → target-time mapping is identical across wave
+// datasets — reconstruct the most recent GFS cycle, add fh hours,
+// hand to fetchWaveDataset which picks the nearest available slice.
+func waveModelFor(name, displayName, domain string, cfg waveDatasetConfig) *WeatherModel {
 	m := &WeatherModel{
-		Name:        "pacioos-ww3",
-		DisplayName: "WaveWatch III (PacIOOS, 0.5° global)",
+		Name:        name,
+		DisplayName: displayName,
 		Kind:        "wave",
-		Domain:      "global",
-		// PacIOOS exposes ~hourly slices and fetchPacIOOSWave maps to
-		// the nearest one, so we don't really have a "cycle" — we
-		// reuse the GFS cadence so the slider's day-tick alignment
-		// and now-floor share a single source of truth across models.
+		Domain:      domain,
+		// All our wave datasets expose ~hourly slices and map fh to
+		// the nearest one — we reuse the GFS cadence for the slider's
+		// day-tick alignment and now-floor across models.
 		CycleHours:  []int{0, 6, 12, 18},
 		MinFh:       0,
 		MaxFh:       240,
 		StepFh:      1,
-		PublishLagH: 4,
+		PublishLagH: 5,
 	}
 	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]windRecord, error) {
-		// Reconstruct a "target time" the way the original wave handler
-		// did: most recent GFS cycle + fh hours. PacIOOS picks the
-		// nearest available hourly slice from there.
 		now := time.Now().UTC().Truncate(time.Hour)
 		gfsCycle := now.Add(-time.Duration(gfsPublishLagHours) * time.Hour)
 		gfsCycle = time.Date(gfsCycle.Year(), gfsCycle.Month(), gfsCycle.Day(),
 			(gfsCycle.Hour()/6)*6, 0, 0, 0, time.UTC)
 		target := gfsCycle.Add(time.Duration(fh) * time.Hour)
-		return fetchPacIOOSWave(ctx, client, target)
+		return fetchWaveDataset(ctx, client, cfg, target)
 	}
 	return m
+}
+
+func pacioosWaveModel() *WeatherModel {
+	return waveModelFor("pacioos-ww3",
+		"WaveWatch III (PacIOOS, 0.5° global)",
+		"global", pacioosGlobalConfig())
+}
+
+func pacioosHawaiiWaveModel() *WeatherModel {
+	return waveModelFor("pacioos-ww3-hawaii",
+		"WaveWatch III (PacIOOS, 0.05° Hawaii)",
+		"hawaii", pacioosHawaiiConfig())
+}
+
+func nomadsGFSWaveModel() *WeatherModel {
+	return waveModelFor("nomads-gfswave",
+		"GFS-Wave (NOAA NOMADS, 0.25° global)",
+		"global", nomadsGFSWaveConfig())
 }
 
 // ----------------------------------------------------------------------

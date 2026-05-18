@@ -25,7 +25,20 @@ import (
 // are called, and how to interpret the grid.
 type waveDatasetConfig struct {
 	// URL is the dataset's DODS root (we'll suffix .dods + a query).
+	// Used when the dataset is a stable "best" aggregation (PacIOOS).
+	// When URLFor is set, this is ignored and URLFor handles
+	// per-cycle URL construction with walkback.
 	URL string
+	// URLFor returns the dataset URL for a given run cycle time. Set
+	// for datasets that don't expose a "best" aggregation (NOMADS
+	// GrADS DODS, where each cycle is its own dataset under a
+	// YYYYMMDD/{cc}z directory). When set, fetchWaveDataset walks
+	// back through CycleHours until one returns 200.
+	URLFor func(cycle time.Time) string
+	// CycleHours / PublishLagH drive the walkback for URLFor-based
+	// datasets. Same semantics as the wind WeatherModel registry.
+	CycleHours  []int
+	PublishLagH int
 	// Nlat / Nlon are the grid dimensions. Pre-known so we can size
 	// the slice query right and validate the response shape.
 	Nlat, Nlon int
@@ -105,6 +118,84 @@ func pacioosGlobalConfig() waveDatasetConfig {
 	}
 }
 
+// pacioosHawaiiConfig is the regional WW3 product for the Hawaiian
+// Islands — same provider, same DODS schema, same direction
+// convention, but at 0.05° (~5 km) covering roughly 18°-23°N,
+// 199°-206°E (= -161° to -154°W). Useful for actual local sailing
+// detail in the islands where the global 0.5° grid averages out the
+// island wave shadows entirely.
+//
+// Time epoch is *probably* 2017-01-01 like ww3_global but the
+// historical record starts 2011 — if the slider ever lands on the
+// wrong slice, that's where to look (parse the DAS units string at
+// runtime instead).
+func pacioosHawaiiConfig() waveDatasetConfig {
+	return waveDatasetConfig{
+		URL:         "https://pae-paha.pacioos.hawaii.edu/thredds/dodsC/ww3_hawaii/WaveWatch_III_Hawaii_Regional_Wave_Model_best.ncd",
+		Nlat:        101,
+		Nlon:        141,
+		LatS:        18.0,
+		LatN:        23.0,
+		LonW:        199.0,
+		LonE:        206.0,
+		Dlat:        0.05,
+		Dlon:        0.05,
+		HeightVar:   "Thgt",
+		DirVar:      "Tdir",
+		TimeVar:     "time",
+		TimeBase:    time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC),
+		TimeUnit:    time.Hour,
+		LatBottomUp: true,
+		SlicePrefix: "[0:0]",
+		MapsPerVar:  4,
+		MissingMax:  1e6,
+	}
+}
+
+// nomadsGFSWaveConfig is NCEP's modern GFS-Wave (gfsv16) at 0.25°
+// global, served through NOMADS' GrADS DODS endpoint. There's no
+// "best" aggregation; each cycle is its own dataset under a date
+// directory, so we walk back to the latest published.
+//
+// Differences from PacIOOS: no z dimension (surface only — slice
+// prefix is empty), 3 maps per Grid (time/lat/lon instead of
+// time/z/lat/lon), lat is *descending* N→S (no row-flip needed
+// because rows are already top-down), and the time axis uses
+// GrADS' year-1 epoch ("days since 1-1-1 00:00:0.0"). 1.5° at
+// the equator vs PacIOOS Global's 0.5° — finer resolution at
+// the cost of being a single-source second opinion.
+func nomadsGFSWaveConfig() waveDatasetConfig {
+	return waveDatasetConfig{
+		URLFor: func(cycle time.Time) string {
+			// Example: /dods/wave/gfswave/20251104/gfswave_12z_gfsv16
+			return fmt.Sprintf(
+				"https://nomads.ncep.noaa.gov/dods/wave/gfswave/%s/gfswave_%02dz_gfsv16",
+				cycle.Format("20060102"), cycle.Hour())
+		},
+		CycleHours:  []int{0, 6, 12, 18},
+		PublishLagH: 5, // empirically safe; NOMADS DODS posting lags model run by 3.5-5h
+		Nlat:        721,
+		Nlon:        1440,
+		LatS:        -90.0,
+		LatN:        90.0,
+		LonW:        0.0,
+		LonE:        359.75,
+		Dlat:        0.25,
+		Dlon:        0.25,
+		HeightVar:   "htsgwsfc",
+		DirVar:      "dirpwsfc",
+		TimeVar:     "time",
+		// GrADS year-0001 epoch — Date(1, 1, 1, 0, 0, 0, 0, UTC) is
+		// proleptic-Gregorian Jan 1, year 1. Go handles this fine.
+		TimeBase:    time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC),
+		TimeUnit:    24 * time.Hour,
+		LatBottomUp: false, // rows are already N→S, no flip
+		SlicePrefix: "",    // no z dimension, surface only
+		MapsPerVar:  3,
+		MissingMax:  1e6,
+	}
+}
+
 // fetchPacIOOSWave is a thin alias for the global WW3 dataset — kept
 // for callers that haven't migrated to fetchWaveDataset yet.
 func fetchPacIOOSWave(ctx context.Context, client *http.Client, target time.Time) ([]windRecord, error) {
@@ -115,6 +206,16 @@ func fetchPacIOOSWave(ctx context.Context, client *http.Client, target time.Time
 // returns 2 windRecords (u + v) ready to JSON-encode for ol-wind.
 // `target` is a hint: we pick the dataset slice closest to it.
 func fetchWaveDataset(ctx context.Context, client *http.Client, cfg waveDatasetConfig, target time.Time) ([]windRecord, error) {
+	// Resolve URL — stable for "best" aggregations, per-cycle walkback
+	// for NOMADS-style date-stamped datasets. Mutating cfg.URL keeps
+	// downstream helpers oblivious.
+	if cfg.URLFor != nil {
+		url, err := resolveWaveURL(ctx, client, cfg, time.Now().UTC())
+		if err != nil {
+			return nil, fmt.Errorf("wave url: %w", err)
+		}
+		cfg.URL = url
+	}
 	timeAxis, err := fetchWaveTimeAxis(ctx, client, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("wave time axis: %w", err)
@@ -202,6 +303,37 @@ func fetchWaveDataset(ctx context.Context, client *http.Client, cfg waveDatasetC
 		{Header: uHdr, Data: uData},
 		{Header: vHdr, Data: vData},
 	}, nil
+}
+
+// resolveWaveURL probes per-cycle dataset URLs from most-recent
+// backwards until one returns a valid DDS response, then returns it.
+// Up to 4 attempts; THREDDS / NOMADS prune old cycles after ~24 h so
+// going further back rarely helps.
+func resolveWaveURL(ctx context.Context, client *http.Client, cfg waveDatasetConfig, now time.Time) (string, error) {
+	if cfg.URLFor == nil {
+		return cfg.URL, nil
+	}
+	if len(cfg.CycleHours) == 0 {
+		return "", fmt.Errorf("URLFor set but no CycleHours configured")
+	}
+	candidate := mostRecentCycle(now.Add(-time.Duration(cfg.PublishLagH)*time.Hour), cfg.CycleHours)
+	var lastErr error
+	for i := 0; i < 4; i++ {
+		url := cfg.URLFor(candidate)
+		// `.dds` is the dataset description (variable list + dims),
+		// smaller and cheaper than `.das` or fetching a slice. Returns
+		// 200 + a parseable response iff the cycle is published.
+		if _, err := opendapGet(ctx, client, url+".dds"); err == nil {
+			return url, nil
+		} else {
+			lastErr = err
+		}
+		candidate = previousCycle(candidate, cfg.CycleHours)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no cycle returned 200 in the last 24h")
+	}
+	return "", lastErr
 }
 
 // nearestWaveTimeIndex picks the time-axis slot closest to `target`,
