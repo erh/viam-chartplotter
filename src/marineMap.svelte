@@ -122,6 +122,13 @@
   // so a user who picks a disabled stub can see *why* it's disabled
   // instead of just seeing the layer blank.
   let weatherModelError = $state<string | null>(null);
+  // setWeatherError mirrors the user-facing banner string into the
+  // browser console so the failure is grep-able + copy-pastable from
+  // DevTools even when the banner times out / scrolls off.
+  function setWeatherError(msg: string | null): void {
+    weatherModelError = msg;
+    if (msg) console.error("[weather]", msg);
+  }
 
   // Convert a "GFS run time + forecast hour" pair into a Date in local
   // time, so we can show "Tue 14:00" instead of "+12h" on the slider.
@@ -4854,11 +4861,11 @@
             onchange={async (e) => {
               const next = (e.currentTarget as HTMLSelectElement).value;
               weatherLoading = true;
-              weatherModelError = null;
+              setWeatherError(null);
               try {
                 const err = await windHandle?.setModel(next);
                 if (err) {
-                  weatherModelError = `${next}: ${err}`;
+                  setWeatherError(`${next}: ${err}`);
                   // Snap the select back to whatever the handle is
                   // actually serving so the UI doesn't lie about the
                   // current state.
@@ -4898,14 +4905,14 @@
             onchange={async (e) => {
               const next = (e.currentTarget as HTMLSelectElement).value;
               weatherLoading = true;
-              weatherModelError = null;
+              setWeatherError(null);
               try {
                 const err = await swapWaveModel(next);
                 if (err) {
                   // Roll the dropdown back to whatever is actually
                   // mounted so the UI doesn't claim a model that
                   // isn't rendering.
-                  weatherModelError = err;
+                  setWeatherError(err);
                   (e.currentTarget as HTMLSelectElement).value = waveModel;
                 }
               } finally {
@@ -6527,7 +6534,15 @@
     border-radius: 4px;
     font-size: 11px;
     z-index: 10;
-    pointer-events: none;
+    /* Selectable so the user can copy the upstream error message
+       to share / paste into a bug report. The banner sits above
+       the slider and ScaleLine but doesn't need to block clicks
+       to anything underneath — `auto` only enables selection on
+       the banner itself. */
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
     max-width: 480px;
     text-align: center;
   }
