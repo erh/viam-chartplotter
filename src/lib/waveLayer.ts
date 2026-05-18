@@ -68,7 +68,12 @@ export const WAVE_LEGEND_URL =
   `${WAVE_WMS_URL}?REQUEST=GetLegendGraphic&LAYER=Thgt` +
   `&PALETTE=rainbow&NUMCOLORBANDS=250` +
   `&COLORSCALERANGE=${WAVE_RANGE_MIN_M},${WAVE_RANGE_MAX_M}` +
-  `&WIDTH=14&HEIGHT=140&COLORBARONLY=true`;
+  // Horizontal aspect (WIDTH > HEIGHT) so ncWMS hands back a
+  // left-to-right gradient suitable for the chart's bottom strip.
+  `&WIDTH=200&HEIGHT=16&COLORBARONLY=true` +
+  // Bust any browser cache of the previous vertical-orientation URL
+  // we shipped before flipping to horizontal.
+  `&_v=h2`;
 
 export function setupWaveLayer(mapGlobal: WaveMapHandle): WaveLayerHandle {
   // PacIOOS NOAA WaveWatch III "best" THREDDS WMS. ncWMS lets us crank

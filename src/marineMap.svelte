@@ -22,7 +22,6 @@
     setupWaveLayer,
     WAVE_RANGE_MAX_M,
     METERS_TO_FEET,
-    WAVE_LEGEND_URL,
     type WaveLayerHandle,
   } from "./lib/waveLayer";
   import "ol/ol.css";
@@ -4690,19 +4689,16 @@
   <div id="map" class="w-full aspect-video bg-white"></div>
 
   {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
-    <!-- Wave-height legend. Colour strip comes from PacIOOS's
-         GetLegendGraphic (COLORBARONLY=true → just the gradient,
-         no axis labels) so the colours match the rendered tiles
-         exactly; the feet labels alongside it are ours since
-         PacIOOS only knows the data's native metres. -->
+    <!-- Wave-height legend. Pure-CSS horizontal gradient matched to
+         the ncWMS "rainbow" palette the WMS tiles use; feet labels
+         beneath. Avoiding the GetLegendGraphic PNG sidesteps a
+         caching bug where the legacy 14×140 vertical-orientation
+         response kept rendering even after the URL changed to
+         200×16 horizontal. Sits above OL's ScaleLine (bottom-left). -->
     <div class="wave-legend">
-      <img
-        class="wave-legend-strip"
-        src={WAVE_LEGEND_URL}
-        alt="wave height"
-      />
+      <div class="wave-legend-strip"></div>
       <div class="wave-legend-ticks">
-        {#each [WAVE_RANGE_MAX_M, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.25, 0] as m}
+        {#each [0, WAVE_RANGE_MAX_M * 0.25, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M] as m}
           <span>{Math.round(m * METERS_TO_FEET)} ft</span>
         {/each}
       </div>
@@ -5816,15 +5812,25 @@
      dark wordmark reads against the chart without dominating it. */
   .viam-logo-overlay {
     position: absolute;
-    /* Sits above OL's ScaleLine (bar mode is ~30 px tall, 8 px inset) so
-       the wordmark doesn't collide with the distance scale. */
-    bottom: 44px;
+    /* Bottom-left, lowest layer of the stacked corner controls
+       (logo → distance scale → wave legend, reading bottom to top). */
+    bottom: 6px;
     left: 8px;
     z-index: 1000;
     opacity: 0.7;
     filter: invert(1) drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
     pointer-events: none;
     user-select: none;
+  }
+
+  /* Push OL's bottom-left distance scale up above the Viam wordmark.
+     `bar: true` renders as `.ol-scale-bar`, NOT `.ol-scale-line` (text
+     mode), so we target both for safety. 50 px gives the ~28 px-tall
+     bar plenty of clearance over the logo at 6 px. */
+  :global(.ol-scale-line),
+  :global(.ol-scale-bar) {
+    bottom: 50px !important;
+    left: 8px !important;
   }
 
   /* Left-side toolbar: vertical stack of map controls anchored just
@@ -6130,34 +6136,51 @@
 
   .wave-legend {
     position: absolute;
-    top: 50%;
-    right: 12px;
-    transform: translateY(-50%);
+    /* Bottom-left stack — bottom→top: Viam logo (6 px), ScaleLine
+       (~50 px), wave legend (80 px). The ScaleLine override below
+       lifts OL's distance scale up enough to clear the wordmark
+       comfortably. */
+    bottom: 80px;
+    left: 8px;
     z-index: 10;
     pointer-events: none;
     background: rgba(255, 255, 255, 0.9);
-    padding: 6px 8px;
+    padding: 4px 6px 3px 6px;
     border-radius: 4px;
     border: 1px solid rgba(0, 0, 0, 0.15);
     display: flex;
-    gap: 6px;
+    flex-direction: column;
+    gap: 2px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
     font-size: 10px;
     color: #444;
   }
   .wave-legend-strip {
     display: block;
-    width: 14px;
-    height: 140px;
+    width: 200px;
+    height: 14px;
     border: 1px solid rgba(0, 0, 0, 0.2);
-    image-rendering: pixelated;
+    /* Approximates the ncWMS "rainbow" palette (left=blue → right=red,
+       no purple/magenta) that the WMS tiles use. CSS keeps it strictly
+       horizontal so we can't get tripped up by a stale vertical PNG. */
+    background: linear-gradient(
+      to right,
+      #0000ff 0%,
+      #00bfff 20%,
+      #00ff80 40%,
+      #ffff00 60%,
+      #ff8000 80%,
+      #ff0000 100%
+    );
   }
   .wave-legend-ticks {
     display: flex;
-    flex-direction: column;
     justify-content: space-between;
-    height: 140px;
+    width: 200px;
     line-height: 1;
+  }
+  .wave-legend-ticks > span {
+    white-space: nowrap;
   }
 
   .layer-section-header {
