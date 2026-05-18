@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -352,6 +354,20 @@ func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]windRecord, error
 	if u == nil || v == nil || grid == nil {
 		return nil, fmt.Errorf("HRRR: missing UGRD or VGRD@10m")
 	}
+	// Diagnostic — print the parsed Lambert grid + a sample of the
+	// unpacked source values so we can tell at runtime whether a
+	// downstream "all wind same speed" symptom is a grid-parsing bug
+	// (Latin1/Latin2/Dx zero), an unpack bug (constant values), or a
+	// reprojection bug (varying source → constant output). Logged at
+	// info level via the stdlib logger so it shows up alongside the
+	// existing weather-cache log lines without needing to thread the
+	// rdk logger through the model registry.
+	uMin, uMax := minMax(u)
+	vMin, vMax := minMax(v)
+	log.Printf("HRRR decoded fh=%d: grid Nx=%d Ny=%d La1=%.3f Lo1=%.3f LaD=%.3f LoV=%.3f Latin1=%.3f Latin2=%.3f Dx=%.1fm Dy=%.1fm scan=%d R=%.0fm; u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
+		fh, grid.Nx, grid.Ny, grid.La1, grid.Lo1, grid.LaD, grid.LoV,
+		grid.Latin1, grid.Latin2, grid.Dx, grid.Dy, grid.ScanMode, grid.EarthRadius,
+		uMin, uMax, vMin, vMax)
 	uLL, Nlon, Nlat, err := reprojectLambertToLatLon(u, grid, hrrrLonW, hrrrLonE, hrrrLatS, hrrrLatN, hrrrDlon, hrrrDlat)
 	if err != nil {
 		return nil, err
@@ -360,6 +376,10 @@ func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]windRecord, error
 	if err != nil {
 		return nil, err
 	}
+	uLLmin, uLLmax := minMax(uLL)
+	vLLmin, vLLmax := minMax(vLL)
+	log.Printf("HRRR reprojected fh=%d: Nlon=%d Nlat=%d u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
+		fh, Nlon, Nlat, uLLmin, uLLmax, vLLmin, vLLmax)
 	hdr := windHeader{
 		Center:                     7, // NCEP
 		RefTime:                    runTime.Format("2006-01-02T15:04:05.000Z"),
@@ -603,6 +623,28 @@ func modelMetaList() []modelMeta {
 		})
 	}
 	return out
+}
+
+// minMax returns the min and max of a non-empty float slice. Used by
+// the HRRR diagnostic logging to sanity-check that unpacked GRIB
+// values land in the m/s range we expect (typically ±30).
+func minMax(xs []float64) (float64, float64) {
+	if len(xs) == 0 {
+		return 0, 0
+	}
+	mn, mx := xs[0], xs[0]
+	for _, x := range xs {
+		if math.IsNaN(x) {
+			continue
+		}
+		if x < mn {
+			mn = x
+		}
+		if x > mx {
+			mx = x
+		}
+	}
+	return mn, mx
 }
 
 // Sanity check at init: model names must be URL-safe (no '/' or

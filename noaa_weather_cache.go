@@ -545,15 +545,19 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 			paramCat = int(s[9])
 			paramNum = int(s[10])
 			surfType = int(s[22])
-			surfScale := int(int8(s[23]))
+			// Sign+magnitude per GRIB2 spec — see signedInt8 in
+			// grib_sections.go for the rationale.
+			surfScale := signedInt8(s[23])
 			surfScaled := int(binary.BigEndian.Uint32(s[24:28]))
 			surfValue = float64(surfScaled) * math.Pow10(-surfScale)
 		case 5: // Data Representation
 			dataTemplate = int(binary.BigEndian.Uint16(s[9:11]))
 			// All packing templates share octets 12-21 — pull them once.
+			// Binary + decimal scale factors are sign+magnitude per the
+			// GRIB2 spec; see signedInt16's comment in grib_sections.go.
 			refValue = math.Float32frombits(binary.BigEndian.Uint32(s[11:15]))
-			binaryScale = int(int16(binary.BigEndian.Uint16(s[15:17])))
-			decimalScale = int(int16(binary.BigEndian.Uint16(s[17:19])))
+			binaryScale = signedInt16(binary.BigEndian.Uint16(s[15:17]))
+			decimalScale = signedInt16(binary.BigEndian.Uint16(s[17:19]))
 			bitsPerValue = int(s[19])
 			switch dataTemplate {
 			case 0:

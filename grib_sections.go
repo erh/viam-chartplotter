@@ -100,10 +100,36 @@ func parseProductSection(s4 []byte) (gribProductInfo, error) {
 	p.paramCat = int(s4[9])
 	p.paramNum = int(s4[10])
 	p.surfType = int(s4[22])
-	scale := int(int8(s4[23]))
+	scale := signedInt8(s4[23])
 	scaled := int(binary.BigEndian.Uint32(s4[24:28]))
 	p.surfValue = float64(scaled) * math.Pow10(-scale)
 	return p, nil
+}
+
+// signedInt8 / signedInt16 decode the GRIB2 sign+magnitude integer
+// representation: the high bit indicates sign, the remaining bits are
+// the magnitude. Used wherever the spec marks a field as "signed"
+// (binary/decimal scale factors, surface scale factor, etc.).
+//
+// Why this matters: Go's `int8` / `int16` casts use two's complement,
+// which silently produces wildly wrong values for any signed GRIB2
+// field with the sign bit set. E.g. a binary-scale-factor of -1
+// encoded per spec as 0x8001 becomes -32767 under two's complement,
+// making 2^E underflow to ~0 and collapsing every unpacked value to
+// the reference — which is the bug that first surfaced as "HRRR shows
+// 57 kt uniformly everywhere".
+func signedInt8(u uint8) int {
+	if u&0x80 != 0 {
+		return -int(u & 0x7F)
+	}
+	return int(u)
+}
+
+func signedInt16(u uint16) int {
+	if u&0x8000 != 0 {
+		return -int(u & 0x7FFF)
+	}
+	return int(u)
 }
 
 // gribPackingInfo carries everything unpack* needs to decode the data
@@ -134,8 +160,12 @@ func parsePackingSection(s5 []byte, valuesCount int) (gribPackingInfo, error) {
 	p.dataValuesCount = valuesCount
 	p.template = int(binary.BigEndian.Uint16(s5[9:11]))
 	p.refValue = math.Float32frombits(binary.BigEndian.Uint32(s5[11:15]))
-	p.binaryScale = int(int16(binary.BigEndian.Uint16(s5[15:17])))
-	p.decimalScale = int(int16(binary.BigEndian.Uint16(s5[17:19])))
+	// Binary + decimal scale factors are sign+magnitude per the GRIB2
+	// spec, NOT two's complement. See signedInt16's comment for why
+	// the distinction matters (HRRR-shaped negative scales otherwise
+	// underflow to 2^-32767).
+	p.binaryScale = signedInt16(binary.BigEndian.Uint16(s5[15:17]))
+	p.decimalScale = signedInt16(binary.BigEndian.Uint16(s5[17:19]))
 	p.bitsPerValue = int(s5[19])
 	switch p.template {
 	case 0:

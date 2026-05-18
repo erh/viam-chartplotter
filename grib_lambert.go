@@ -68,7 +68,7 @@ func parseLambertGrid(s3 []byte) (*lambertGrid, error) {
 	case 0:
 		g.EarthRadius = 6367470.0
 	case 1:
-		scale := int(int8(s3[15]))
+		scale := signedInt8(s3[15])
 		scaled := int(binary.BigEndian.Uint32(s3[16:20]))
 		g.EarthRadius = float64(scaled) * math.Pow10(-scale)
 	default:
@@ -196,7 +196,16 @@ func reprojectLambertToLatLon(
 // (fx, fy). Returns 0 outside the source grid — for HRRR/NAM that lands
 // over ocean off CONUS, which the consumers (wind particle layer)
 // happily render as "no motion".
+//
+// NaN guard: if fx or fy is NaN (e.g. forward() blew up on a degenerate
+// projection — Latin1=Latin2=0 → division by zero), the bounds-check
+// branch below would silently fall through (NaN comparisons are false
+// in Go), int(NaN) is implementation-defined, and we'd index src at a
+// non-determined cell every call. Return 0 for any non-finite fx/fy.
 func bilinearSample(src []float64, Nx, Ny int, fx, fy float64) float64 {
+	if math.IsNaN(fx) || math.IsNaN(fy) || math.IsInf(fx, 0) || math.IsInf(fy, 0) {
+		return 0
+	}
 	if fx < 0 || fy < 0 || fx > float64(Nx-1) || fy > float64(Ny-1) {
 		return 0
 	}

@@ -1,9 +1,82 @@
 package vc
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 )
+
+// buildSyntheticLambertSection3 hand-rolls a GRIB2 section 3 body that
+// encodes a known Lambert Conformal grid (template 3.30) using the
+// real-HRRR field values. The test below parses these bytes and
+// verifies every field round-trips — that's the only way to catch
+// off-by-one offset bugs without a real .grib2 sample to compare
+// against. Layout follows the WMO Manual on Codes; octet numbers in
+// comments are 1-indexed.
+func buildSyntheticLambertSection3() []byte {
+	// We pin the synthetic section length at 81 octets — the smallest
+	// valid template-3.30 body — and fill from the top.
+	s := make([]byte, 81)
+	binary.BigEndian.PutUint32(s[0:4], 81)                                // 1-4:   section length
+	s[4] = 3                                                              // 5:     section number
+	s[5] = 0                                                              // 6:     source of grid def
+	binary.BigEndian.PutUint32(s[6:10], 1799*1059)                         // 7-10:  N data points
+	s[10] = 0                                                             // 11:    octets for optional list
+	s[11] = 0                                                             // 12:    interpretation
+	binary.BigEndian.PutUint16(s[12:14], 30)                              // 13-14: template number = 30
+	s[14] = 6                                                             // 15:    shape of earth = 6 (sphere)
+	binary.BigEndian.PutUint32(s[30:34], 1799)                            // 31-34: Nx
+	binary.BigEndian.PutUint32(s[34:38], 1059)                            // 35-38: Ny
+	binary.BigEndian.PutUint32(s[38:42], 21138000)                        // 39-42: La1 (×1e6 deg) = 21.138°
+	binary.BigEndian.PutUint32(s[42:46], 237280000)                       // 43-46: Lo1 = 237.28° (= -122.72°, stored 0-360)
+	s[46] = 0                                                             // 47:    res + component flags
+	binary.BigEndian.PutUint32(s[47:51], 38500000)                        // 48-51: LaD = 38.5°
+	binary.BigEndian.PutUint32(s[51:55], 262500000)                       // 52-55: LoV = 262.5° (= -97.5°)
+	binary.BigEndian.PutUint32(s[55:59], 3000000)                         // 56-59: Dx (×10⁻³ m) = 3 km
+	binary.BigEndian.PutUint32(s[59:63], 3000000)                         // 60-63: Dy (×10⁻³ m) = 3 km
+	s[63] = 0                                                             // 64:    projection centre flag
+	s[64] = 64                                                            // 65:    scanning mode = 64 (+i, +j)
+	binary.BigEndian.PutUint32(s[65:69], 38500000)                        // 66-69: Latin1 = 38.5°
+	binary.BigEndian.PutUint32(s[69:73], 38500000)                        // 70-73: Latin2 = 38.5°
+	return s
+}
+
+// TestParseLambertGridOffsets is the byte-offset sanity check. If any
+// field of template 3.30 is read from the wrong octet the parsed grid
+// will disagree with the inputs above — and the bug that surfaced as
+// "all wind 57 kt uniformly" downstream would have been caught here.
+func TestParseLambertGridOffsets(t *testing.T) {
+	s := buildSyntheticLambertSection3()
+	g, err := parseLambertGrid(s)
+	if err != nil {
+		t.Fatalf("parseLambertGrid: %v", err)
+	}
+	checks := []struct {
+		name string
+		got  float64
+		want float64
+	}{
+		{"Nx", float64(g.Nx), 1799},
+		{"Ny", float64(g.Ny), 1059},
+		{"La1", g.La1, 21.138},
+		// Lo1 of 237.28° is normalised by parseLambertGrid into -122.72°
+		// so the projection math sees a [-180,180] longitude.
+		{"Lo1", g.Lo1, -122.72},
+		{"LaD", g.LaD, 38.5},
+		{"LoV", g.LoV, -97.5},
+		{"Dx", g.Dx, 3000},
+		{"Dy", g.Dy, 3000},
+		{"Latin1", g.Latin1, 38.5},
+		{"Latin2", g.Latin2, 38.5},
+		{"ScanMode", float64(g.ScanMode), 64},
+		{"EarthRadius", g.EarthRadius, 6371229},
+	}
+	for _, c := range checks {
+		if math.Abs(c.got-c.want) > 1e-6 {
+			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
 
 // hrrrLikeGrid returns the projection parameters NCEP publishes for the
 // 3 km HRRR CONUS grid. Used in multiple tests; pulled to a helper so
