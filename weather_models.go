@@ -595,6 +595,12 @@ func namWindStub() *WeatherModel {
 
 const ecmwfBaseURL = "https://data.ecmwf.int/forecasts/%s/%02dz/ifs/0p25/oper/%s%02d0000-%dh-oper-fc"
 
+// ecmwfUserAgent identifies us to ECMWF Open Data's WAF. The default
+// Go http.Client UA ("Go-http-client/1.1") trips a 429 rate limit
+// almost immediately; ECMWF Open Data's documentation explicitly
+// asks automated clients to send a descriptive UA with a contact URL.
+const ecmwfUserAgent = "viam-chartplotter/0.1 (+https://github.com/erh/viam-chartplotter)"
+
 // ecmwfIndexEntry is one JSON line out of the .index sidecar. ECMWF
 // stamps extra keys on each line (class, expver, stream, …); we only
 // care about the ones that identify a wind-at-10m message and the byte
@@ -649,7 +655,7 @@ func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Ti
 	indexURL := base + ".index"
 	gribURL := base + ".grib2"
 
-	idxBody, err := fetchURLAnyContent(ctx, client, indexURL)
+	idxBody, err := ecmwfGet(ctx, client, indexURL, "")
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF index: %w", err)
 	}
@@ -658,11 +664,11 @@ func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Ti
 		return nil, fmt.Errorf("ECMWF index pick: %w", err)
 	}
 
-	uMsg, err := fetchRange(ctx, client, gribURL, uEntry.Offset, uEntry.Length)
+	uMsg, err := ecmwfGetRange(ctx, client, gribURL, uEntry.Offset, uEntry.Length)
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF 10u range: %w", err)
 	}
-	vMsg, err := fetchRange(ctx, client, gribURL, vEntry.Offset, vEntry.Length)
+	vMsg, err := ecmwfGetRange(ctx, client, gribURL, vEntry.Offset, vEntry.Length)
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF 10v range: %w", err)
 	}
@@ -718,31 +724,40 @@ func pickECMWFWindEntries(idx []byte) (uEntry, vEntry ecmwfIndexEntry, err error
 	return uEntry, vEntry, nil
 }
 
-// fetchRange issues a HTTP Range request against url and returns the
-// requested byte slice. Used to grab just the 10u/10v messages out of
-// ECMWF's monolithic per-step GRIB2 file.
-func fetchRange(ctx context.Context, client *http.Client, url string, offset, length int64) ([]byte, error) {
+// ecmwfGet issues a polite GET against data.ecmwf.int. ECMWF Open
+// Data's WAF responds 429 to the default Go User-Agent within a few
+// hits per minute; setting a descriptive UA per their docs avoids
+// the throttle and matches what we ask of users of cmd/ecmwf-probe.
+func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	req.Header.Set("User-Agent", ecmwfUserAgent)
+	req.Header.Set("Accept", "*/*")
+	if rangeHdr != "" {
+		req.Header.Set("Range", rangeHdr)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	// Servers that honour ranges return 206; some buggy ones return
-	// 200 with the full body — accept either and trust the byte slice.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, url)
 	}
-	body, err := io.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
+}
+
+// ecmwfGetRange is the byte-range variant — same UA-shaping as
+// ecmwfGet but slices a 200-with-full-body response down to the
+// requested window if a misbehaving cache ignored the Range header.
+func ecmwfGetRange(ctx context.Context, client *http.Client, url string, offset, length int64) ([]byte, error) {
+	body, err := ecmwfGet(ctx, client, url, fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusOK && int64(len(body)) > length {
-		// Range was ignored — slice down to the window we asked for.
+	if int64(len(body)) > length {
 		body = body[offset : offset+length]
 	}
 	if len(body) < 4 || string(body[:4]) != "GRIB" {

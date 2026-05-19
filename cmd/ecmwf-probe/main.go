@@ -94,23 +94,22 @@ func main() {
 	}
 }
 
+// ecmwfUserAgent identifies this probe to ECMWF's WAF. The default Go
+// User-Agent string ("Go-http-client/1.1") trips a 429 rate limit
+// almost immediately; a descriptive UA with a contact URL is what
+// ECMWF Open Data's docs ask of automated clients.
+const ecmwfUserAgent = "viam-chartplotter-ecmwf-probe/0.1 (+https://github.com/erh/viam-chartplotter)"
+
 func fetchECMWFMessage(date string, cycle, step int, param string) ([]byte, error) {
 	base := fmt.Sprintf(ecmwfBaseURL, date, cycle, date, cycle, step)
 	indexURL := base + ".index"
 	gribURL := base + ".grib2"
 
 	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Get(indexURL)
+
+	idxBody, err := httpGetWithRetry(client, indexURL, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("index: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("index %s: HTTP %d", indexURL, resp.StatusCode)
-	}
-	idxBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("index read: %w", err)
 	}
 
 	var hit indexEntry
@@ -138,27 +137,63 @@ func fetchECMWFMessage(date string, cycle, step int, param string) ([]byte, erro
 
 	log.Printf("index hit: param=%s offset=%d length=%d", hit.Param, hit.Offset, hit.Length)
 
-	req, err := http.NewRequest("GET", gribURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", hit.Offset, hit.Offset+hit.Length-1))
-	resp2, err := client.Do(req)
+	rangeHdr := fmt.Sprintf("bytes=%d-%d", hit.Offset, hit.Offset+hit.Length-1)
+	body, err := httpGetWithRetry(client, gribURL, rangeHdr, "")
 	if err != nil {
 		return nil, fmt.Errorf("range get: %w", err)
 	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK && resp2.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("range get %s: HTTP %d", gribURL, resp2.StatusCode)
-	}
-	body, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp2.StatusCode == http.StatusOK && int64(len(body)) > hit.Length {
+	// If the server didn't honour Range and returned the full body,
+	// slice down. httpGetWithRetry only treats 200 / 206 as success.
+	if int64(len(body)) > hit.Length {
 		body = body[hit.Offset : hit.Offset+hit.Length]
 	}
 	return body, nil
+}
+
+// httpGetWithRetry issues an HTTP GET with a polite User-Agent and
+// retries on 429 (rate limited) and 5xx with exponential backoff. We
+// keep it simple — no jitter, no concurrent dedup — because the probe
+// is a single-shot diagnostic tool.
+func httpGetWithRetry(client *http.Client, url, rangeHdr, _ string) ([]byte, error) {
+	delay := 2 * time.Second
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", ecmwfUserAgent)
+		req.Header.Set("Accept", "*/*")
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			log.Printf("attempt %d: %v — retrying in %s", attempt+1, err, delay)
+			time.Sleep(delay)
+			delay *= 2
+			continue
+		}
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+			defer resp.Body.Close()
+			return io.ReadAll(resp.Body)
+		}
+		// Body may carry a useful 429/5xx error message — surface it.
+		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		resp.Body.Close()
+		lastErr = fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, url, bytes.TrimSpace(preview))
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests, http.StatusServiceUnavailable,
+			http.StatusBadGateway, http.StatusGatewayTimeout:
+			log.Printf("attempt %d: %v — retrying in %s", attempt+1, lastErr, delay)
+			time.Sleep(delay)
+			delay *= 2
+			continue
+		}
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("exhausted retries: %w", lastErr)
 }
 
 func min(a, b int) int {
