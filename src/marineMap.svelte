@@ -3143,7 +3143,39 @@
         // still resolves to a valid tile.
         return [-80, 30, -60, 50];
       };
-      setupWeatherLayer(mapGlobal, {
+      // Prefer ECMWF as the default wind model when the CDN is up
+      // and serving fresh data — it's higher-fidelity than GFS at
+      // short range AND it's served from R2 (free fan-out at fleet
+      // scale). Fall back to "gfs" (the existing default, fetched
+      // locally from NOMADS) when the CDN's latest.json is
+      // unreachable or stale, so a publisher outage doesn't take
+      // the wind layer down for the fleet.
+      //
+      // setupLayers isn't async, so we do this as a promise chain
+      // that resolves before setupWeatherLayer is called. The
+      // probe is fast (a single fetch of a ~5 KB JSON pointer) and
+      // dedupes with the regular per-fh fetch path (the lazy
+      // getECMWFTileClient caches the client and the LatestPointer).
+      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+      const probeECMWF: Promise<void> = getECMWFTileClient()
+        .then(async (client) => {
+          if (!client) return;
+          const latest = await client.getLatest();
+          const age = Date.now() - Date.parse(latest.publishedAt);
+          if (Number.isFinite(age) && age < STALE_THRESHOLD_MS) {
+            windModel = "ecmwf";
+            console.log(`wind layer default: ecmwf (CDN fresh, publishedAt=${latest.publishedAt})`);
+          } else {
+            console.log(`wind layer default: gfs (ECMWF CDN stale, ${age}ms old)`);
+          }
+        })
+        .catch((e) => {
+          console.warn("wind layer default: gfs (ECMWF CDN probe failed):", e);
+        });
+      probeECMWF.then(() => setupWindLayer());
+
+      function setupWindLayer() {
+        setupWeatherLayer(mapGlobal, {
         layerName: "wind",
         displayName: "wind",
         parent: "weather",
@@ -3254,6 +3286,7 @@
         .finally(() => {
           windLoading = false;
         });
+      } // end setupWindLayer
       // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
       // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
       // and converted to u/v vectors so it shares the same JSON shape
