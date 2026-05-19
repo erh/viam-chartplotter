@@ -964,6 +964,61 @@
     }
   });
 
+  // Catch a weather child layer up the next time it goes from
+  // off → on. The forecast-hour slider only syncs visible layers
+  // (each layer's setData blocks the main thread, so syncing
+  // hidden ones would stack onto the user's wait), which means a
+  // hidden layer can lag the slider value. We track effective-on
+  // (parent && self) across runs and trigger a one-shot fetch on
+  // the false → true edge. Idempotent: setForecastHour returns
+  // immediately when fh already matches.
+  let prevWindOn = $state(false);
+  let prevWaveOn = $state(false);
+  let prevIsobarOn = $state(false);
+  $effect(() => {
+    const parent = mapGlobal.layerOptions.find((l) => l.name === "weather");
+    const wind = mapGlobal.layerOptions.find((l) => l.name === "wind");
+    const wave = mapGlobal.layerOptions.find((l) => l.name === "waves");
+    const isobar = mapGlobal.layerOptions.find((l) => l.name === "isobars");
+    const parentOn = parent?.on ?? true;
+    const windOn = parentOn && !!wind?.on;
+    const waveOn = parentOn && !!wave?.on;
+    const isobarOn = parentOn && !!isobar?.on;
+    if (
+      windOn && !prevWindOn && windHandle &&
+      windHandle.getForecastHour() !== weatherForecastHour
+    ) {
+      windLoading = true;
+      windHandle
+        .setForecastHour(weatherForecastHour)
+        .catch(() => {})
+        .finally(() => { windLoading = false; });
+    }
+    if (
+      waveOn && !prevWaveOn && waveHandle &&
+      waveHandle.getForecastHour() !== weatherForecastHour
+    ) {
+      waveLoading = true;
+      waveHandle
+        .setForecastHour(weatherForecastHour)
+        .catch(() => {})
+        .finally(() => { waveLoading = false; });
+    }
+    if (
+      isobarOn && !prevIsobarOn && isobarHandle &&
+      isobarHandle.getForecastHour() !== weatherForecastHour
+    ) {
+      isobarLoading = true;
+      isobarHandle
+        .setForecastHour(weatherForecastHour)
+        .catch(() => {})
+        .finally(() => { isobarLoading = false; });
+    }
+    prevWindOn = windOn;
+    prevWaveOn = waveOn;
+    prevIsobarOn = isobarOn;
+  });
+
   let mapGlobal = $state({
     map: null as Map | null,
     view: null as View | null,
@@ -5064,39 +5119,51 @@
           // re-render at the stale old value and snap the thumb back
           // to the slider's min.
           weatherForecastHour = v;
-          if (windHandle) windLoading = true;
-          if (waveHandle) waveLoading = true;
-          if (isobarHandle) isobarLoading = true;
-          // Hide both data layers while we refetch so the user doesn't
-          // see the previous forecast hour's pixels under the new
-          // forecast-hour label — purely visual, the OL layers stay
-          // registered so the toggles stay where the user left them.
-          const windLayer = mapGlobal.layerOptions.find(
-            (l) => l.name === "wind",
-          )?.layer as any;
-          const waveLayer = mapGlobal.layerOptions.find(
-            (l) => l.name === "waves",
-          )?.layer as any;
-          const isobarLayer = mapGlobal.layerOptions.find(
+          // Sync only the layers the user can actually see. ol-wind
+          // setData and ol's GeoJSON readFeatures both block the main
+          // thread, so they serialise on the event loop even though
+          // we Promise.all them — every off-but-fetched layer adds
+          // wall-clock time the user feels as slider lag. The on→off
+          // $effect further down catches a layer up the next time
+          // it's enabled.
+          const weatherParent = mapGlobal.layerOptions.find(
+            (l) => l.name === "weather",
+          );
+          const parentOn = weatherParent?.on ?? true;
+          const windOpt = mapGlobal.layerOptions.find((l) => l.name === "wind");
+          const waveOpt = mapGlobal.layerOptions.find((l) => l.name === "waves");
+          const isobarOpt = mapGlobal.layerOptions.find(
             (l) => l.name === "isobars",
-          )?.layer as any;
-          windLayer?.setVisible?.(false);
-          waveLayer?.setVisible?.(false);
-          isobarLayer?.setVisible?.(false);
+          );
+          const syncWind = parentOn && !!windOpt?.on && !!windHandle;
+          const syncWave = parentOn && !!waveOpt?.on && !!waveHandle;
+          const syncIsobars = parentOn && !!isobarOpt?.on && !!isobarHandle;
+          if (syncWind) windLoading = true;
+          if (syncWave) waveLoading = true;
+          if (syncIsobars) isobarLoading = true;
+          // Hide each layer that's about to refetch so the user
+          // doesn't see the previous forecast hour's pixels under
+          // the new forecast-hour label. Don't touch off layers —
+          // their visibility is governed by the panel's $effect.
+          const windLayer = windOpt?.layer as any;
+          const waveLayer = waveOpt?.layer as any;
+          const isobarLayer = isobarOpt?.layer as any;
+          if (syncWind) windLayer?.setVisible?.(false);
+          if (syncWave) waveLayer?.setVisible?.(false);
+          if (syncIsobars) isobarLayer?.setVisible?.(false);
           try {
-            // Drive all weather layers in lockstep — all three are fed
-            // by the same /noaa-weather/data/{model}/latest.json?fh=N
-            // pipeline so they refresh together when the slider moves.
             const tasks: Promise<void>[] = [];
-            if (windHandle) tasks.push(windHandle.setForecastHour(v));
-            if (waveHandle) tasks.push(waveHandle.setForecastHour(v));
-            if (isobarHandle) tasks.push(isobarHandle.setForecastHour(v));
+            if (syncWind && windHandle) tasks.push(windHandle.setForecastHour(v));
+            if (syncWave && waveHandle) tasks.push(waveHandle.setForecastHour(v));
+            if (syncIsobars && isobarHandle) tasks.push(isobarHandle.setForecastHour(v));
             await Promise.all(tasks);
-            if (windHandle) {
+            if (syncWind && windHandle) {
               weatherForecastHour = windHandle.getForecastHour();
               weatherRunTime = windHandle.getRunTime();
-            } else if (waveHandle) {
+            } else if (syncWave && waveHandle) {
               weatherForecastHour = waveHandle.getForecastHour();
+            } else if (syncIsobars && isobarHandle) {
+              weatherForecastHour = isobarHandle.getForecastHour();
             } else {
               weatherForecastHour = v;
             }
@@ -5105,9 +5172,9 @@
             windLoading = false;
             waveLoading = false;
             isobarLoading = false;
-            windLayer?.setVisible?.(true);
-            waveLayer?.setVisible?.(true);
-            isobarLayer?.setVisible?.(true);
+            if (syncWind) windLayer?.setVisible?.(true);
+            if (syncWave) waveLayer?.setVisible?.(true);
+            if (syncIsobars) isobarLayer?.setVisible?.(true);
           }
         }}
         />
