@@ -6,14 +6,17 @@
 //
 // Usage:
 //
-//	go run ./cmd/ecmwf-probe                  # most recent default cycle, step 0, 10u
+//	go run ./cmd/ecmwf-probe                              # default cycle, step 0, 10u — cached
 //	go run ./cmd/ecmwf-probe -date 20260518 -cycle 0 -step 6 -param 10v
-//	go run ./cmd/ecmwf-probe -file /path/to/captured.grib2
+//	go run ./cmd/ecmwf-probe -file /path/to/captured.grib2 # offline replay
+//	go run ./cmd/ecmwf-probe -refresh                     # force network refetch
 //
-// The -file form skips the HTTP fetch and parses a local file —
-// useful when running offline (the sandbox CI environment can't
-// reach data.ecmwf.int but a developer can drop a local file in
-// place after fetching it elsewhere).
+// The probe is cache-first by default: the first run downloads the
+// message and writes the wire bytes to a deterministic path; every
+// subsequent invocation with the same (date, cycle, step, param)
+// reuses that file without hitting data.ecmwf.int. The path is
+// printed at startup so you always know where the blob is, even when
+// the decoder later crashes. Pass -refresh to force a redownload.
 package main
 
 import (
@@ -44,13 +47,14 @@ type indexEntry struct {
 
 func main() {
 	var (
-		date  = flag.String("date", "", "cycle date YYYYMMDD (default: today UTC)")
-		cycle = flag.Int("cycle", 0, "cycle hour (0/6/12/18)")
-		step  = flag.Int("step", 0, "forecast step in hours")
-		param = flag.String("param", "10u", "parameter name (10u/10v/2t/...)")
-		file  = flag.String("file", "", "local .grib2 file to parse (skips HTTP fetch)")
-		out   = flag.String("out", "", "explicit path to save the fetched .grib2 bytes (defaults to /tmp/ecmwf-probe-...grib2 so a decoder failure always leaves replayable wire data)")
-		quiet = flag.Bool("quiet", false, "suppress per-block AEC trace lines")
+		date    = flag.String("date", "", "cycle date YYYYMMDD (default: yesterday UTC)")
+		cycle   = flag.Int("cycle", 0, "cycle hour (0/6/12/18)")
+		step    = flag.Int("step", 0, "forecast step in hours")
+		param   = flag.String("param", "10u", "parameter name (10u/10v/2t/...)")
+		file    = flag.String("file", "", "local .grib2 file to parse (skips HTTP + cache)")
+		out     = flag.String("out", "", "explicit cache path for the fetched .grib2 bytes (default: <cacheDir>/ecmwf-probe-...grib2)")
+		refresh = flag.Bool("refresh", false, "redownload even if the cache file already exists")
+		quiet   = flag.Bool("quiet", false, "suppress per-block AEC trace lines")
 	)
 	flag.Parse()
 
@@ -59,14 +63,17 @@ func main() {
 	}
 
 	var grib []byte
-	if *file != "" {
+	switch {
+	case *file != "":
+		// Offline replay path — don't touch the network or the cache.
 		b, err := os.ReadFile(*file)
 		if err != nil {
 			log.Fatalf("read %s: %v", *file, err)
 		}
 		grib = b
 		log.Printf("loaded local file %s (%d bytes)", *file, len(grib))
-	} else {
+	default:
+		// Network path with on-disk cache.
 		if *date == "" {
 			// ECMWF Open Data publishes a few hours after the cycle;
 			// fall back to "yesterday at this cycle" to dodge the
@@ -74,31 +81,36 @@ func main() {
 			t := time.Now().UTC().Add(-24 * time.Hour)
 			*date = t.Format("20060102")
 		}
+		cachePath := *out
+		if cachePath == "" {
+			cachePath = defaultCachePath(*date, *cycle, *step, *param)
+		}
+		// Cache-first: if the file is already on disk, use it and
+		// don't hit the server. The point of the cache is to avoid
+		// repeatedly downloading the same blob while iterating on
+		// the decoder; we'd otherwise trip ECMWF's WAF in a few runs.
+		if !*refresh {
+			if b, err := os.ReadFile(cachePath); err == nil {
+				grib = b
+				log.Printf("CACHE HIT: %s (%d bytes) — pass -refresh to redownload", cachePath, len(grib))
+				break
+			}
+		}
+		log.Printf("CACHE MISS: fetching from data.ecmwf.int (will write to %s)", cachePath)
 		b, err := fetchECMWFMessage(*date, *cycle, *step, *param)
 		if err != nil {
 			log.Fatalf("fetch: %v", err)
 		}
 		grib = b
-		log.Printf("fetched %s %02dz step=%d %s (%d bytes)", *date, *cycle, *step, *param, len(grib))
-	}
-
-	// Persist the wire bytes BEFORE running the decoder so a crash
-	// or panic still leaves something to inspect with hexdump / a
-	// different decoder / a later probe run with -file. When the
-	// user didn't pass -out, default to a deterministic path under
-	// /tmp so they don't have to know the convention up front. -file
-	// runs already have the source on disk, so we don't double-write.
-	if *file == "" {
-		outPath := *out
-		if outPath == "" {
-			outPath = filepath.Join(os.TempDir(),
-				fmt.Sprintf("ecmwf-probe-%s-%02dz-f%03d-%s.grib2",
-					*date, *cycle, *step, *param))
+		// Persist BEFORE decode so a crash or unpacker error still
+		// leaves the file on disk for replay / inspection / iteration.
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			log.Fatalf("mkdir %s: %v", filepath.Dir(cachePath), err)
 		}
-		if err := os.WriteFile(outPath, grib, 0o644); err != nil {
-			log.Fatalf("write %s: %v", outPath, err)
+		if err := os.WriteFile(cachePath, grib, 0o644); err != nil {
+			log.Fatalf("write %s: %v", cachePath, err)
 		}
-		log.Printf("wrote %d wire bytes to %s (use -file %s to replay)", len(grib), outPath, outPath)
+		log.Printf("wrote %d wire bytes to %s", len(grib), cachePath)
 	}
 
 	if len(grib) < 4 || string(grib[:4]) != "GRIB" {
@@ -115,6 +127,26 @@ func main() {
 	}
 }
 
+// defaultCachePath returns the cache file path for a (date, cycle,
+// step, param) tuple. Prefers $XDG_CACHE_HOME or ~/Library/Caches on
+// macOS so files survive across reboots — /tmp on macOS is a tmpfs
+// that empties on every restart, which defeated the cache for runs
+// spanning a reboot.
+func defaultCachePath(date string, cycle, step int, param string) string {
+	dir := userCacheDir("viam-chartplotter-ecmwf-probe")
+	name := fmt.Sprintf("ecmwf-%s-%02dz-f%03d-%s.grib2", date, cycle, step, param)
+	return filepath.Join(dir, name)
+}
+
+// userCacheDir returns os.UserCacheDir() with `name` appended, falling
+// back to a sibling of /tmp if the user cache dir isn't available.
+func userCacheDir(name string) string {
+	if base, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(base, name)
+	}
+	return filepath.Join(os.TempDir(), name)
+}
+
 // ecmwfUserAgent identifies this probe to ECMWF's WAF. The default Go
 // User-Agent string ("Go-http-client/1.1") trips a 429 rate limit
 // almost immediately; a descriptive UA with a contact URL is what
@@ -128,7 +160,7 @@ func fetchECMWFMessage(date string, cycle, step int, param string) ([]byte, erro
 
 	client := &http.Client{Timeout: 120 * time.Second}
 
-	idxBody, err := httpGetWithRetry(client, indexURL, "", "")
+	idxBody, err := httpGetWithRetry(client, indexURL, "")
 	if err != nil {
 		return nil, fmt.Errorf("index: %w", err)
 	}
@@ -159,12 +191,10 @@ func fetchECMWFMessage(date string, cycle, step int, param string) ([]byte, erro
 	log.Printf("index hit: param=%s offset=%d length=%d", hit.Param, hit.Offset, hit.Length)
 
 	rangeHdr := fmt.Sprintf("bytes=%d-%d", hit.Offset, hit.Offset+hit.Length-1)
-	body, err := httpGetWithRetry(client, gribURL, rangeHdr, "")
+	body, err := httpGetWithRetry(client, gribURL, rangeHdr)
 	if err != nil {
 		return nil, fmt.Errorf("range get: %w", err)
 	}
-	// If the server didn't honour Range and returned the full body,
-	// slice down. httpGetWithRetry only treats 200 / 206 as success.
 	if int64(len(body)) > hit.Length {
 		body = body[hit.Offset : hit.Offset+hit.Length]
 	}
@@ -175,7 +205,7 @@ func fetchECMWFMessage(date string, cycle, step int, param string) ([]byte, erro
 // retries on 429 (rate limited) and 5xx with exponential backoff. We
 // keep it simple — no jitter, no concurrent dedup — because the probe
 // is a single-shot diagnostic tool.
-func httpGetWithRetry(client *http.Client, url, rangeHdr, _ string) ([]byte, error) {
+func httpGetWithRetry(client *http.Client, url, rangeHdr string) ([]byte, error) {
 	delay := 2 * time.Second
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -200,7 +230,6 @@ func httpGetWithRetry(client *http.Client, url, rangeHdr, _ string) ([]byte, err
 			defer resp.Body.Close()
 			return io.ReadAll(resp.Body)
 		}
-		// Body may carry a useful 429/5xx error message — surface it.
 		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		resp.Body.Close()
 		lastErr = fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, url, bytes.TrimSpace(preview))
