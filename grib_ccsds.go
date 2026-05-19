@@ -425,46 +425,55 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			}
 		}
 
-		// Preprocessor inverse: convert the AEC-decoded per-sample
-		// mapped values back to absolute samples. libaec's FLUSH
-		// macro in decode.c (NOT the strict CCSDS 121.0-B-3 theta-
-		// mapping) is what we have to match — ecCodes drives libaec
-		// on the encode side, so anything else mis-decodes the wire.
+		// Preprocessor inverse, modelled directly on libaec/src/
+		// decode.c's FLUSH macro (the unsigned xmin==0 branch — which
+		// is what GRIB2's CCSDS encoding always lands in). Three
+		// pieces matter here that earlier revisions of this code got
+		// wrong:
 		//
-		// Two branches, threshold at d/2 ≤ xMax-prev:
+		//   1. half_d is ceil(d/2), encoded as `(d>>1) + (d&1)` — not
+		//      floor(d/2). Using floor makes the threshold off by one
+		//      for odd d at the boundary, which silently mis-classes
+		//      whole runs of samples between alternation and
+		//      complement.
 		//
-		//   - In-range (d/2 <= xMax-prev): "alternating" decode.
-		//     Even d → positive delta d/2; odd d → negative delta
-		//     -(d/2 + 1). New sample = prev + delta. This is the
-		//     branch the encoder picks when |delta| fits in
-		//     [-(xMax-prev), +(xMax-prev)], i.e., everything within
-		//     reach via straight subtraction from xMax.
+		//   2. The complement branch's "mask" depends on which half
+		//      of [0, xMax] `prev` is in. With med = xMax/2 + 1:
+		//        prev <  med (lower half): mask = 0    → complement
+		//                                    yields  data = d
+		//        prev >= med (upper half): mask = xMax → complement
+		//                                    yields  data = xMax - d
+		//      That asymmetry mirrors the encoder, which uses
+		//      d = X for an "increasing complement" jump from a
+		//      lower-half prev (encode.c preprocess_unsigned, line
+		//      `d[i+1] = x[i+1]`) and d = xMax-X for the upper-half
+		//      "decreasing complement" jump. Using `data = xMax^d`
+		//      unconditionally (as the previous revision did) made
+		//      lower-half jumps decode to xMax-X instead of X.
 		//
-		//   - Out-of-range (d/2 > xMax-prev): "complement" decode.
-		//     New sample = xMax XOR d. The encoder picks this branch
-		//     for samples on the far side of prev when alternating
-		//     would require a larger d than the complement does;
-		//     concretely this is the "prev is close to xMax, target
-		//     sample is close to 0" case.
-		//
-		// Previously this code used the strict CCSDS theta formula
-		// (theta = min(prev, xMax-prev)) which produced wildly wrong
-		// values for any block where prev was in the upper half of
-		// the range — that's the "wind bouncing around like crazy"
-		// symptom you saw once the decoder finished without bit-
-		// budget errors.
+		//   3. The threshold itself is `half_d <= (mask ^ prev)`,
+		//      which evaluates to `half_d <= prev` in the lower half
+		//      and `half_d <= xMax-prev` in the upper half — again
+		//      asymmetric, matching the encoder's per-direction
+		//      D <= prev / D <= xMax-prev bounds.
 		if preprocess {
 			xMax := uint64(1)<<uint(bps) - 1
+			med := xMax/2 + 1
 			prev := refSample
 			for i := rsiOut + 1; i < len(out); i++ {
-				mapped := out[i]
+				d := out[i]
+				halfD := (d >> 1) + (d & 1)
+				var mask uint64
+				if prev&med != 0 {
+					mask = xMax
+				}
 				var newVal uint64
-				if (mapped >> 1) <= xMax-prev {
+				if halfD <= (mask ^ prev) {
 					var delta int64
-					if mapped&1 == 0 {
-						delta = int64(mapped / 2)
+					if d&1 == 0 {
+						delta = int64(d >> 1)
 					} else {
-						delta = -(int64(mapped>>1) + 1)
+						delta = -(int64(d>>1) + 1)
 					}
 					v := int64(prev) + delta
 					if v < 0 {
@@ -474,7 +483,7 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					}
 					newVal = uint64(v)
 				} else {
-					newVal = xMax ^ mapped
+					newVal = mask ^ d
 				}
 				out[i] = newVal
 				prev = newVal
