@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"sort"
 
 	"github.com/fogleman/gg"
 )
@@ -57,19 +58,62 @@ func RenderTile(fs *FeatureSet, z, x, y int) ([]byte, error) {
 	eMinLon, eMaxLon := tMinLon-bufDeg, tMaxLon+bufDeg
 	eMinLat, eMaxLat := tMinLat-bufDeg, tMaxLat+bufDeg
 
-	// Geometry pass. FeatureSet is pre-sorted into painter's order at
-	// load time so we can iterate in place.
+	// Geometry pass — split into three sub-passes so road casings
+	// and fills paint as two global sweeps. Otherwise residential
+	// streets' casings would cut across motorway fills wherever they
+	// intersect, instead of appearing to flow under them.
+	//
+	//   1. Non-road geometry (landuse, buildings, leisure, ...)
+	//   2. All road casings, lowest-class first
+	//   3. All road fills, lowest-class first
+	zu8 := uint8(z)
+	type roadCandidate struct {
+		idx   int
+		order int
+	}
+	var roads []roadCandidate
+
 	for i := range fs.Features {
 		f := &fs.Features[i]
+		if zu8 < f.MinZoom {
+			continue
+		}
 		if f.MaxLon < eMinLon || f.MinLon > eMaxLon ||
 			f.MaxLat < eMinLat || f.MinLat > eMaxLat {
+			continue
+		}
+		if f.Class == ClassRoad {
+			roads = append(roads, roadCandidate{i, roadClassPaintOrder(f.RoadKind)})
 			continue
 		}
 		drawFeature(dc, f, z, x, y)
 	}
 
+	sort.SliceStable(roads, func(i, j int) bool {
+		return roads[i].order < roads[j].order
+	})
+	scale := roadWidthScale(z)
+	for _, rc := range roads {
+		f := &fs.Features[rc.idx]
+		s := roadStyles[f.RoadKind]
+		strokeRoadAlong(dc, f, z, x, y, s.casingColor, s.casingWidth*scale)
+	}
+	for _, rc := range roads {
+		f := &fs.Features[rc.idx]
+		s := roadStyles[f.RoadKind]
+		strokeRoadAlong(dc, f, z, x, y, s.fillColor, s.fillWidth*scale)
+	}
+
 	// Label pass.
-	if err := drawLabels(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat); err != nil {
+	placed, err := drawLabels(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat)
+	if err != nil {
+		return nil, err
+	}
+
+	// Shields pass — paints route refs (I-95, NY-9A, ...) on top of
+	// road labels but sharing the same collision tracker so they
+	// don't pile up.
+	if err := drawShields(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat, &placed); err != nil {
 		return nil, err
 	}
 
@@ -114,7 +158,7 @@ const minSameNameLineDist = 150.0
 // Collisions are resolved greedy first-wins — features are pre-sorted
 // into painter's order at load time, which puts higher-importance
 // classes (Place < POI < Road) first so they claim space.
-func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64) error {
+func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64) ([]labelRect, error) {
 	zu8 := uint8(z)
 	var placed []labelRect
 	var placedLineNames []namedAnchor
@@ -136,7 +180,7 @@ func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, t
 		if size != curSize {
 			face, err := labelFontFace(size)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			dc.SetFontFace(face)
 			curSize = size
@@ -151,7 +195,7 @@ func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, t
 			drawAreaLabel(dc, f, z, x, y, size, &placed)
 		}
 	}
-	return nil
+	return placed, nil
 }
 
 // drawAreaLabel places a name at the vertex-average centroid of a

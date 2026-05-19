@@ -132,6 +132,94 @@ func isRenderedNatural(v string) bool {
 	return false
 }
 
+// GeomMinZoom returns the smallest zoom at which a feature's geometry
+// should be drawn. Lifted (loosely) from openstreetmap-carto's
+// `project.mml`/`roads.mss` thresholds — roads are filtered by
+// `highway=*` sub-type, buildings appear at z=14, and most landuse
+// only at z=8+. Without this, low-zoom tiles for any dense city look
+// like uniform gray static.
+func GeomMinZoom(class Class, tags osm.Tags) uint8 {
+	switch class {
+	case ClassRoad:
+		switch tags.Find("highway") {
+		case "motorway", "motorway_link":
+			return 5
+		case "trunk", "trunk_link":
+			return 6
+		case "primary", "primary_link":
+			return 8
+		case "secondary", "secondary_link":
+			return 10
+		case "tertiary", "tertiary_link":
+			return 12
+		case "unclassified", "residential", "living_street":
+			return 13
+		case "service":
+			return 15
+		case "pedestrian", "footway", "path", "cycleway", "bridleway", "steps", "track":
+			return 14
+		case "":
+			return 13
+		}
+		return 13
+	case ClassBuilding:
+		return 14
+	case ClassRailway:
+		switch tags.Find("railway") {
+		case "rail":
+			return 8
+		case "subway", "light_rail", "tram":
+			return 12
+		}
+		return 13
+	case ClassAeroway:
+		switch tags.Find("aeroway") {
+		case "runway":
+			return 10
+		case "taxiway":
+			return 13
+		}
+		return 13
+	case ClassAdmin:
+		// admin_level=2 (country) at low zoom; finer admin lines at
+		// higher zooms. Treat any administrative boundary as visible
+		// from z=4 for now — we don't carry admin_level through.
+		return 4
+	case ClassLanduse:
+		switch tags.Find("landuse") {
+		case "forest", "park", "meadow", "grass", "farmland":
+			return 8
+		case "residential", "commercial", "industrial", "retail":
+			return 10
+		}
+		return 10
+	case ClassNatural:
+		switch tags.Find("natural") {
+		case "wood", "forest", "grassland", "meadow", "scrub", "heath", "wetland":
+			return 7
+		case "beach", "sand", "bare_rock":
+			return 11
+		case "peak", "saddle", "volcano":
+			return 10
+		}
+		return 12
+	case ClassLeisure:
+		switch tags.Find("leisure") {
+		case "park", "garden", "nature_reserve", "recreation_ground", "common":
+			return 10
+		}
+		return 13
+	case ClassPlace:
+		// Place dots aren't really visible without their labels;
+		// reuse the label threshold so we don't draw a dot at a
+		// zoom where its name is hidden.
+		return LabelMinZoom(class, tags)
+	case ClassPOI:
+		return 14
+	}
+	return 0
+}
+
 // LabelMinZoom returns the smallest zoom at which a feature should be
 // labelled, or 0 if it should not. Thresholds are loosely modelled on
 // osm-carto's place / POI rules — high-importance things (countries,

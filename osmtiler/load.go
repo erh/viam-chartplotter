@@ -39,12 +39,14 @@ func LoadPBF(ctx context.Context, path string) (*FeatureSet, error) {
 
 	for _, rd := range relations {
 		minLabelZoom := LabelMinZoom(rd.Class, nil)
+		minZoom := GeomMinZoom(rd.Class, nil)
 		for _, ring := range assembleRings(rd.OuterWays, memberCoords) {
 			feat := Feature{
 				Class:        rd.Class,
 				Kind:         GeomPolygon,
 				Coords:       ring,
 				Name:         rd.Name,
+				MinZoom:      minZoom,
 				MinLabelZoom: minLabelZoom,
 			}
 			feat.computeBounds()
@@ -94,6 +96,7 @@ func loadNodesAndWays(ctx context.Context, path string, memberWays map[osm.WayID
 				Kind:         GeomPoint,
 				Coords:       []LonLat{{Lon: e.Lon, Lat: e.Lat}},
 				Name:         e.Tags.Find("name"),
+				MinZoom:      GeomMinZoom(class, e.Tags),
 				MinLabelZoom: LabelMinZoom(class, e.Tags),
 			}
 			feat.computeBounds()
@@ -135,7 +138,12 @@ func loadNodesAndWays(ctx context.Context, path string, memberWays map[osm.WayID
 				Kind:         kind,
 				Coords:       coords,
 				Name:         e.Tags.Find("name"),
+				MinZoom:      GeomMinZoom(class, e.Tags),
 				MinLabelZoom: LabelMinZoom(class, e.Tags),
+			}
+			if class == ClassRoad {
+				feat.RoadKind = roadKindFor(e.Tags.Find("highway"))
+				feat.Ref = e.Tags.Find("ref")
 			}
 			feat.computeBounds()
 			fs.Features = append(fs.Features, feat)

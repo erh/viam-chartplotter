@@ -33,10 +33,30 @@ type Feature struct {
 	MinLon, MaxLon float64
 	MinLat, MaxLat float64
 
+	// MinZoom is the smallest zoom at which this feature's geometry
+	// should be drawn. Below it the renderer skips the feature
+	// entirely. Used to mirror osm-carto's road-class / building /
+	// landuse thresholds so low-zoom tiles don't smear every
+	// residential street and building footprint into a gray mess.
+	MinZoom uint8
+
 	// MinLabelZoom is the smallest zoom at which the label for this
 	// feature should be drawn. 0 means "never label". Populated at
 	// load time so the render path doesn't need the original tags.
 	MinLabelZoom uint8
+
+	// RoadKind sub-classifies ClassRoad features (motorway, primary,
+	// residential, ...) so the renderer can pick per-kind colors,
+	// widths, and paint order. Zero (RoadUnknown) for non-road
+	// features.
+	RoadKind RoadKind
+
+	// Ref is the route number tag (`ref=`) for roads — "I-95",
+	// "NY-9A", "M25" etc. Used by the shield pass to draw small
+	// labelled markers along the route. Empty for almost every
+	// feature; the per-feature string-header cost is real but
+	// kept here so the renderer doesn't need a side table.
+	Ref string
 }
 
 // computeBounds fills in MinLon/MaxLon/MinLat/MaxLat from Coords.
