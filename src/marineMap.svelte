@@ -97,6 +97,38 @@
   // legend / etc.) re-render when the user scrolls past the gate. The
   // resolution-change listener installed in setupMap writes here.
   let currentZoom = $state(0);
+  // The set of wind / wave forecast models the user can switch between
+  // — populated from /noaa-weather/models on mount. Each entry carries
+  // its own MaxFh / StepFh / Disabled flag so the picker can both
+  // display the human label and grey out models whose decoders haven't
+  // been wired up server-side yet (NAM, ECMWF, ICON-Global).
+  type WeatherModelMeta = {
+    name: string;
+    displayName: string;
+    kind: "wind" | "wave";
+    domain: string;
+    minFh: number;
+    maxFh: number;
+    stepFh: number;
+    disabled?: boolean;
+    reason?: string;
+  };
+  let weatherModels = $state<WeatherModelMeta[]>([]);
+  // Currently selected model per kind. Defaults to the legacy product
+  // names so behaviour is unchanged until the user pops the dropdown.
+  let windModel = $state("gfs");
+  let waveModel = $state("pacioos-ww3");
+  // Last error from a failed model switch, surfaced under the picker
+  // so a user who picks a disabled stub can see *why* it's disabled
+  // instead of just seeing the layer blank.
+  let weatherModelError = $state<string | null>(null);
+  // setWeatherError mirrors the user-facing banner string into the
+  // browser console so the failure is grep-able + copy-pastable from
+  // DevTools even when the banner times out / scrolls off.
+  function setWeatherError(msg: string | null): void {
+    weatherModelError = msg;
+    if (msg) console.error("[weather]", msg);
+  }
 
   // Convert a "GFS run time + forecast hour" pair into a Date in local
   // time, so we can show "Tue 14:00" instead of "+12h" on the slider.
@@ -107,6 +139,17 @@
     return new Date(d.getTime() + fh * 3600_000);
   }
 
+  // Switch the wave layer to a different upstream model. Today there's
+  // only one registered wave option (pacioos-ww3) so the dropdown
+  // doesn't render — this stays as a one-liner forwarder so adding a
+  // second wave model (ECMWF WAM, GFSWAVE once we have JPEG2000) just
+  // works without UI changes.
+  async function swapWaveModel(next: string): Promise<string | null> {
+    if (next === waveModel || !waveHandle) return null;
+    const err = await waveHandle.setModel(next);
+    if (!err) waveModel = next;
+    return err;
+  }
 
   // Compute the smallest 3-h-aligned forecast hour that lands at or
   // after "now" — used as the slider floor so the user always starts
@@ -2958,7 +3001,8 @@
         layerName: "wind",
         displayName: "wind",
         parent: "weather",
-        dataUrl: "/noaa-weather/gfs/latest.json",
+        initialModel: windModel,
+        dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
         colorScale: WIND_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 15,
@@ -3003,7 +3047,8 @@
         layerName: "waves",
         displayName: "waves",
         parent: "weather",
-        dataUrl: "/noaa-weather/wave/latest.json",
+        initialModel: waveModel,
+        dataUrlFor: (model) => `/noaa-weather/data/${model}/latest.json`,
         colorScale: WAVE_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 3,
@@ -3032,6 +3077,15 @@
         .catch((err) => {
           console.warn("wave layer disabled:", err);
         });
+      // Populate the model picker. Failures are non-fatal — the picker
+      // just stays at the bundled defaults (GFS + PacIOOS) if the
+      // registry endpoint isn't reachable for some reason.
+      fetch("/noaa-weather/models")
+        .then((r) => (r.ok ? r.json() : []))
+        .then((list: WeatherModelMeta[]) => {
+          weatherModels = Array.isArray(list) ? list : [];
+        })
+        .catch(() => {});
     }
 
     // Track layer for myBoat (child of boat layer)
@@ -4787,12 +4841,93 @@
 
   {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
     {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
+    {@const windModelOptions = weatherModels.filter((m) => m.kind === "wind")}
+    {@const waveModelOptions = weatherModels.filter((m) => m.kind === "wave")}
     {@const dayMarkers = computeDayMarkers(
       weatherRunTime,
       weatherMinForecastHour,
       240,
     )}
     <div class="wind-forecast-bar">
+      {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on && windModelOptions.length > 1}
+        <!-- Wind model picker. Disabled-stub models stay listed (so the
+             user sees what's *planned*) but the option is greyed and a
+             selection attempt surfaces the registered Reason. -->
+        <label class="wind-forecast-bar-model">
+          <span class="wind-forecast-bar-model-prefix">wind</span>
+          <select
+            disabled={weatherLoading}
+            value={windModel}
+            onchange={async (e) => {
+              const next = (e.currentTarget as HTMLSelectElement).value;
+              weatherLoading = true;
+              setWeatherError(null);
+              try {
+                const err = await windHandle?.setModel(next);
+                if (err) {
+                  setWeatherError(`${next}: ${err}`);
+                  // Snap the select back to whatever the handle is
+                  // actually serving so the UI doesn't lie about the
+                  // current state.
+                  windModel = windHandle?.getModel() ?? windModel;
+                } else {
+                  windModel = next;
+                  weatherRunTime = windHandle?.getRunTime() ?? weatherRunTime;
+                  // Re-floor the slider — different models have
+                  // different run cadences, so the "now hour" shifts.
+                  const floor = nowForecastHour(weatherRunTime);
+                  weatherMinForecastHour = floor;
+                  if (weatherForecastHour < floor) {
+                    weatherForecastHour = floor;
+                    await windHandle?.setForecastHour(floor);
+                  }
+                  mapGlobal.map?.render();
+                }
+              } finally {
+                weatherLoading = false;
+              }
+            }}
+          >
+            {#each windModelOptions as m}
+              <option value={m.name} disabled={m.disabled} title={m.reason ?? ""}>
+                {m.displayName}{m.disabled ? " (n/a)" : ""}
+              </option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && waveModelOptions.length > 0}
+        <label class="wind-forecast-bar-model">
+          <span class="wind-forecast-bar-model-prefix">wave</span>
+          <select
+            disabled={weatherLoading}
+            value={waveModel}
+            onchange={async (e) => {
+              const next = (e.currentTarget as HTMLSelectElement).value;
+              weatherLoading = true;
+              setWeatherError(null);
+              try {
+                const err = await swapWaveModel(next);
+                if (err) {
+                  // Roll the dropdown back to whatever is actually
+                  // mounted so the UI doesn't claim a model that
+                  // isn't rendering.
+                  setWeatherError(err);
+                  (e.currentTarget as HTMLSelectElement).value = waveModel;
+                }
+              } finally {
+                weatherLoading = false;
+              }
+            }}
+          >
+            {#each waveModelOptions as m}
+              <option value={m.name} disabled={m.disabled} title={m.reason ?? ""}>
+                {m.displayName}{m.disabled ? " (n/a)" : ""}
+              </option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       <label class="wind-forecast-bar-label">
         {#if previewDate}
           {previewDate.toLocaleString(undefined, {
@@ -4875,10 +5010,13 @@
       </div>
       <span class="wind-forecast-bar-runtime">
         {#if weatherRunTime}
-          GFS run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
+          {windModel.toUpperCase()} run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
         {/if}
       </span>
     </div>
+    {#if weatherModelError}
+      <div class="wind-forecast-bar-error">{weatherModelError}</div>
+    {/if}
   {/if}
 
   <!-- Tiny "Powered By Viam" overlay anchored above the OL ScaleLine so it
@@ -6366,6 +6504,47 @@
     font-size: 11px;
     color: #888;
     min-width: 150px;
+  }
+  .wind-forecast-bar-model {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #555;
+  }
+  .wind-forecast-bar-model-prefix {
+    color: #888;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+  .wind-forecast-bar-model select {
+    font-size: 11px;
+    padding: 1px 2px;
+    max-width: 160px;
+  }
+  .wind-forecast-bar-error {
+    position: absolute;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    background: rgba(220, 53, 69, 0.92);
+    color: white;
+    border-radius: 4px;
+    font-size: 11px;
+    z-index: 10;
+    /* Selectable so the user can copy the upstream error message
+       to share / paste into a bug report. The banner sits above
+       the slider and ScaleLine but doesn't need to block clicks
+       to anything underneath — `auto` only enables selection on
+       the banner itself. */
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
+    max-width: 480px;
+    text-align: center;
   }
 
   .layer-controls input[type="checkbox"] {
