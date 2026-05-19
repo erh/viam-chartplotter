@@ -34,6 +34,15 @@ type WeatherCache struct {
 	client   *http.Client
 	logger   logging.Logger
 
+	// windCDNBaseURL, when non-empty, is the public base URL the
+	// frontend should prefer for tile-published wind data (currently
+	// ECMWF only). e.g. "https://chartwx.example.com". The chartplotter
+	// frontend reads this via /noaa-weather/config and, if set, fetches
+	// `<base>/wind/ecmwf/...` tile blobs instead of hammering this
+	// module for global JSON. Empty means "no CDN; serve everything
+	// locally" (single-instance dev mode, the default).
+	windCDNBaseURL string
+
 	// refresh is the soft TTL — past this, a request triggers a
 	// background refresh (the cached copy is still served immediately).
 	refresh time.Duration
@@ -74,6 +83,15 @@ const (
 
 // NewWeatherCache wires a WeatherCache pointing at cacheDir. The
 // directory is created if it doesn't exist.
+// SetWindCDNBaseURL configures the public CDN base for tile-published
+// wind data. Called by the module's Register-time wiring; the cache
+// holds it just so the frontend can read it back via
+// /noaa-weather/config (the cache itself doesn't use the CDN — it
+// remains the on-demand fallback).
+func (wc *WeatherCache) SetWindCDNBaseURL(u string) {
+	wc.windCDNBaseURL = strings.TrimRight(u, "/")
+}
+
 func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, error) {
 	if cacheDir == "" {
 		return nil, fmt.Errorf("weather cache: cacheDir required")
@@ -112,6 +130,7 @@ func (wc *WeatherCache) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-weather/models", wc.handleModels)
 	mux.HandleFunc("/noaa-weather/data/", wc.handleData)
 	mux.HandleFunc("/noaa-weather/stats", wc.handleStats)
+	mux.HandleFunc("/noaa-weather/config", wc.handleConfig)
 	// Legacy alias — pre-multi-model code path. Cheap to keep around.
 	mux.HandleFunc("/noaa-weather/gfs/latest.json", func(w http.ResponseWriter, r *http.Request) {
 		wc.serveModel(w, r, findModel("gfs"))
@@ -122,6 +141,32 @@ func (wc *WeatherCache) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_ = json.NewEncoder(w).Encode(modelMetaList())
+}
+
+// handleConfig exposes the small bits of server config the frontend
+// needs at runtime — currently just the wind CDN base URL the tile
+// fetcher should use. Lives next to /noaa-weather/models so the
+// frontend's existing config fetch can be extended with one more
+// request without inventing a new namespace.
+func (wc *WeatherCache) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	body := map[string]interface{}{
+		"windCDNBaseURL": wc.windCDNBaseURL,
+		// Tile grid params — must match the publisher's constants
+		// (wind_publisher_tiler.go). Surfacing them lets a frontend
+		// recompute tile keys without hard-coding the grid; if we
+		// ever change tileGridCols / tileGridRows / tileOverlapDeg
+		// the frontend follows automatically.
+		"tileGrid": map[string]interface{}{
+			"cols":       tileGridCols,
+			"rows":       tileGridRows,
+			"overlapDeg": tileOverlapDeg,
+			"nominalLonW": tileNominalLonW,
+			"nominalLatS": tileNominalLatS,
+		},
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // handleData parses /noaa-weather/data/{model}/latest.json and dispatches
@@ -254,10 +299,14 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 		}()
 	default:
 		// No cache yet — block on the first fetch.
+		start := time.Now()
 		if err := wc.refreshNow(r.Context(), m, fh); err != nil {
+			wc.logger.Warnf("weather: %s fh=%d MISS refresh failed dur=%s err=%v",
+				m.Name, fh, time.Since(start), err)
 			http.Error(w, "weather fetch: "+err.Error(), http.StatusBadGateway)
 			return
 		}
+		wc.logger.Infof("weather: %s fh=%d MISS refresh ok dur=%s", m.Name, fh, time.Since(start))
 		w.Header().Set("X-Cache", "MISS")
 	}
 

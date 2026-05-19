@@ -52,7 +52,13 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon)
+	// Public base URL of the wind-publisher's R2/CDN bucket. When set,
+	// the frontend's ECMWF wind layer fetches per-tile blobs from this
+	// origin instead of asking this module to decode/encode global JSON
+	// on every request. Empty (default) = no CDN; everything stays
+	// local. See wind_publisher_resource.go for the producer side.
+	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL)
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -128,6 +134,7 @@ func StartChartplotterServer(
 	cacheMaxBytes int64,
 	draftFt float64,
 	myBoatIconPath string,
+	windCDNBaseURL string,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -206,13 +213,14 @@ func StartChartplotterServer(
 	if err != nil {
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
+		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
 		weatherCache.Register(mux)
 		// Background prewarm of every model's forecast hours so the
 		// first user scrub to any hour hits the disk cache instead of
 		// blocking on a ~30-60 s NOMADS fetch. Uses its own context so
 		// resource.Close can cancel it on module unload.
 		weatherCache.Prewarm(context.Background())
-		logger.Infof("noaa weather cache: %s", weatherDir)
+		logger.Infof("noaa weather cache: %s (cdn=%q)", weatherDir, windCDNBaseURL)
 	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it

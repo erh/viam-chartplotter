@@ -135,10 +135,15 @@ func walkLatestCycle(
 	candidate := mostRecentCycle(now, m.CycleHours)
 	var lastErr error
 	for i := 0; i < 4; i++ {
+		start := time.Now()
 		body, err := fetch(ctx, candidate)
 		if err == nil {
+			log.Printf("weather: %s walkLatestCycle hit cycle=%s fh=%d attempt=%d dur=%s bytes=%d",
+				m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), len(body))
 			return body, candidate, nil
 		}
+		log.Printf("weather: %s walkLatestCycle MISS cycle=%s fh=%d attempt=%d dur=%s err=%v",
+			m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), err)
 		lastErr = err
 		// Step back to the prior cycle. CycleHours are sorted; find the
 		// previous slot, jumping a day if we wrap.
@@ -771,15 +776,21 @@ func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string) ([
 	if rangeHdr != "" {
 		req.Header.Set("Range", rangeHdr)
 	}
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("ecmwfGet: %s range=%q dur=%s err=%v", url, rangeHdr, time.Since(start), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		log.Printf("ecmwfGet: %s range=%q dur=%s status=%d", url, rangeHdr, time.Since(start), resp.StatusCode)
 		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	log.Printf("ecmwfGet: %s range=%q dur=%s status=%d bytes=%d",
+		url, rangeHdr, time.Since(start), resp.StatusCode, len(body))
+	return body, err
 }
 
 // ecmwfGetRange is the byte-range variant — same UA-shaping as

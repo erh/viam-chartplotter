@@ -21,6 +21,10 @@
     type WeatherLayerHandle,
   } from "./lib/windLayer";
   import {
+    WindCDNClient,
+    loadServerWindConfig,
+  } from "./lib/windTiles";
+  import {
     setupIsobarLayer,
     type IsobarLayerHandle,
   } from "./lib/isobarLayer";
@@ -3096,12 +3100,72 @@
         window.setTimeout(ensureRendered, 200);
       };
       const initialFh = nowForecastHour(null); // 0 until we know the run time
+      // ECMWF tile-CDN client: when the server config exposes a
+      // windCDNBaseURL, route ECMWF wind fetches through the
+      // wind-publisher's R2 output instead of asking this module to
+      // decode/encode global JSON on every request. Falls back to the
+      // legacy local endpoint on any CDN error so a CDN outage doesn't
+      // kill the wind layer. setupLayers() isn't async, so we lazy-
+      // load the config inside the fetchData callback below — the
+      // shared promise dedupes if the first scrub fires before the
+      // config arrives.
+      let ecmwfTileClientPromise: Promise<WindCDNClient | null> | null = null;
+      const getECMWFTileClient = (): Promise<WindCDNClient | null> => {
+        if (!ecmwfTileClientPromise) {
+          ecmwfTileClientPromise = loadServerWindConfig()
+            .catch(() => null)
+            .then((cfg) => {
+              const base = cfg?.windCDNBaseURL ?? "";
+              return base ? new WindCDNClient(base, "ecmwf", cfg?.tileGrid) : null;
+            });
+        }
+        return ecmwfTileClientPromise;
+      };
+      // Reads the live viewport at fetch time so a user pan that
+      // crosses tile boundaries triggers a re-fetch on the next slider
+      // event. ol-wind's setData call rebinds the field on each
+      // loadInto, so panning + the next scrub gives us the right tile.
+      const viewportBbox = (): [number, number, number, number] => {
+        const ext = mapGlobal.view?.calculateExtent?.(
+          mapGlobal.map?.getSize?.() ?? [800, 600],
+        );
+        if (Array.isArray(ext) && ext.length === 4) {
+          return [ext[0], ext[1], ext[2], ext[3]];
+        }
+        // Sensible default (Atlantic-ish) so a viewport-less fetch
+        // still resolves to a valid tile.
+        return [-80, 30, -60, 50];
+      };
       setupWeatherLayer(mapGlobal, {
         layerName: "wind",
         displayName: "wind",
         parent: "weather",
         initialModel: windModel,
         dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
+        fetchData: async (model, fh) => {
+          const fetchLocal = async () => {
+            const resp = await fetch(`/noaa-weather/data/${model}/latest.json?fh=${fh}`);
+            if (!resp.ok) {
+              const body = await resp.text().catch(() => "");
+              return { error: body.trim() || `HTTP ${resp.status}` };
+            }
+            return { data: await resp.json() };
+          };
+          // Only ECMWF is tile-published right now. Other models stay
+          // on the local URL-based fetch.
+          if (model !== "ecmwf") return fetchLocal();
+          const client = await getECMWFTileClient();
+          if (!client) return fetchLocal();
+          try {
+            const tileUrl = await client.urlFor(viewportBbox(), fh);
+            const resp = await fetch(tileUrl);
+            if (!resp.ok) throw new Error(`CDN tile: HTTP ${resp.status}`);
+            return { data: await resp.json() };
+          } catch (e) {
+            console.warn("ECMWF CDN fetch failed, falling back to local:", e);
+            return fetchLocal();
+          }
+        },
         colorScale: WIND_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 15,
