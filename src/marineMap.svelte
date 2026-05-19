@@ -84,7 +84,13 @@
   // 3 h step so changes line up with both wind + wave file cadences.
   let weatherForecastHour = $state(0);
   let weatherRunTime = $state<string | null>(null);
-  let weatherLoading = $state(false);
+  // Per-layer fetch state. Default true because both setupWeatherLayer
+  // calls fire at mount; flipped false in each .finally below. Reused
+  // for refetches (model swap, forecast-hour scrub) so the spinner in
+  // the forecast bar covers both initial load and subsequent fetches.
+  let windLoading = $state(true);
+  let waveLoading = $state(true);
+  let weatherLoading = $derived(windLoading || waveLoading);
   // First forecast hour ≥ "now", computed from the GFS run time. Used
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
@@ -3036,6 +3042,9 @@
         })
         .catch((err) => {
           console.warn("wind layer disabled:", err);
+        })
+        .finally(() => {
+          windLoading = false;
         });
       // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
       // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
@@ -3076,6 +3085,9 @@
         })
         .catch((err) => {
           console.warn("wave layer disabled:", err);
+        })
+        .finally(() => {
+          waveLoading = false;
         });
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
@@ -4860,7 +4872,7 @@
             value={windModel}
             onchange={async (e) => {
               const next = (e.currentTarget as HTMLSelectElement).value;
-              weatherLoading = true;
+              windLoading = true;
               setWeatherError(null);
               try {
                 const err = await windHandle?.setModel(next);
@@ -4884,7 +4896,7 @@
                   mapGlobal.map?.render();
                 }
               } finally {
-                weatherLoading = false;
+                windLoading = false;
               }
             }}
           >
@@ -4904,7 +4916,7 @@
             value={waveModel}
             onchange={async (e) => {
               const next = (e.currentTarget as HTMLSelectElement).value;
-              weatherLoading = true;
+              waveLoading = true;
               setWeatherError(null);
               try {
                 const err = await swapWaveModel(next);
@@ -4916,7 +4928,7 @@
                   (e.currentTarget as HTMLSelectElement).value = waveModel;
                 }
               } finally {
-                weatherLoading = false;
+                waveLoading = false;
               }
             }}
           >
@@ -4940,7 +4952,9 @@
         {:else}
           +{weatherForecastHour}h
         {/if}
-        {#if weatherLoading}…{/if}
+        {#if weatherLoading}
+          <span class="wind-forecast-bar-spinner" aria-label="loading" title="loading"></span>
+        {/if}
       </label>
       <div class="wind-forecast-bar-slider-wrap">
         {#each dayMarkers as m (m.pct)}
@@ -4971,7 +4985,8 @@
           // re-render at the stale old value and snap the thumb back
           // to the slider's min.
           weatherForecastHour = v;
-          weatherLoading = true;
+          if (windHandle) windLoading = true;
+          if (waveHandle) waveLoading = true;
           // Hide both data layers while we refetch so the user doesn't
           // see the previous forecast hour's pixels under the new
           // forecast-hour label — purely visual, the OL layers stay
@@ -5001,7 +5016,8 @@
             }
             mapGlobal.map?.render();
           } finally {
-            weatherLoading = false;
+            windLoading = false;
+            waveLoading = false;
             windLayer?.setVisible?.(true);
             waveLayer?.setVisible?.(true);
           }
@@ -6463,6 +6479,22 @@
     font-weight: 600;
     min-width: 70px;
     text-align: right;
+  }
+  .wind-forecast-bar-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-left: 6px;
+    vertical-align: -2px;
+    border: 2px solid rgba(0, 0, 0, 0.18);
+    border-top-color: #0a66c2;
+    border-radius: 50%;
+    animation: wind-forecast-bar-spin 0.7s linear infinite;
+  }
+  @keyframes wind-forecast-bar-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .wind-forecast-bar input[type="range"] {
     width: 240px;
