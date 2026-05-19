@@ -2,8 +2,17 @@ package vc
 
 import (
 	"fmt"
+	"log"
 	"math"
 )
+
+// AECDebug, when set to a non-nil logger, causes aecDecode to print
+// a one-line summary per block decoded (ID, option, samples emitted,
+// bit position). Off by default — production servers should leave it
+// nil. The cmd/ecmwf-probe diagnostic tool toggles it on to make the
+// decoder traceable against a captured ECMWF file when iterating on
+// the spec interpretation.
+var AECDebug *log.Logger
 
 // CCSDS / AEC (Adaptive Entropy Coder) decoder for GRIB2 data
 // representation template 5.42. ECMWF Open Data publishes every
@@ -187,10 +196,25 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 	// raw "reference" sample (bps bits) stored ahead of the first
 	// block's coded payload — it counts as the first sample of the
 	// first block, so the coded portion of that block is one shorter.
+	rsiIdx := 0
 	for len(out) < n {
-		samplesThisRSI := rsi * blockSize
-		if samplesThisRSI > n-len(out) {
-			samplesThisRSI = n - len(out)
+		// Determine the number of blocks in this RSI. libaec encoders
+		// write ceil(n / block_size) blocks total, grouped in `rsi`-
+		// block reference-sample intervals — a full RSI for all but
+		// the last, then a short RSI of ceil(remaining / block_size)
+		// blocks. We must NOT read `rsi` blocks for the short last
+		// RSI, otherwise we'd consume bits the encoder never wrote
+		// and overrun the section-7 buffer (this is what surfaced as
+		// "no-compression sample N: read past end of stream"
+		// thousands of samples into the field).
+		nBlocks := rsi
+		remaining := n - len(out)
+		fullRSISamples := rsi * blockSize
+		if remaining < fullRSISamples {
+			nBlocks = (remaining + blockSize - 1) / blockSize
+			if nBlocks < 1 {
+				nBlocks = 1
+			}
 		}
 
 		// rsiOut indexes into out for the start of the current RSI so we
@@ -201,33 +225,40 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 		if preprocess {
 			v, err := r.readBits(bps)
 			if err != nil {
-				return nil, fmt.Errorf("aec: reading RSI reference sample: %w", err)
+				return nil, fmt.Errorf("aec: rsi=%d reference sample: %w", rsiIdx, err)
 			}
 			refSample = v
 			out = append(out, refSample)
 		}
 
-		samplesEmittedInRSI := len(out) - rsiOut
-		blockIndex := 0
-		for samplesEmittedInRSI < samplesThisRSI {
-			// First block consumes one fewer coded sample if the ref
-			// already occupied its first slot.
+		if AECDebug != nil {
+			AECDebug.Printf("aec: rsi=%d blocks=%d remaining=%d ref=%d bytePos=%d bitPos=%d",
+				rsiIdx, nBlocks, remaining, refSample, r.bytePos, r.bitPos)
+		}
+
+		for blockIndex := 0; blockIndex < nBlocks; blockIndex++ {
+			// First block consumes one fewer coded sample when the ref
+			// already occupies its first slot. All other blocks always
+			// encode exactly `block_size` samples (the encoder pads
+			// the very last block's samples to fill out to block_size
+			// — those padded samples get truncated from `out` at the
+			// end of this function).
 			samplesNeeded := blockSize
 			if blockIndex == 0 && preprocess {
 				samplesNeeded = blockSize - 1
 			}
-			if samplesEmittedInRSI+samplesNeeded > samplesThisRSI {
-				samplesNeeded = samplesThisRSI - samplesEmittedInRSI
-			}
-			blockIndex++
+			bytePosBefore := r.bytePos
+			bitPosBefore := r.bitPos
 
 			id, err := r.readBits(idBits)
 			if err != nil {
-				return nil, fmt.Errorf("aec: reading block ID: %w", err)
+				return nil, fmt.Errorf("aec: rsi=%d block=%d ID: %w", rsiIdx, blockIndex, err)
 			}
 
+			var optionName string
 			switch {
 			case id == 0:
+				optionName = "FS"
 				// FS-only block (k=0) — every sample encoded as its
 				// own unary run. The spec also overloads id=0 with a
 				// zero-block escape (a run of all-zero blocks), but
@@ -240,22 +271,22 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				for j := 0; j < samplesNeeded; j++ {
 					v, err := r.readFS()
 					if err != nil {
-						return nil, fmt.Errorf("aec: FS sample %d: %w", j, err)
+						return nil, fmt.Errorf("aec: rsi=%d block=%d FS sample %d: %w", rsiIdx, blockIndex, j, err)
 					}
 					out = append(out, uint64(v))
 				}
-				samplesEmittedInRSI += samplesNeeded
 			case int(id) == idNC:
+				optionName = "NC"
 				// No-Compression block: raw bps bits per sample.
 				for j := 0; j < samplesNeeded; j++ {
 					v, err := r.readBits(bps)
 					if err != nil {
-						return nil, fmt.Errorf("aec: no-compression sample %d: %w", j, err)
+						return nil, fmt.Errorf("aec: rsi=%d block=%d NC sample %d: %w", rsiIdx, blockIndex, j, err)
 					}
 					out = append(out, v)
 				}
-				samplesEmittedInRSI += samplesNeeded
 			case int(id) == idSE && bps >= 3:
+				optionName = "SE"
 				// Second Extension: each FS-coded value m decodes into
 				// a pair (s1, s2) via the triangular pairing
 				// m = (s1+s2)*(s1+s2+1)/2 + s2 → s1+s2 = floor((√(1+8m)-1)/2),
@@ -281,7 +312,7 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				for emitted < samplesNeeded {
 					m, err := r.readFS()
 					if err != nil {
-						return nil, fmt.Errorf("aec: SE FS read: %w", err)
+						return nil, fmt.Errorf("aec: rsi=%d block=%d SE FS: %w", rsiIdx, blockIndex, err)
 					}
 					mu := uint64(m)
 					k := uint64((math.Sqrt(float64(1+8*mu)) - 1) / 2)
@@ -303,8 +334,8 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					blockI++
 					emitted++
 				}
-				samplesEmittedInRSI += samplesNeeded
 			default:
+				optionName = fmt.Sprintf("k=%d", id)
 				// k-split: low k bits raw, high (bps-k) bits FS-coded.
 				// Per libaec's on-the-wire layout, k can range from 1
 				// up to idNC-2; when k >= bps the FS portion encodes
@@ -314,8 +345,8 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				// some blocks and the decoder must accept it.
 				k := int(id)
 				if k <= 0 || k > idNC-2 {
-					return nil, fmt.Errorf("aec: invalid block id=%d (bps=%d, idNC=%d)",
-						k, bps, idNC)
+					return nil, fmt.Errorf("aec: rsi=%d block=%d invalid id=%d (bps=%d, idNC=%d)",
+						rsiIdx, blockIndex, k, bps, idNC)
 				}
 				// Per CCSDS spec, the encoder emits the high parts
 				// first (all FS values back-to-back) then the low
@@ -325,18 +356,22 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				for j := 0; j < samplesNeeded; j++ {
 					h, err := r.readFS()
 					if err != nil {
-						return nil, fmt.Errorf("aec: split high %d (k=%d): %w", j, k, err)
+						return nil, fmt.Errorf("aec: rsi=%d block=%d split high %d (k=%d): %w", rsiIdx, blockIndex, j, k, err)
 					}
 					highs[j] = uint64(h)
 				}
 				for j := 0; j < samplesNeeded; j++ {
 					low, err := r.readBits(k)
 					if err != nil {
-						return nil, fmt.Errorf("aec: split low %d (k=%d): %w", j, k, err)
+						return nil, fmt.Errorf("aec: rsi=%d block=%d split low %d (k=%d): %w", rsiIdx, blockIndex, j, k, err)
 					}
 					out = append(out, (highs[j]<<uint(k))|low)
 				}
-				samplesEmittedInRSI += samplesNeeded
+			}
+			if AECDebug != nil {
+				bitsConsumed := (r.bytePos-bytePosBefore)*8 + int(r.bitPos) - int(bitPosBefore)
+				AECDebug.Printf("aec:   block=%d id=%d (%s) samples=%d bits=%d bytePos=%d",
+					blockIndex, id, optionName, samplesNeeded, bitsConsumed, r.bytePos)
 			}
 		}
 
@@ -385,6 +420,7 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				r.bitPos = 0
 			}
 		}
+		rsiIdx++
 	}
 
 	if len(out) > n {

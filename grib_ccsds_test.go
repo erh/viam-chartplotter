@@ -1,9 +1,62 @@
 package vc
 
 import (
+	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// TestECMWFCapturedMessage decodes a real ECMWF Open Data wind message
+// if one has been captured into testdata/ecmwf/*.grib2. The file is
+// not checked in (ECMWF Open Data licensing aside, the GRIB blobs are
+// large enough that checking them in would bloat the repo) — drop one
+// in locally to validate the decoder against wire data.
+//
+// Capture one with:
+//
+//	go run ./cmd/ecmwf-probe -date YYYYMMDD -cycle 0 -step 0 -param 10u \
+//	    > /tmp/probe.log    # tracing output
+//	# or grab the raw message:
+//	curl -r OFFSET-END -o testdata/ecmwf/10u-f000.grib2 \
+//	    https://data.ecmwf.int/forecasts/YYYYMMDD/00z/ifs/0p25/oper/...grib2
+//
+// The test skips cleanly when the directory is empty so CI stays green
+// in environments without network access (e.g. the sandbox where this
+// branch was authored).
+func TestECMWFCapturedMessage(t *testing.T) {
+	dir := filepath.Join("testdata", "ecmwf")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("no testdata/ecmwf directory — drop a captured .grib2 message in to enable this test")
+		}
+		t.Fatal(err)
+	}
+	var found int
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".grib2" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		grib, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: read: %v", e.Name(), err)
+			continue
+		}
+		var buf bytes.Buffer
+		if err := DebugDumpGRIB(grib, &buf); err != nil {
+			t.Errorf("%s: %v\n%s", e.Name(), err, buf.String())
+			continue
+		}
+		t.Logf("%s OK:\n%s", e.Name(), buf.String())
+		found++
+	}
+	if found == 0 {
+		t.Skip("testdata/ecmwf is empty — drop a captured .grib2 message in to enable this test")
+	}
+}
 
 // aecBitWriter is the encoder-side counterpart to aecBitReader, used
 // only by the test suite to manufacture AEC bitstreams that exercise
@@ -377,6 +430,56 @@ func TestAECDecodeBps12NC(t *testing.T) {
 	for i, want := range samples {
 		if got[i] != want {
 			t.Errorf("got[%d] = %d, want %d", i, got[i], want)
+		}
+	}
+}
+
+// TestAECDecodePartialLastRSI locks in the fix for a production
+// failure where the decoder ran off the end of the section-7 buffer
+// thousands of samples into the field. libaec encoders write only
+// ceil(n / block_size) blocks total, grouped into reference-sample
+// intervals of `rsi` blocks each. The last RSI typically has fewer
+// blocks than `rsi`; the previous decoder revision unconditionally
+// read `rsi` blocks per RSI, which made it try to consume bits the
+// encoder never wrote once `n` wasn't a multiple of `rsi*block_size`.
+func TestAECDecodePartialLastRSI(t *testing.T) {
+	const bps = 8
+	const blockSize = 4
+	const rsi = 3 // RSI window = 12 samples
+	// n = 14: first RSI has 3 blocks (12 samples), last "RSI" has
+	// only 1 block (covering samples 12-13, with sample 13 of the
+	// block being padded by the encoder).
+	const n = 14
+	idBits := idSizeBits(bps)
+	idNC := (1 << uint(idBits)) - 1
+
+	w := &aecBitWriter{}
+	// 3 NC blocks for the first RSI.
+	for blk := 0; blk < 3; blk++ {
+		w.writeBits(uint64(idNC), idBits)
+		for j := 0; j < blockSize; j++ {
+			w.writeBits(uint64(blk*blockSize+j), bps)
+		}
+	}
+	// 1 NC block for the short last RSI (samples 12, 13, plus two
+	// padding values the encoder fabricates; the decoder must read
+	// all 4 then discard the trailing 2).
+	w.writeBits(uint64(idNC), idBits)
+	w.writeBits(12, bps)
+	w.writeBits(13, bps)
+	w.writeBits(0xAA, bps) // padding
+	w.writeBits(0xBB, bps) // padding
+
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, n)
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("len(got)=%d, want %d", len(got), n)
+	}
+	for i := 0; i < n; i++ {
+		if got[i] != uint64(i) {
+			t.Errorf("got[%d] = %d, want %d", i, got[i], i)
 		}
 	}
 }
