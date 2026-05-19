@@ -55,6 +55,13 @@ type WeatherModel struct {
 	// distinctly so a deploy can tell "upstream missing" from "decoder
 	// missing".
 	Fetch func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error)
+	// FetchBytes is the alternative path for models whose on-the-wire
+	// shape isn't the ol-wind 2-record JSON — currently isobars (GeoJSON
+	// LineString FeatureCollection) and (eventually) lightning strokes.
+	// When set, the cache writes the returned bytes straight to disk
+	// instead of json-encoding []windRecord. Exactly one of Fetch /
+	// FetchBytes must be set on an enabled model.
+	FetchBytes func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error)
 }
 
 // snapFh snaps fh to [MinFh, MaxFh] aligned to StepFh.
@@ -82,6 +89,8 @@ var allModels = []*WeatherModel{
 	iconGlobalWindStub(),
 	pacioosWaveModel(),
 	pacioosHawaiiWaveModel(),
+	gfsIsobarsModel(),
+	noaaGLMLightningStub(),
 	// nomads-gfswave is unregistered until we verify NOMADS' actual
 	// current DODS URL pattern. Every variant I've tried (date dir
 	// with/without `gfswave` prefix, gfsv16 suffix, etc.) lands on
@@ -836,6 +845,23 @@ func iconGlobalWindStub() *WeatherModel {
 		Domain:      "global",
 		Disabled:    true,
 		Reason:      "needs icosahedral→latlon regrid (DWD ships native unstructured grid)",
+	}
+}
+
+// noaaGLMLightningStub registers the GOES-East GLM lightning option in
+// the picker so it surfaces in the layer panel under the weather
+// group, but flips Disabled so toggling it on shows the Reason
+// (matching the NAM/ECMWF/ICON pattern). The actual GLM L2 LCFA feed
+// is NetCDF4/HDF5 over the NESDIS S3 mirror — decoding that is a
+// separate work item.
+func noaaGLMLightningStub() *WeatherModel {
+	return &WeatherModel{
+		Name:        "noaa-glm",
+		DisplayName: "Lightning (GOES-East GLM, near-real-time)",
+		Kind:        "lightning",
+		Domain:      "americas",
+		Disabled:    true,
+		Reason:      "needs GOES-16/18 GLM NetCDF4 decoder (L2 LCFA strokes)",
 	}
 }
 
