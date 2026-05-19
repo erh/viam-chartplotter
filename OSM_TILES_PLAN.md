@@ -37,14 +37,20 @@ Smallest end-to-end slice that produces recognisable tiles.
 - Coverage for dev iteration: small extract (e.g. Monaco, ~500KB) until
   the pipeline works, then scale up to a regional extract, then planet.
 
-### v0.2 — line labels + shaped text
+### v0.2 — multipolygon relations, labels, shaped text
 
-- `go-text/typesetting` for HarfBuzz-equivalent shaping. Adds CJK,
-  Arabic, Devanagari label rendering.
-- Line labels along `highway=*` (curved text along path).
-- Halos (white stroke under black fill).
-- Cross-tile label collision: 128px buffer, deterministic placement
-  seeded by `hash(feature_id, zoom)`. Adjacent tiles agree.
+- **v0.2a (done)**: multipolygon relation support. Two-pass PBF load
+  (relations → member-way IDs, then nodes/ways with geometry stashing),
+  then greedy endpoint stitching to assemble outer rings. Inner rings
+  (holes) deferred — we drop water anyway so holes-inside-parks render
+  the same regardless. Gets Riverside / Central / Battery / Prospect
+  parks visible.
+- **v0.2b**: `go-text/typesetting` for HarfBuzz-equivalent shaping.
+  Adds CJK, Arabic, Devanagari label rendering.
+- **v0.2c**: line labels along `highway=*` (curved text along path).
+  Halos (white stroke under black fill).
+- **v0.2d**: cross-tile label collision — 128px buffer, deterministic
+  placement seeded by `hash(feature_id, zoom)`. Adjacent tiles agree.
 
 ### v0.3 — long-tail polish
 

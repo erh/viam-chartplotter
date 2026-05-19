@@ -132,6 +132,48 @@ func isRenderedNatural(v string) bool {
 	return false
 }
 
+// LabelMinZoom returns the smallest zoom at which a feature should be
+// labelled, or 0 if it should not. Thresholds are loosely modelled on
+// osm-carto's place / POI rules — high-importance things (countries,
+// cities) appear earlier than hamlets and POIs. Roads, buildings,
+// landuse etc. return 0 here; their labels come in later v0.2 work
+// (line labels along ways, area labels at centroids).
+func LabelMinZoom(class Class, tags osm.Tags) uint8 {
+	switch class {
+	case ClassPlace:
+		switch tags.Find("place") {
+		case "country":
+			return 3
+		case "state", "province":
+			return 5
+		case "city":
+			return 8
+		case "town":
+			return 11
+		case "village":
+			return 13
+		case "hamlet":
+			return 14
+		case "island":
+			return 9
+		case "suburb", "neighbourhood":
+			return 13
+		case "locality", "islet":
+			return 15
+		}
+	case ClassPOI:
+		return 17
+	case ClassRoad:
+		// For now, all named roads at z>=16. Sub-type-aware
+		// thresholds (motorway at z9, residential at z16) come with
+		// the v0.3 carto-style port; without them, lowering this
+		// makes residential-grid cities like Manhattan unreadable
+		// from a wall of street names.
+		return 16
+	}
+	return 0
+}
+
 func isPOI(tags osm.Tags) bool {
 	for _, k := range []string{"amenity", "shop", "tourism", "historic", "office"} {
 		if tags.Find(k) != "" {

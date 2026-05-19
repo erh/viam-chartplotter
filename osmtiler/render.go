@@ -2,8 +2,11 @@ package osmtiler
 
 import (
 	"bytes"
+	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
+	"math"
 
 	"github.com/fogleman/gg"
 )
@@ -12,39 +15,264 @@ import (
 // Matches tile.openstreetmap.org's 256x256 raster output.
 const TileSize = 256
 
+// LabelBuffer is the per-side overdraw, in pixels, used by RenderTile
+// for cross-tile label consistency. We rasterise into a canvas that's
+// (TileSize + 2*LabelBuffer) on a side and crop to the inner TileSize
+// at output time. A label whose anchor sits inside this tile's buffer
+// area but in a neighbour's interior is still drawn here at the same
+// position, so adjacent tiles stitch without text vanishing or shifting
+// across the seam.
+//
+// 64 px ≈ enough for any single-word label at our largest font size.
+// Bump if multi-word road labels start being clipped at tile edges.
+const LabelBuffer = 64
+
+const bufferedSize = TileSize + 2*LabelBuffer
+
 // RenderTile rasterises the (z, x, y) tile from fs. Background is fully
 // transparent — the chart renderer underneath supplies water and base
 // fills; we draw only land features. Returns PNG bytes.
 //
-// This is the v0.1 render path: per-class flat colors, no style port,
-// no labels. Just enough to validate geometry + projection + the "no
-// water" guarantee against real data. See OSM_TILES_PLAN.md for the
-// v0.2 work (carto-style port, line/area labels, halos).
+// Geometry uses the painter's algorithm with per-class fills/strokes
+// from a v0.1 flat palette. After geometry, a label pass paints names
+// for ClassPlace / ClassPOI features whose MinLabelZoom is reached.
+// Both passes draw into a buffered canvas (TileSize + 2*LabelBuffer)
+// and we crop on the way out, so a label that straddles the tile edge
+// is fully painted on this side and on its neighbour at consistent
+// coordinates.
 func RenderTile(fs *FeatureSet, z, x, y int) ([]byte, error) {
-	dc := gg.NewContext(TileSize, TileSize)
-	// Leave the buffer transparent — gg's NewContext gives us
-	// (0,0,0,0) RGBA already.
+	dc := gg.NewContext(bufferedSize, bufferedSize)
+	// Shift the origin so feature projection still treats (0, 0) as
+	// the top-left of the inner tile; everything in the buffer ring
+	// rasterises into the surrounding LabelBuffer pixels.
+	dc.Translate(LabelBuffer, LabelBuffer)
 
 	tMinLon, tMinLat, tMaxLon, tMaxLat := TileBoundsLonLat(z, x, y)
-	// A small overdraw margin in degrees so lines whose endpoints are
-	// just outside the tile still paint the portion that crosses in.
-	const pad = 1e-4
+	// Expand the lon/lat reject filter so features whose geometry
+	// lives entirely in the buffer ring still get drawn.
+	nTiles := math.Exp2(float64(z))
+	bufDeg := float64(LabelBuffer) / TileSize * 360.0 / nTiles
+	// Latitude pad is approximate (Mercator stretches near the poles);
+	// at chart-use latitudes the lon pad is a close-enough overestimate.
+	eMinLon, eMaxLon := tMinLon-bufDeg, tMaxLon+bufDeg
+	eMinLat, eMaxLat := tMinLat-bufDeg, tMaxLat+bufDeg
 
-	// FeatureSet is pre-sorted into painter's order at load time.
+	// Geometry pass. FeatureSet is pre-sorted into painter's order at
+	// load time so we can iterate in place.
 	for i := range fs.Features {
 		f := &fs.Features[i]
-		if f.MaxLon < tMinLon-pad || f.MinLon > tMaxLon+pad ||
-			f.MaxLat < tMinLat-pad || f.MinLat > tMaxLat+pad {
+		if f.MaxLon < eMinLon || f.MinLon > eMaxLon ||
+			f.MaxLat < eMinLat || f.MinLat > eMaxLat {
 			continue
 		}
 		drawFeature(dc, f, z, x, y)
 	}
 
+	// Label pass.
+	if err := drawLabels(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat); err != nil {
+		return nil, err
+	}
+
+	// Crop the buffered render down to the inner TileSize × TileSize.
+	inner := image.NewRGBA(image.Rect(0, 0, TileSize, TileSize))
+	draw.Draw(inner, inner.Bounds(), dc.Image(),
+		image.Pt(LabelBuffer, LabelBuffer), draw.Src)
+
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, dc.Image()); err != nil {
+	if err := png.Encode(&buf, inner); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// labelRect is an axis-aligned bounding box used by the within-tile
+// collision tracker. Line labels supply the AABB of their rotated
+// glyph run so the same first-wins greedy logic applies to both
+// point and curved labels.
+type labelRect struct{ x0, y0, x1, y1 float64 }
+
+func (r labelRect) overlaps(o labelRect) bool {
+	return r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0
+}
+
+// drawLabels paints names for every labellable feature. Point labels
+// (ClassPlace, ClassPOI) sit above their anchor; line labels (named
+// roads) follow the longest left-to-right segment of the way.
+// Collisions are resolved greedy first-wins — features are pre-sorted
+// into painter's order at load time, which puts higher-importance
+// classes (Place < POI < Road) first so they claim space.
+func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64) error {
+	zu8 := uint8(z)
+	var placed []labelRect
+
+	// gg caches the active font face; we set per size as we encounter
+	// new classes. Most tiles only have one or two class types in their
+	// label pass so the switching cost is negligible.
+	var curSize float64
+	for i := range fs.Features {
+		f := &fs.Features[i]
+		if f.MinLabelZoom == 0 || zu8 < f.MinLabelZoom || f.Name == "" {
+			continue
+		}
+		if f.MaxLon < tMinLon || f.MinLon > tMaxLon ||
+			f.MaxLat < tMinLat || f.MinLat > tMaxLat {
+			continue
+		}
+		size := labelSizeForClass(f.Class)
+		if size != curSize {
+			face, err := labelFontFace(size)
+			if err != nil {
+				return err
+			}
+			dc.SetFontFace(face)
+			curSize = size
+		}
+
+		switch f.Kind {
+		case GeomPoint:
+			drawPointLabel(dc, f, z, x, y, size, &placed)
+		case GeomLine:
+			drawLineLabel(dc, f, z, x, y, size, &placed)
+		}
+	}
+	return nil
+}
+
+func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+	px, py := LonLatToTilePx(f.Coords[0].Lon, f.Coords[0].Lat, z, x, y)
+	if px < -LabelBuffer || px > TileSize+LabelBuffer ||
+		py < -LabelBuffer || py > TileSize+LabelBuffer {
+		return
+	}
+	w, _ := dc.MeasureString(f.Name)
+	const pad = 2.0
+	cx, cy := px, py-7 // anchor 7px above the geometry dot
+	box := labelRect{
+		x0: cx - w/2 - pad, y0: cy - size/2 - pad,
+		x1: cx + w/2 + pad, y1: cy + size/2 + pad,
+	}
+	for _, p := range *placed {
+		if box.overlaps(p) {
+			return
+		}
+	}
+	*placed = append(*placed, box)
+	drawLabelWithHalo(dc, cx, cy, f.Name)
+}
+
+// drawLineLabel lays a road's name along its polyline. It picks the
+// longest segment whose direction is "readable" (closer to horizontal
+// than vertical), reverses if running right-to-left, and walks the
+// chosen segment placing glyphs one at a time with per-glyph rotation.
+// Halo and fill are each one pass over the glyph run (8 + 1 = 9 total),
+// which is cheap relative to gg's per-glyph state-push overhead.
+func drawLineLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+	pts := make([][2]float64, len(f.Coords))
+	for i, c := range f.Coords {
+		px, py := LonLatToTilePx(c.Lon, c.Lat, z, x, y)
+		pts[i] = [2]float64{px, py}
+	}
+
+	w, _ := dc.MeasureString(f.Name)
+	// Require a small amount of segment slack beyond the text width
+	// so labels aren't crammed end-to-end on segment boundaries.
+	const slack = 1.05
+
+	// Pick the longest horizontal-ish segment that fits the label.
+	bestIdx := -1
+	bestLen := 0.0
+	for i := 0; i+1 < len(pts); i++ {
+		dx := pts[i+1][0] - pts[i][0]
+		dy := pts[i+1][1] - pts[i][1]
+		// Filter out near-vertical segments — text on them would
+		// require a 90° rotation and be hard to read at low zooms.
+		if math.Abs(dx) < math.Abs(dy) {
+			continue
+		}
+		segLen := math.Sqrt(dx*dx + dy*dy)
+		if segLen < w*slack {
+			continue
+		}
+		if segLen > bestLen {
+			bestLen = segLen
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 {
+		return
+	}
+	p0, p1 := pts[bestIdx], pts[bestIdx+1]
+	if p1[0] < p0[0] {
+		p0, p1 = p1, p0 // ensure left-to-right
+	}
+	dx := p1[0] - p0[0]
+	dy := p1[1] - p0[1]
+	segLen := math.Sqrt(dx*dx + dy*dy)
+	dirX, dirY := dx/segLen, dy/segLen
+	angle := math.Atan2(dy, dx)
+
+	// Center the label run along the segment.
+	cursor := (segLen - w) / 2
+	cx := p0[0] + dirX*(cursor+w/2)
+	cy := p0[1] + dirY*(cursor+w/2)
+
+	// Rotated AABB: |hw·cos| + |hh·sin| in x, |hw·sin| + |hh·cos| in y.
+	hw, hh := w/2, size/2
+	c, s := math.Abs(math.Cos(angle)), math.Abs(math.Sin(angle))
+	ex := hw*c + hh*s
+	ey := hw*s + hh*c
+	const pad = 2.0
+	box := labelRect{
+		x0: cx - ex - pad, y0: cy - ey - pad,
+		x1: cx + ex + pad, y1: cy + ey + pad,
+	}
+	// Reject if entirely outside the buffered canvas.
+	if box.x1 < -LabelBuffer || box.x0 > TileSize+LabelBuffer ||
+		box.y1 < -LabelBuffer || box.y0 > TileSize+LabelBuffer {
+		return
+	}
+	for _, p := range *placed {
+		if box.overlaps(p) {
+			return
+		}
+	}
+	*placed = append(*placed, box)
+
+	drawTextAlongLine(dc, f.Name, p0, dirX, dirY, angle, cursor)
+}
+
+// drawTextAlongLine lays out runes from `text` along the line starting
+// at p0 with direction (dirX, dirY), the first glyph's left edge at
+// distance `cursor` from p0. White halo (8 offsets) + black fill =
+// nine passes over the glyph run.
+func drawTextAlongLine(dc *gg.Context, text string, p0 [2]float64, dirX, dirY, angle, cursor float64) {
+	runes := []rune(text)
+
+	paintPass := func(ox, oy float64) {
+		c := cursor
+		for _, r := range runes {
+			gw, _ := dc.MeasureString(string(r))
+			gx := p0[0] + dirX*(c+gw/2) + ox
+			gy := p0[1] + dirY*(c+gw/2) + oy
+			dc.Push()
+			dc.RotateAbout(angle, gx, gy)
+			dc.DrawStringAnchored(string(r), gx, gy, 0.5, 0.5)
+			dc.Pop()
+			c += gw
+		}
+	}
+
+	dc.SetRGB(1, 1, 1)
+	for _, dxo := range [...]float64{-1, 0, 1} {
+		for _, dyo := range [...]float64{-1, 0, 1} {
+			if dxo == 0 && dyo == 0 {
+				continue
+			}
+			paintPass(dxo, dyo)
+		}
+	}
+	dc.SetRGB(0, 0, 0)
+	paintPass(0, 0)
 }
 
 // drawOrder returns the painter's-algorithm priority for a class —

@@ -32,6 +32,11 @@ type Feature struct {
 
 	MinLon, MaxLon float64
 	MinLat, MaxLat float64
+
+	// MinLabelZoom is the smallest zoom at which the label for this
+	// feature should be drawn. 0 means "never label". Populated at
+	// load time so the render path doesn't need the original tags.
+	MinLabelZoom uint8
 }
 
 // computeBounds fills in MinLon/MaxLon/MinLat/MaxLat from Coords.
