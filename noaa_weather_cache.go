@@ -87,6 +87,17 @@ const (
 
 // NewWeatherCache wires a WeatherCache pointing at cacheDir. The
 // directory is created if it doesn't exist.
+// cdnServedModels lists every model whose data the chartplotter
+// fleet should fetch from the wind-publisher's R2 bucket rather than
+// from upstream directly. Centralised so a future "add GFS to the
+// publisher" change is a one-line edit here plus a publisher tweak —
+// no scattered string comparisons.
+var cdnServedModels = map[string]bool{
+	"ecmwf": true,
+}
+
+func isCDNServedModel(name string) bool { return cdnServedModels[name] }
+
 // SetWindCDNBaseURL configures the public CDN base for tile-published
 // wind data. Called by the module's Register-time wiring; the cache
 // holds it just so the frontend can read it back via
@@ -653,6 +664,17 @@ func (wc *WeatherCache) runPrewarm(ctx context.Context) {
 	}()
 	for _, m := range listModels() {
 		if m.Disabled || (m.Fetch == nil && m.FetchBytes == nil) {
+			continue
+		}
+		// Skip models that the wind-publisher CDN is serving: the
+		// fleet should read those from R2, not pre-fetch them on
+		// every chartplotter (the whole point of the publisher is
+		// to make ECMWF a one-machine-per-fleet upstream pull).
+		// The on-demand fallback path still works if the CDN
+		// breaks; we just don't pre-warm it.
+		if wc.windCDNBaseURL != "" && isCDNServedModel(m.Name) {
+			wc.logger.Infof("weather: prewarm skipping %s (served by CDN %s)",
+				m.Name, wc.windCDNBaseURL)
 			continue
 		}
 		step := m.StepFh
