@@ -13,6 +13,10 @@ func main() {
 	module.ModularMain(
 		resource.APIModel{generic.API, vc.Model},
 		resource.APIModel{navigation.API, vc.NavModel},
+		// One designated machine in the fleet runs this — pulls
+		// ECMWF Open Data, crops into tiles, publishes to R2. Every
+		// other chartplotter reads tiles from R2.
+		resource.APIModel{generic.API, vc.WindPublisherModel},
 	)
 
 }
