@@ -222,18 +222,24 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 		rsiOut := len(out)
 
 		var refSample uint64
-		if preprocess {
-			v, err := r.readBits(bps)
-			if err != nil {
-				return nil, fmt.Errorf("aec: rsi=%d reference sample: %w", rsiIdx, err)
-			}
-			refSample = v
-			out = append(out, refSample)
-		}
+		refRead := false
+		// IMPORTANT: in libaec the per-block ID is read BEFORE the
+		// reference sample — m_id reads the ID, then m_split reads
+		// the ref iff state->ref is set (i.e. this is the first block
+		// of an RSI with the preprocessor on). The previous revision
+		// of this loop pre-read the ref outside the block loop, which
+		// shifted the whole bitstream interpretation by bps bits and
+		// turned every block ID into a garbage value (e.g. id=12 was
+		// being read where the encoder had really written id=0).
+		// Different code options handle the ref differently: m_split
+		// reads it as a separate raw-bps-bit prefix; m_uncomp treats
+		// the first of its block_size raw samples as the ref; SE and
+		// zero-block leave slot 0 of the block untouched but reserve
+		// it (samplesNeeded = block_size - 1 for the first block).
 
 		if AECDebug != nil {
-			AECDebug.Printf("aec: rsi=%d blocks=%d remaining=%d ref=%d bytePos=%d bitPos=%d",
-				rsiIdx, nBlocks, remaining, refSample, r.bytePos, r.bitPos)
+			AECDebug.Printf("aec: rsi=%d blocks=%d remaining=%d bytePos=%d bitPos=%d",
+				rsiIdx, nBlocks, remaining, r.bytePos, r.bitPos)
 		}
 
 		for blockIndex := 0; blockIndex < nBlocks; blockIndex++ {
@@ -243,16 +249,40 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			// the very last block's samples to fill out to block_size
 			// — those padded samples get truncated from `out` at the
 			// end of this function).
-			samplesNeeded := blockSize
-			if blockIndex == 0 && preprocess {
-				samplesNeeded = blockSize - 1
-			}
 			bytePosBefore := r.bytePos
 			bitPosBefore := r.bitPos
 
 			id, err := r.readBits(idBits)
 			if err != nil {
 				return nil, fmt.Errorf("aec: rsi=%d block=%d ID: %w", rsiIdx, blockIndex, err)
+			}
+
+			// For first block of RSI with preprocess on, read the
+			// raw reference sample AFTER the ID. For NC the ref is
+			// just the first of the block_size raw samples (no
+			// special read needed); for k-split, SE, and zero-block
+			// the ref is a separate bps-bit prefix written here.
+			needRefHere := blockIndex == 0 && preprocess && !refRead && int(id) != idNC
+			if needRefHere {
+				v, err := r.readBits(bps)
+				if err != nil {
+					return nil, fmt.Errorf("aec: rsi=%d block=0 ref sample: %w", rsiIdx, err)
+				}
+				refSample = v
+				out = append(out, refSample)
+				refRead = true
+			}
+
+			// samplesNeeded is the number of *encoded* samples the
+			// block's code option will produce (i.e. excludes the
+			// ref slot when we already read it above as a separate
+			// prefix). NC reads block_size raw samples no matter
+			// what — its first sample IS the ref when the
+			// preprocessor is on — so samplesNeeded stays at
+			// block_size for NC even on the first block.
+			samplesNeeded := blockSize
+			if blockIndex == 0 && preprocess && int(id) != idNC {
+				samplesNeeded = blockSize - 1
 			}
 
 			var optionName string
@@ -321,12 +351,22 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			case int(id) == idNC:
 				optionName = "NC"
 				// No-Compression block: raw bps bits per sample.
+				// libaec m_encode_uncomp replaces block[0] with the
+				// ref_sample before emitting, so the on-the-wire
+				// layout for an NC first block is: raw ref + 31 raw
+				// mapped d values. From the decoder's perspective
+				// this is just block_size raw bps-bit reads — the
+				// first one BECOMES the ref for the rest of the RSI.
 				for j := 0; j < samplesNeeded; j++ {
 					v, err := r.readBits(bps)
 					if err != nil {
 						return nil, fmt.Errorf("aec: rsi=%d block=%d NC sample %d: %w", rsiIdx, blockIndex, j, err)
 					}
 					out = append(out, v)
+				}
+				if blockIndex == 0 && preprocess && !refRead {
+					refSample = out[rsiOut]
+					refRead = true
 				}
 			case int(id) == idSE && bps >= 3:
 				optionName = "SE"

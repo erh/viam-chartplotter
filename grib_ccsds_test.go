@@ -551,10 +551,11 @@ func TestAECDecodeSEFirstBlockWithRef(t *testing.T) {
 	const flags = ccsdsFlagPreprocessor
 
 	w := &aecBitWriter{}
-	// Reference sample first (raw bps bits).
-	w.writeBits(ref, bps)
-	// Then the SE block ID.
+	// libaec wire order is ID → ref → encoded samples. m_id reads
+	// the ID first, then m_split / m_se read the raw ref iff
+	// state->ref is set.
 	w.writeBits(uint64(idSE), idBits)
+	w.writeBits(ref, bps)
 	// 16 m values, all m=0 → each decodes to (s1=0, s2=0).
 	for i := 0; i < 16; i++ {
 		w.writeFS(0)
