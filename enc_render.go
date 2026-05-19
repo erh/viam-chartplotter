@@ -1345,6 +1345,23 @@ func splitRings(coords [][]float64) [][][]float64 {
 // vertex spacing under ~100 m even at 1:80k cells, so 300 m is unambiguous.
 const structurePhantomJumpM = 300.0
 
+// classNeedsPhantomEdgeRepair reports whether splitPathOnLongJumps /
+// hasPhantomEdge should be applied to features of this class. The phantom-
+// jump filter exists to repair the s57 lib's edge-concatenation fallback
+// (see structurePhantomJumpM) — a bug that's only been observed on bridge /
+// overhead-cable / overhead-pipe / conveyor / causeway features. Applying
+// the filter universally silently drops legitimate sparse-vertex linework
+// on overview cells: e.g. a 1:1.2M COALNE or DEPCNT can carry consecutive
+// vertices ~1 km apart by design, and the 300 m guard splits every edge
+// into single-vertex runs that get discarded.
+func classNeedsPhantomEdgeRepair(class string) bool {
+	switch class {
+	case "BRIDGE", "CBLOHD", "PIPOHD", "CONVYR", "CAUSWY":
+		return true
+	}
+	return false
+}
+
 // overviewClipEdgeM is the per-edge threshold above which a polygon's
 // max-edge counts as "cell-boundary-scale": s57 polygon rings that thread
 // along a cell edge to close the polygon clip carry one or more multi-km
@@ -1855,6 +1872,12 @@ func cellScaleRangeFor(z int, latDeg float64) (int, int) {
 	//           density)
 	div := 2.0
 	switch {
+	case z <= 6:
+		// Floor must drop low enough to admit the 1:675k overview cell
+		// (US2EC04M-style band-2 coverage). z=6 displayScale ≈ 7.2M, so
+		// div=12 yields a floor around 600k. Band-2 cells are still
+		// continent-scale so they tile cleanly — no seam risk.
+		div = 12.0
 	case z <= 9:
 		div = 8.0
 	case z == 12:
@@ -2106,18 +2129,18 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 			if stroke == nil {
 				return
 			}
-			// Phantom-segment guard: same s57-lib edge concatenation that
-			// breaks fills also paints a long straight stroke joining the
-			// disconnected sub-features. Split on km-scale jumps and
-			// stroke each surviving run as an open subpath. Applied to
-			// every class with a stroke — a real ring with all vertices
-			// spaced under structurePhantomJumpM is unaffected because
-			// split returns false.
-			if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
-				if len(runs) > 0 {
-					strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+			// Phantom-segment guard for the structure classes whose s57-lib
+			// output sometimes concatenates raw edges with multi-km jumps
+			// between disconnected sub-features. Scoped narrowly because
+			// overview-cell coastline polygons legitimately carry vertex
+			// spacings well above structurePhantomJumpM.
+			if classNeedsPhantomEdgeRepair(class) {
+				if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
+					if len(runs) > 0 {
+						strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+					}
+					return
 				}
-				return
 			}
 			tracePolygonPath(dc, geom.Coordinates, project)
 			dc.SetColor(stroke)
@@ -2145,16 +2168,17 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		if stroke == nil {
 			return
 		}
-		// Phantom-segment guard: the s57 lib concatenates multi-edge
-		// linestring coords with no separator, so any feature whose edges
-		// aren't topologically chained paints a polyline with a straight
-		// line bridging the gap. Applied to every class — features whose
-		// vertices are all within structurePhantomJumpM are unaffected.
-		if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
-			if len(runs) > 0 {
-				strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+		// Phantom-segment guard, scoped to the structure classes that need it
+		// — see classNeedsPhantomEdgeRepair. Generic line classes (COALNE,
+		// DEPCNT, RIVERS, ...) can have legitimate >300 m vertex gaps in
+		// overview cells and must NOT be split here.
+		if classNeedsPhantomEdgeRepair(class) {
+			if runs, split := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM); split {
+				if len(runs) > 0 {
+					strokeOpenSubpaths(dc, runs, project, stroke, width*scale)
+				}
+				return
 			}
-			return
 		}
 		dc.NewSubPath()
 		for i, c := range geom.Coordinates {
