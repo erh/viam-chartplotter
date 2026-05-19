@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,13 @@ import (
 // WindPublisherModel is the Viam model triple for the publisher.
 var WindPublisherModel = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("wind-publisher")
 
+// DefaultECMWFR2Bucket is the canonical Cloudflare R2 bucket the
+// project-wide publisher writes to. Hardcoded so every chartplotter
+// in the fleet reads from the same place by default; an operator can
+// still override via the `r2_bucket` config attribute if they're
+// running a staging fleet or want to sandbox a publisher's output.
+const DefaultECMWFR2Bucket = "viam-chartplotter-ecmwf"
+
 func init() {
 	resource.RegisterComponent(
 		generic.API,
@@ -43,12 +52,23 @@ type WindPublisherConfig struct {
 	// BuildECMWFCycle-style entry point as we ship them.
 	Models []string `json:"models"`
 
-	// R2 credentials + bucket. All four required when R2 publishing
-	// is enabled (i.e. UploadEnabled = true).
+	// R2 credentials. The cleanest setup uses two values from
+	// Cloudflare's "Create R2 API Token" dialog:
+	//   r2_access_key_id  → the token's *id* (a short identifier
+	//                       Cloudflare shows alongside the token)
+	//   r2_api_token      → the raw token *value* (a long secret);
+	//                       SHA-256'd at startup to produce the
+	//                       SigV4 secret S3 needs.
+	// r2_secret_access_key is the legacy alternative — supply it
+	// directly only if you've already computed it yourself.
+	// AccountID + AccessKeyID + (APIToken OR SecretAccessKey) are
+	// required when UploadEnabled = true. Bucket defaults to
+	// DefaultECMWFR2Bucket; override only for a staging fleet.
 	R2AccountID       string `json:"r2_account_id"`
 	R2AccessKeyID     string `json:"r2_access_key_id"`
-	R2SecretAccessKey string `json:"r2_secret_access_key"`
-	R2Bucket          string `json:"r2_bucket"`
+	R2APIToken        string `json:"r2_api_token,omitempty"`
+	R2SecretAccessKey string `json:"r2_secret_access_key,omitempty"`
+	R2Bucket          string `json:"r2_bucket,omitempty"`
 
 	// UploadEnabled toggles real R2 uploads. Default false so adding
 	// the component to a new machine doesn't immediately start
@@ -81,14 +101,22 @@ func (c *WindPublisherConfig) Validate(path string) ([]string, error) {
 		case c.R2AccountID == "":
 			return nil, fmt.Errorf("%s: r2_account_id required when upload_enabled", path)
 		case c.R2AccessKeyID == "":
-			return nil, fmt.Errorf("%s: r2_access_key_id required when upload_enabled", path)
-		case c.R2SecretAccessKey == "":
-			return nil, fmt.Errorf("%s: r2_secret_access_key required when upload_enabled", path)
-		case c.R2Bucket == "":
-			return nil, fmt.Errorf("%s: r2_bucket required when upload_enabled", path)
+			return nil, fmt.Errorf("%s: r2_access_key_id required when upload_enabled (the R2 API token id Cloudflare shows in the dashboard)", path)
+		case c.R2APIToken == "" && c.R2SecretAccessKey == "":
+			return nil, fmt.Errorf("%s: r2_api_token (raw value) or r2_secret_access_key (pre-hashed) required when upload_enabled", path)
 		}
 	}
 	return nil, nil
+}
+
+// effectiveBucket returns the configured bucket or the project-wide
+// default. Kept in one place so reconfigure() and any future
+// inspection RPC report the same name.
+func (c *WindPublisherConfig) effectiveBucket() string {
+	if c.R2Bucket != "" {
+		return c.R2Bucket
+	}
+	return DefaultECMWFR2Bucket
 }
 
 // windPublisher is the running resource. It owns one goroutine that
@@ -117,6 +145,23 @@ func newWindPublisher(ctx context.Context, deps resource.Dependencies, conf reso
 	if err != nil {
 		return nil, err
 	}
+	// Wire the project-wide raw-grib cache (rule: every external
+	// fetch goes through a disk cache) if no other code path has
+	// already set it. On a machine that also runs the chartplotter
+	// component, NewWeatherCache will have set this; on a
+	// publisher-only machine this is the only place that does.
+	if ECMWFRawCacheDir == "" {
+		base, derr := os.UserCacheDir()
+		if derr != nil {
+			base = os.TempDir()
+		}
+		dir := filepath.Join(base, "viam-chartplotter-wind-publisher", "raw-ecmwf")
+		if serr := SetECMWFRawCacheDir(dir); serr != nil {
+			logger.Warnf("publisher: raw-grib cache disabled: %v", serr)
+		} else {
+			logger.Infof("publisher: raw-grib cache: %s", dir)
+		}
+	}
 	p := &windPublisher{
 		Named:       conf.ResourceName().AsNamed(),
 		logger:      logger,
@@ -142,13 +187,15 @@ func (p *windPublisher) reconfigure(cfg *WindPublisherConfig) error {
 		up, err := NewR2Uploader(R2Config{
 			AccountID:       cfg.R2AccountID,
 			AccessKeyID:     cfg.R2AccessKeyID,
+			APIToken:        cfg.R2APIToken,
 			SecretAccessKey: cfg.R2SecretAccessKey,
-			Bucket:          cfg.R2Bucket,
+			Bucket:          cfg.effectiveBucket(),
 		})
 		if err != nil {
 			return fmt.Errorf("r2 setup: %w", err)
 		}
 		p.uploader = up
+		p.logger.Infof("publisher: r2 bucket=%s", cfg.effectiveBucket())
 	} else {
 		p.uploader = nil
 	}

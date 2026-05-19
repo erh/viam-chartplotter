@@ -50,11 +50,37 @@ func main() {
 
 func runPublish() {
 	var (
-		out     = flag.String("out", "./publish-out", "output directory for dry-run publish")
-		r2Flag  = flag.Bool("r2", false, "upload to Cloudflare R2 (requires R2_* env vars)")
-		timeout = flag.Duration("timeout", 30*time.Minute, "overall timeout for the cycle build")
+		out      = flag.String("out", "./publish-out", "output directory for dry-run publish")
+		r2Flag   = flag.Bool("r2", false, "upload to Cloudflare R2 (requires R2_* env vars)")
+		timeout  = flag.Duration("timeout", 30*time.Minute, "overall timeout for the cycle build")
+		cacheDir = flag.String("cache-dir", "", "raw-GRIB cache directory (default: $WIND_PUBLISHER_CACHE_DIR or ~/Library/Caches/viam-chartplotter-wind-publisher/raw-ecmwf)")
+		noCache  = flag.Bool("no-cache", false, "force re-fetch from ECMWF even when cached bytes are present (debugging only)")
 	)
 	flag.Parse()
+
+	// Wire the project-wide raw-bytes cache so a crash mid-publish
+	// doesn't cost us a full ECMWF re-fetch on the next run. ECMWF
+	// data is immutable per (cycle, fh), so the cache never needs
+	// invalidation. --no-cache disables this for debugging.
+	if !*noCache {
+		dir := *cacheDir
+		if dir == "" {
+			dir = os.Getenv("WIND_PUBLISHER_CACHE_DIR")
+		}
+		if dir == "" {
+			base, err := os.UserCacheDir()
+			if err != nil {
+				base = os.TempDir()
+			}
+			dir = filepath.Join(base, "viam-chartplotter-wind-publisher", "raw-ecmwf")
+		}
+		if err := vc.SetECMWFRawCacheDir(dir); err != nil {
+			log.Fatalf("cache dir: %v", err)
+		}
+		log.Printf("raw-grib cache: %s", dir)
+	} else {
+		log.Printf("raw-grib cache: DISABLED (--no-cache)")
+	}
 	args := flag.Args()
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "missing model name (e.g. 'ecmwf')")

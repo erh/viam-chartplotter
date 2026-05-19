@@ -3,6 +3,8 @@ package vc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,10 +28,26 @@ import (
 // to a specific bucket. Region must be "auto" for R2.
 
 // R2Config wires the publisher to one R2 bucket.
+//
+// Auth: Cloudflare's "Create R2 API Token" flow gives you two values
+// — a token *id* (used as the S3 Access Key ID) and a token *value*
+// (a long secret string). Per Cloudflare's docs the Secret Access
+// Key that S3 SigV4 needs is just `SHA-256(value)`, derived
+// client-side, so the value never leaves the user's hands as a
+// pre-hashed secret. This struct supports either:
+//
+//   - Pass `AccessKeyID` + `SecretAccessKey` directly (legacy / for
+//     setups that already store the derived secret).
+//   - Pass `AccessKeyID` + `APIToken` (the raw token value); the
+//     constructor SHA-256s it into the secret.
+//
+// Both forms are equivalent — the API-token form just avoids having
+// to handle the hashed secret yourself.
 type R2Config struct {
 	AccountID       string // your Cloudflare account ID
-	AccessKeyID     string // R2 API token access key
-	SecretAccessKey string // R2 API token secret
+	AccessKeyID     string // R2 API token's id field (visible in the dashboard)
+	SecretAccessKey string // optional: SHA-256(token value); derived from APIToken when empty
+	APIToken        string // optional: raw R2 API token value; hashed into SecretAccessKey
 	Bucket          string // bucket name
 }
 
@@ -41,13 +59,25 @@ func (c R2Config) Validate() error {
 	case c.AccountID == "":
 		return fmt.Errorf("r2: account_id required")
 	case c.AccessKeyID == "":
-		return fmt.Errorf("r2: access_key_id required")
-	case c.SecretAccessKey == "":
-		return fmt.Errorf("r2: secret_access_key required")
+		return fmt.Errorf("r2: access_key_id required (the R2 API token's id, shown alongside the token value in the dashboard)")
+	case c.SecretAccessKey == "" && c.APIToken == "":
+		return fmt.Errorf("r2: either api_token (raw value) or secret_access_key (pre-hashed) required")
 	case c.Bucket == "":
 		return fmt.Errorf("r2: bucket required")
 	}
 	return nil
+}
+
+// resolvedSecret returns the SigV4 secret key, deriving it from the
+// raw API token value when the pre-hashed form isn't supplied. The
+// SHA-256 conversion matches Cloudflare's documented derivation:
+// "Secret Access Key = SHA-256 hash of the API token value".
+func (c R2Config) resolvedSecret() string {
+	if c.SecretAccessKey != "" {
+		return c.SecretAccessKey
+	}
+	sum := sha256.Sum256([]byte(c.APIToken))
+	return hex.EncodeToString(sum[:])
 }
 
 // R2Uploader pushes one PublishedCycle to a Cloudflare R2 bucket.
@@ -69,7 +99,7 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 	sess, err := session.NewSession(&aws.Config{
 		Region:      aws.String("auto"),
 		Endpoint:    aws.String(endpoint),
-		Credentials: credentials.NewStaticCredentials(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Credentials: credentials.NewStaticCredentials(cfg.AccessKeyID, cfg.resolvedSecret(), ""),
 		// R2 doesn't support virtual-host style addressing for buckets
 		// that contain dots; force path-style so any bucket name works.
 		S3ForcePathStyle: aws.Bool(true),
@@ -80,17 +110,24 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 	return &R2Uploader{cfg: cfg, s3: s3.New(sess)}, nil
 }
 
-// NewR2UploaderFromEnv reads R2_ACCOUNT_ID / R2_ACCESS_KEY_ID /
-// R2_SECRET_ACCESS_KEY / R2_BUCKET from the process environment.
+// NewR2UploaderFromEnv reads R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and
+// either R2_API_TOKEN (raw token value, hashed into the SigV4 secret)
+// or R2_SECRET_ACCESS_KEY (pre-hashed) from the process environment.
+// R2_BUCKET is optional — falls back to DefaultECMWFR2Bucket.
 // Convenient for cmd/wind-publisher and dev workflows; in production
 // the Viam resource constructor reads from component attributes
 // instead.
 func NewR2UploaderFromEnv() (*R2Uploader, error) {
+	bucket := os.Getenv("R2_BUCKET")
+	if bucket == "" {
+		bucket = DefaultECMWFR2Bucket
+	}
 	return NewR2Uploader(R2Config{
 		AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
 		SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
-		Bucket:          os.Getenv("R2_BUCKET"),
+		APIToken:        os.Getenv("R2_API_TOKEN"),
+		Bucket:          bucket,
 	})
 }
 

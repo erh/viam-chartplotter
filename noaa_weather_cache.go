@@ -55,6 +55,10 @@ type WeatherCache struct {
 	// goroutines that keep hitting NOMADS after the server is gone.
 	prewarmCancel context.CancelFunc
 
+	// cleanerCancel stops the periodic disk-cache cleaner goroutine
+	// (see StartCleaner). nil when no cleaner is running.
+	cleanerCancel context.CancelFunc
+
 	hits    atomic.Uint64
 	refreshes atomic.Uint64
 	errs    atomic.Uint64
@@ -687,11 +691,91 @@ func (wc *WeatherCache) runPrewarm(ctx context.Context) {
 
 // Close stops the prewarm goroutine. The in-flight HTTP request (if
 // any) is cancelled via ctx, though it may take up to the client
-// timeout to actually return.
+// timeout to actually return. Also cancels any active cache
+// cleaner goroutine if one was started.
 func (wc *WeatherCache) Close() {
 	if wc.prewarmCancel != nil {
 		wc.prewarmCancel()
 	}
+	if wc.cleanerCancel != nil {
+		wc.cleanerCancel()
+	}
+}
+
+// cleanOldFiles walks the cache directory recursively and deletes
+// every regular file whose mtime is older than `maxAge`. Returns
+// the count + bytes freed so the caller can log a summary. Walk
+// errors on individual files are swallowed (logged but not fatal)
+// so a single permission issue doesn't strand the rest of the
+// cleanup.
+//
+// Covers everything under wc.cacheDir: stale per-version JSON
+// (e.g. orphaned ecmwf-v2-*.json after a version bump), the
+// raw-ecmwf/ raw-GRIB cache, and any .gz siblings. ECMWF data is
+// immutable per (cycle, fh) so re-fetching after a cleanup costs
+// only the bytes we'd have to re-pull from upstream — at 60-day
+// thresholds that's essentially never on a normally-active
+// publisher.
+func (wc *WeatherCache) cleanOldFiles(maxAge time.Duration) (filesDeleted int, bytesFreed int64) {
+	cutoff := time.Now().Add(-maxAge)
+	_ = filepath.Walk(wc.cacheDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			// Log + skip; one bad entry shouldn't abort the whole walk.
+			wc.logger.Debugf("weather: cache cleaner walk %s: %v", path, err)
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.ModTime().After(cutoff) {
+			return nil
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			wc.logger.Debugf("weather: cache cleaner rm %s: %v", path, rmErr)
+			return nil
+		}
+		filesDeleted++
+		bytesFreed += info.Size()
+		return nil
+	})
+	return
+}
+
+// StartCleaner runs cleanOldFiles in a background goroutine: once
+// immediately, then on each `interval` tick. Cancelled by Close.
+// Safe to call more than once (subsequent calls replace the
+// previous cleaner's cancel; the orphaned goroutine exits on its
+// next tick).
+//
+// `maxAge` is how stale a file must be before deletion (e.g.
+// 60 * 24 * time.Hour for two months). `interval` is how often the
+// cleaner runs — once a day is plenty since the cache grows slowly
+// and the cleanup itself is cheap (one Walk pass).
+func (wc *WeatherCache) StartCleaner(maxAge, interval time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	wc.cleanerCancel = cancel
+	go func() {
+		runOnce := func() {
+			n, freed := wc.cleanOldFiles(maxAge)
+			if n > 0 {
+				wc.logger.Infof("weather: cache cleaner removed %d files (%.1f MB freed, older than %s)",
+					n, float64(freed)/(1024*1024), maxAge)
+			}
+		}
+		// Eagerly clean once on startup so a long-idle install with a
+		// huge stale cache doesn't have to wait `interval` to reclaim.
+		runOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runOnce()
+			}
+		}
+	}()
 }
 
 // --- ol-wind JSON shape ---------------------------------------------------

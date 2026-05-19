@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -62,32 +63,85 @@ type TileManifest struct {
 	PublishedBbox [4]float64 `json:"publishedBbox"` // [w, s, e, n]
 }
 
-// BuildECMWFCycle runs one full publish prep: walks the latest ECMWF
-// Open Data cycle, decodes 10u + 10v at every forecast hour in
-// `m.MinFh..m.MaxFh` with step `m.StepFh`, crops each into the tile
-// grid, gzips each tile's ol-wind JSON, and returns everything ready
-// for the uploader. No network I/O happens beyond the ECMWF fetch
-// itself — the returned PublishedCycle is pure bytes.
+// BuildECMWFCycle runs one full publish prep: picks one ECMWF Open
+// Data cycle that has every required forecast hour available, decodes
+// 10u + 10v at each fh, crops into the tile grid, gzips each tile's
+// ol-wind JSON, and returns everything ready for the uploader.
 //
-// This is the slow path: ~49 fhs × (1 GRIB fetch + decode + 36 crops
-// + 36 gzips). Expect ~5-15 minutes on a small VM. Run inside a
-// goroutine; cancel via ctx to abort mid-cycle.
+// "Picks one cycle" is the key invariant: a published archive must be
+// internally consistent, never mixing fhs from different runs. ECMWF
+// publishes a cycle incrementally — fh=0 lands first, fh=144 lands
+// last — so the freshest cycle is often partial. We probe each
+// candidate cycle in turn (newest first) and only ship one where
+// every fh in [MinFh..MaxFh] is present.
+//
+// Slow path: per cycle, ~49 fhs × (GRIB fetch + decode + 36 crops +
+// 36 gzips). Expect ~5-15 minutes on a small VM for a successful
+// cycle. Run inside a goroutine; cancel via ctx to abort.
 func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) (*PublishedCycle, error) {
 	if m == nil || m.Fetch == nil {
 		return nil, fmt.Errorf("wind-publisher: model nil or has no Fetch")
 	}
+	if len(m.CycleHours) == 0 {
+		return nil, fmt.Errorf("wind-publisher: model %s has no cycle hours", m.Name)
+	}
+
+	now := time.Now().UTC().Add(-time.Duration(m.PublishLagH) * time.Hour)
+	candidate := mostRecentCycle(now, m.CycleHours)
+	var lastErr error
+	// Same 4-back budget walkLatestCycle uses on the on-demand path —
+	// that's two full days for a 6h-cycle model, more than enough for
+	// any realistic publish-lag scenario.
+	for attempt := 0; attempt < 4; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		cycle, err := buildOneCycle(ctx, client, m, candidate)
+		if err == nil {
+			return cycle, nil
+		}
+		log.Printf("publisher: cycle %s incomplete (%v) — trying previous cycle",
+			candidate.Format("20060102T15"), err)
+		lastErr = err
+		candidate = previousCycle(candidate, m.CycleHours)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no fully-published cycle for %s in last %d attempts", m.Name, 4)
+	}
+	return nil, lastErr
+}
+
+// buildOneCycle attempts every forecast hour against ONE specific
+// cycle. Returns an error on the first fh that isn't available in
+// that cycle so the caller can step back. The error message includes
+// the failing fh so an operator can tell "the cycle just hasn't
+// finished publishing yet" from "ECMWF is broken".
+//
+// Uses two cache layers (project-wide rule: every external fetch +
+// every expensive recomputation goes through a disk cache):
+//
+//   - Raw-GRIB cache via cachedFetchECMWFWind10m — skips ECMWF
+//   - Tile-blob cache via readTileBlobCache — skips CCSDS decode +
+//     crop + JSON encode + gzip when we already produced this
+//     exact (cycle, fh, tile) tuple in a prior (perhaps interrupted)
+//     run. Saves ~60 s CPU per cycle on full retry.
+//
+// When every tile for an fh is cached, we don't even need to decode
+// the GRIB for that fh — saves the ~150 ms CCSDS decode too. We
+// still call cachedFetchECMWFWind10m to confirm the GRIB is
+// retrievable (a hit-from-disk is essentially free), so a future
+// "all-tiles-cached-but-the-raw-cache-was-wiped" scenario still
+// produces a coherent error rather than silently skipping a missing
+// fh.
+func buildOneCycle(ctx context.Context, client *http.Client, m *WeatherModel, cycleT time.Time) (*PublishedCycle, error) {
 	tiles := AllTiles()
 	cycle := &PublishedCycle{
 		Model:     m.Name,
+		CycleTime: cycleT,
 		Tiles:     tiles,
 		TileBlobs: make(map[publishKey]TileBlob),
 	}
 
-	// Walk all fhs in step order. Stop on the first cycle-resolution
-	// error (fetch returned no body for ANY cycle in walkLatestCycle's
-	// 4-back window); a single-fh failure mid-walk is fatal too so we
-	// don't ship a partial cycle with holes the client would surface
-	// as 404s.
 	startFh := m.MinFh
 	step := m.StepFh
 	if step <= 0 {
@@ -97,72 +151,75 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) 
 		startFh += step - (startFh % step)
 	}
 
-	var anyCycleTime time.Time
 	for fh := startFh; fh <= m.MaxFh; fh += step {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		records, cycleT, err := fetchAndDecodeForPublish(ctx, client, m, fh)
+
+		// Fast path: every tile for this fh already cached on disk?
+		// Read them back and skip the decode entirely.
+		cached, allHit := loadAllTileBlobsForFh(m.Name, cycleT, fh, tiles)
+		if allHit {
+			cycle.FHs = append(cycle.FHs, fh)
+			for k, blob := range cached {
+				cycle.TileBlobs[k] = blob
+			}
+			log.Printf("tileCache: ALL-HIT cycle=%s fh=%d tiles=%d (skipped decode + encode)",
+				cycleT.UTC().Format("20060102T15"), fh, len(tiles))
+			continue
+		}
+
+		records, err := fetchAndDecodeForPublish(ctx, client, cycleT, fh)
 		if err != nil {
 			return nil, fmt.Errorf("fh=%d: %w", fh, err)
 		}
-		if anyCycleTime.IsZero() {
-			anyCycleTime = cycleT
-		} else if !cycleT.Equal(anyCycleTime) {
-			// A walkLatestCycle that hit a different cycle for this fh
-			// (because the latest one isn't fully published yet) would
-			// mix cycles in one publish — refuse rather than ship
-			// inconsistent fields.
-			return nil, fmt.Errorf("fh=%d resolved to cycle %s, expected %s",
-				fh, cycleT.Format("20060102T15"), anyCycleTime.Format("20060102T15"))
-		}
 		cycle.FHs = append(cycle.FHs, fh)
-
 		for _, tile := range tiles {
+			pk := publishKey{FH: fh, TileKey: tile.Key}
+			if blob, ok := cached[pk]; ok {
+				// Partial hit from the loadAll above — already on
+				// disk, just reuse.
+				cycle.TileBlobs[pk] = blob
+				continue
+			}
 			cropped := cropPair(records, tile.PublishedBbox)
 			blob, err := encodeTileBlob(cropped)
 			if err != nil {
 				return nil, fmt.Errorf("fh=%d tile=%s encode: %w", fh, tile.Key, err)
 			}
-			cycle.TileBlobs[publishKey{FH: fh, TileKey: tile.Key}] = blob
+			if werr := writeTileBlobCache(m.Name, cycleT, fh, tile.Key, blob); werr != nil {
+				// Cache write is best-effort; the in-memory blob
+				// still gets uploaded.
+				log.Printf("tileCache: write %s: %v", tileCachePath(m.Name, cycleT, fh, tile.Key), werr)
+			}
+			cycle.TileBlobs[pk] = blob
 		}
 	}
 
-	cycle.CycleTime = anyCycleTime
 	cycle.PublishedAt = time.Now().UTC()
 	sort.Ints(cycle.FHs)
 	return cycle, nil
 }
 
-// fetchAndDecodeForPublish wraps the existing m.Fetch path so the
-// publisher reuses the same decoder, cycle-walkback, and raw-cache
-// behaviour as the on-demand server. Returns the decoded windRecords
-// and the reference time of the cycle that satisfied the fetch.
-func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, m *WeatherModel, fh int) ([]windRecord, time.Time, error) {
-	// Capture the cycle time by intercepting walkLatestCycle's choice.
-	// The standard m.Fetch contract doesn't return the cycle time, so
-	// we duplicate the walkback here (the ECMWF model's Fetch does the
-	// same internally) to get it back.
-	var pickedCycle time.Time
-	walker := func(ctx context.Context, t time.Time) ([]byte, error) {
-		bytes, err := fetchECMWFWind10m(ctx, client, t, fh)
-		if err == nil {
-			pickedCycle = t
-		}
-		return bytes, err
-	}
-	grib, cycleT, err := walkLatestCycle(ctx, m, fh, walker)
+// fetchAndDecodeForPublish pulls one (cycle, fh) pair through the
+// project-wide raw-bytes disk cache (cachedFetchECMWFWind10m). No
+// per-fh walkback — the cycle-locked walkback lives in
+// BuildECMWFCycle so a missing fh aborts the whole-cycle attempt
+// cleanly instead of silently mixing runs. Cache means a resumed
+// publish after a mid-build crash only re-fetches the fhs that
+// weren't yet cached, which matters because ECMWF rate-limits
+// aggressively and a full cycle is ~85 MB of unnecessary traffic on
+// re-fetch.
+func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, cycleT time.Time, fh int) ([]windRecord, error) {
+	grib, err := cachedFetchECMWFWind10m(ctx, client, cycleT, fh)
 	if err != nil {
-		return nil, time.Time{}, err
-	}
-	if !pickedCycle.IsZero() {
-		cycleT = pickedCycle
+		return nil, err
 	}
 	records, err := parseECMWFWind10m(grib, cycleT, fh)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf("parse: %w", err)
 	}
-	return records, cycleT, nil
+	return records, nil
 }
 
 // cropPair runs CropWindRecord across a 2-record (10u, 10v) pair so

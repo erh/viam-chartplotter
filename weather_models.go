@@ -17,16 +17,98 @@ import (
 	"time"
 )
 
-// ECMWFRawCacheDir, if non-empty, names a directory into which the
-// ECMWF model writes the raw concatenated 10u/10v GRIB2 bytes for
-// every successful fetch — BEFORE attempting to decode. Lets you
-// post-mortem a CCSDS-decoder failure by replaying the exact wire
-// blob through `go run ./cmd/ecmwf-probe -file <path>`, instead of
-// guessing what bits the upstream actually sent. Production wiring
-// happens in NewWeatherCache, which points this at
-// <cacheDir>/raw-ecmwf when the cache is constructed; tests and the
-// probe leave it unset.
+// ECMWFRawCacheDir is the directory backing the project-wide rule
+// "every external fetch goes through a disk cache." ECMWF Open Data
+// publishes each GRIB message at one immutable URL, so once we've
+// pulled (cycle, fh) we never re-fetch — every subsequent caller
+// (on-demand server, wind-publisher cron, cmd/ecmwf-probe) gets the
+// cached bytes for free. This matters because ECMWF rate-limits
+// aggressively (we hit a 429 during development) and a publisher
+// that crashes 80% through a cycle build would otherwise re-fetch
+// all 49 fhs on the next run.
+//
+// Production wiring: NewWeatherCache sets this to <cacheDir>/raw-ecmwf
+// on the server, and the wind-publisher CLI / Viam resource set it
+// via SetECMWFRawCacheDir. The on-demand model.Fetch and the
+// publisher's fetchAndDecodeForPublish both go through
+// cachedFetchECMWFWind10m, which is cache-first.
 var ECMWFRawCacheDir string
+
+// SetECMWFRawCacheDir lets non-server callers wire up the raw cache
+// without going through NewWeatherCache. Creates the directory if
+// missing; the empty-string form disables caching (only useful in
+// tests).
+func SetECMWFRawCacheDir(dir string) error {
+	if dir == "" {
+		ECMWFRawCacheDir = ""
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("ecmwf raw cache mkdir %q: %w", dir, err)
+	}
+	ECMWFRawCacheDir = dir
+	return nil
+}
+
+// ecmwfRawCachePath builds the deterministic file name for a
+// (cycle, fh) blob. Stable across processes so the publisher CLI,
+// the on-demand server, and the probe all hit the same cache entry.
+func ecmwfRawCachePath(runTime time.Time, fh int) string {
+	if ECMWFRawCacheDir == "" {
+		return ""
+	}
+	return filepath.Join(ECMWFRawCacheDir,
+		fmt.Sprintf("ecmwf-%s-f%03d.grib2", runTime.UTC().Format("20060102T15"), fh))
+}
+
+// cachedFetchECMWFWind10m is the cache-first entry point every caller
+// should use. Checks the disk cache, falls back to fetchECMWFWind10m
+// on miss, writes back to the cache on success. Write failures are
+// non-fatal — caching is best-effort, the decoded data is what
+// matters.
+//
+// Logs one line per call so an operator can confirm cache behaviour
+// at a glance: a healthy publisher resume after a crash should show
+// HIT for every fh it already processed and MISS only for the new
+// ones.
+func cachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
+	cycleStr := runTime.UTC().Format("20060102T15")
+	path := ecmwfRawCachePath(runTime, fh)
+	if path == "" {
+		log.Printf("ecmwfCache: DISABLED cycle=%s fh=%d (no raw cache dir set)", cycleStr, fh)
+	} else if b, err := os.ReadFile(path); err == nil {
+		log.Printf("ecmwfCache: HIT cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(b), path)
+		return b, nil
+	} else if !os.IsNotExist(err) {
+		// Real I/O error reading the cache file — log it so it's
+		// obvious rather than silently re-fetching. We still
+		// proceed to fetch from ECMWF.
+		log.Printf("ecmwfCache: ERR cycle=%s fh=%d path=%s read: %v (will refetch)", cycleStr, fh, path, err)
+	} else {
+		log.Printf("ecmwfCache: MISS cycle=%s fh=%d path=%s", cycleStr, fh, path)
+	}
+
+	grib, err := fetchECMWFWind10m(ctx, client, runTime, fh)
+	if err != nil {
+		return nil, err
+	}
+	if path != "" {
+		// Write via .tmp + rename so a crash mid-write doesn't
+		// leave a half-blob the next run would happily try to
+		// decode (and fail in a confusing way).
+		tmp := path + ".tmp"
+		if werr := os.WriteFile(tmp, grib, 0o644); werr == nil {
+			if rerr := os.Rename(tmp, path); rerr != nil {
+				log.Printf("ecmwfCache: write rename %s: %v", path, rerr)
+			} else {
+				log.Printf("ecmwfCache: STORE cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(grib), path)
+			}
+		} else {
+			log.Printf("ecmwfCache: write %s: %v", path, werr)
+		}
+	}
+	return grib, nil
+}
 
 // WeatherModel describes one upstream forecast that the cache can
 // serve under /noaa-weather/data/{name}/latest.json. The cache layer
@@ -660,22 +742,14 @@ func ecmwfWindModel() *WeatherModel {
 		PublishLagH: 7,
 	}
 	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
+		// cachedFetchECMWFWind10m handles the raw-bytes disk cache
+		// (project-wide rule: every upstream fetch goes through a
+		// cache). On a cache hit, ECMWF isn't touched at all.
 		grib, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
-			return fetchECMWFWind10m(ctx, client, t, fh)
+			return cachedFetchECMWFWind10m(ctx, client, t, fh)
 		})
 		if err != nil {
 			return nil, err
-		}
-		// Stash the raw wire bytes BEFORE decoding so a decode
-		// failure leaves us something to replay against. Write
-		// failures here are non-fatal — the cache still tries to
-		// decode and serve regardless.
-		if ECMWFRawCacheDir != "" {
-			path := filepath.Join(ECMWFRawCacheDir,
-				fmt.Sprintf("ecmwf-%s-f%03d.grib2", runT.UTC().Format("20060102T15"), fh))
-			if werr := os.WriteFile(path, grib, 0o644); werr != nil {
-				log.Printf("ECMWF raw cache write %s: %v", path, werr)
-			}
 		}
 		return parseECMWFWind10m(grib, runT, fh)
 	}
