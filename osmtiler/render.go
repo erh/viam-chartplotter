@@ -225,10 +225,20 @@ func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 
 	w, _ := dc.MeasureString(f.Name)
 
-	// Cull small polygons whose visible width can't host the label.
+	// Cull only polygons whose largest dimension still can't host the
+	// label — a tall thin park (Morningside Park, Riverside Park) is
+	// fine to label even if a horizontal name overflows the narrow
+	// axis. Lat-pixel-per-degree scales by 1/cos(lat) in Mercator.
 	nTiles := math.Exp2(float64(z))
 	lonPxPerDeg := 256 * nTiles / 360
-	if (f.MaxLon-f.MinLon)*lonPxPerDeg < w {
+	latPxPerDeg := lonPxPerDeg / math.Cos(cLat*math.Pi/180.0)
+	widthPx := (f.MaxLon - f.MinLon) * lonPxPerDeg
+	heightPx := (f.MaxLat - f.MinLat) * latPxPerDeg
+	maxExtent := widthPx
+	if heightPx > maxExtent {
+		maxExtent = heightPx
+	}
+	if maxExtent < w {
 		return
 	}
 
