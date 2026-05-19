@@ -116,6 +116,13 @@
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
   let weatherMinForecastHour = $state(0);
+  // Slider upper bound — driven by the currently-selected wind model's
+  // MaxFh (ECMWF=144, GFS=240, HRRR=18, ICON-EU=120 …). Updated by the
+  // model picker onchange handler so a GFS→ECMWF switch at fh=207
+  // visibly snaps the slider to 144, instead of leaving the thumb at
+  // a value the publisher has no tile for. Default 240 covers GFS at
+  // startup before the per-model meta lands.
+  let weatherMaxForecastHour = $state(240);
   // Highest zoom at which the GFS-resolution weather overlay reads as
   // signal rather than a flat coloured wash. Above this, both the
   // wind/wave layers and the forecast-hour slider hide automatically.
@@ -3225,6 +3232,11 @@
           weatherRunTime = refTime;
           const floor = nowForecastHour(refTime);
           weatherMinForecastHour = floor;
+          // Slider max tracks the active wind model's MaxFh from
+          // /noaa-weather/models meta. Falls back to 240 (GFS) if
+          // the models endpoint hasn't responded yet at this point.
+          const initialMeta = weatherModels.find((m) => m.name === windModel);
+          if (initialMeta) weatherMaxForecastHour = initialMeta.maxFh;
           weatherForecastHour = floor;
           // Re-fetch at the "now-aligned" hour if the initial f000
           // fetch happened before we knew the run time.
@@ -5095,7 +5107,7 @@
     {@const dayMarkers = computeDayMarkers(
       weatherRunTime,
       weatherMinForecastHour,
-      240,
+      weatherMaxForecastHour,
     )}
     <div class="wind-forecast-bar">
       {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on && windModelOptions.length > 1}
@@ -5126,12 +5138,17 @@
                   // different run cadences, so the "now hour" shifts.
                   const floor = nowForecastHour(weatherRunTime);
                   weatherMinForecastHour = floor;
-                  // Also clamp DOWN to the new model's MaxFh.
-                  // ECMWF caps at 144, GFS at 240 — without this
-                  // clamp, switching GFS→ECMWF at fh=207 silently
-                  // 404s on every tile (no published data past 144).
+                  // Update the slider's MAX too — ECMWF caps at 144,
+                  // GFS at 240, HRRR at 18. Drives the visible track
+                  // length AND the value the thumb can be dragged to,
+                  // so the user can't even select an fh the publisher
+                  // doesn't have.
                   const newModelMeta = weatherModels.find((m) => m.name === next);
-                  const newMaxFh = newModelMeta?.maxFh ?? Infinity;
+                  const newMaxFh = newModelMeta?.maxFh ?? 240;
+                  weatherMaxForecastHour = newMaxFh;
+                  // Clamp the current value to the new [floor, newMaxFh]
+                  // window. Without the down-clamp, switching GFS@fh=207
+                  // → ECMWF would silently 404 on every tile.
                   let target = weatherForecastHour;
                   if (target < floor) target = floor;
                   if (target > newMaxFh) target = newMaxFh;
@@ -5215,7 +5232,7 @@
         <input
           type="range"
           min={weatherMinForecastHour}
-          max="240"
+          max={weatherMaxForecastHour}
           step="3"
         value={weatherForecastHour}
         disabled={weatherLoading}
