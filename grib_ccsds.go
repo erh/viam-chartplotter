@@ -460,8 +460,8 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			}
 			if AECDebug != nil {
 				bitsConsumed := (r.bytePos-bytePosBefore)*8 + int(r.bitPos) - int(bitPosBefore)
-				AECDebug.Printf("aec:   block=%d id=%d (%s) samples=%d bits=%d bytePos=%d",
-					blockIndex, id, optionName, samplesNeeded, bitsConsumed, r.bytePos)
+				AECDebug.Printf("aec:   block=%d id=%d (%s) samples=%d bits=%d bytePos=%d bitPos=%d",
+					blockIndex, id, optionName, samplesNeeded, bitsConsumed, r.bytePos, r.bitPos)
 			}
 		}
 
