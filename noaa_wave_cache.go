@@ -167,9 +167,13 @@ func pacioosHawaiiConfig() waveDatasetConfig {
 func nomadsGFSWaveConfig() waveDatasetConfig {
 	return waveDatasetConfig{
 		URLFor: func(cycle time.Time) string {
-			// Example: /dods/wave/gfswave/20251104/gfswave_12z_gfsv16
+			// Directory naming follows NOMADS' GrADS-DODS convention:
+			// `{modelname}{YYYYMMDD}/{modelname}_{HH}z_gfsv16`. The
+			// double `gfswave` is intentional — hitting the date-only
+			// path (`/20260519/...`) lands on the "Welcome to NOMADS"
+			// 301 page because that directory doesn't actually exist.
 			return fmt.Sprintf(
-				"https://nomads.ncep.noaa.gov/dods/wave/gfswave/%s/gfswave_%02dz_gfsv16",
+				"https://nomads.ncep.noaa.gov/dods/wave/gfswave/gfswave%s/gfswave_%02dz_gfsv16",
 				cycle.Format("20060102"), cycle.Hour())
 		},
 		CycleHours:  []int{0, 6, 12, 18},
@@ -421,11 +425,19 @@ func fetchWaveSlice(ctx context.Context, client *http.Client, cfg waveDatasetCon
 // opendapGet fetches an OPeNDAP URL and returns the raw body. THREDDS
 // 4xx responses embed the actual error message in the body so we
 // surface that instead of just the HTTP code.
+//
+// Identifies as a real client (NOMADS' GrADS-DODS server bounces
+// blank User-Agent requests to its "Welcome to NOMADS" landing page
+// via 301), and surfaces the Location of any redirect that escapes
+// the http.Client default-follow loop so a bad URL diagnoses itself
+// from the log instead of looking like a generic 301.
 func opendapGet(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "viam-chartplotter/1 (https://github.com/erh/viam-chartplotter)")
+	req.Header.Set("Accept", "*/*")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -436,11 +448,15 @@ func opendapGet(ctx context.Context, client *http.Client, url string) ([]byte, e
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		msg := string(body)
+		msg := strings.ReplaceAll(string(body), "\n", " ")
 		if len(msg) > 200 {
 			msg = msg[:200]
 		}
-		return nil, fmt.Errorf("opendap %s: %d %s", url, resp.StatusCode, msg)
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			return nil, fmt.Errorf("opendap %s: %d %s", url, resp.StatusCode, msg)
+		}
+		return nil, fmt.Errorf("opendap %s: %d → %s (body: %s)", url, resp.StatusCode, loc, msg)
 	}
 	return body, nil
 }
