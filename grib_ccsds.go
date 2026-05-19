@@ -175,18 +175,19 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 	}
 	preprocess := flags&ccsdsFlagPreprocessor != 0
 	idBits := idSizeBits(bps)
-	// libaec-on-the-wire layout (what ECMWF Open Data uses):
-	//   - 2^idBits-1 = idNC (No Compression)
-	//   - 2^idBits-2 = idSE (Second Extension)
-	//   - 0          = FS / zero-block
-	//   - 1..idNC-2  = k-split with k = id
-	// Note the k-split range can extend past bps when idBits brackets
-	// bps below the next power-of-two boundary. The decoder accepts
-	// k=bps and k=bps+1 etc. — those carry no useful information
-	// versus NC, but libaec's encoder emits them in some corners
-	// (we observed id=12 with bps=12 in production ECMWF runs).
+	// libaec-on-the-wire layout (what ECMWF Open Data uses) per
+	// decode.c's id_table setup:
+	//   - id = 0           → m_low_entropy: read one more bit to choose
+	//                        zero-block (subbit=0) or SE (subbit=1)
+	//   - id = 1..idNC-1   → k-split with k = id - 1
+	//   - id = idNC        → No-Compression (raw bps bits per sample)
+	// Earlier revisions of this decoder treated id=idNC-1 as SE
+	// directly (the strict-CCSDS layout), which made every captured
+	// ECMWF wind message corrupt: the missing m_low_entropy subbit
+	// shifted every subsequent bit-read by one, so every block past the
+	// first zero-block got mis-decoded (raw integer values came out
+	// halved, polar-row zero-runs over-consumed by exactly one block).
 	idNC := (1 << uint(idBits)) - 1
-	idSE := idNC - 1
 
 	out := make([]uint64, 0, n)
 	r := newAECBitReader(packed)
@@ -257,11 +258,30 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				return nil, fmt.Errorf("aec: rsi=%d block=%d ID: %w", rsiIdx, blockIndex, err)
 			}
 
+			// id==0 enters libaec's m_low_entropy path: one extra
+			// subbit selects between zero-block (0) and SE (1).
+			// Reading this bit BEFORE the optional ref is critical —
+			// libaec's state machine is m_low_entropy → m_low_entropy_ref
+			// → m_zero_block / m_se. Skipping it shifts every
+			// subsequent bit-read by one (the bug that produced
+			// halved sample values and over-long zero-runs on every
+			// captured ECMWF wind message).
+			isLowEntropy := id == 0
+			isSE := false
+			if isLowEntropy {
+				sub, err := r.readBits(1)
+				if err != nil {
+					return nil, fmt.Errorf("aec: rsi=%d block=%d low-entropy subbit: %w", rsiIdx, blockIndex, err)
+				}
+				isSE = sub == 1
+			}
+
 			// For first block of RSI with preprocess on, read the
-			// raw reference sample AFTER the ID. For NC the ref is
-			// just the first of the block_size raw samples (no
-			// special read needed); for k-split, SE, and zero-block
-			// the ref is a separate bps-bit prefix written here.
+			// raw reference sample AFTER the ID (and the subbit
+			// for low-entropy blocks). For NC the ref is just the
+			// first of the block_size raw samples (no special read
+			// needed); for k-split, SE, and zero-block the ref is a
+			// separate bps-bit prefix written here.
 			needRefHere := blockIndex == 0 && preprocess && !refRead && int(id) != idNC
 			if needRefHere {
 				v, err := r.readBits(bps)
@@ -287,7 +307,7 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 
 			var optionName string
 			switch {
-			case id == 0:
+			case isLowEntropy && !isSE:
 				// libaec uses ID=0 unconditionally as the zero-block
 				// code (NOT as a generic FS-only block). A single
 				// FS-encoded value m maps to a run of all-θ-mapped-
@@ -368,7 +388,7 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					refSample = out[rsiOut]
 					refRead = true
 				}
-			case int(id) == idSE && bps >= 3:
+			case isLowEntropy && isSE && bps >= 3:
 				optionName = "SE"
 				// Second Extension: each FS-coded value m decodes into
 				// a pair (s1, s2) via the triangular pairing

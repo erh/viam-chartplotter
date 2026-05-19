@@ -24,13 +24,20 @@ func DebugDumpGRIB(grib []byte, w io.Writer) error {
 		fmt.Fprintf(w, "\n=== message %d  off=%d  totalLen=%d  discipline=%d  center=%d ===\n",
 			msg, off, secs.totalLen, secs.discipline, secs.center)
 
-		if len(secs.section3) >= 38 {
+		if len(secs.section3) >= 72 {
 			gridTemplate := binary.BigEndian.Uint16(secs.section3[12:14])
 			nPoints := binary.BigEndian.Uint32(secs.section3[6:10])
 			nx := binary.BigEndian.Uint32(secs.section3[30:34])
 			ny := binary.BigEndian.Uint32(secs.section3[34:38])
-			fmt.Fprintf(w, "section3: gridTemplate=%d nPoints=%d nx=%d ny=%d\n",
-				gridTemplate, nPoints, nx, ny)
+			la1 := signedUint32(binary.BigEndian.Uint32(secs.section3[46:50])) / 1e6
+			lo1 := signedUint32(binary.BigEndian.Uint32(secs.section3[50:54])) / 1e6
+			la2 := signedUint32(binary.BigEndian.Uint32(secs.section3[55:59])) / 1e6
+			lo2 := signedUint32(binary.BigEndian.Uint32(secs.section3[59:63])) / 1e6
+			dx := signedUint32(binary.BigEndian.Uint32(secs.section3[63:67])) / 1e6
+			dy := signedUint32(binary.BigEndian.Uint32(secs.section3[67:71])) / 1e6
+			scan := secs.section3[71]
+			fmt.Fprintf(w, "section3: gridTemplate=%d nPoints=%d nx=%d ny=%d la1=%.3f lo1=%.3f la2=%.3f lo2=%.3f dx=%.4f dy=%.4f scan=0x%02x\n",
+				gridTemplate, nPoints, nx, ny, la1, lo1, la2, lo2, dx, dy, scan)
 		}
 
 		if len(secs.section4) >= 28 {

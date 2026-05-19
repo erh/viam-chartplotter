@@ -243,11 +243,15 @@ func TestAECDecodeZeroBlock(t *testing.T) {
 	idBits := idSizeBits(bps)
 
 	w := &aecBitWriter{}
-	// First zero-block run: id=0, m=2 → 3 zero blocks (12 samples).
+	// libaec wire layout: id=0 (low_entropy) + subbit (0=zero-block,
+	// 1=SE) + FS-encoded m.
+	// First zero-block run: id=0, sub=0, m=2 → 3 zero blocks (12 samples).
 	w.writeBits(0, idBits)
+	w.writeBits(0, 1) // subbit: zero-block
 	w.writeFS(2)
-	// Second zero-block run: id=0, m=5 → 5 zero blocks (20 samples).
+	// Second zero-block run: id=0, sub=0, m=5 → 5 zero blocks (20 samples).
 	w.writeBits(0, idBits)
+	w.writeBits(0, 1)
 	w.writeFS(5)
 
 	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, n)
@@ -279,7 +283,8 @@ func TestAECDecodeZeroBlockROS(t *testing.T) {
 
 	w := &aecBitWriter{}
 	w.writeBits(0, idBits)
-	w.writeFS(4) // ROS — rest of segment, all remaining `rsi` blocks zero
+	w.writeBits(0, 1) // low_entropy subbit: 0 = zero-block
+	w.writeFS(4)      // ROS — rest of segment, all remaining `rsi` blocks zero
 
 	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, n)
 	if err != nil {
@@ -302,13 +307,14 @@ func TestAECDecodeSecondExtension(t *testing.T) {
 	const bps = 8
 	const blockSize = 4
 	const rsi = 1
-	idBits := idSizeBits(bps)        // 3 under libaec bracketing
-	idSE := (1 << uint(idBits)) - 2  // 6
+	idBits := idSizeBits(bps) // 3 under libaec bracketing
 	samples := []uint64{0, 1, 2, 0, 3, 4, 1, 0}
 
 	w := &aecBitWriter{}
 	for b := 0; b < 2; b++ {
-		w.writeBits(uint64(idSE), idBits)
+		// libaec SE: id=0 (low_entropy) + subbit=1 (SE) + FS pairs.
+		w.writeBits(0, idBits)
+		w.writeBits(1, 1)
 		for j := 0; j < blockSize; j += 2 {
 			s1 := samples[b*blockSize+j]
 			s2 := samples[b*blockSize+j+1]
@@ -546,15 +552,15 @@ func TestAECDecodeSEFirstBlockWithRef(t *testing.T) {
 	const blockSize = 32
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idSE := (1 << uint(idBits)) - 2
 	const ref uint64 = 0x800
 	const flags = ccsdsFlagPreprocessor
 
 	w := &aecBitWriter{}
-	// libaec wire order is ID → ref → encoded samples. m_id reads
-	// the ID first, then m_split / m_se read the raw ref iff
-	// state->ref is set.
-	w.writeBits(uint64(idSE), idBits)
+	// libaec wire order for SE: id=0 (low_entropy) → subbit=1 (SE) →
+	// ref (since this is first block of RSI with preprocess) →
+	// encoded samples.
+	w.writeBits(0, idBits)
+	w.writeBits(1, 1) // SE
 	w.writeBits(ref, bps)
 	// 16 m values, all m=0 → each decodes to (s1=0, s2=0).
 	for i := 0; i < 16; i++ {
