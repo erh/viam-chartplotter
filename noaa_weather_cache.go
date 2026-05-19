@@ -213,7 +213,7 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 		http.Error(w, "model disabled: "+m.Reason, http.StatusNotImplemented)
 		return
 	}
-	if m.Fetch == nil {
+	if m.Fetch == nil && m.FetchBytes == nil {
 		// Frontend-rendered model (e.g. PacIOOS WMS heatmap) — there's
 		// no JSON to serve, the picker uses a different code path.
 		http.Error(w, "model is frontend-rendered, no data endpoint", http.StatusNotImplemented)
@@ -335,18 +335,38 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int)
 		return nil
 	}
 
-	records, err := wc.spanFetch(ctx, m, fh)
-	if err != nil {
-		wc.errs.Add(1)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "fetch")
-		return fmt.Errorf("%s fetch: %w", m.Name, err)
-	}
-	span.SetAttributes(attribute.Int("weather.records", len(records)))
-	if err := wc.spanEncode(ctx, m, fh, records); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "encode")
-		return err
+	// Models split into two output shapes: ol-wind windRecord JSON for
+	// the particle layers (wind / waves), and pre-serialised bytes
+	// (GeoJSON for isobars, …) for the vector overlays. FetchBytes wins
+	// when set so a model can short-circuit the windRecord encoder.
+	if m.FetchBytes != nil {
+		body, err := wc.spanFetchBytes(ctx, m, fh)
+		if err != nil {
+			wc.errs.Add(1)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "fetch")
+			return fmt.Errorf("%s fetch: %w", m.Name, err)
+		}
+		span.SetAttributes(attribute.Int("weather.bytes_in", len(body)))
+		if err := wc.spanWriteBytes(ctx, m, fh, body); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "encode")
+			return err
+		}
+	} else {
+		records, err := wc.spanFetch(ctx, m, fh)
+		if err != nil {
+			wc.errs.Add(1)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "fetch")
+			return fmt.Errorf("%s fetch: %w", m.Name, err)
+		}
+		span.SetAttributes(attribute.Int("weather.records", len(records)))
+		if err := wc.spanEncode(ctx, m, fh, records); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "encode")
+			return err
+		}
 	}
 	// Write the .gz sibling so requests that advertise gzip can skip the
 	// 35 MB raw transfer. Failures here are non-fatal — the handler
@@ -356,7 +376,7 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int)
 		span.RecordError(err)
 	}
 	wc.refreshes.Add(1)
-	wc.logger.Infof("weather: refreshed %s fh=%d records=%d", m.Name, fh, len(records))
+	wc.logger.Infof("weather: refreshed %s fh=%d", m.Name, fh)
 	return nil
 }
 
@@ -416,6 +436,48 @@ func (wc *WeatherCache) spanEncode(ctx context.Context, m *WeatherModel, fh int,
 	if info, err := os.Stat(wc.cachePath(m.Name, fh)); err == nil {
 		span.SetAttributes(attribute.Int64("weather.bytes", info.Size()))
 	}
+	return nil
+}
+
+// spanFetchBytes mirrors spanFetch but for the FetchBytes path used by
+// vector overlays (isobars). The model returns already-serialised bytes
+// (GeoJSON) so the cache layer doesn't go through windRecord encoding.
+func (wc *WeatherCache) spanFetchBytes(ctx context.Context, m *WeatherModel, fh int) ([]byte, error) {
+	ctx, span := tracer().Start(ctx, "weather.fetch",
+		trace.WithAttributes(
+			attribute.String("weather.model", m.Name),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
+	body, err := m.FetchBytes(ctx, wc.client, time.Time{}, fh)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return body, err
+}
+
+// spanWriteBytes is the FetchBytes equivalent of spanEncode: writes the
+// raw bytes atomically (.tmp + rename) into the model's cache file.
+func (wc *WeatherCache) spanWriteBytes(ctx context.Context, m *WeatherModel, fh int, body []byte) error {
+	_, span := tracer().Start(ctx, "weather.encode",
+		trace.WithAttributes(
+			attribute.String("weather.model", m.Name),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
+	tmp := wc.cachePath(m.Name, fh) + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	if err := os.Rename(tmp, wc.cachePath(m.Name, fh)); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	span.SetAttributes(attribute.Int64("weather.bytes", int64(len(body))))
 	return nil
 }
 
@@ -513,7 +575,7 @@ func (wc *WeatherCache) runPrewarm(ctx context.Context) {
 		)
 	}()
 	for _, m := range listModels() {
-		if m.Disabled || m.Fetch == nil {
+		if m.Disabled || (m.Fetch == nil && m.FetchBytes == nil) {
 			continue
 		}
 		step := m.StepFh

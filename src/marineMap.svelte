@@ -20,6 +20,10 @@
     colorForValue,
     type WeatherLayerHandle,
   } from "./lib/windLayer";
+  import {
+    setupIsobarLayer,
+    type IsobarLayerHandle,
+  } from "./lib/isobarLayer";
   import "ol/ol.css";
   import ScaleLine from "ol/control/ScaleLine.js";
   import { defaults as defaultControls } from "ol/control/defaults.js";
@@ -76,6 +80,11 @@
   // chart and the cursor wind/wave readout.
   let windHandle: WeatherLayerHandle | null = $state(null);
   let waveHandle: WeatherLayerHandle | null = $state(null);
+  // Isobar layer (GFS PRMSL contours, GeoJSON LineStrings). Same
+  // forecast-hour slider as the wind/wave layers, but no model picker —
+  // there's only one PRMSL source registered today.
+  let isobarHandle: IsobarLayerHandle | null = $state(null);
+  let isobarLoading = $state(true);
   // Constants used by the wind/wave legend UIs. ol-wind's Field
   // carries the magnitude slot — wind speed in m/s for the wind layer,
   // wave height in m for the wave layer (we encoded h·sin/h·cos as u/v
@@ -98,7 +107,7 @@
   // the forecast bar covers both initial load and subsequent fetches.
   let windLoading = $state(true);
   let waveLoading = $state(true);
-  let weatherLoading = $derived(windLoading || waveLoading);
+  let weatherLoading = $derived(windLoading || waveLoading || isobarLoading);
   // First forecast hour ≥ "now", computed from the GFS run time. Used
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
@@ -119,7 +128,7 @@
   type WeatherModelMeta = {
     name: string;
     displayName: string;
-    kind: "wind" | "wave";
+    kind: "wind" | "wave" | "isobars" | "lightning";
     domain: string;
     minFh: number;
     maxFh: number;
@@ -3003,6 +3012,27 @@
         on: false,
         maxZoom: weatherMaxZoom,
       });
+      // Isobar overlay (GFS PRMSL contours). Placeholder row so the
+      // panel order matches wind/waves; setupIsobarLayer fills in the
+      // .layer reference once the first GeoJSON fetch resolves.
+      mapGlobal.layerOptions.push({
+        name: "isobars",
+        displayName: "isobars",
+        parent: "weather",
+        on: false,
+        maxZoom: weatherMaxZoom,
+      });
+      // Lightning overlay. Backed by the noaa-glm stub model server-
+      // side — the option appears in the panel but turning it on
+      // surfaces the "needs NetCDF decoder" reason. Filled in for real
+      // when the GLM decoder ships.
+      mapGlobal.layerOptions.push({
+        name: "lightning",
+        displayName: "lightning",
+        parent: "weather",
+        on: false,
+        maxZoom: weatherMaxZoom,
+      });
       const ensureRendered = () => {
         if (mapGlobal.map) {
           mapGlobal.map.render();
@@ -3096,6 +3126,31 @@
         })
         .finally(() => {
           waveLoading = false;
+        });
+      // Isobar overlay (GFS PRMSL contours). Same backend cache as
+      // wind/waves, but the model returns GeoJSON LineStrings instead
+      // of ol-wind records — handled by setupIsobarLayer with a thin
+      // OL Vector layer. Forecast-hour scrubs are driven by the same
+      // slider via the lockstep handler further down.
+      setupIsobarLayer(mapGlobal, {
+        layerName: "isobars",
+        displayName: "isobars",
+        parent: "weather",
+        model: "gfs-isobars",
+        initialForecastHour: initialFh,
+        maxZoom: weatherMaxZoom,
+      })
+        .then((handle) => {
+          isobarHandle = handle;
+          if (handle && weatherForecastHour > 0) {
+            handle.setForecastHour(weatherForecastHour).catch(() => {});
+          }
+        })
+        .catch((err) => {
+          console.warn("isobar layer disabled:", err);
+        })
+        .finally(() => {
+          isobarLoading = false;
         });
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
@@ -5011,6 +5066,7 @@
           weatherForecastHour = v;
           if (windHandle) windLoading = true;
           if (waveHandle) waveLoading = true;
+          if (isobarHandle) isobarLoading = true;
           // Hide both data layers while we refetch so the user doesn't
           // see the previous forecast hour's pixels under the new
           // forecast-hour label — purely visual, the OL layers stay
@@ -5021,14 +5077,20 @@
           const waveLayer = mapGlobal.layerOptions.find(
             (l) => l.name === "waves",
           )?.layer as any;
+          const isobarLayer = mapGlobal.layerOptions.find(
+            (l) => l.name === "isobars",
+          )?.layer as any;
           windLayer?.setVisible?.(false);
           waveLayer?.setVisible?.(false);
+          isobarLayer?.setVisible?.(false);
           try {
-            // Drive both layers in lockstep — both are now ol-wind
-            // pipelines fed by /noaa-weather/{gfs,wave}/latest.json?fh=N.
+            // Drive all weather layers in lockstep — all three are fed
+            // by the same /noaa-weather/data/{model}/latest.json?fh=N
+            // pipeline so they refresh together when the slider moves.
             const tasks: Promise<void>[] = [];
             if (windHandle) tasks.push(windHandle.setForecastHour(v));
             if (waveHandle) tasks.push(waveHandle.setForecastHour(v));
+            if (isobarHandle) tasks.push(isobarHandle.setForecastHour(v));
             await Promise.all(tasks);
             if (windHandle) {
               weatherForecastHour = windHandle.getForecastHour();
@@ -5042,8 +5104,10 @@
           } finally {
             windLoading = false;
             waveLoading = false;
+            isobarLoading = false;
             windLayer?.setVisible?.(true);
             waveLayer?.setVisible?.(true);
+            isobarLayer?.setVisible?.(true);
           }
         }}
         />
