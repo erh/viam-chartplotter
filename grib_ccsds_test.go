@@ -381,6 +381,57 @@ func TestAECDecodeBps12NC(t *testing.T) {
 	}
 }
 
+// TestAECDecodeSEFirstBlockWithRef reproduces the production case
+// "SE block needs even sample count, got 31": block_size = 32 with
+// the preprocessor on, so block 0 of an RSI has a raw reference
+// sample at position 0 and 31 (odd) remaining samples coded by SE.
+// libaec resolves the odd count by reading 16 m values where the
+// first iteration emits only the s2 half (the s1 half would have
+// paired with the absent slot before sample 1, so it's discarded),
+// and the remaining 15 iterations emit full (s1, s2) pairs.
+//
+// We also exercise the preprocessor inverse here by setting the ref
+// to a known mid-range value and choosing m=0 for every iteration —
+// that decodes (s1=0, s2=0) which the preprocessor inverse then
+// maps to "no change from previous", i.e., every sample equals ref.
+func TestAECDecodeSEFirstBlockWithRef(t *testing.T) {
+	const bps = 12
+	const blockSize = 32
+	const rsi = 1
+	idBits := idSizeBits(bps)
+	idSE := (1 << uint(idBits)) - 2
+	const ref uint64 = 0x800
+	const flags = ccsdsFlagPreprocessor
+
+	w := &aecBitWriter{}
+	// Reference sample first (raw bps bits).
+	w.writeBits(ref, bps)
+	// Then the SE block ID.
+	w.writeBits(uint64(idSE), idBits)
+	// 16 m values, all m=0 → each decodes to (s1=0, s2=0).
+	for i := 0; i < 16; i++ {
+		w.writeFS(0)
+	}
+
+	got, err := aecDecode(w.bytes(), bps, flags, blockSize, rsi, blockSize)
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	if len(got) != blockSize {
+		t.Fatalf("len(got)=%d, want %d", len(got), blockSize)
+	}
+	if got[0] != ref {
+		t.Errorf("got[0] = %d, want ref %d", got[0], ref)
+	}
+	// Preprocessor inverse: theta-mapped 0 means "delta = 0" relative
+	// to the previous sample, so every sample equals the reference.
+	for i := 1; i < blockSize; i++ {
+		if got[i] != ref {
+			t.Errorf("got[%d] = %d, want %d (preprocessor inverse identity)", i, got[i], ref)
+		}
+	}
+}
+
 // TestAECDecodeBps12KSplitAtBps covers the companion wire case: with
 // bps=12, libaec encoders are observed to emit id=12 in some blocks,
 // which under the libaec layout is a k=12 split — the high part has

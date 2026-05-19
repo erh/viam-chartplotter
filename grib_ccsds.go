@@ -256,22 +256,34 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				}
 				samplesEmittedInRSI += samplesNeeded
 			case int(id) == idSE && bps >= 3:
-				// Second Extension: encode pairs (s1, s2) of adjacent
-				// samples as a single combined value m using the
-				// triangular pairing m = (s1+s2)*(s1+s2+1)/2 + s2,
-				// then FS-encode m. Decoder inverts via
-				// s1+s2 = floor((sqrt(1+8m)-1)/2), s2 = m - tri.
-				// SE is only defined for bps >= 3 per CCSDS.
-				if samplesNeeded%2 != 0 {
-					return nil, fmt.Errorf("aec: SE block needs even sample count, got %d", samplesNeeded)
+				// Second Extension: each FS-coded value m decodes into
+				// a pair (s1, s2) via the triangular pairing
+				// m = (s1+s2)*(s1+s2+1)/2 + s2 → s1+s2 = floor((√(1+8m)-1)/2),
+				// s2 = m - tri, s1 = (s1+s2) - s2.
+				//
+				// libaec's loop tracks the per-block sample index i
+				// (starting at 1 when the preprocessor places a
+				// reference at position 0 of block 0, else 0). On
+				// each iteration it reads one m: if i is even the
+				// pair (s1, s2) is emitted (advancing by 2); if i is
+				// odd only s2 is emitted (the s1 half is the "pair
+				// partner" for the absent slot before sample 1, and
+				// is discarded). That's how SE coexists with an odd
+				// remaining-sample count in ref-on block 0; earlier
+				// revisions of this decoder errored out on that case,
+				// which is what surfaced in production as
+				// "SE block needs even sample count, got 31".
+				blockI := 0
+				if blockIndex == 0 && preprocess {
+					blockI = 1
 				}
-				for j := 0; j < samplesNeeded; j += 2 {
+				emitted := 0
+				for emitted < samplesNeeded {
 					m, err := r.readFS()
 					if err != nil {
 						return nil, fmt.Errorf("aec: SE FS read: %w", err)
 					}
 					mu := uint64(m)
-					// Largest k s.t. k*(k+1)/2 <= m.
 					k := uint64((math.Sqrt(float64(1+8*mu)) - 1) / 2)
 					for (k+1)*(k+2)/2 <= mu {
 						k++
@@ -279,7 +291,17 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					tri := k * (k + 1) / 2
 					s2 := mu - tri
 					s1 := k - s2
-					out = append(out, s1, s2)
+					if blockI%2 == 0 {
+						out = append(out, s1)
+						blockI++
+						emitted++
+						if emitted >= samplesNeeded {
+							break
+						}
+					}
+					out = append(out, s2)
+					blockI++
+					emitted++
 				}
 				samplesEmittedInRSI += samplesNeeded
 			default:
