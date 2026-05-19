@@ -3114,6 +3114,9 @@
           // "creeping" without losing the directional read.
           return 0.15 / Math.pow(2, z);
         },
+        // 50 % thicker than the windLayer.ts default of 1.6 — reads
+        // more clearly against the chart at typical marine zooms.
+        lineWidth: 2.4,
         initialForecastHour: initialFh,
       })
         .then((wind) => {
@@ -3163,7 +3166,7 @@
           return 0.12 / Math.pow(2, z);
         },
         paths: 6000,
-        lineWidth: 5,
+        lineWidth: 7.5,
         // Brighter strokes than wind — the calm/cyan end of the wave
         // ramp washes out against the ocean basemap otherwise.
         globalAlpha: 0.97,
