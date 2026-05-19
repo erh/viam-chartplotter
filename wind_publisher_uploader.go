@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -29,20 +31,22 @@ import (
 
 // R2Config wires the publisher to one R2 bucket.
 //
-// Auth: Cloudflare's "Create R2 API Token" flow gives you two values
-// — a token *id* (used as the S3 Access Key ID) and a token *value*
-// (a long secret string). Per Cloudflare's docs the Secret Access
-// Key that S3 SigV4 needs is just `SHA-256(value)`, derived
-// client-side, so the value never leaves the user's hands as a
-// pre-hashed secret. This struct supports either:
+// Auth: Cloudflare R2 API tokens have an `id` (used as the S3
+// Access Key ID) and a `value` (a long secret string; SHA-256 of
+// that gives the SigV4 Secret Access Key). This struct supports
+// three increasingly convenient forms:
 //
-//   - Pass `AccessKeyID` + `SecretAccessKey` directly (legacy / for
-//     setups that already store the derived secret).
+//   - Pass `AccessKeyID` + `SecretAccessKey` directly (legacy /
+//     for setups that already store the derived secret).
 //   - Pass `AccessKeyID` + `APIToken` (the raw token value); the
-//     constructor SHA-256s it into the secret.
+//     constructor SHA-256s the value to get the secret.
+//   - Pass `APIToken` ALONE; the constructor calls Cloudflare's
+//     `/user/tokens/verify` to discover the token's `id` and SHA-
+//     256s the value. Most convenient — one secret to manage —
+//     but adds a one-time HTTPS round-trip on uploader construct.
 //
-// Both forms are equivalent — the API-token form just avoids having
-// to handle the hashed secret yourself.
+// All three are equivalent — pick whichever you prefer based on
+// what your secrets store gives you.
 type R2Config struct {
 	AccountID       string // your Cloudflare account ID
 	AccessKeyID     string // R2 API token's id field (visible in the dashboard)
@@ -58,10 +62,9 @@ func (c R2Config) Validate() error {
 	switch {
 	case c.AccountID == "":
 		return fmt.Errorf("r2: account_id required")
-	case c.AccessKeyID == "":
-		return fmt.Errorf("r2: access_key_id required (the R2 API token's id, shown alongside the token value in the dashboard)")
-	case c.SecretAccessKey == "" && c.APIToken == "":
-		return fmt.Errorf("r2: either api_token (raw value) or secret_access_key (pre-hashed) required")
+	case c.APIToken == "" && (c.AccessKeyID == "" || c.SecretAccessKey == ""):
+		return fmt.Errorf("r2: provide either api_token (alone — id derived via Cloudflare /verify) " +
+			"or access_key_id + (api_token | secret_access_key)")
 	case c.Bucket == "":
 		return fmt.Errorf("r2: bucket required")
 	}
@@ -95,6 +98,18 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	// When the caller passed an API token but no Access Key ID, ask
+	// Cloudflare for the token's id and use it. One HTTPS round-trip
+	// at construct time; the result is cached for the uploader's
+	// lifetime.
+	if cfg.AccessKeyID == "" {
+		id, err := cloudflareVerifyTokenID(context.Background(), cfg.APIToken)
+		if err != nil {
+			return nil, fmt.Errorf("r2: derive access_key_id from api_token: %w", err)
+		}
+		cfg.AccessKeyID = id
+		log.Printf("r2: derived access_key_id=%s from api_token via cloudflare /verify", id)
+	}
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 	sess, err := session.NewSession(&aws.Config{
 		Region:      aws.String("auto"),
@@ -108,6 +123,73 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 		return nil, fmt.Errorf("r2 session: %w", err)
 	}
 	return &R2Uploader{cfg: cfg, s3: s3.New(sess)}, nil
+}
+
+// cloudflareVerifyTokenID hits Cloudflare's /user/tokens/verify
+// endpoint with the supplied Bearer token. The response includes the
+// token's `id`, which doubles as the S3 Access Key ID for R2's
+// SigV4 endpoint. Lets a publisher operator configure with just one
+// secret (the API token) instead of two (id + value).
+//
+// Errors are passed back verbatim from Cloudflare so a misconfigured
+// or expired token surfaces with the actual Cloudflare error message
+// rather than a generic "auth failed" later in the upload path.
+func cloudflareVerifyTokenID(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		"https://api.cloudflare.com/client/v4/user/tokens/verify", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var v struct {
+		Result struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"result"`
+		Success bool `json:"success"`
+		Errors  []struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return "", fmt.Errorf("cloudflare verify: parse: %w (body: %s)", err, body)
+	}
+	if !v.Success || v.Result.ID == "" {
+		// Code 1000 "Invalid API Token" from /verify almost always
+		// means the user has an R2-specific S3 credential (created
+		// via R2 → Manage R2 API Tokens) rather than a generic
+		// Cloudflare API token (created via My Profile → API Tokens).
+		// The R2 dashboard confusingly labels both as "API Token" but
+		// only the latter works with /verify. Give an actionable hint
+		// instead of just echoing the Cloudflare error.
+		for _, e := range v.Errors {
+			if e.Code == 1000 {
+				return "", fmt.Errorf(
+					"cloudflare /verify rejected this token (code 1000 'Invalid API Token'). " +
+						"This usually means you have an R2-specific S3 credential (from R2 → " +
+						"Manage R2 API Tokens), not a generic Cloudflare API token. R2-specific " +
+						"tokens can't be verified via /verify — the dashboard shows BOTH an " +
+						"Access Key ID and a Secret Access Key on the same result screen. Set " +
+						"both: R2_ACCESS_KEY_ID=<the short string> and either " +
+						"R2_SECRET_ACCESS_KEY=<the pre-hashed long string> or R2_API_TOKEN=<the " +
+						"raw token value if you saved it before the secret reveal closed>")
+			}
+		}
+		return "", fmt.Errorf("cloudflare verify: %v (body: %s)", v.Errors, body)
+	}
+	if v.Result.Status != "active" {
+		return "", fmt.Errorf("cloudflare verify: token status=%s (not active)", v.Result.Status)
+	}
+	return v.Result.ID, nil
 }
 
 // NewR2UploaderFromEnv reads R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and

@@ -100,10 +100,9 @@ func (c *WindPublisherConfig) Validate(path string) ([]string, error) {
 		switch {
 		case c.R2AccountID == "":
 			return nil, fmt.Errorf("%s: r2_account_id required when upload_enabled", path)
-		case c.R2AccessKeyID == "":
-			return nil, fmt.Errorf("%s: r2_access_key_id required when upload_enabled (the R2 API token id Cloudflare shows in the dashboard)", path)
-		case c.R2APIToken == "" && c.R2SecretAccessKey == "":
-			return nil, fmt.Errorf("%s: r2_api_token (raw value) or r2_secret_access_key (pre-hashed) required when upload_enabled", path)
+		case c.R2APIToken == "" && (c.R2AccessKeyID == "" || c.R2SecretAccessKey == ""):
+			return nil, fmt.Errorf("%s: provide r2_api_token alone (id derived via Cloudflare /verify) "+
+				"or r2_access_key_id + (r2_api_token | r2_secret_access_key)", path)
 		}
 	}
 	return nil, nil
