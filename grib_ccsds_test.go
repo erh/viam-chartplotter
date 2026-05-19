@@ -202,7 +202,9 @@ func TestAECDecodeKSplit(t *testing.T) {
 	}
 
 	w := &aecBitWriter{}
-	w.writeBits(uint64(k), idBits)
+	// libaec encodes k-split with id = k + 1, reserving id=0 for the
+	// zero-block code. So a k=3 split goes on the wire as id=4.
+	w.writeBits(uint64(k+1), idBits)
 	// High parts first, all FS-coded.
 	for _, s := range samples {
 		high := s >> uint(k)
@@ -577,32 +579,63 @@ func TestAECDecodeSEFirstBlockWithRef(t *testing.T) {
 	}
 }
 
-// TestAECDecodeBps12KSplitAtBps covers the companion wire case: with
-// bps=12, libaec encoders are observed to emit id=12 in some blocks,
-// which under the libaec layout is a k=12 split — the high part has
-// (bps-k)=0 bits (each FS read just consumes a single "1" stop bit
-// returning 0) and the low part carries the raw 12-bit sample.
-// Strict-CCSDS-spec interpretations would treat id=12 as NC instead
-// and mis-decode the bitstream.
-func TestAECDecodeBps12KSplitAtBps(t *testing.T) {
+// TestAECDecodeBps12KSplitNearBps covers the boundary case in ECMWF
+// wire data: id=12 with bps=12, which under libaec's id=k+1 layout
+// means k=11 — eleven low bits per sample plus a single FS stop bit
+// (since high = sample >> 11 ∈ {0, 1} and most samples have high=0).
+// Before locking in `k = id - 1`, the decoder read 12 low bits per
+// sample instead of 11, over-consuming block_size bits per k-split
+// block and exhausting the bitstream partway through every wind
+// field.
+func TestAECDecodeBps12KSplitNearBps(t *testing.T) {
 	const bps = 12
 	const blockSize = 4
 	const rsi = 1
-	const k = bps // 12 — the boundary case that surfaces in real ECMWF runs
+	const k = bps - 1 // 11 — the boundary case
+	const id = k + 1  // 12 on the wire
 	idBits := idSizeBits(bps)
-	if k > (1<<uint(idBits))-3 {
-		t.Fatalf("k=%d not in libaec k-split range for bps=%d", k, bps)
+	if id > (1<<uint(idBits))-2 {
+		t.Fatalf("id=%d not in libaec k-split range for bps=%d", id, bps)
 	}
-	samples := []uint64{0, 1, 4095, 2048}
+	samples := []uint64{0, 1, 2047, 2048, 4095, 100, 200, 0}[:blockSize]
 	w := &aecBitWriter{}
-	w.writeBits(uint64(k), idBits)
-	// High parts: all zero, each encoded as a single "1" stop bit.
-	for range samples {
-		w.writeFS(0)
-	}
-	// Low parts: raw k=12 bits per sample.
+	w.writeBits(uint64(id), idBits)
+	// High parts: sample >> k, FS-encoded.
 	for _, s := range samples {
-		w.writeBits(s, k)
+		w.writeFS(int(s >> uint(k)))
+	}
+	// Low parts: low k bits, raw.
+	for _, s := range samples {
+		w.writeBits(s&((1<<uint(k))-1), k)
+	}
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	for i, want := range samples {
+		if got[i] != want {
+			t.Errorf("got[%d] = %d, want %d", i, got[i], want)
+		}
+	}
+}
+
+// TestAECDecodeKSplitK0 exercises the libaec encoding for "FS-only"
+// blocks: id=1 (i.e., k = id - 1 = 0), no low-bit phase, each FS
+// value IS the sample. This is the path libaec uses for blocks where
+// pure FS coding would be optimal — id=0 is reserved for the zero-
+// block code, so FS-only lands at id=1.
+func TestAECDecodeKSplitK0(t *testing.T) {
+	const bps = 8
+	const blockSize = 8
+	const rsi = 1
+	const id = 1 // k = id - 1 = 0 → pure FS
+	idBits := idSizeBits(bps)
+	samples := []uint64{0, 1, 2, 3, 0, 1, 2, 0}
+
+	w := &aecBitWriter{}
+	w.writeBits(uint64(id), idBits)
+	for _, s := range samples {
+		w.writeFS(int(s))
 	}
 	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
 	if err != nil {

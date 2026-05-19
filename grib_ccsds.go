@@ -378,23 +378,25 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					emitted++
 				}
 			default:
-				optionName = fmt.Sprintf("k=%d", id)
 				// k-split: low k bits raw, high (bps-k) bits FS-coded.
-				// Per libaec's on-the-wire layout, k can range from 1
-				// up to idNC-2; when k >= bps the FS portion encodes
-				// only zeros (each sample emits one "1" stop bit) and
-				// the low k bits carry the raw value. That's wasteful
-				// versus straight NC, but it's what libaec emits in
-				// some blocks and the decoder must accept it.
-				k := int(id)
-				if k <= 0 || k > idNC-2 {
+				// Per libaec/src/decode.c's m_split: the encoded ID
+				// maps to k via `k = id - 1`. So id=1 is k=0 (pure
+				// FS, no low bits) and id=N is k=(N-1) split. Reading
+				// `id` low bits per sample instead of `id - 1` would
+				// over-consume the bitstream by `encoded_block_size`
+				// bits per k-split block — which is exactly the bug
+				// that surfaced as "read past end of stream" RSIs
+				// into a wind field even after the zero-block fix.
+				k := int(id) - 1
+				if k < 0 || k > idNC-2 {
 					return nil, fmt.Errorf("aec: rsi=%d block=%d invalid id=%d (bps=%d, idNC=%d)",
-						rsiIdx, blockIndex, k, bps, idNC)
+						rsiIdx, blockIndex, id, bps, idNC)
 				}
-				// Per CCSDS spec, the encoder emits the high parts
-				// first (all FS values back-to-back) then the low
-				// parts (k bits each). We materialise the highs into
-				// a small fixed-size scratch, then fold in lows.
+				optionName = fmt.Sprintf("k=%d", k)
+				// libaec layout: encoder writes all (encoded_block_
+				// size) FS high parts first, then all k-bit low parts.
+				// When k==0 there are no low bits — the FS values
+				// ARE the samples.
 				highs := make([]uint64, samplesNeeded)
 				for j := 0; j < samplesNeeded; j++ {
 					h, err := r.readFS()
@@ -403,12 +405,17 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					}
 					highs[j] = uint64(h)
 				}
-				for j := 0; j < samplesNeeded; j++ {
-					low, err := r.readBits(k)
-					if err != nil {
-						return nil, fmt.Errorf("aec: rsi=%d block=%d split low %d (k=%d): %w", rsiIdx, blockIndex, j, k, err)
+				if k > 0 {
+					for j := 0; j < samplesNeeded; j++ {
+						low, err := r.readBits(k)
+						if err != nil {
+							return nil, fmt.Errorf("aec: rsi=%d block=%d split low %d (k=%d): %w", rsiIdx, blockIndex, j, k, err)
+						}
+						highs[j] = (highs[j] << uint(k)) | low
 					}
-					out = append(out, (highs[j]<<uint(k))|low)
+				}
+				for j := 0; j < samplesNeeded; j++ {
+					out = append(out, highs[j])
 				}
 			}
 			if AECDebug != nil {
