@@ -156,7 +156,12 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 //
 // v2: sign+magnitude decode for signed GRIB2 integer fields (binary /
 //     decimal scale factors, surface + earth-radius scales).
-const weatherCacheVersion = "v2"
+// v3: ECMWF CCSDS/AEC decoder — partial libaec fidelity through the
+//     ID-before-ref, k=id-1, zero-block, FLUSH-postprocess, and
+//     xMax clamp fixes. Bumped so the production server stops serving
+//     the impossible-1000-m/s-wind JSON some earlier ECMWF runs
+//     produced.
+const weatherCacheVersion = "v3"
 
 // cachePath returns the on-disk cache location for one (model, fh)
 // combination. Model names are validated URL-safe at init time so we
