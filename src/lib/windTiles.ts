@@ -175,12 +175,33 @@ export class WindCDNClient {
    *  Resolves the current cycle if it hasn't been fetched within the
    *  last minute, then composes the immutable tile URL. */
   async urlFor(viewport: [number, number, number, number], fh: number): Promise<string> {
-    const latest = await this.fetchLatest();
+    const latest = await this.getLatest();
     const { tile } = tileForBbox(viewport, this.grid);
     // Path mirrors R2UploaderUploadCycle's key format:
     //   wind/<model>/<cycle>/f<fh>/<tile>.json.gz
     const fhStr = `f${String(fh).padStart(3, "0")}`;
     return `${this.cdnBase}/wind/${this.model}/${latest.cycle}/${fhStr}/${tile.key}.json.gz`;
+  }
+
+  /** Public accessor for the latest pointer. Same caching semantics
+   *  as urlFor (60 s memo + in-flight dedupe). Throws on fetch error
+   *  so the caller can distinguish "CDN unreachable" from "CDN
+   *  responded but the data is stale". */
+  getLatest(): Promise<LatestPointer> {
+    return this.fetchLatest();
+  }
+
+  /** True iff the most recently fetched publishedAt is older than
+   *  `maxAgeMs`. Returns false when no pointer has ever been fetched
+   *  (caller should call getLatest() first). The threshold guards the
+   *  fan-out invariant: a transient CDN error must NOT push 10K
+   *  chartplotters back onto ECMWF Open Data; we only fall back to
+   *  the local endpoint when the publisher is genuinely broken. */
+  isStale(maxAgeMs: number): boolean {
+    if (!this.latest) return false;
+    const publishedAt = Date.parse(this.latest.publishedAt);
+    if (!Number.isFinite(publishedAt)) return false;
+    return Date.now() - publishedAt > maxAgeMs;
   }
 
   /** Force-refresh the latest pointer (e.g. after a publish event). */

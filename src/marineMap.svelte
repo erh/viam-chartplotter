@@ -3155,15 +3155,51 @@
           // on the local URL-based fetch.
           if (model !== "ecmwf") return fetchLocal();
           const client = await getECMWFTileClient();
+          // No CDN configured at all (dev mode): use the local
+          // decoder. Distinct from the configured-but-stale case
+          // below; this path is the only one a single-instance
+          // deployment ever takes.
           if (!client) return fetchLocal();
+
+          // STALE-ONLY FALLBACK POLICY: the local endpoint hits
+          // ECMWF Open Data directly. At fleet scale (~10K
+          // chartplotters) a transient CDN hiccup must NOT push
+          // every client onto ECMWF — that's the failure mode the
+          // wind-publisher exists to prevent. So we only fall back
+          // when the publisher is GENUINELY broken (no fresh
+          // publish in 24h). Other errors surface to the UI but
+          // keep the chartplotter on the CDN.
+          const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+          try {
+            const latest = await client.getLatest();
+            const publishedAt = Date.parse(latest.publishedAt);
+            if (Number.isFinite(publishedAt) && Date.now() - publishedAt > STALE_THRESHOLD_MS) {
+              const hoursOld = ((Date.now() - publishedAt) / 3_600_000).toFixed(1);
+              console.warn(`ECMWF CDN data is ${hoursOld}h old (>24h), falling back to local fetch`);
+              return fetchLocal();
+            }
+          } catch (e) {
+            // latest.json itself unreachable — can't determine
+            // freshness. Refuse to fall back: a CDN outage flipping
+            // 10K clients to direct-fetch would crush ECMWF. The
+            // user sees a missing/stale wind layer until the CDN
+            // recovers, which is the right pressure on the
+            // publisher operator.
+            return { error: `ECMWF CDN unreachable (${e}); not falling back to protect ECMWF` };
+          }
+
+          // CDN is fresh: fetch the tile. A tile-level failure here
+          // (404, 5xx) is a publisher bug, not a reason to fall
+          // back — surface the error so it gets noticed and fixed.
           try {
             const tileUrl = await client.urlFor(viewportBbox(), fh);
             const resp = await fetch(tileUrl);
-            if (!resp.ok) throw new Error(`CDN tile: HTTP ${resp.status}`);
+            if (!resp.ok) {
+              return { error: `ECMWF CDN tile fetch: HTTP ${resp.status}` };
+            }
             return { data: await resp.json() };
           } catch (e) {
-            console.warn("ECMWF CDN fetch failed, falling back to local:", e);
-            return fetchLocal();
+            return { error: `ECMWF CDN tile fetch: ${e}` };
           }
         },
         colorScale: WIND_COLOR_SCALE,
