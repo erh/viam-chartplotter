@@ -11,9 +11,22 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// ECMWFRawCacheDir, if non-empty, names a directory into which the
+// ECMWF model writes the raw concatenated 10u/10v GRIB2 bytes for
+// every successful fetch — BEFORE attempting to decode. Lets you
+// post-mortem a CCSDS-decoder failure by replaying the exact wire
+// blob through `go run ./cmd/ecmwf-probe -file <path>`, instead of
+// guessing what bits the upstream actually sent. Production wiring
+// happens in NewWeatherCache, which points this at
+// <cacheDir>/raw-ecmwf when the cache is constructed; tests and the
+// probe leave it unset.
+var ECMWFRawCacheDir string
 
 // WeatherModel describes one upstream forecast that the cache can
 // serve under /noaa-weather/data/{name}/latest.json. The cache layer
@@ -638,6 +651,17 @@ func ecmwfWindModel() *WeatherModel {
 		})
 		if err != nil {
 			return nil, err
+		}
+		// Stash the raw wire bytes BEFORE decoding so a decode
+		// failure leaves us something to replay against. Write
+		// failures here are non-fatal — the cache still tries to
+		// decode and serve regardless.
+		if ECMWFRawCacheDir != "" {
+			path := filepath.Join(ECMWFRawCacheDir,
+				fmt.Sprintf("ecmwf-%s-f%03d.grib2", runT.UTC().Format("20060102T15"), fh))
+			if werr := os.WriteFile(path, grib, 0o644); werr != nil {
+				log.Printf("ECMWF raw cache write %s: %v", path, werr)
+			}
 		}
 		return parseECMWFWind10m(grib, runT, fh)
 	}

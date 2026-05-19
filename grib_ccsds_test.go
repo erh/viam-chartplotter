@@ -225,28 +225,70 @@ func TestAECDecodeKSplit(t *testing.T) {
 	}
 }
 
-// TestAECDecodeFSOnly exercises id=0 with no preprocessor — every
-// sample is FS-coded. Tested with small magnitudes so the bitstream
-// stays compact.
-func TestAECDecodeFSOnly(t *testing.T) {
-	const bps = 4
-	const blockSize = 8
-	const rsi = 1
-	idBits := idSizeBits(bps) // 3 under libaec bracketing
-	samples := []uint64{0, 1, 2, 3, 0, 1, 2, 0}
+// TestAECDecodeZeroBlock exercises id=0, which libaec uses as the
+// zero-block code (NOT as a generic FS-only block — the encoder
+// prefers k=1 split for FS-like coding of non-zero data). Each
+// zero-block ID is followed by a single FS-encoded m that maps to
+// a run of consecutive all-zero blocks. We encode a 3-block run
+// (m=2 → 3 zero blocks) and a 5-block run (m=5 → 5 zero blocks),
+// then verify the decoder fills all 8 blocks × 4 samples = 32 slots
+// with zeros while consuming only two FS reads' worth of bits.
+func TestAECDecodeZeroBlock(t *testing.T) {
+	const bps = 8
+	const blockSize = 4
+	const rsi = 8
+	const n = rsi * blockSize // 32
+	idBits := idSizeBits(bps)
 
 	w := &aecBitWriter{}
-	w.writeBits(0, idBits) // id = 0 → FS only
-	for _, s := range samples {
-		w.writeFS(int(s))
-	}
-	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
+	// First zero-block run: id=0, m=2 → 3 zero blocks (12 samples).
+	w.writeBits(0, idBits)
+	w.writeFS(2)
+	// Second zero-block run: id=0, m=5 → 5 zero blocks (20 samples).
+	w.writeBits(0, idBits)
+	w.writeFS(5)
+
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, n)
 	if err != nil {
 		t.Fatalf("aecDecode: %v", err)
 	}
+	if len(got) != n {
+		t.Fatalf("len(got)=%d, want %d", len(got), n)
+	}
 	for i, v := range got {
-		if v != samples[i] {
-			t.Errorf("got[%d] = %d, want %d", i, v, samples[i])
+		if v != 0 {
+			t.Errorf("got[%d] = %d, want 0 (zero-block run)", i, v)
+		}
+	}
+}
+
+// TestAECDecodeZeroBlockROS exercises the m=4 "rest of segment"
+// sentinel: when the FS-decoded m equals 4, the run extends to the
+// end of the current RSI (clamped to 64 blocks by libaec's CCSDS
+// 121.0-B-2 alignment). Encoded as id=0 + a single FS(4); the decoder
+// must emit exactly `rsi` blocks' worth of zeros without trying to
+// read past the bitstream for further block IDs.
+func TestAECDecodeZeroBlockROS(t *testing.T) {
+	const bps = 8
+	const blockSize = 4
+	const rsi = 6
+	const n = rsi * blockSize // 24
+	idBits := idSizeBits(bps)
+
+	w := &aecBitWriter{}
+	w.writeBits(0, idBits)
+	w.writeFS(4) // ROS — rest of segment, all remaining `rsi` blocks zero
+
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, n)
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("len(got)=%d, want %d", len(got), n)
+	}
+	for i, v := range got {
+		if v != 0 {
+			t.Errorf("got[%d] = %d, want 0 (ROS zero-block)", i, v)
 		}
 	}
 }

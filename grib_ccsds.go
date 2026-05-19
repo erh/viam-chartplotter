@@ -258,23 +258,66 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			var optionName string
 			switch {
 			case id == 0:
-				optionName = "FS"
-				// FS-only block (k=0) — every sample encoded as its
-				// own unary run. The spec also overloads id=0 with a
-				// zero-block escape (a run of all-zero blocks), but
-				// we cannot tell zero-block from FS at the bit level
-				// without out-of-band encoder state, so we
-				// conservatively decode as FS. Zero-block runs are
-				// rare on wind fields (10u/10v vary almost
-				// everywhere) — flagged as a known limitation in the
-				// package doc above.
-				for j := 0; j < samplesNeeded; j++ {
-					v, err := r.readFS()
-					if err != nil {
-						return nil, fmt.Errorf("aec: rsi=%d block=%d FS sample %d: %w", rsiIdx, blockIndex, j, err)
-					}
-					out = append(out, uint64(v))
+				// libaec uses ID=0 unconditionally as the zero-block
+				// code (NOT as a generic FS-only block). A single
+				// FS-encoded value m maps to a run of all-θ-mapped-
+				// zero blocks per the ROS rules below; for runs of 5
+				// or more the encoded m is decremented by 1 vs the
+				// block count. A previous revision of this decoder
+				// read 32 FS values here (treating ID=0 as FS-only),
+				// which over-consumed roughly 31 sample-bits per
+				// zero-block region of the field — that's what
+				// surfaced in production as "read past end of stream"
+				// hundreds of RSIs in.
+				const ROS = 5
+				m, err := r.readFS()
+				if err != nil {
+					return nil, fmt.Errorf("aec: rsi=%d block=%d zero-block FS: %w", rsiIdx, blockIndex, err)
 				}
+				var zeroBlocks int
+				switch {
+				case m+1 < ROS:
+					// m=0..3 → 1..4 zero blocks.
+					zeroBlocks = m + 1
+				case m+1 == ROS:
+					// "Rest of segment" sentinel. libaec clamps to the
+					// remaining blocks of the RSI and to a 64-block
+					// modular alignment that comes from CCSDS 121.0-B-2.
+					rem := nBlocks - blockIndex
+					modAlign := 64 - (blockIndex % 64)
+					if rem < modAlign {
+						zeroBlocks = rem
+					} else {
+						zeroBlocks = modAlign
+					}
+				default:
+					// m >= 5: encoded count is decremented by 1
+					// versus literal m+1 to make room for the ROS code.
+					zeroBlocks = m
+				}
+				if zeroBlocks > nBlocks-blockIndex {
+					zeroBlocks = nBlocks - blockIndex
+				}
+				if zeroBlocks < 1 {
+					zeroBlocks = 1
+				}
+				optionName = fmt.Sprintf("ZB×%d (m=%d)", zeroBlocks, m)
+				// Emit zero deltas across all covered blocks. The
+				// first covered block respects the ref-on accounting
+				// (one fewer slot), every subsequent block emits a
+				// full block_size of zeros.
+				for b := 0; b < zeroBlocks; b++ {
+					emit := blockSize
+					if (blockIndex+b) == 0 && preprocess {
+						emit = blockSize - 1
+					}
+					for j := 0; j < emit; j++ {
+						out = append(out, 0)
+					}
+				}
+				// Advance blockIndex past the additional covered
+				// blocks; the outer for-loop's ++ adds the last 1.
+				blockIndex += zeroBlocks - 1
 			case int(id) == idNC:
 				optionName = "NC"
 				// No-Compression block: raw bps bits per sample.

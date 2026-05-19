@@ -48,6 +48,7 @@ func main() {
 		step  = flag.Int("step", 0, "forecast step in hours")
 		param = flag.String("param", "10u", "parameter name (10u/10v/2t/...)")
 		file  = flag.String("file", "", "local .grib2 file to parse (skips HTTP fetch)")
+		out   = flag.String("out", "", "save fetched .grib2 bytes to this path before decoding (so a decoder failure still leaves replayable wire data)")
 		quiet = flag.Bool("quiet", false, "suppress per-block AEC trace lines")
 	)
 	flag.Parse()
@@ -78,6 +79,18 @@ func main() {
 		}
 		grib = b
 		log.Printf("fetched %s %02dz step=%d %s (%d bytes)", *date, *cycle, *step, *param, len(grib))
+	}
+
+	// Persist the wire bytes BEFORE running the decoder so a crash
+	// or error still leaves something to inspect with hexdump / a
+	// different decoder. -out is opt-in for the probe (the
+	// production cache writes to <cacheDir>/raw-ecmwf
+	// automatically; see ECMWFRawCacheDir in weather_models.go).
+	if *out != "" {
+		if err := os.WriteFile(*out, grib, 0o644); err != nil {
+			log.Fatalf("write -out=%s: %v", *out, err)
+		}
+		log.Printf("wrote %d bytes to %s", len(grib), *out)
 	}
 
 	if len(grib) < 4 || string(grib[:4]) != "GRIB" {

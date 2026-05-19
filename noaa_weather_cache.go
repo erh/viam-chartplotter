@@ -81,6 +81,15 @@ func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, err
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("weather cache: mkdir %q: %w", cacheDir, err)
 	}
+	// Wire ECMWF's raw-GRIB2 stash to a subdirectory of the cache so
+	// a CCSDS-decoder failure leaves the wire blob on disk for the
+	// cmd/ecmwf-probe -file replay path. Best-effort: if the mkdir
+	// fails we just don't enable the raw cache (the model still
+	// works, you just can't replay).
+	rawDir := filepath.Join(cacheDir, "raw-ecmwf")
+	if err := os.MkdirAll(rawDir, 0o755); err == nil {
+		ECMWFRawCacheDir = rawDir
+	}
 	return &WeatherCache{
 		cacheDir: cacheDir,
 		client:   &http.Client{Timeout: 120 * time.Second},
