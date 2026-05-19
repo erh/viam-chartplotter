@@ -100,15 +100,14 @@ func TestAECFSRoundTrip(t *testing.T) {
 }
 
 // TestAECDecodeNoCompression exercises the no-compression block path
-// — every block ID is the max value, every sample is raw bps bits.
-// We pick parameters that ECMWF doesn't actually use (bps=8, block=8,
-// rsi=2, preprocessor off) to isolate the code path.
+// — every block uses ID = bps (the CCSDS NC option), every sample is
+// raw bps bits.
 func TestAECDecodeNoCompression(t *testing.T) {
 	const bps = 8
 	const blockSize = 8
 	const rsi = 2
-	idBits := idSizeBits(bps) // 3
-	idMax := (1 << uint(idBits)) - 1
+	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
+	idNC := bps               // CCSDS: NC ID is at bps
 
 	samples := []uint64{
 		0, 1, 2, 3, 4, 5, 6, 7,
@@ -117,7 +116,7 @@ func TestAECDecodeNoCompression(t *testing.T) {
 	w := &aecBitWriter{}
 	// 2 blocks of 8 samples each. Both use no-compression.
 	for b := 0; b < 2; b++ {
-		w.writeBits(uint64(idMax), idBits)
+		w.writeBits(uint64(idNC), idBits)
 		for i := 0; i < blockSize; i++ {
 			w.writeBits(samples[b*blockSize+i], bps)
 		}
@@ -144,7 +143,7 @@ func TestAECDecodeKSplit(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	const k = 3
-	idBits := idSizeBits(bps) // 3
+	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
 	samples := []uint64{
 		0, 1, 7, 8, 15, 16, 23, 31,
 	}
@@ -180,7 +179,7 @@ func TestAECDecodeFSOnly(t *testing.T) {
 	const bps = 4
 	const blockSize = 8
 	const rsi = 1
-	idBits := idSizeBits(bps) // 2
+	idBits := idSizeBits(bps) // ⌈log₂(5)⌉ = 3
 	samples := []uint64{0, 1, 2, 3, 0, 1, 2, 0}
 
 	w := &aecBitWriter{}
@@ -206,9 +205,8 @@ func TestAECDecodeSecondExtension(t *testing.T) {
 	const bps = 8
 	const blockSize = 4
 	const rsi = 1
-	idBits := idSizeBits(bps) // 3
-	idMax := (1 << uint(idBits)) - 1
-	idSE := idMax - 1
+	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
+	idSE := bps - 1           // CCSDS: SE ID is at bps-1
 	samples := []uint64{0, 1, 2, 0, 3, 4, 1, 0}
 
 	w := &aecBitWriter{}
@@ -241,11 +239,11 @@ func TestUnpackCCSDSAppliesScaling(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idMax := (1 << uint(idBits)) - 1
+	idNC := bps
 	samples := []uint64{0, 1, 2, 4, 8, 16, 32, 64}
 
 	w := &aecBitWriter{}
-	w.writeBits(uint64(idMax), idBits)
+	w.writeBits(uint64(idNC), idBits)
 	for _, s := range samples {
 		w.writeBits(s, bps)
 	}
@@ -272,11 +270,11 @@ func TestCCSDSThroughPackingSection(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idMax := (1 << uint(idBits)) - 1
+	idNC := bps
 	samples := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
 
 	w := &aecBitWriter{}
-	w.writeBits(uint64(idMax), idBits)
+	w.writeBits(uint64(idNC), idBits)
 	for _, s := range samples {
 		w.writeBits(s, bps)
 	}
@@ -326,6 +324,58 @@ func TestCCSDSThroughPackingSection(t *testing.T) {
 	for i, want := range samples {
 		if got[i] != float64(want) {
 			t.Errorf("got[%d] = %v, want %v", i, got[i], float64(want))
+		}
+	}
+}
+
+// TestIDSizeBits locks in the CCSDS 121.0-B-3 §5.1.2.1.1.3 formula
+// (⌈log₂(bps+1)⌉). A previous "round-down to libaec's internal
+// boundary" implementation was producing the wrong id width for
+// bps in {2, 4, 8, 16} and silently mis-decoded ECMWF Open Data
+// fields encoded at the spec-correct width.
+func TestIDSizeBits(t *testing.T) {
+	cases := []struct {
+		bps  int
+		want int
+	}{
+		{1, 1}, {2, 2}, {3, 2}, {4, 3}, {5, 3}, {7, 3},
+		{8, 4}, {12, 4}, {15, 4}, {16, 5}, {17, 5}, {31, 5}, {32, 6},
+	}
+	for _, c := range cases {
+		if got := idSizeBits(c.bps); got != c.want {
+			t.Errorf("idSizeBits(%d) = %d, want %d", c.bps, got, c.want)
+		}
+	}
+}
+
+// TestAECDecodeBps12NC reproduces the ECMWF Open Data wire-level case
+// that surfaced the original "invalid split k=12 (bps=12)" bug: with
+// bps=12, idSizeBits is 4 bits, and the No-Compression option ID is
+// 12 (not 15, which would be 2^4-1 and is what an earlier libaec-style
+// layout used). The decoder must read id=12 as NC and unpack raw
+// 12-bit samples instead of treating it as an out-of-range k-split.
+func TestAECDecodeBps12NC(t *testing.T) {
+	const bps = 12
+	const blockSize = 4
+	const rsi = 1
+	idBits := idSizeBits(bps)
+	idNC := bps
+	if idBits != 4 {
+		t.Fatalf("idSizeBits(12) = %d, want 4", idBits)
+	}
+	samples := []uint64{0, 1, 4095, 2048}
+	w := &aecBitWriter{}
+	w.writeBits(uint64(idNC), idBits)
+	for _, s := range samples {
+		w.writeBits(s, bps)
+	}
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	for i, want := range samples {
+		if got[i] != want {
+			t.Errorf("got[%d] = %d, want %d", i, got[i], want)
 		}
 	}
 }

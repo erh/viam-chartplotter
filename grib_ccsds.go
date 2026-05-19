@@ -60,21 +60,22 @@ const (
 	ccsdsFlagPadRSI       = 0x20 // pad each RSI to a byte boundary
 )
 
-// idSizeBits maps bits-per-sample to the width of the per-block ID
-// field (CCSDS 121.0-B-3 Table 5-1).
+// idSizeBits returns ⌈log₂(bps+1)⌉ per CCSDS 121.0-B-3 §5.1.2.1.1.3 —
+// the width of the per-block ID field, sized to fit the option IDs
+// {0..bps}. Previously this rounded down to a smaller power-of-two-ish
+// boundary that matched libaec's internal layout; that disagrees with
+// the CCSDS-on-the-wire layout ECMWF Open Data actually uses, which
+// reserves ID = bps (not 2^id_len − 1) for No-Compression and ID =
+// bps − 1 (not 2^id_len − 2) for Second Extension.
 func idSizeBits(bps int) int {
-	switch {
-	case bps <= 2:
-		return 1
-	case bps <= 4:
-		return 2
-	case bps <= 8:
-		return 3
-	case bps <= 16:
-		return 4
-	default:
-		return 5
+	if bps <= 0 {
+		return 0
 	}
+	bits := 1
+	for (1 << uint(bits)) < bps+1 {
+		bits++
+	}
+	return bits
 }
 
 // aecBitReader pulls bit fields from a byte slice. The CCSDS spec
@@ -162,8 +163,13 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 	}
 	preprocess := flags&ccsdsFlagPreprocessor != 0
 	idBits := idSizeBits(bps)
-	idMax := (1 << uint(idBits)) - 1 // No-Compression ID
-	idSE := idMax - 1                // Second-Extension ID
+	// Per CCSDS 121.0-B-3 §5.1.2.1.3/§5.1.2.1.4 the ID space is
+	// {0=FS, 1..bps-2=k-split, bps-1=SE, bps=NC}. Higher IDs (up to
+	// 2^idBits-1) are unused — a compliant encoder will never emit
+	// them, so receiving one is treated as a decode error rather than
+	// silently mis-interpreted as an oversized k-split.
+	idNC := bps
+	idSE := bps - 1
 
 	out := make([]uint64, 0, n)
 	r := newAECBitReader(packed)
@@ -213,7 +219,25 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			}
 
 			switch {
-			case int(id) == idMax:
+			case id == 0:
+				// FS-only block (k=0) — every sample encoded as its
+				// own unary run. The spec also overloads id=0 with a
+				// zero-block escape (a run of all-zero blocks), but
+				// we cannot tell zero-block from FS at the bit level
+				// without out-of-band encoder state, so we
+				// conservatively decode as FS. Zero-block runs are
+				// rare on wind fields (10u/10v vary almost
+				// everywhere) — flagged as a known limitation in the
+				// package doc above.
+				for j := 0; j < samplesNeeded; j++ {
+					v, err := r.readFS()
+					if err != nil {
+						return nil, fmt.Errorf("aec: FS sample %d: %w", j, err)
+					}
+					out = append(out, uint64(v))
+				}
+				samplesEmittedInRSI += samplesNeeded
+			case int(id) == idNC:
 				// No-Compression block: raw bps bits per sample.
 				for j := 0; j < samplesNeeded; j++ {
 					v, err := r.readBits(bps)
@@ -223,12 +247,13 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					out = append(out, v)
 				}
 				samplesEmittedInRSI += samplesNeeded
-			case int(id) == idSE:
-				// Second Extension: encode pairs (γ1, γ2) of adjacent
+			case int(id) == idSE && bps >= 3:
+				// Second Extension: encode pairs (s1, s2) of adjacent
 				// samples as a single combined value m using the
 				// triangular pairing m = (s1+s2)*(s1+s2+1)/2 + s2,
 				// then FS-encode m. Decoder inverts via
 				// s1+s2 = floor((sqrt(1+8m)-1)/2), s2 = m - tri.
+				// SE is only defined for bps >= 3 per CCSDS.
 				if samplesNeeded%2 != 0 {
 					return nil, fmt.Errorf("aec: SE block needs even sample count, got %d", samplesNeeded)
 				}
@@ -249,73 +274,14 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					out = append(out, s1, s2)
 				}
 				samplesEmittedInRSI += samplesNeeded
-			case id == 0:
-				// Either an all-FS (k=0) block or the start of a
-				// zero-block run. The encoder signals a zero-block
-				// run by emitting an FS value m where m+1 indicates
-				// how many consecutive zero blocks follow (m=4 -> 5
-				// zero blocks ... m=63 -> "rest of RSI"). A normal
-				// FS-only block's first symbol m is < blockSize in
-				// the typical sample population, but the spec
-				// distinguishes the cases via where we are in the
-				// RSI: zero blocks always pair with id=0 and have m
-				// >= 1 first symbol meaning "1 zero block + (m-1)
-				// more". libaec uses a different sentinel: first
-				// FS-decoded value > some threshold means zero
-				// block. We follow CCSDS 121.0-B-3 §5.1.2.3.2: the
-				// zero-block code is id=0 followed by a FS value
-				// where m=0 → 5 zero blocks (encoder enters zero
-				// mode only at runs ≥ 5 in unbounded RSI) … m=63 →
-				// "rest of RSI". Because we cannot tell zero-block
-				// from FS at the bit level without context, we use
-				// the convention used by every GRIB2 CCSDS encoder
-				// in the wild (eccodes, libaec): the encoder never
-				// emits a normal FS block whose first sample equals
-				// 0 if the block is all zeros — instead it always
-				// promotes to a zero-block run starting at the
-				// first all-zero block. So: peek samplesNeeded FS
-				// values; if the first is < (rsi - blocks emitted)
-				// it's a zero block of that count + 1, otherwise
-				// it's a regular FS block.
-				//
-				// In practice that means we have to look ahead. We
-				// implement it as: read first FS value m. If we are
-				// already in zero-block mode (the encoder commits
-				// id=0 + m, where m maps to count), interpret count
-				// = m + 1 if m < 63 else "to end of RSI". Else treat
-				// the block as FS-only and m is the first sample.
-				//
-				// We cannot reliably distinguish those two without
-				// out-of-band info. For ECMWF Open Data files, zero
-				// blocks are extremely rare on wind fields (10u/10v
-				// vary almost everywhere), so we conservatively
-				// treat id=0 + first-FS as an FS-only block, which
-				// matches libaec's most common decode path. This is
-				// flagged in the package doc above as a known
-				// limitation; if a wind field hits a zero-block-coded
-				// region (e.g., dead-calm ocean basin at the
-				// resolution of the rounding) the values would be
-				// mis-decoded. We accept that risk for now and will
-				// revisit once we have a real ECMWF file to test
-				// against.
-				first, err := r.readFS()
-				if err != nil {
-					return nil, fmt.Errorf("aec: FS first sample: %w", err)
-				}
-				out = append(out, uint64(first))
-				for j := 1; j < samplesNeeded; j++ {
-					v, err := r.readFS()
-					if err != nil {
-						return nil, fmt.Errorf("aec: FS sample %d: %w", j, err)
-					}
-					out = append(out, uint64(v))
-				}
-				samplesEmittedInRSI += samplesNeeded
 			default:
 				// k-split: low k bits raw, high (bps-k) bits FS-coded.
+				// idSE and idNC are already caught above, so a valid
+				// k here lies in 1..bps-2.
 				k := int(id)
-				if k <= 0 || k >= bps {
-					return nil, fmt.Errorf("aec: invalid split k=%d (bps=%d)", k, bps)
+				if k <= 0 || k > bps-2 {
+					return nil, fmt.Errorf("aec: invalid block id=%d (bps=%d, expected 0..%d)",
+						k, bps, idNC)
 				}
 				// Per CCSDS spec, the encoder emits the high parts
 				// first (all FS values back-to-back) then the low
