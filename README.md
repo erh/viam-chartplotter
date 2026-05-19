@@ -84,6 +84,142 @@ warning and leaves the layer out — nothing else breaks.
 | `/noaa-weather/gfs/latest.json`   | Latest GFS 0.25° UGRD + VGRD at 10 m, two-record JSON shaped for `ol-wind`. Disk-cached under `<root>/noaa-weather/`, soft TTL 90 min with stale-while-revalidate. Fetches the most recent published GFS cycle from NOMADS (walks back in 6 h steps until one returns 200). |
 | `/noaa-weather/stats`             | JSON cache stats: hits, refreshes, errors, current file size and mtime.                                              |
 
+### ECMWF wind: one machine populates the cache for the whole fleet
+
+ECMWF Open Data publishes a complete forecast every 6 h, and a chartplotter
+fleet of any size would crush their free tier (and trip the rate limiter)
+if every machine pulled directly. So one machine in the fleet runs the
+`erh:viam-chartplotter:wind-publisher` model, which:
+
+1. Wakes up on a 15-minute heartbeat
+2. Walks the latest fully-published ECMWF cycle (newest first, falls back
+   one cycle at a time if the freshest one is still publishing)
+3. Decodes 10u + 10v at each forecast hour (0…144 in 3 h steps = 49 fhs)
+4. Crops each fh into a fixed 6 × 6 grid of overlapping tiles
+5. Uploads each gzipped tile blob + a manifest + a `latest.json` pointer
+   to Cloudflare R2
+
+Every other chartplotter in the fleet reads tiles from R2 (zero ECMWF
+traffic). Default bucket: `viam-chartplotter-ecmwf`, default public URL:
+`https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev`.
+
+#### Setting up the publisher machine
+
+You need exactly one machine running this component. Pick whichever one
+has reliable network and modest CPU to spare (the build phase is ~5–15 min
+per cycle but only fires after a new ECMWF cycle publishes, ~4×/day).
+
+1. **Create an R2 bucket** (one-time, project-wide). Cloudflare dashboard
+   → R2 → Create bucket → name it `viam-chartplotter-ecmwf`. Enable the
+   public r2.dev URL under Settings → Public access, and add a CORS
+   policy so chartplotter browsers can fetch from it:
+
+   ```json
+   [
+     {
+       "AllowedOrigins": ["*"],
+       "AllowedMethods": ["GET", "HEAD"],
+       "AllowedHeaders": ["*"],
+       "ExposeHeaders": ["ETag", "Content-Length"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+
+2. **Create a Cloudflare API token** scoped to that bucket with R2 Object
+   Read & Write. The token format starting with `cfut_` is the one that
+   works with the auto-derive convenience (described below); the older
+   "Access Key ID + Secret Access Key" pair from R2 → Manage R2 API Tokens
+   also works if you prefer that route.
+
+3. **Add the wind-publisher component** to the chosen machine's Viam
+   config. Minimal form (single API token, bucket defaults applied):
+
+   ```jsonc
+   {
+     "name": "wind-publisher",
+     "namespace": "rdk",
+     "type": "generic",
+     "model": "erh:viam-chartplotter:wind-publisher",
+     "attributes": {
+       "models": ["ecmwf"],
+       "upload_enabled": true,
+       "r2_account_id": "<your Cloudflare account ID>",
+       "r2_api_token": "cfut_..."
+     }
+   }
+   ```
+
+   Other machines in the fleet should NOT have this component — only one
+   publisher per bucket, otherwise multiple machines race to upload the
+   same blobs.
+
+4. **Verify the first publish.** Within a few minutes of startup the
+   publisher logs should show `publisher: starting ecmwf cycle=… build`
+   followed by `publisher: ecmwf cycle=… done in …`. After that:
+
+   ```bash
+   curl -s https://pub-<your-hash>.r2.dev/wind/ecmwf/latest.json | jq '{cycle, publishedAt, fhs: .fhs | length, tiles: .tiles | length}'
+   # {"cycle": "20260519T06", "publishedAt": "...", "fhs": 49, "tiles": 36}
+   ```
+
+5. **Point the consumer chartplotters at the bucket.** The default
+   `wind_cdn_base_url` is already the project-wide R2 URL, so nothing to
+   change on the consumer side unless you're using a private bucket.
+
+#### Wind-publisher config attributes
+
+| Name                    | Type     | Required | Default | Description |
+| ----------------------- | -------- | -------- | ------- | --- |
+| `models`                | string[] | yes      | —       | Models to publish. Currently only `["ecmwf"]` is implemented. |
+| `upload_enabled`        | bool     | no       | `false` | Off by default so adding the component doesn't immediately write to production. Flip to `true` after credentials are verified. |
+| `r2_account_id`         | string   | yes (when `upload_enabled`) | — | Cloudflare account ID. |
+| `r2_api_token`          | string   | one of these two | — | Raw Cloudflare API token (single value, `cfut_…`). The Access Key ID is derived via Cloudflare's `/verify` endpoint, and the SigV4 Secret Access Key is computed as SHA-256 of the token value. |
+| `r2_access_key_id` + `r2_secret_access_key` | string + string | one of these two | — | Legacy explicit S3 credentials, for setups that already store the derived secret. Either form works. |
+| `r2_bucket`             | string   | no       | `viam-chartplotter-ecmwf` | Override only when running a staging fleet against a sandbox bucket. |
+| `publish_offset_minutes`| int      | no       | `30`    | Minutes past the hour for the post-cycle wake-up. Tunable only if ECMWF starts publishing earlier. |
+
+#### Manual publish (CLI, for testing or backfill)
+
+The same code path is exposed as a standalone CLI under
+`cmd/wind-publisher/`. Useful for one-off publishes, dry-runs against
+local disk, or backfilling a cycle the cron loop missed:
+
+```bash
+# Dry-run: build a cycle to local disk instead of R2
+go run ./cmd/wind-publisher publish --out /tmp/publish-test ecmwf
+
+# Real upload (env vars match the Viam attribute names with R2_ prefix)
+export R2_ACCOUNT_ID=...
+export R2_API_TOKEN=cfut_...
+go run ./cmd/wind-publisher publish --r2 ecmwf
+
+# Inspect the tile grid
+go run ./cmd/wind-publisher tiles
+```
+
+The CLI shares the same raw-GRIB and tile-blob caches as the in-module
+publisher (`~/Library/Caches/viam-chartplotter-wind-publisher/` on
+macOS, XDG cache dir on Linux), so re-running after a crash is fast.
+
+#### How consumer chartplotters use the CDN
+
+The chartplotter component reads the CDN URL via its own config attribute
+(default points at the project bucket):
+
+| Name                | Type   | Default | Description |
+| ------------------- | ------ | ------- | --- |
+| `wind_cdn_base_url` | string | `https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev` | Base URL the frontend fetches ECMWF tiles from. Empty / unset → uses the project default. |
+
+On boot the frontend probes `<cdn>/wind/ecmwf/latest.json`. If reachable
+and < 24 h old, ECMWF becomes the default wind model and tile fetches
+go straight to R2. If the CDN is stale (>24 h) the chartplotter falls
+back to the local on-demand fetcher (which hits ECMWF directly — useful
+as a last-resort but not at fleet scale). If the CDN is unreachable
+entirely the chartplotter shows a wind-layer error rather than silently
+falling back, to keep CDN outages from cascading 10K direct ECMWF
+requests.
+
 ### Debug endpoints
 
 | Path                                          | Purpose                                                                                                          |

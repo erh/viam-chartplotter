@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -52,7 +53,13 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon)
+	// Public base URL of the wind-publisher's R2/CDN bucket. Empty
+	// (or unset) falls back to DefaultWindCDNBaseURL inside
+	// SetWindCDNBaseURL so every chartplotter gets fan-out behaviour
+	// out of the box. Override with a different URL to point at a
+	// staging mirror.
+	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL)
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -128,6 +135,7 @@ func StartChartplotterServer(
 	cacheMaxBytes int64,
 	draftFt float64,
 	myBoatIconPath string,
+	windCDNBaseURL string,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -206,13 +214,24 @@ func StartChartplotterServer(
 	if err != nil {
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
+		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
 		weatherCache.Register(mux)
 		// Background prewarm of every model's forecast hours so the
 		// first user scrub to any hour hits the disk cache instead of
 		// blocking on a ~30-60 s NOMADS fetch. Uses its own context so
 		// resource.Close can cancel it on module unload.
 		weatherCache.Prewarm(context.Background())
-		logger.Infof("noaa weather cache: %s", weatherDir)
+		// Periodic cache cleaner: delete any file under
+		// <root>/noaa-weather/ older than 60 days. Covers stale
+		// per-version JSON (orphaned by weatherCacheVersion bumps),
+		// raw-ecmwf/ raw-GRIB blobs that haven't been touched in
+		// months, and any leftover .gz siblings. Runs once on
+		// startup, then daily. ECMWF data is immutable per (cycle,
+		// fh) so a delete-then-refetch is just one wasted upstream
+		// pull on the next request — at 60 days that's essentially
+		// never on an active install.
+		weatherCache.StartCleaner(60*24*time.Hour, 24*time.Hour)
+		logger.Infof("noaa weather cache: %s (cdn=%q)", weatherDir, windCDNBaseURL)
 	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it

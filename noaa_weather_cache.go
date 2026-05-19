@@ -34,6 +34,15 @@ type WeatherCache struct {
 	client   *http.Client
 	logger   logging.Logger
 
+	// windCDNBaseURL, when non-empty, is the public base URL the
+	// frontend should prefer for tile-published wind data (currently
+	// ECMWF only). e.g. "https://chartwx.example.com". The chartplotter
+	// frontend reads this via /noaa-weather/config and, if set, fetches
+	// `<base>/wind/ecmwf/...` tile blobs instead of hammering this
+	// module for global JSON. Empty means "no CDN; serve everything
+	// locally" (single-instance dev mode, the default).
+	windCDNBaseURL string
+
 	// refresh is the soft TTL — past this, a request triggers a
 	// background refresh (the cached copy is still served immediately).
 	refresh time.Duration
@@ -45,6 +54,10 @@ type WeatherCache struct {
 	// resource is closed, so an in-flight module reload doesn't leak
 	// goroutines that keep hitting NOMADS after the server is gone.
 	prewarmCancel context.CancelFunc
+
+	// cleanerCancel stops the periodic disk-cache cleaner goroutine
+	// (see StartCleaner). nil when no cleaner is running.
+	cleanerCancel context.CancelFunc
 
 	hits    atomic.Uint64
 	refreshes atomic.Uint64
@@ -74,12 +87,51 @@ const (
 
 // NewWeatherCache wires a WeatherCache pointing at cacheDir. The
 // directory is created if it doesn't exist.
+// cdnServedModels lists every model whose data the chartplotter
+// fleet should fetch from the wind-publisher's R2 bucket rather than
+// from upstream directly. Centralised so a future "add GFS to the
+// publisher" change is a one-line edit here plus a publisher tweak —
+// no scattered string comparisons.
+var cdnServedModels = map[string]bool{
+	"ecmwf": true,
+}
+
+func isCDNServedModel(name string) bool { return cdnServedModels[name] }
+
+// SetWindCDNBaseURL configures the public CDN base for tile-published
+// wind data. Called by the module's Register-time wiring; the cache
+// holds it just so the frontend can read it back via
+// /noaa-weather/config (the cache itself doesn't use the CDN — it
+// remains the on-demand fallback).
+//
+// Empty input maps to DefaultWindCDNBaseURL so a `make run` /
+// minimal-config deployment still gets fan-out behaviour out of the
+// box. There's no first-class "disable the CDN" mode any more — the
+// only practical reason to bypass it is local dev against a module
+// with no publisher running, and even then the local fallback still
+// kicks in when latest.json is unreachable.
+func (wc *WeatherCache) SetWindCDNBaseURL(u string) {
+	if u == "" {
+		u = DefaultWindCDNBaseURL
+	}
+	wc.windCDNBaseURL = strings.TrimRight(u, "/")
+}
+
 func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, error) {
 	if cacheDir == "" {
 		return nil, fmt.Errorf("weather cache: cacheDir required")
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("weather cache: mkdir %q: %w", cacheDir, err)
+	}
+	// Wire ECMWF's raw-GRIB2 stash to a subdirectory of the cache so
+	// a CCSDS-decoder failure leaves the wire blob on disk for the
+	// cmd/ecmwf-probe -file replay path. Best-effort: if the mkdir
+	// fails we just don't enable the raw cache (the model still
+	// works, you just can't replay).
+	rawDir := filepath.Join(cacheDir, "raw-ecmwf")
+	if err := os.MkdirAll(rawDir, 0o755); err == nil {
+		ECMWFRawCacheDir = rawDir
 	}
 	return &WeatherCache{
 		cacheDir: cacheDir,
@@ -103,6 +155,7 @@ func (wc *WeatherCache) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-weather/models", wc.handleModels)
 	mux.HandleFunc("/noaa-weather/data/", wc.handleData)
 	mux.HandleFunc("/noaa-weather/stats", wc.handleStats)
+	mux.HandleFunc("/noaa-weather/config", wc.handleConfig)
 	// Legacy alias — pre-multi-model code path. Cheap to keep around.
 	mux.HandleFunc("/noaa-weather/gfs/latest.json", func(w http.ResponseWriter, r *http.Request) {
 		wc.serveModel(w, r, findModel("gfs"))
@@ -113,6 +166,32 @@ func (wc *WeatherCache) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_ = json.NewEncoder(w).Encode(modelMetaList())
+}
+
+// handleConfig exposes the small bits of server config the frontend
+// needs at runtime — currently just the wind CDN base URL the tile
+// fetcher should use. Lives next to /noaa-weather/models so the
+// frontend's existing config fetch can be extended with one more
+// request without inventing a new namespace.
+func (wc *WeatherCache) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	body := map[string]interface{}{
+		"windCDNBaseURL": wc.windCDNBaseURL,
+		// Tile grid params — must match the publisher's constants
+		// (wind_publisher_tiler.go). Surfacing them lets a frontend
+		// recompute tile keys without hard-coding the grid; if we
+		// ever change tileGridCols / tileGridRows / tileOverlapDeg
+		// the frontend follows automatically.
+		"tileGrid": map[string]interface{}{
+			"cols":       tileGridCols,
+			"rows":       tileGridRows,
+			"overlapDeg": tileOverlapDeg,
+			"nominalLonW": tileNominalLonW,
+			"nominalLatS": tileNominalLatS,
+		},
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // handleData parses /noaa-weather/data/{model}/latest.json and dispatches
@@ -147,7 +226,12 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 //
 // v2: sign+magnitude decode for signed GRIB2 integer fields (binary /
 //     decimal scale factors, surface + earth-radius scales).
-const weatherCacheVersion = "v2"
+// v3: ECMWF CCSDS/AEC decoder — partial libaec fidelity through the
+//     ID-before-ref, k=id-1, zero-block, FLUSH-postprocess, and
+//     xMax clamp fixes. Bumped so the production server stops serving
+//     the impossible-1000-m/s-wind JSON some earlier ECMWF runs
+//     produced.
+const weatherCacheVersion = "v3"
 
 // cachePath returns the on-disk cache location for one (model, fh)
 // combination. Model names are validated URL-safe at init time so we
@@ -240,10 +324,14 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 		}()
 	default:
 		// No cache yet — block on the first fetch.
+		start := time.Now()
 		if err := wc.refreshNow(r.Context(), m, fh); err != nil {
+			wc.logger.Warnf("weather: %s fh=%d MISS refresh failed dur=%s err=%v",
+				m.Name, fh, time.Since(start), err)
 			http.Error(w, "weather fetch: "+err.Error(), http.StatusBadGateway)
 			return
 		}
+		wc.logger.Infof("weather: %s fh=%d MISS refresh ok dur=%s", m.Name, fh, time.Since(start))
 		w.Header().Set("X-Cache", "MISS")
 	}
 
@@ -578,6 +666,17 @@ func (wc *WeatherCache) runPrewarm(ctx context.Context) {
 		if m.Disabled || (m.Fetch == nil && m.FetchBytes == nil) {
 			continue
 		}
+		// Skip models that the wind-publisher CDN is serving: the
+		// fleet should read those from R2, not pre-fetch them on
+		// every chartplotter (the whole point of the publisher is
+		// to make ECMWF a one-machine-per-fleet upstream pull).
+		// The on-demand fallback path still works if the CDN
+		// breaks; we just don't pre-warm it.
+		if wc.windCDNBaseURL != "" && isCDNServedModel(m.Name) {
+			wc.logger.Infof("weather: prewarm skipping %s (served by CDN %s)",
+				m.Name, wc.windCDNBaseURL)
+			continue
+		}
 		step := m.StepFh
 		if step < prewarmStepHours {
 			step = prewarmStepHours
@@ -624,11 +723,91 @@ func (wc *WeatherCache) runPrewarm(ctx context.Context) {
 
 // Close stops the prewarm goroutine. The in-flight HTTP request (if
 // any) is cancelled via ctx, though it may take up to the client
-// timeout to actually return.
+// timeout to actually return. Also cancels any active cache
+// cleaner goroutine if one was started.
 func (wc *WeatherCache) Close() {
 	if wc.prewarmCancel != nil {
 		wc.prewarmCancel()
 	}
+	if wc.cleanerCancel != nil {
+		wc.cleanerCancel()
+	}
+}
+
+// cleanOldFiles walks the cache directory recursively and deletes
+// every regular file whose mtime is older than `maxAge`. Returns
+// the count + bytes freed so the caller can log a summary. Walk
+// errors on individual files are swallowed (logged but not fatal)
+// so a single permission issue doesn't strand the rest of the
+// cleanup.
+//
+// Covers everything under wc.cacheDir: stale per-version JSON
+// (e.g. orphaned ecmwf-v2-*.json after a version bump), the
+// raw-ecmwf/ raw-GRIB cache, and any .gz siblings. ECMWF data is
+// immutable per (cycle, fh) so re-fetching after a cleanup costs
+// only the bytes we'd have to re-pull from upstream — at 60-day
+// thresholds that's essentially never on a normally-active
+// publisher.
+func (wc *WeatherCache) cleanOldFiles(maxAge time.Duration) (filesDeleted int, bytesFreed int64) {
+	cutoff := time.Now().Add(-maxAge)
+	_ = filepath.Walk(wc.cacheDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			// Log + skip; one bad entry shouldn't abort the whole walk.
+			wc.logger.Debugf("weather: cache cleaner walk %s: %v", path, err)
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.ModTime().After(cutoff) {
+			return nil
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			wc.logger.Debugf("weather: cache cleaner rm %s: %v", path, rmErr)
+			return nil
+		}
+		filesDeleted++
+		bytesFreed += info.Size()
+		return nil
+	})
+	return
+}
+
+// StartCleaner runs cleanOldFiles in a background goroutine: once
+// immediately, then on each `interval` tick. Cancelled by Close.
+// Safe to call more than once (subsequent calls replace the
+// previous cleaner's cancel; the orphaned goroutine exits on its
+// next tick).
+//
+// `maxAge` is how stale a file must be before deletion (e.g.
+// 60 * 24 * time.Hour for two months). `interval` is how often the
+// cleaner runs — once a day is plenty since the cache grows slowly
+// and the cleanup itself is cheap (one Walk pass).
+func (wc *WeatherCache) StartCleaner(maxAge, interval time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	wc.cleanerCancel = cancel
+	go func() {
+		runOnce := func() {
+			n, freed := wc.cleanOldFiles(maxAge)
+			if n > 0 {
+				wc.logger.Infof("weather: cache cleaner removed %d files (%.1f MB freed, older than %s)",
+					n, float64(freed)/(1024*1024), maxAge)
+			}
+		}
+		// Eagerly clean once on startup so a long-idle install with a
+		// huge stale cache doesn't have to wait `interval` to reclaim.
+		runOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runOnce()
+			}
+		}
+	}()
 }
 
 // --- ol-wind JSON shape ---------------------------------------------------
@@ -859,6 +1038,10 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 		groupLengthBits         int
 		spatialDiffOrder        int
 		spatialDiffExtraOctets  int
+		// Template 5.42 (CCSDS) extras.
+		ccsdsFlags     byte
+		ccsdsBlockSize int
+		ccsdsRSI       int
 	)
 
 	off := 16
@@ -956,6 +1139,19 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 					spatialDiffOrder = int(s[47])
 					spatialDiffExtraOctets = int(s[48])
 				}
+			case 42:
+				// CCSDS / AEC (used by ECMWF Open Data). Section 5
+				// extras live at the same offsets as the table in
+				// grib_sections.go's parsePackingSection:
+				//   octet 22 → s[21] flags (mask per WMO Table 5.40)
+				//   octet 23 → s[22] block size
+				//   octets 24-25 → s[23:25] reference sample interval
+				if len(s) < 25 {
+					return 0, nil, fmt.Errorf("ccsds section too short (%d bytes)", len(s))
+				}
+				ccsdsFlags = s[21]
+				ccsdsBlockSize = int(s[22])
+				ccsdsRSI = int(binary.BigEndian.Uint16(s[23:25]))
 			default:
 				return totalLen, nil, nil // unsupported template (e.g. JPEG2000)
 			}
@@ -992,6 +1188,9 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 			numGroups, groupWidthRef, groupWidthBits,
 			groupLengthRef, groupLengthIncrement, groupLengthLast, groupLengthBits,
 			spatialDiffOrder, spatialDiffExtraOctets, dataValuesCount)
+	case 42:
+		values, err = unpackCCSDS(packedData, refValue, binaryScale, decimalScale, bitsPerValue,
+			ccsdsFlags, ccsdsBlockSize, ccsdsRSI, dataValuesCount)
 	default:
 		return totalLen, nil, nil
 	}

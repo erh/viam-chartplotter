@@ -3,6 +3,7 @@ module github.com/erh/viam-chartplotter
 go 1.25.0
 
 require (
+	github.com/aws/aws-sdk-go v1.55.8
 	github.com/beetlebugorg/s57 v0.100.0
 	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
 	github.com/fogleman/gg v1.3.0
@@ -36,7 +37,6 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/a8m/envsubst v1.4.2 // indirect
 	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b // indirect
-	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/beetlebugorg/iso8211 v0.100.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
@@ -88,6 +88,7 @@ require (
 	github.com/improbable-eng/grpc-web v0.15.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.4.6 // indirect
 	github.com/jhump/protoreflect v1.15.6 // indirect
+	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

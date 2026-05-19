@@ -21,6 +21,10 @@
     type WeatherLayerHandle,
   } from "./lib/windLayer";
   import {
+    WindCDNClient,
+    loadServerWindConfig,
+  } from "./lib/windTiles";
+  import {
     setupIsobarLayer,
     type IsobarLayerHandle,
   } from "./lib/isobarLayer";
@@ -112,6 +116,13 @@
   // as the slider minimum so the user can't scrub back into already-
   // expired analysis hours.
   let weatherMinForecastHour = $state(0);
+  // Slider upper bound — driven by the currently-selected wind model's
+  // MaxFh (ECMWF=144, GFS=240, HRRR=18, ICON-EU=120 …). Updated by the
+  // model picker onchange handler so a GFS→ECMWF switch at fh=207
+  // visibly snaps the slider to 144, instead of leaving the thumb at
+  // a value the publisher has no tile for. Default 240 covers GFS at
+  // startup before the per-model meta lands.
+  let weatherMaxForecastHour = $state(240);
   // Highest zoom at which the GFS-resolution weather overlay reads as
   // signal rather than a flat coloured wash. Above this, both the
   // wind/wave layers and the forecast-hour slider hide automatically.
@@ -3096,12 +3107,140 @@
         window.setTimeout(ensureRendered, 200);
       };
       const initialFh = nowForecastHour(null); // 0 until we know the run time
-      setupWeatherLayer(mapGlobal, {
+      // ECMWF tile-CDN client: when the server config exposes a
+      // windCDNBaseURL, route ECMWF wind fetches through the
+      // wind-publisher's R2 output instead of asking this module to
+      // decode/encode global JSON on every request. Falls back to the
+      // legacy local endpoint on any CDN error so a CDN outage doesn't
+      // kill the wind layer. setupLayers() isn't async, so we lazy-
+      // load the config inside the fetchData callback below — the
+      // shared promise dedupes if the first scrub fires before the
+      // config arrives.
+      let ecmwfTileClientPromise: Promise<WindCDNClient | null> | null = null;
+      const getECMWFTileClient = (): Promise<WindCDNClient | null> => {
+        if (!ecmwfTileClientPromise) {
+          ecmwfTileClientPromise = loadServerWindConfig()
+            .catch(() => null)
+            .then((cfg) => {
+              const base = cfg?.windCDNBaseURL ?? "";
+              return base ? new WindCDNClient(base, "ecmwf", cfg?.tileGrid) : null;
+            });
+        }
+        return ecmwfTileClientPromise;
+      };
+      // Reads the live viewport at fetch time so a user pan that
+      // crosses tile boundaries triggers a re-fetch on the next slider
+      // event. ol-wind's setData call rebinds the field on each
+      // loadInto, so panning + the next scrub gives us the right tile.
+      const viewportBbox = (): [number, number, number, number] => {
+        const ext = mapGlobal.view?.calculateExtent?.(
+          mapGlobal.map?.getSize?.() ?? [800, 600],
+        );
+        if (Array.isArray(ext) && ext.length === 4) {
+          return [ext[0], ext[1], ext[2], ext[3]];
+        }
+        // Sensible default (Atlantic-ish) so a viewport-less fetch
+        // still resolves to a valid tile.
+        return [-80, 30, -60, 50];
+      };
+      // Prefer ECMWF as the default wind model when the CDN is up
+      // and serving fresh data — it's higher-fidelity than GFS at
+      // short range AND it's served from R2 (free fan-out at fleet
+      // scale). Fall back to "gfs" (the existing default, fetched
+      // locally from NOMADS) when the CDN's latest.json is
+      // unreachable or stale, so a publisher outage doesn't take
+      // the wind layer down for the fleet.
+      //
+      // setupLayers isn't async, so we do this as a promise chain
+      // that resolves before setupWeatherLayer is called. The
+      // probe is fast (a single fetch of a ~5 KB JSON pointer) and
+      // dedupes with the regular per-fh fetch path (the lazy
+      // getECMWFTileClient caches the client and the LatestPointer).
+      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+      const probeECMWF: Promise<void> = getECMWFTileClient()
+        .then(async (client) => {
+          if (!client) return;
+          const latest = await client.getLatest();
+          const age = Date.now() - Date.parse(latest.publishedAt);
+          if (Number.isFinite(age) && age < STALE_THRESHOLD_MS) {
+            windModel = "ecmwf";
+            console.log(`wind layer default: ecmwf (CDN fresh, publishedAt=${latest.publishedAt})`);
+          } else {
+            console.log(`wind layer default: gfs (ECMWF CDN stale, ${age}ms old)`);
+          }
+        })
+        .catch((e) => {
+          console.warn("wind layer default: gfs (ECMWF CDN probe failed):", e);
+        });
+      probeECMWF.then(() => setupWindLayer());
+
+      function setupWindLayer() {
+        setupWeatherLayer(mapGlobal, {
         layerName: "wind",
         displayName: "wind",
         parent: "weather",
         initialModel: windModel,
         dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
+        fetchData: async (model, fh) => {
+          const fetchLocal = async () => {
+            const resp = await fetch(`/noaa-weather/data/${model}/latest.json?fh=${fh}`);
+            if (!resp.ok) {
+              const body = await resp.text().catch(() => "");
+              return { error: body.trim() || `HTTP ${resp.status}` };
+            }
+            return { data: await resp.json() };
+          };
+          // Only ECMWF is tile-published right now. Other models stay
+          // on the local URL-based fetch.
+          if (model !== "ecmwf") return fetchLocal();
+          const client = await getECMWFTileClient();
+          // No CDN configured at all (dev mode): use the local
+          // decoder. Distinct from the configured-but-stale case
+          // below; this path is the only one a single-instance
+          // deployment ever takes.
+          if (!client) return fetchLocal();
+
+          // STALE-ONLY FALLBACK POLICY: the local endpoint hits
+          // ECMWF Open Data directly. At fleet scale (~10K
+          // chartplotters) a transient CDN hiccup must NOT push
+          // every client onto ECMWF — that's the failure mode the
+          // wind-publisher exists to prevent. So we only fall back
+          // when the publisher is GENUINELY broken (no fresh
+          // publish in 24h). Other errors surface to the UI but
+          // keep the chartplotter on the CDN.
+          const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+          try {
+            const latest = await client.getLatest();
+            const publishedAt = Date.parse(latest.publishedAt);
+            if (Number.isFinite(publishedAt) && Date.now() - publishedAt > STALE_THRESHOLD_MS) {
+              const hoursOld = ((Date.now() - publishedAt) / 3_600_000).toFixed(1);
+              console.warn(`ECMWF CDN data is ${hoursOld}h old (>24h), falling back to local fetch`);
+              return fetchLocal();
+            }
+          } catch (e) {
+            // latest.json itself unreachable — can't determine
+            // freshness. Refuse to fall back: a CDN outage flipping
+            // 10K clients to direct-fetch would crush ECMWF. The
+            // user sees a missing/stale wind layer until the CDN
+            // recovers, which is the right pressure on the
+            // publisher operator.
+            return { error: `ECMWF CDN unreachable (${e}); not falling back to protect ECMWF` };
+          }
+
+          // CDN is fresh: fetch the tile. A tile-level failure here
+          // (404, 5xx) is a publisher bug, not a reason to fall
+          // back — surface the error so it gets noticed and fixed.
+          try {
+            const tileUrl = await client.urlFor(viewportBbox(), fh);
+            const resp = await fetch(tileUrl);
+            if (!resp.ok) {
+              return { error: `ECMWF CDN tile fetch: HTTP ${resp.status}` };
+            }
+            return { data: await resp.json() };
+          } catch (e) {
+            return { error: `ECMWF CDN tile fetch: ${e}` };
+          }
+        },
         colorScale: WIND_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 15,
@@ -3125,6 +3264,11 @@
           weatherRunTime = refTime;
           const floor = nowForecastHour(refTime);
           weatherMinForecastHour = floor;
+          // Slider max tracks the active wind model's MaxFh from
+          // /noaa-weather/models meta. Falls back to 240 (GFS) if
+          // the models endpoint hasn't responded yet at this point.
+          const initialMeta = weatherModels.find((m) => m.name === windModel);
+          if (initialMeta) weatherMaxForecastHour = initialMeta.maxFh;
           weatherForecastHour = floor;
           // Re-fetch at the "now-aligned" hour if the initial f000
           // fetch happened before we knew the run time.
@@ -3142,6 +3286,7 @@
         .finally(() => {
           windLoading = false;
         });
+      } // end setupWindLayer
       // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
       // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
       // and converted to u/v vectors so it shares the same JSON shape
@@ -4995,7 +5140,7 @@
     {@const dayMarkers = computeDayMarkers(
       weatherRunTime,
       weatherMinForecastHour,
-      240,
+      weatherMaxForecastHour,
     )}
     <div class="wind-forecast-bar">
       {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on && windModelOptions.length > 1}
@@ -5026,9 +5171,23 @@
                   // different run cadences, so the "now hour" shifts.
                   const floor = nowForecastHour(weatherRunTime);
                   weatherMinForecastHour = floor;
-                  if (weatherForecastHour < floor) {
-                    weatherForecastHour = floor;
-                    await windHandle?.setForecastHour(floor);
+                  // Update the slider's MAX too — ECMWF caps at 144,
+                  // GFS at 240, HRRR at 18. Drives the visible track
+                  // length AND the value the thumb can be dragged to,
+                  // so the user can't even select an fh the publisher
+                  // doesn't have.
+                  const newModelMeta = weatherModels.find((m) => m.name === next);
+                  const newMaxFh = newModelMeta?.maxFh ?? 240;
+                  weatherMaxForecastHour = newMaxFh;
+                  // Clamp the current value to the new [floor, newMaxFh]
+                  // window. Without the down-clamp, switching GFS@fh=207
+                  // → ECMWF would silently 404 on every tile.
+                  let target = weatherForecastHour;
+                  if (target < floor) target = floor;
+                  if (target > newMaxFh) target = newMaxFh;
+                  if (target !== weatherForecastHour) {
+                    weatherForecastHour = target;
+                    await windHandle?.setForecastHour(target);
                   }
                   mapGlobal.map?.render();
                 }
@@ -5106,7 +5265,7 @@
         <input
           type="range"
           min={weatherMinForecastHour}
-          max="240"
+          max={weatherMaxForecastHour}
           step="3"
         value={weatherForecastHour}
         disabled={weatherLoading}

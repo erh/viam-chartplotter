@@ -71,6 +71,13 @@ export interface SetupWeatherOptions {
    *  null means the model is frontend-rendered (no JSON fetch) and the
    *  caller should swap renderers instead. */
   dataUrlFor: (modelName: string, fh: number) => string | null;
+  /** Optional async fetcher that takes over from `dataUrlFor` when set.
+   *  Used by tile-published models (ECMWF via R2 CDN) where the URL
+   *  depends on runtime state (current viewport + latest cycle pointer)
+   *  and may need a fallback to the legacy local endpoint on CDN error.
+   *  Returning `{ data }` succeeds; returning `{ error }` surfaces the
+   *  message in the UI same as a `dataUrlFor` HTTP failure would. */
+  fetchData?: (modelName: string, fh: number) => Promise<{ data?: any; error?: string }>;
   /** ol-wind colour scale (15 colours typical, mapped linearly across [0, maxVelocity]). */
   colorScale: string[];
   /** Lower bound of the colour scale (m/s). */
@@ -134,11 +141,23 @@ export async function setupWeatherLayer(
   let currentFh = Math.max(0, opts.initialForecastHour ?? 0);
   let currentModel = opts.initialModel;
   const urlFor = (model: string, fh: number) => opts.dataUrlFor(model, fh);
-  const initialUrl = urlFor(currentModel, currentFh);
-  if (!initialUrl) {
-    // The initial model has no fetch URL (frontend-rendered, e.g. WMS).
-    // We can't set up a particle layer for that; bail.
-    return null;
+  // Either fetch via the supplied async fetcher (tile-published models)
+  // or via the synchronous URL builder + fetchJSON (everything else).
+  // Both paths return the same { data?, error? } shape so the rest of
+  // the loader doesn't need to care which one is wired up.
+  const fetchOne = async (model: string, fh: number): Promise<{ data?: any; error?: string }> => {
+    if (opts.fetchData) return opts.fetchData(model, fh);
+    const url = urlFor(model, fh);
+    if (!url) return { error: `model ${model} has no data endpoint (frontend-only)` };
+    return fetchJSON(url, fh);
+  };
+  if (!opts.fetchData) {
+    const initialUrl = urlFor(currentModel, currentFh);
+    if (!initialUrl) {
+      // The initial model has no fetch URL (frontend-rendered, e.g. WMS).
+      // We can't set up a particle layer for that; bail.
+      return null;
+    }
   }
 
   // Per-handle LRU of parsed JSON keyed by `${model}:${fh}`. Wire payload
@@ -183,10 +202,12 @@ export async function setupWeatherLayer(
     const key = cacheKey(model, fh);
     if (dataCache.has(key)) return;
     if (inflightPrefetch.has(key)) return;
-    const url = urlFor(model, fh);
-    if (!url) return;
+    if (!opts.fetchData) {
+      const url = urlFor(model, fh);
+      if (!url) return;
+    }
     inflightPrefetch.add(key);
-    fetchJSON(url, fh)
+    fetchOne(model, fh)
       .then((r) => {
         if (r.data) cachePut(model, fh, r.data);
       })
@@ -199,7 +220,7 @@ export async function setupWeatherLayer(
     prefetch(model, fh + 6);
   }
 
-  const first = await fetchJSON(initialUrl, currentFh);
+  const first = await fetchOne(currentModel, currentFh);
   if (!first.data) return null;
   let data: any = first.data;
   cachePut(currentModel, currentFh, data);
@@ -266,14 +287,22 @@ export async function setupWeatherLayer(
   // UI can surface "this model is disabled because Y" instead of just
   // blanking the layer.
   async function loadInto(model: string, fh: number): Promise<string | null> {
-    const url = urlFor(model, fh);
-    if (!url) {
-      return `model ${model} has no data endpoint (frontend-only)`;
+    if (!opts.fetchData) {
+      const url = urlFor(model, fh);
+      if (!url) return `model ${model} has no data endpoint (frontend-only)`;
     }
     let parsed = cacheGet(model, fh);
     if (parsed === null) {
-      const result = await fetchJSON(url, fh);
-      if (!result.data) return result.error ?? "fetch failed";
+      const result = await fetchOne(model, fh);
+      if (!result.data) {
+        const msg = result.error ?? "fetch failed";
+        // Surface fetch errors at console.warn level so a 404 (e.g.
+        // a slider asking for an fh past this model's MaxFh — the
+        // ECMWF MaxFh=144 vs GFS MaxFh=240 mismatch trips this when
+        // switching models) doesn't disappear silently between layers.
+        console.warn(`${opts.layerName} layer fetch ${model} fh=${fh}: ${msg}`);
+        return msg;
+      }
       parsed = result.data;
       cachePut(model, fh, parsed);
     }

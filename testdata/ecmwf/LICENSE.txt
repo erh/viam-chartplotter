@@ -1,0 +1,6 @@
+ecmwf-*.grib2 — © European Centre for Medium-Range Weather Forecasts.
+ECMWF Open Data, licensed under Creative Commons Attribution 4.0
+(CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+Retained here as a fixture for the CCSDS decoder regression test
+(TestECMWFCapturedMessage). Source:
+https://data.ecmwf.int/forecasts/20260518/00z/ifs/0p25/oper/
