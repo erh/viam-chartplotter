@@ -9,7 +9,7 @@ require (
 	github.com/fogleman/gg v1.3.0
 	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
-	go.mongodb.org/mongo-driver v1.17.1
+	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.66.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
@@ -31,6 +31,7 @@ require (
 	codeberg.org/go-latex/latex v0.1.0 // indirect
 	codeberg.org/go-pdf/fpdf v0.10.0 // indirect
 	git.sr.ht/~sbinet/gg v0.6.0 // indirect
+	github.com/DataDog/czlib v0.0.0-20240814115052-86a9592b3985 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
@@ -106,6 +107,9 @@ require (
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/muhlemmer/gu v0.3.1 // indirect
+	github.com/paulmach/orb v0.12.0 // indirect
+	github.com/paulmach/osm v0.9.0 // indirect
+	github.com/paulmach/protoscan v0.2.1 // indirect
 	github.com/pion/datachannel v1.5.8 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect
 	github.com/pion/ice/v2 v2.3.34 // indirect
