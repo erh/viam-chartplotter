@@ -442,3 +442,39 @@ export const WAVE_COLOR_SCALE = [
   "#b51010", // 2.79
   "#6e0606", // 3.0+ m (~10 ft, legend tick) — deep red
 ];
+
+/**
+ * Resolve a numeric measurement to the colour ol-wind would render for
+ * it. Used by the cursor-info readout to paint a small swatch next to
+ * the wind / wave number so the eye can correlate the popup with the
+ * gradient on screen.
+ *
+ * Linearly interpolates between adjacent stops so a 12 kt readout
+ * doesn't snap to the colour of either 10 or 14 kt — same behaviour
+ * ol-wind uses internally for the particle stroke.
+ */
+export function colorForValue(
+  scale: string[],
+  value: number,
+  maxValue: number,
+): string {
+  if (scale.length === 0) return "#000";
+  if (!Number.isFinite(value) || maxValue <= 0) return scale[0];
+  const t = Math.max(0, Math.min(1, value / maxValue));
+  const idx = t * (scale.length - 1);
+  const i0 = Math.floor(idx);
+  const i1 = Math.min(scale.length - 1, i0 + 1);
+  const f = idx - i0;
+  const a = parseHex(scale[i0]);
+  const b = parseHex(scale[i1]);
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * f)},${Math.round(a[1] + (b[1] - a[1]) * f)},${Math.round(a[2] + (b[2] - a[2]) * f)})`;
+}
+
+function parseHex(h: string): [number, number, number] {
+  const x = h.replace("#", "");
+  return [
+    parseInt(x.slice(0, 2), 16),
+    parseInt(x.slice(2, 4), 16),
+    parseInt(x.slice(4, 6), 16),
+  ];
+}
