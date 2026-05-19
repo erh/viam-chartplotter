@@ -16,7 +16,7 @@
 import VectorLayer from "ol/layer/Vector.js";
 import VectorSource from "ol/source/Vector.js";
 import GeoJSON from "ol/format/GeoJSON.js";
-import { Style, Stroke, Text, Fill } from "ol/style.js";
+import { Style, Stroke, Text, Fill, Circle as CircleStyle } from "ol/style.js";
 import type { Feature } from "ol";
 import type { LineString } from "ol/geom.js";
 
@@ -159,13 +159,25 @@ const styleCache = new Map<string, Style>();
 
 function isobarStyle(feature: any, resolution: number): Style | undefined {
   const props = feature.getProperties();
+  const kind: string | undefined = props.kind;
   const hPa: number = typeof props.hPa === "number" ? props.hPa : 1000;
-  // Label visibility ladder: at far zoom, every 8 hPa (1000, 1008, …);
-  // mid zoom every 4 hPa; close zoom every 4 hPa always. Threshold
-  // values are degrees-per-pixel under useGeographic, so smaller
-  // resolution = more zoomed in.
+  // H / L Point features short-circuit the contour path — they always
+  // render, with a large red/blue letter plus the field value below.
+  if (kind === "H" || kind === "L") {
+    return extremumStyle(kind, hPa);
+  }
+  // Contour-line visibility ladder against the 2 hPa spacing the
+  // backend now emits: at far zoom we drop the in-between 2 hPa lines
+  // entirely (only the 4 hPa marine-standard contours show); close in
+  // every 2 hPa line draws. Labels are sparser: every 8 hPa far,
+  // every 4 hPa close. Threshold values are degrees-per-pixel under
+  // useGeographic, so smaller resolution = more zoomed in.
+  const isHalfStep = hPa % 4 !== 0;
+  if (isHalfStep && resolution > 0.3) {
+    return undefined; // hide 2 hPa lines at overview zoom
+  }
   const labelEvery = resolution > 0.5 ? 8 : 4;
-  const showLabel = hPa % labelEvery === 0;
+  const showLabel = !isHalfStep && hPa % labelEvery === 0;
   // Only the midpoint of each cell-level segment gets a label so we
   // don't draw text on every short stub. We pick segments where the
   // feature's first coordinate falls on a coarse lon/lat lattice.
@@ -190,21 +202,41 @@ function isobarStyle(feature: any, resolution: number): Style | undefined {
   const key = `${hPa}:${labelText ?? ""}`;
   const cached = styleCache.get(key);
   if (cached) return cached;
-  const s = buildStyle(hPa, labelText);
+  const s = buildStyle(hPa, labelText, isHalfStep);
   styleCache.set(key, s);
   return s;
 }
 
 // buildStyle picks stroke weight/colour from the contour value.
-// Marine convention: solid below + above 1000, but emphasise every
-// 20 hPa as a "heavy" line and the 1000 hPa contour itself as the
-// reference. Sub-1000 contours use a thinner stroke so the high-
-// pressure / low-pressure asymmetry reads at a glance.
-function buildStyle(hPa: number, labelText: string | null): Style {
-  const isHeavy = hPa % 20 === 0;
+// Visual ladder against the 2 hPa backend spacing:
+//   reference (1000 hPa): darkest, 2.0 px
+//   heavy (every 20 hPa): mid-grey, 1.4 px
+//   standard (every 4 hPa, the canonical NWS analysis): 1.0 px
+//   half-step (the new 2 hPa fill): light grey, 0.6 px
+// Sub-1000 contours don't get special weight any more — the half-step
+// fill already conveys gradient density.
+function buildStyle(
+  hPa: number,
+  labelText: string | null,
+  isHalfStep: boolean,
+): Style {
   const isReference = hPa === 1000;
-  const color = isReference ? "rgba(40, 40, 40, 0.95)" : "rgba(60, 60, 60, 0.78)";
-  const width = isReference ? 2.0 : isHeavy ? 1.4 : 0.9;
+  const isHeavy = hPa % 20 === 0;
+  let color: string;
+  let width: number;
+  if (isReference) {
+    color = "rgba(40, 40, 40, 0.95)";
+    width = 2.0;
+  } else if (isHeavy) {
+    color = "rgba(50, 50, 50, 0.85)";
+    width = 1.4;
+  } else if (isHalfStep) {
+    color = "rgba(90, 90, 90, 0.55)";
+    width = 0.6;
+  } else {
+    color = "rgba(60, 60, 60, 0.78)";
+    width = 1.0;
+  }
   const stroke = new Stroke({ color, width });
   const text = labelText
     ? new Text({
@@ -217,4 +249,36 @@ function buildStyle(hPa: number, labelText: string | null): Style {
       })
     : undefined;
   return new Style({ stroke, text });
+}
+
+// extremumStyle paints the big bold "H" or "L" letter at a pressure
+// extremum with the field value (in hPa) on a second line below. Red
+// for highs, blue for lows — the surface-analysis convention. Cached
+// per (kind, hPa) so OL can swap styles without rebuilding.
+function extremumStyle(kind: "H" | "L", hPa: number): Style {
+  const key = `extremum:${kind}:${hPa}`;
+  const cached = styleCache.get(key);
+  if (cached) return cached;
+  const color = kind === "H" ? "#b71c1c" : "#0d47a1";
+  // Two-line label: glyph on top, value below. OL's Text supports
+  // multi-line via \n; offsetY centres the block around the point.
+  const s = new Style({
+    image: new CircleStyle({
+      radius: 0,
+      // Zero-radius circle keeps the feature pickable via Text-only
+      // styles while leaving no visible mark behind the letter.
+      stroke: new Stroke({ color: "rgba(0,0,0,0)", width: 0 }),
+    }),
+    text: new Text({
+      text: `${kind}\n${hPa}`,
+      font: "bold 18px sans-serif",
+      placement: "point",
+      fill: new Fill({ color }),
+      stroke: new Stroke({ color: "rgba(255,255,255,0.95)", width: 4 }),
+      offsetY: 0,
+      overflow: true,
+    }),
+  });
+  styleCache.set(key, s);
+  return s;
 }

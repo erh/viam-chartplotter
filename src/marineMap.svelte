@@ -3244,18 +3244,23 @@
         colorScale: WIND_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 15,
-        // Particle motion is in degrees under useGeographic — tune so
-        // a 10 m/s wind moves ~2 px / frame at the current zoom.
+        // Particle motion is in degrees under useGeographic. Halved
+        // from ol-wind's 0.3 default to 0.225 / 2^z so a 10 m/s wind
+        // drifts ~1.5 px / frame — between "creeping" (0.15) and
+        // "darting" (0.3). High-wind streaks still come out
+        // noticeably longer than calm-air streaks because the per-
+        // frame distance is `velocityScale * magnitude`.
         velocityScale: () => {
           const z = mapGlobal.view?.getZoom() ?? 6;
-          // Was 0.3 / 2^z; halved so a 10 m/s wind drifts ~1 px / frame
-          // instead of ~2, taking the streaks from "darting" to
-          // "creeping" without losing the directional read.
-          return 0.15 / Math.pow(2, z);
+          return 0.225 / Math.pow(2, z);
         },
-        // 50 % thicker than the windLayer.ts default of 1.6 — reads
-        // more clearly against the chart at typical marine zooms.
-        lineWidth: 2.4,
+        // Per-particle stroke width keyed off wind magnitude (m/s,
+        // ≤ 15 per maxVelocity). ~2.7 px at calm air, ~4.35 px at
+        // gale strength — midway between the prior constant 2.4 px
+        // line and the more aggressive 3..6.3 px ramp, so faster
+        // wind reads as thicker streaks without overwhelming the
+        // chart underneath.
+        lineWidth: (m: number) => 2.7 + Math.max(0, m) * 0.11,
         initialForecastHour: initialFh,
       })
         .then((wind) => {
@@ -6147,20 +6152,26 @@
               </span>
             {/if}
             {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
-              <span class="data-panel-value">
-                <span
-                  class="weather-swatch"
-                  style="background: {colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}"
+              {@const windColor = colorForValue(
+                WIND_COLOR_SCALE,
+                cursorInfo.windKt / MS_TO_KT,
+                15,
+              )}
+              <span class="data-panel-value" style="color: {windColor}">
+                <span class="weather-swatch" style="background: {windColor}"
                 ></span>
                 wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup>
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
             {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
-              <span class="data-panel-value">
-                <span
-                  class="weather-swatch"
-                  style="background: {colorForValue(WAVE_COLOR_SCALE, cursorInfo.waveM, WAVE_RANGE_MAX_M)}"
+              {@const waveColor = colorForValue(
+                WAVE_COLOR_SCALE,
+                cursorInfo.waveM,
+                WAVE_RANGE_MAX_M,
+              )}
+              <span class="data-panel-value" style="color: {waveColor}">
+                <span class="weather-swatch" style="background: {waveColor}"
                 ></span>
                 wave <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span><sup>ft</sup>
                 from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°

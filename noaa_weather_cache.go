@@ -231,7 +231,12 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 //     xMax clamp fixes. Bumped so the production server stops serving
 //     the impossible-1000-m/s-wind JSON some earlier ECMWF runs
 //     produced.
-const weatherCacheVersion = "v3"
+// v4: gfs-isobars now emits 2 hPa contour spacing (was 4 hPa) plus
+//     Point features for local H/L pressure extrema. Old v3 GeoJSON
+//     files don't carry the kind="H"/"L" properties the frontend now
+//     expects, so they'd render the existing 4 hPa lines without
+//     any extremum labels.
+const weatherCacheVersion = "v4"
 
 // cachePath returns the on-disk cache location for one (model, fh)
 // combination. Model names are validated URL-safe at init time so we

@@ -36,13 +36,27 @@ const (
 	gribParamPRMSL          = 1
 	gribSurfaceMeanSeaLevel = 101
 
-	// Isobar contour spacing in hectopascals. 4 hPa is the standard
-	// marine forecast spacing (NWS surface analysis charts). Range
-	// covers anything from a very deep low (~920 hPa, hurricane core)
-	// to a strong high (~1060 hPa).
-	isobarStepHPa = 4
+	// Isobar contour spacing in hectopascals. 2 hPa picks up gradients
+	// the 4 hPa NWS standard hides — frontend gives every 4th level a
+	// heavier stroke so it still reads as the canonical analysis at a
+	// glance. Range covers anything from a very deep low (~920 hPa,
+	// hurricane core) to a strong high (~1060 hPa).
+	isobarStepHPa = 2
 	isobarMinHPa  = 920
 	isobarMaxHPa  = 1064
+
+	// Local-extremum search window for "H" / "L" labels. PRMSL field is
+	// on a ~28 km grid (GFS 0.25°), so a 9-cell radius ≈ ~250 km — the
+	// synoptic scale at which H/L pairs are typically labelled on
+	// surface analysis charts. Anything tighter picks up noise; wider
+	// would miss neighboring lobes in a complex pattern.
+	extremumRadius = 9
+	// Minimum required pressure offset (Pa) from the window's opposite
+	// extreme before a point qualifies as an H or L. Stops the layer
+	// from labelling every flat plateau pixel — only meaningful highs
+	// and lows. 100 Pa = 1 hPa — coarser than the 2 hPa contour step
+	// so we'd never label something that's also between contour lines.
+	extremumMinOffsetPa = 100
 )
 
 func gfsIsobarsModel() *WeatherModel {
@@ -90,6 +104,7 @@ func decodeGFSIsobars(grib []byte, runTime time.Time, fh int) ([]byte, error) {
 		return nil, fmt.Errorf("PRMSL not found in GRIB body")
 	}
 	features := contourLatLonGrid(rec)
+	features = append(features, extremaLatLonGrid(rec)...)
 	fc := geoJSONFeatureCollection{
 		Type:     "FeatureCollection",
 		Features: features,
@@ -102,6 +117,100 @@ func decodeGFSIsobars(grib []byte, runTime time.Time, fh int) ([]byte, error) {
 	return json.Marshal(fc)
 }
 
+// extremaLatLonGrid scans the PRMSL grid for local highs and lows over a
+// `extremumRadius`-cell window — the radius defines the smallest scale
+// at which we'll call something an H or L. A point qualifies as the
+// extreme if it strictly beats every neighbour in the window AND
+// differs from the window's opposite extreme by at least
+// extremumMinOffsetPa, so we don't label every micro-perturbation in a
+// flat pressure plateau. Emits one Point feature per extremum.
+func extremaLatLonGrid(rec *windRecord) []geoJSONFeature {
+	h := rec.Header
+	nx, ny := h.Nx, h.Ny
+	if nx < 2*extremumRadius+1 || ny < 2*extremumRadius+1 {
+		return nil
+	}
+	shiftLon := func(l float64) float64 {
+		if l >= 180 {
+			return l - 360
+		}
+		return l
+	}
+	out := make([]geoJSONFeature, 0, 64)
+	for iy := extremumRadius; iy < ny-extremumRadius; iy++ {
+		for ix := extremumRadius; ix < nx-extremumRadius; ix++ {
+			v := rec.Data[iy*nx+ix]
+			if !valid(v) {
+				continue
+			}
+			isHigh := true
+			isLow := true
+			winMin := v
+			winMax := v
+			for dy := -extremumRadius; dy <= extremumRadius && (isHigh || isLow); dy++ {
+				for dx := -extremumRadius; dx <= extremumRadius; dx++ {
+					if dx == 0 && dy == 0 {
+						continue
+					}
+					// Wrap longitude for the global grid; latitude doesn't
+					// wrap so the loop bounds already guarantee in-range.
+					nix := ix + dx
+					if nix < 0 {
+						nix += nx
+					} else if nix >= nx {
+						nix -= nx
+					}
+					nv := rec.Data[(iy+dy)*nx+nix]
+					if !valid(nv) {
+						isHigh = false
+						isLow = false
+						break
+					}
+					if nv >= v {
+						isHigh = false
+					}
+					if nv <= v {
+						isLow = false
+					}
+					if nv < winMin {
+						winMin = nv
+					}
+					if nv > winMax {
+						winMax = nv
+					}
+				}
+			}
+			if !isHigh && !isLow {
+				continue
+			}
+			if isHigh && v-winMin < extremumMinOffsetPa {
+				continue
+			}
+			if isLow && winMax-v < extremumMinOffsetPa {
+				continue
+			}
+			lon := shiftLon(h.Lo1 + float64(ix)*h.Dx)
+			lat := h.La1 - float64(iy)*h.Dy
+			kind := "H"
+			if isLow {
+				kind = "L"
+			}
+			out = append(out, geoJSONFeature{
+				Type: "Feature",
+				Geometry: geoJSONPoint{
+					Type:        "Point",
+					Coordinates: [2]float64{lon, lat},
+				},
+				Properties: isobarProperties{
+					HPa:  int(math.Round(v / 100)),
+					Kind: kind,
+				},
+			})
+		}
+	}
+	return out
+}
+
 // --- GeoJSON shape --------------------------------------------------------
 
 type geoJSONFeatureCollection struct {
@@ -112,17 +221,30 @@ type geoJSONFeatureCollection struct {
 
 type geoJSONFeature struct {
 	Type       string             `json:"type"`
-	Geometry   geoJSONGeometry    `json:"geometry"`
+	Geometry   any                `json:"geometry"`
 	Properties isobarProperties   `json:"properties"`
 }
 
-type geoJSONGeometry struct {
+// geoJSONLineString is the LineString shape used for isobar contour
+// segments. Coordinates are an array of [lon, lat] pairs.
+type geoJSONLineString struct {
 	Type        string        `json:"type"`
 	Coordinates [][2]float64  `json:"coordinates"`
 }
 
+// geoJSONPoint is the Point shape used for H/L extremum markers. A
+// single [lon, lat] pair sits at the field's local high or low.
+type geoJSONPoint struct {
+	Type        string     `json:"type"`
+	Coordinates [2]float64 `json:"coordinates"`
+}
+
 type isobarProperties struct {
+	// HPa is the contour level for LineString features, or the field
+	// value at the extremum for Point features.
 	HPa int `json:"hPa"`
+	// Kind is "H" or "L" on Point features (omitted on LineStrings).
+	Kind string `json:"kind,omitempty"`
 }
 
 type isobarMeta struct {
@@ -221,7 +343,7 @@ func contourLatLonGrid(rec *windRecord) []geoJSONFeature {
 					}
 					out = append(out, geoJSONFeature{
 						Type: "Feature",
-						Geometry: geoJSONGeometry{
+						Geometry: geoJSONLineString{
 							Type: "LineString",
 							Coordinates: [][2]float64{
 								{s[0], s[1]},

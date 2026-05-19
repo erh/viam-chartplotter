@@ -75,6 +75,59 @@ func TestMarchCellSaddle(t *testing.T) {
 	}
 }
 
+// TestExtremaLatLonGrid feeds a synthetic field with a known high and
+// low bump and confirms extremaLatLonGrid emits one Point feature for
+// each, labelled "H"/"L" with the right hPa value.
+func TestExtremaLatLonGrid(t *testing.T) {
+	// 35x35 grid — extremum detection skips the outer 9-cell rim, so
+	// the testable interior is ix,iy ∈ [9..25]. Base 101000 Pa with a
+	// raised peak (+1500 Pa = +15 hPa) at (12, 12) and a depressed
+	// trough (-1500 Pa) at (22, 22), separated enough that the gaussians
+	// don't smear into each other.
+	const nx, ny = 35, 35
+	data := make([]float64, nx*ny)
+	for iy := 0; iy < ny; iy++ {
+		for ix := 0; ix < nx; ix++ {
+			base := 101000.0
+			dxH := float64(ix - 12)
+			dyH := float64(iy - 12)
+			peak := 1500.0 * math.Exp(-(dxH*dxH+dyH*dyH)/8.0)
+			dxL := float64(ix - 22)
+			dyL := float64(iy - 22)
+			trough := -1500.0 * math.Exp(-(dxL*dxL+dyL*dyL)/8.0)
+			data[iy*nx+ix] = base + peak + trough
+		}
+	}
+	rec := &windRecord{
+		Header: windHeader{Nx: nx, Ny: ny, Lo1: 0, La1: 25, Dx: 1, Dy: 1},
+		Data:   data,
+	}
+	feats := extremaLatLonGrid(rec)
+	if len(feats) == 0 {
+		t.Fatal("expected at least one extremum, got 0")
+	}
+	var gotH, gotL bool
+	for _, f := range feats {
+		switch f.Properties.Kind {
+		case "H":
+			gotH = true
+		case "L":
+			gotL = true
+		default:
+			t.Errorf("unexpected kind %q on extremum feature", f.Properties.Kind)
+		}
+		if _, ok := f.Geometry.(geoJSONPoint); !ok {
+			t.Errorf("extremum has wrong geometry type: %T", f.Geometry)
+		}
+	}
+	if !gotH {
+		t.Errorf("missing high-pressure extremum (H)")
+	}
+	if !gotL {
+		t.Errorf("missing low-pressure extremum (L)")
+	}
+}
+
 // TestContourLatLonGridShape: feed a simple linear pressure ramp and
 // confirm the output FeatureCollection has features at the expected
 // pressure levels.
@@ -159,7 +212,11 @@ func TestContourLatLonGridDateline(t *testing.T) {
 	}
 	const maxSegLon = 1.0 // generous: real segments are <= Dx wide
 	for i, f := range feats {
-		c := f.Geometry.Coordinates
+		ls, ok := f.Geometry.(geoJSONLineString)
+		if !ok {
+			continue // skip H/L Point features; we only check segments
+		}
+		c := ls.Coordinates
 		if len(c) != 2 {
 			t.Fatalf("feat %d: expected 2 coords, got %d", i, len(c))
 		}

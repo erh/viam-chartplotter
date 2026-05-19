@@ -92,8 +92,11 @@ export interface SetupWeatherOptions {
   paths?: number;
   /** Frames before a particle is re-randomized. */
   particleAge?: number;
-  /** Particle line width in CSS pixels. */
-  lineWidth?: number;
+  /** Particle line width in CSS pixels. May be a function of the per-
+   *  particle magnitude (m/s for wind, m for waves) so higher-speed
+   *  particles paint thicker streaks; wind-core calls it with each
+   *  particle's `m` at draw time. */
+  lineWidth?: number | ((magnitude: number) => number);
   /**
    * wind-core's `globalAlpha` knob. Doubles as the stroke alpha for new
    * particles AND the trail-fadeout rate, so higher = brighter strokes
