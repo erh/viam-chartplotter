@@ -104,7 +104,11 @@ export interface SetupWeatherOptions {
  *  because Y" in the UI rather than just blanking the layer. */
 async function fetchJSON(url: string, fh: number): Promise<{ data?: any; error?: string }> {
   try {
-    const resp = await fetch(`${url}?fh=${fh}`, { cache: "no-store" });
+    // Default `cache` (no override) — the server stamps Cache-Control:
+    // max-age=300 on these responses, so the browser HTTP cache makes
+    // return-scrubs to a recently-loaded hour effectively free instead
+    // of re-downloading 35 MB of JSON.
+    const resp = await fetch(`${url}?fh=${fh}`);
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       return { error: body.trim() || `HTTP ${resp.status}` };
@@ -136,9 +140,73 @@ export async function setupWeatherLayer(
     // We can't set up a particle layer for that; bail.
     return null;
   }
+
+  // Per-handle LRU of parsed JSON keyed by `${model}:${fh}`. Wire payload
+  // is ~35 MB raw / ~5 MB gzipped, and JSON.parse on the raw body is the
+  // dominant cost on a return-scrub even with a warm browser cache —
+  // hitting this map skips both the network roundtrip and the parse.
+  // Map iteration order is insertion order, so delete-then-set on hit
+  // implements LRU in O(1).
+  const dataCache = new Map<string, any>();
+  // 8 entries × 35 MB ≈ 280 MB for wind, ~80 MB for waves. Larger
+  // caches don't usefully help — the user typically scrubs forward
+  // through a forecast, then back, then forward, all within a small
+  // window.
+  const DATA_CACHE_MAX = 8;
+  const cacheKey = (model: string, fh: number) => `${model}:${fh}`;
+  function cacheGet(model: string, fh: number): any | null {
+    const key = cacheKey(model, fh);
+    const v = dataCache.get(key);
+    if (v === undefined) return null;
+    dataCache.delete(key);
+    dataCache.set(key, v);
+    return v;
+  }
+  function cachePut(model: string, fh: number, data: any) {
+    const key = cacheKey(model, fh);
+    if (dataCache.has(key)) dataCache.delete(key);
+    dataCache.set(key, data);
+    while (dataCache.size > DATA_CACHE_MAX) {
+      const first = dataCache.keys().next().value;
+      if (first === undefined) break;
+      dataCache.delete(first);
+    }
+  }
+
+  // Background prefetch of neighbouring hours. Slider step is 3h (the
+  // GFS native step), so prefetching ±3 covers the most common scrub
+  // pattern; ±6 buys a second hop for free. In-flight tracking dedupes
+  // overlapping prefetches when the user keeps scrubbing.
+  const inflightPrefetch = new Set<string>();
+  function prefetch(model: string, fh: number) {
+    if (fh < 0) return;
+    const key = cacheKey(model, fh);
+    if (dataCache.has(key)) return;
+    if (inflightPrefetch.has(key)) return;
+    const url = urlFor(model, fh);
+    if (!url) return;
+    inflightPrefetch.add(key);
+    fetchJSON(url, fh)
+      .then((r) => {
+        if (r.data) cachePut(model, fh, r.data);
+      })
+      .catch(() => {})
+      .finally(() => inflightPrefetch.delete(key));
+  }
+  function prefetchNeighbors(model: string, fh: number) {
+    prefetch(model, fh + 3);
+    prefetch(model, fh - 3);
+    prefetch(model, fh + 6);
+  }
+
   const first = await fetchJSON(initialUrl, currentFh);
   if (!first.data) return null;
   let data: any = first.data;
+  cachePut(currentModel, currentFh, data);
+  // Warm the next slider position so the first scrub is instant. Done
+  // before windLayer construction since that step is synchronous and
+  // doesn't block the in-flight prefetch.
+  prefetchNeighbors(currentModel, currentFh);
 
   const windLayer = new WindLayer(data, {
     forceRender: true,
@@ -202,12 +270,17 @@ export async function setupWeatherLayer(
     if (!url) {
       return `model ${model} has no data endpoint (frontend-only)`;
     }
-    const result = await fetchJSON(url, fh);
-    if (!result.data) return result.error ?? "fetch failed";
+    let parsed = cacheGet(model, fh);
+    if (parsed === null) {
+      const result = await fetchJSON(url, fh);
+      if (!result.data) return result.error ?? "fetch failed";
+      parsed = result.data;
+      cachePut(model, fh, parsed);
+    }
     currentModel = model;
     currentFh = fh;
-    currentRunTime = result.data[0]?.header?.refTime ?? null;
-    windLayer.setData(result.data, {
+    currentRunTime = parsed[0]?.header?.refTime ?? null;
+    windLayer.setData(parsed, {
       translateX: true,
       wrapX: true,
       flipY: true,
@@ -218,6 +291,7 @@ export async function setupWeatherLayer(
     console.log(
       `${opts.layerName} layer updated model=${model} fh=${fh} refTime=${currentRunTime}`,
     );
+    prefetchNeighbors(model, fh);
     return null;
   }
 
