@@ -39,15 +39,25 @@ import (
 // 10m-wind file is still required before declaring the ECMWF model
 // production-ready.
 
-// ccsdsFlag bits, encoded into GRIB2 Section 5 Octet 22 per WMO Code
-// Table 5.40. These map onto libaec's flag bits one-to-one but at
-// different bit positions; the rename here keeps the public-facing
-// names aligned with the GRIB2 spec rather than libaec's API.
+// ccsdsFlag bits, encoded into GRIB2 Section 5 Octet 22. Despite
+// living in a WMO-defined byte, ecCodes (the de-facto reference
+// implementation that ECMWF Open Data is encoded against) treats this
+// byte as the libaec flag set directly, with no remapping — see
+// eccodes/src/grib_accessor_class_data_ccsds_packing.cc, which does a
+// straight `strm.flags = ccsds_flags`. So our bit positions here are
+// the libaec ones, not a separately-numbered WMO scheme.
+//
+// Real ECMWF Open Data fields typically arrive with flags = 0x0C
+// (MSB-first + preprocessor on). Earlier revisions of this file used
+// a WMO 1-indexed-bit interpretation which made MSB-first look like
+// "restricted option set" and bailed the decoder out at first byte.
 const (
-	ccsdsFlagMSBFirst     = 0x01 // bit 1: 0=LSB first, 1=MSB first
-	ccsdsFlagPreprocessor = 0x02 // bit 2: 1=preprocessor applied
-	ccsdsFlagRestricted   = 0x04 // bit 3: 1=restricted code option set
-	ccsdsFlagPadRSI       = 0x08 // bit 4: 1=pad each RSI to a byte boundary
+	ccsdsFlagSigned       = 0x01 // input data is signed (two's complement)
+	ccsdsFlag3Byte        = 0x02 // 24-bit packed samples
+	ccsdsFlagMSBFirst     = 0x04 // 0 = LSB first within sample, 1 = MSB first
+	ccsdsFlagPreprocessor = 0x08 // preprocessor (offset-binary θ-mapping) applied
+	ccsdsFlagRestricted   = 0x10 // restricted code option set
+	ccsdsFlagPadRSI       = 0x20 // pad each RSI to a byte boundary
 )
 
 // idSizeBits maps bits-per-sample to the width of the per-block ID
