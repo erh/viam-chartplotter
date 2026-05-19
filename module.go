@@ -53,11 +53,11 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	// Public base URL of the wind-publisher's R2/CDN bucket. When set,
-	// the frontend's ECMWF wind layer fetches per-tile blobs from this
-	// origin instead of asking this module to decode/encode global JSON
-	// on every request. Empty (default) = no CDN; everything stays
-	// local. See wind_publisher_resource.go for the producer side.
+	// Public base URL of the wind-publisher's R2/CDN bucket. Empty
+	// (or unset) falls back to DefaultWindCDNBaseURL inside
+	// SetWindCDNBaseURL so every chartplotter gets fan-out behaviour
+	// out of the box. Override with a different URL to point at a
+	// staging mirror.
 	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL)
 }

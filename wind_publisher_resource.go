@@ -34,6 +34,15 @@ var WindPublisherModel = resource.ModelNamespace("erh").WithFamily("viam-chartpl
 // running a staging fleet or want to sandbox a publisher's output.
 const DefaultECMWFR2Bucket = "viam-chartplotter-ecmwf"
 
+// DefaultWindCDNBaseURL is the public r2.dev URL the
+// viam-chartplotter-ecmwf bucket is exposed at. Every chartplotter
+// in the fleet defaults to fetching ECMWF tiles from here so we
+// only hit ECMWF Open Data from the one machine running the
+// wind-publisher component, not from 10K chartplotters. Override
+// via the `wind_cdn_base_url` chartplotter config attribute when
+// running against a staging bucket or a custom-domain mirror.
+const DefaultWindCDNBaseURL = "https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev"
+
 func init() {
 	resource.RegisterComponent(
 		generic.API,

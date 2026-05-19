@@ -92,7 +92,17 @@ const (
 // holds it just so the frontend can read it back via
 // /noaa-weather/config (the cache itself doesn't use the CDN — it
 // remains the on-demand fallback).
+//
+// Empty input maps to DefaultWindCDNBaseURL so a `make run` /
+// minimal-config deployment still gets fan-out behaviour out of the
+// box. There's no first-class "disable the CDN" mode any more — the
+// only practical reason to bypass it is local dev against a module
+// with no publisher running, and even then the local fallback still
+// kicks in when latest.json is unreachable.
 func (wc *WeatherCache) SetWindCDNBaseURL(u string) {
+	if u == "" {
+		u = DefaultWindCDNBaseURL
+	}
 	wc.windCDNBaseURL = strings.TrimRight(u, "/")
 }
 
