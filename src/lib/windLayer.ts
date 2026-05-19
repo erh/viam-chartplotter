@@ -294,7 +294,15 @@ export async function setupWeatherLayer(
     let parsed = cacheGet(model, fh);
     if (parsed === null) {
       const result = await fetchOne(model, fh);
-      if (!result.data) return result.error ?? "fetch failed";
+      if (!result.data) {
+        const msg = result.error ?? "fetch failed";
+        // Surface fetch errors at console.warn level so a 404 (e.g.
+        // a slider asking for an fh past this model's MaxFh — the
+        // ECMWF MaxFh=144 vs GFS MaxFh=240 mismatch trips this when
+        // switching models) doesn't disappear silently between layers.
+        console.warn(`${opts.layerName} layer fetch ${model} fh=${fh}: ${msg}`);
+        return msg;
+      }
       parsed = result.data;
       cachePut(model, fh, parsed);
     }

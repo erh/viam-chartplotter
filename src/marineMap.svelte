@@ -5126,9 +5126,18 @@
                   // different run cadences, so the "now hour" shifts.
                   const floor = nowForecastHour(weatherRunTime);
                   weatherMinForecastHour = floor;
-                  if (weatherForecastHour < floor) {
-                    weatherForecastHour = floor;
-                    await windHandle?.setForecastHour(floor);
+                  // Also clamp DOWN to the new model's MaxFh.
+                  // ECMWF caps at 144, GFS at 240 — without this
+                  // clamp, switching GFS→ECMWF at fh=207 silently
+                  // 404s on every tile (no published data past 144).
+                  const newModelMeta = weatherModels.find((m) => m.name === next);
+                  const newMaxFh = newModelMeta?.maxFh ?? Infinity;
+                  let target = weatherForecastHour;
+                  if (target < floor) target = floor;
+                  if (target > newMaxFh) target = newMaxFh;
+                  if (target !== weatherForecastHour) {
+                    weatherForecastHour = target;
+                    await windHandle?.setForecastHour(target);
                   }
                   mapGlobal.map?.render();
                 }
