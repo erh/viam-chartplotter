@@ -100,14 +100,14 @@ func TestAECFSRoundTrip(t *testing.T) {
 }
 
 // TestAECDecodeNoCompression exercises the no-compression block path
-// — every block uses ID = bps (the CCSDS NC option), every sample is
-// raw bps bits.
+// — every block uses ID = 2^idBits-1 (the libaec NC option), every
+// sample is raw bps bits.
 func TestAECDecodeNoCompression(t *testing.T) {
 	const bps = 8
 	const blockSize = 8
 	const rsi = 2
-	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
-	idNC := bps               // CCSDS: NC ID is at bps
+	idBits := idSizeBits(bps)        // 3 under libaec bracketing
+	idNC := (1 << uint(idBits)) - 1  // 7
 
 	samples := []uint64{
 		0, 1, 2, 3, 4, 5, 6, 7,
@@ -143,7 +143,7 @@ func TestAECDecodeKSplit(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	const k = 3
-	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
+	idBits := idSizeBits(bps) // 3 under libaec bracketing
 	samples := []uint64{
 		0, 1, 7, 8, 15, 16, 23, 31,
 	}
@@ -179,7 +179,7 @@ func TestAECDecodeFSOnly(t *testing.T) {
 	const bps = 4
 	const blockSize = 8
 	const rsi = 1
-	idBits := idSizeBits(bps) // ⌈log₂(5)⌉ = 3
+	idBits := idSizeBits(bps) // 3 under libaec bracketing
 	samples := []uint64{0, 1, 2, 3, 0, 1, 2, 0}
 
 	w := &aecBitWriter{}
@@ -205,8 +205,8 @@ func TestAECDecodeSecondExtension(t *testing.T) {
 	const bps = 8
 	const blockSize = 4
 	const rsi = 1
-	idBits := idSizeBits(bps) // ⌈log₂(9)⌉ = 4
-	idSE := bps - 1           // CCSDS: SE ID is at bps-1
+	idBits := idSizeBits(bps)        // 3 under libaec bracketing
+	idSE := (1 << uint(idBits)) - 2  // 6
 	samples := []uint64{0, 1, 2, 0, 3, 4, 1, 0}
 
 	w := &aecBitWriter{}
@@ -239,7 +239,7 @@ func TestUnpackCCSDSAppliesScaling(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idNC := bps
+	idNC := (1 << uint(idBits)) - 1
 	samples := []uint64{0, 1, 2, 4, 8, 16, 32, 64}
 
 	w := &aecBitWriter{}
@@ -270,7 +270,7 @@ func TestCCSDSThroughPackingSection(t *testing.T) {
 	const blockSize = 8
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idNC := bps
+	idNC := (1 << uint(idBits)) - 1
 	samples := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
 
 	w := &aecBitWriter{}
@@ -328,18 +328,19 @@ func TestCCSDSThroughPackingSection(t *testing.T) {
 	}
 }
 
-// TestIDSizeBits locks in the CCSDS 121.0-B-3 §5.1.2.1.1.3 formula
-// (⌈log₂(bps+1)⌉). A previous "round-down to libaec's internal
-// boundary" implementation was producing the wrong id width for
-// bps in {2, 4, 8, 16} and silently mis-decoded ECMWF Open Data
-// fields encoded at the spec-correct width.
+// TestIDSizeBits locks in the libaec-on-the-wire bracket boundaries
+// (3 / 4 / 5 bits for bps in ≤8 / ≤16 / ≤32) that ECMWF Open Data
+// is encoded against. The strict CCSDS ⌈log₂(bps+1)⌉ formula would
+// disagree at boundary values like bps=8 or bps=16 — sticking with
+// libaec matches what we actually see on the wire.
 func TestIDSizeBits(t *testing.T) {
 	cases := []struct {
 		bps  int
 		want int
 	}{
-		{1, 1}, {2, 2}, {3, 2}, {4, 3}, {5, 3}, {7, 3},
-		{8, 4}, {12, 4}, {15, 4}, {16, 5}, {17, 5}, {31, 5}, {32, 6},
+		{1, 3}, {2, 3}, {4, 3}, {7, 3}, {8, 3},
+		{9, 4}, {12, 4}, {15, 4}, {16, 4},
+		{17, 5}, {31, 5}, {32, 5},
 	}
 	for _, c := range cases {
 		if got := idSizeBits(c.bps); got != c.want {
@@ -348,26 +349,64 @@ func TestIDSizeBits(t *testing.T) {
 	}
 }
 
-// TestAECDecodeBps12NC reproduces the ECMWF Open Data wire-level case
-// that surfaced the original "invalid split k=12 (bps=12)" bug: with
-// bps=12, idSizeBits is 4 bits, and the No-Compression option ID is
-// 12 (not 15, which would be 2^4-1 and is what an earlier libaec-style
-// layout used). The decoder must read id=12 as NC and unpack raw
-// 12-bit samples instead of treating it as an out-of-range k-split.
+// TestAECDecodeBps12NC reproduces an ECMWF Open Data wire case: with
+// bps=12 (idBits=4 under the libaec bracketing), the No-Compression
+// option ID is the all-ones 4-bit value 15. An earlier revision of
+// this decoder followed the strict CCSDS spec instead and put NC at
+// ID=bps=12, which made it reject ECMWF's real id=15 NC blocks as
+// "invalid block id=15" once it stopped first failing at id=12.
 func TestAECDecodeBps12NC(t *testing.T) {
 	const bps = 12
 	const blockSize = 4
 	const rsi = 1
 	idBits := idSizeBits(bps)
-	idNC := bps
-	if idBits != 4 {
-		t.Fatalf("idSizeBits(12) = %d, want 4", idBits)
+	idNC := (1 << uint(idBits)) - 1
+	if idBits != 4 || idNC != 15 {
+		t.Fatalf("idBits=%d idNC=%d, want 4 / 15", idBits, idNC)
 	}
 	samples := []uint64{0, 1, 4095, 2048}
 	w := &aecBitWriter{}
 	w.writeBits(uint64(idNC), idBits)
 	for _, s := range samples {
 		w.writeBits(s, bps)
+	}
+	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
+	if err != nil {
+		t.Fatalf("aecDecode: %v", err)
+	}
+	for i, want := range samples {
+		if got[i] != want {
+			t.Errorf("got[%d] = %d, want %d", i, got[i], want)
+		}
+	}
+}
+
+// TestAECDecodeBps12KSplitAtBps covers the companion wire case: with
+// bps=12, libaec encoders are observed to emit id=12 in some blocks,
+// which under the libaec layout is a k=12 split — the high part has
+// (bps-k)=0 bits (each FS read just consumes a single "1" stop bit
+// returning 0) and the low part carries the raw 12-bit sample.
+// Strict-CCSDS-spec interpretations would treat id=12 as NC instead
+// and mis-decode the bitstream.
+func TestAECDecodeBps12KSplitAtBps(t *testing.T) {
+	const bps = 12
+	const blockSize = 4
+	const rsi = 1
+	const k = bps // 12 — the boundary case that surfaces in real ECMWF runs
+	idBits := idSizeBits(bps)
+	if k > (1<<uint(idBits))-3 {
+		t.Fatalf("k=%d not in libaec k-split range for bps=%d", k, bps)
+	}
+	samples := []uint64{0, 1, 4095, 2048}
+	w := &aecBitWriter{}
+	w.writeBits(uint64(k), idBits)
+	// High parts: all zero, each encoded as a single "1" stop bit.
+	for range samples {
+		w.writeFS(0)
+	}
+	// Low parts: raw k=12 bits per sample.
+	for _, s := range samples {
+		w.writeBits(s, k)
 	}
 	got, err := aecDecode(w.bytes(), bps, 0, blockSize, rsi, len(samples))
 	if err != nil {

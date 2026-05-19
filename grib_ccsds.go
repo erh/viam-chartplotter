@@ -60,22 +60,25 @@ const (
 	ccsdsFlagPadRSI       = 0x20 // pad each RSI to a byte boundary
 )
 
-// idSizeBits returns ⌈log₂(bps+1)⌉ per CCSDS 121.0-B-3 §5.1.2.1.1.3 —
-// the width of the per-block ID field, sized to fit the option IDs
-// {0..bps}. Previously this rounded down to a smaller power-of-two-ish
-// boundary that matched libaec's internal layout; that disagrees with
-// the CCSDS-on-the-wire layout ECMWF Open Data actually uses, which
-// reserves ID = bps (not 2^id_len − 1) for No-Compression and ID =
-// bps − 1 (not 2^id_len − 2) for Second Extension.
+// idSizeBits is the width of the per-block ID field. ECMWF Open Data
+// is encoded by ecCodes-via-libaec, which rounds bps up to fixed
+// brackets (3/4/5 bits) rather than using the strict ⌈log₂(bps+1)⌉
+// width from CCSDS 121.0-B-3 §5.1.2.1.1.3. We follow libaec because
+// that's what we'll see on the wire: bps=12 fields ship with a 4-bit
+// ID space and reserve the maximum ID (= 2^4-1 = 15) for the No-
+// Compression option, leaving room for k-split codes between bps and
+// idMax-2 that the strict CCSDS layout would call "unused".
 func idSizeBits(bps int) int {
-	if bps <= 0 {
+	switch {
+	case bps <= 0:
 		return 0
+	case bps <= 8:
+		return 3
+	case bps <= 16:
+		return 4
+	default:
+		return 5
 	}
-	bits := 1
-	for (1 << uint(bits)) < bps+1 {
-		bits++
-	}
-	return bits
 }
 
 // aecBitReader pulls bit fields from a byte slice. The CCSDS spec
@@ -163,13 +166,18 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 	}
 	preprocess := flags&ccsdsFlagPreprocessor != 0
 	idBits := idSizeBits(bps)
-	// Per CCSDS 121.0-B-3 §5.1.2.1.3/§5.1.2.1.4 the ID space is
-	// {0=FS, 1..bps-2=k-split, bps-1=SE, bps=NC}. Higher IDs (up to
-	// 2^idBits-1) are unused — a compliant encoder will never emit
-	// them, so receiving one is treated as a decode error rather than
-	// silently mis-interpreted as an oversized k-split.
-	idNC := bps
-	idSE := bps - 1
+	// libaec-on-the-wire layout (what ECMWF Open Data uses):
+	//   - 2^idBits-1 = idNC (No Compression)
+	//   - 2^idBits-2 = idSE (Second Extension)
+	//   - 0          = FS / zero-block
+	//   - 1..idNC-2  = k-split with k = id
+	// Note the k-split range can extend past bps when idBits brackets
+	// bps below the next power-of-two boundary. The decoder accepts
+	// k=bps and k=bps+1 etc. — those carry no useful information
+	// versus NC, but libaec's encoder emits them in some corners
+	// (we observed id=12 with bps=12 in production ECMWF runs).
+	idNC := (1 << uint(idBits)) - 1
+	idSE := idNC - 1
 
 	out := make([]uint64, 0, n)
 	r := newAECBitReader(packed)
@@ -276,11 +284,15 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 				samplesEmittedInRSI += samplesNeeded
 			default:
 				// k-split: low k bits raw, high (bps-k) bits FS-coded.
-				// idSE and idNC are already caught above, so a valid
-				// k here lies in 1..bps-2.
+				// Per libaec's on-the-wire layout, k can range from 1
+				// up to idNC-2; when k >= bps the FS portion encodes
+				// only zeros (each sample emits one "1" stop bit) and
+				// the low k bits carry the raw value. That's wasteful
+				// versus straight NC, but it's what libaec emits in
+				// some blocks and the decoder must accept it.
 				k := int(id)
-				if k <= 0 || k > bps-2 {
-					return nil, fmt.Errorf("aec: invalid block id=%d (bps=%d, expected 0..%d)",
+				if k <= 0 || k > idNC-2 {
+					return nil, fmt.Errorf("aec: invalid block id=%d (bps=%d, idNC=%d)",
 						k, bps, idNC)
 				}
 				// Per CCSDS spec, the encoder emits the high parts
