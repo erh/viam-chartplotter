@@ -26,6 +26,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	vc "github.com/erh/viam-chartplotter"
@@ -48,7 +49,7 @@ func main() {
 		step  = flag.Int("step", 0, "forecast step in hours")
 		param = flag.String("param", "10u", "parameter name (10u/10v/2t/...)")
 		file  = flag.String("file", "", "local .grib2 file to parse (skips HTTP fetch)")
-		out   = flag.String("out", "", "save fetched .grib2 bytes to this path before decoding (so a decoder failure still leaves replayable wire data)")
+		out   = flag.String("out", "", "explicit path to save the fetched .grib2 bytes (defaults to /tmp/ecmwf-probe-...grib2 so a decoder failure always leaves replayable wire data)")
 		quiet = flag.Bool("quiet", false, "suppress per-block AEC trace lines")
 	)
 	flag.Parse()
@@ -82,15 +83,22 @@ func main() {
 	}
 
 	// Persist the wire bytes BEFORE running the decoder so a crash
-	// or error still leaves something to inspect with hexdump / a
-	// different decoder. -out is opt-in for the probe (the
-	// production cache writes to <cacheDir>/raw-ecmwf
-	// automatically; see ECMWFRawCacheDir in weather_models.go).
-	if *out != "" {
-		if err := os.WriteFile(*out, grib, 0o644); err != nil {
-			log.Fatalf("write -out=%s: %v", *out, err)
+	// or panic still leaves something to inspect with hexdump / a
+	// different decoder / a later probe run with -file. When the
+	// user didn't pass -out, default to a deterministic path under
+	// /tmp so they don't have to know the convention up front. -file
+	// runs already have the source on disk, so we don't double-write.
+	if *file == "" {
+		outPath := *out
+		if outPath == "" {
+			outPath = filepath.Join(os.TempDir(),
+				fmt.Sprintf("ecmwf-probe-%s-%02dz-f%03d-%s.grib2",
+					*date, *cycle, *step, *param))
 		}
-		log.Printf("wrote %d bytes to %s", len(grib), *out)
+		if err := os.WriteFile(outPath, grib, 0o644); err != nil {
+			log.Fatalf("write %s: %v", outPath, err)
+		}
+		log.Printf("wrote %d wire bytes to %s (use -file %s to replay)", len(grib), outPath, outPath)
 	}
 
 	if len(grib) < 4 || string(grib[:4]) != "GRIB" {
