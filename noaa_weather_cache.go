@@ -1,10 +1,12 @@
 package vc
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -16,6 +18,10 @@ import (
 	"time"
 
 	"go.viam.com/rdk/logging"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WeatherCache fetches NOAA GFS GRIB2 data from NOMADS, parses out 10 m
@@ -34,6 +40,11 @@ type WeatherCache struct {
 
 	// fetchMu de-dupes concurrent refreshes; second caller just waits.
 	fetchMu sync.Mutex
+
+	// prewarmCancel stops the startup prewarm goroutine when the
+	// resource is closed, so an in-flight module reload doesn't leak
+	// goroutines that keep hitting NOMADS after the server is gone.
+	prewarmCancel context.CancelFunc
 
 	hits    atomic.Uint64
 	refreshes atomic.Uint64
@@ -145,6 +156,39 @@ func (wc *WeatherCache) cachePath(modelName string, fh int) string {
 	return filepath.Join(wc.cacheDir, fmt.Sprintf("%s-%s-f%03d.json", modelName, weatherCacheVersion, fh))
 }
 
+// cacheGzPath is the precompressed sibling next to the .json cache file.
+// Written atomically by refreshNow and served (Content-Encoding: gzip)
+// to clients that advertise Accept-Encoding: gzip so we don't pay 35 MB
+// of wire transfer per forecast hour.
+func (wc *WeatherCache) cacheGzPath(modelName string, fh int) string {
+	return wc.cachePath(modelName, fh) + ".gz"
+}
+
+// clientAcceptsGzip is true if the request advertises gzip in its
+// Accept-Encoding header. Lower-cased compare so "GZIP" / "gzip,
+// deflate" both match.
+func clientAcceptsGzip(r *http.Request) bool {
+	enc := r.Header.Get("Accept-Encoding")
+	if enc == "" {
+		return false
+	}
+	for _, tok := range strings.Split(enc, ",") {
+		// "gzip;q=0" disables gzip explicitly; skip in that case.
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		name, params, _ := strings.Cut(tok, ";")
+		if strings.EqualFold(strings.TrimSpace(name), "gzip") {
+			if strings.Contains(params, "q=0") && !strings.Contains(params, "q=0.") {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // parseForecastHour pulls `?fh=N` off the request and snaps it to the
 // model's StepFh / [MinFh, MaxFh] window. Defaults to MinFh on missing
 // / malformed input.
@@ -205,6 +249,32 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
+	// Prefer the precompressed sibling when the client supports it —
+	// ~7-10× smaller wire payload for the same 35 MB JSON. Vary so
+	// shared caches keep gzipped and identity responses separate.
+	w.Header().Add("Vary", "Accept-Encoding")
+	if clientAcceptsGzip(r) {
+		gzPath := wc.cacheGzPath(m.Name, fh)
+		if _, gzErr := os.Stat(gzPath); gzErr == nil {
+			w.Header().Set("Content-Encoding", "gzip")
+			http.ServeFile(w, r, gzPath)
+			return
+		}
+		// Missing .gz next to an existing .json (e.g. a cache file from
+		// before gzip support shipped). Build it asynchronously so the
+		// next request gets the compressed version; serve uncompressed
+		// for this one rather than blocking ~200 ms on compression.
+		go func() {
+			wc.fetchMu.Lock()
+			defer wc.fetchMu.Unlock()
+			if _, err := os.Stat(gzPath); err == nil {
+				return
+			}
+			if err := wc.writeGzip(m.Name, fh); err != nil {
+				wc.logger.Warnf("weather: backfill gzip %s fh=%d: %v", m.Name, fh, err)
+			}
+		}()
+	}
 	http.ServeFile(w, r, path)
 }
 
@@ -243,40 +313,260 @@ func (wc *WeatherCache) handleStats(w http.ResponseWriter, r *http.Request) {
 // concurrent callers for the same (model, fh) wait for the first
 // one's result.
 func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int) error {
+	// Outer span covers everything including the time spent waiting on
+	// fetchMu, since that's a real source of latency when prewarm and a
+	// user request collide.
+	ctx, span := tracer().Start(ctx, "weather.refreshNow",
+		trace.WithAttributes(
+			attribute.String("weather.model", m.Name),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
+
+	lockStart := time.Now()
 	wc.fetchMu.Lock()
+	span.SetAttributes(attribute.Int64("weather.lock_wait_ms", time.Since(lockStart).Milliseconds()))
 	defer wc.fetchMu.Unlock()
 	// Re-check freshness after acquiring the lock — another caller may
 	// have just refreshed this same (model, fh).
 	if info, err := os.Stat(wc.cachePath(m.Name, fh)); err == nil && time.Since(info.ModTime()) <= wc.refresh {
+		span.SetAttributes(attribute.Bool("weather.short_circuit", true))
 		return nil
 	}
 
-	records, err := m.Fetch(ctx, wc.client, time.Time{}, fh)
+	records, err := wc.spanFetch(ctx, m, fh)
 	if err != nil {
 		wc.errs.Add(1)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "fetch")
 		return fmt.Errorf("%s fetch: %w", m.Name, err)
 	}
+	span.SetAttributes(attribute.Int("weather.records", len(records)))
+	if err := wc.spanEncode(ctx, m, fh, records); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "encode")
+		return err
+	}
+	// Write the .gz sibling so requests that advertise gzip can skip the
+	// 35 MB raw transfer. Failures here are non-fatal — the handler
+	// transparently falls back to the .json file.
+	if err := wc.spanWriteGzip(ctx, m.Name, fh); err != nil {
+		wc.logger.Warnf("weather: gzip %s fh=%d: %v", m.Name, fh, err)
+		span.RecordError(err)
+	}
+	wc.refreshes.Add(1)
+	wc.logger.Infof("weather: refreshed %s fh=%d records=%d", m.Name, fh, len(records))
+	return nil
+}
+
+// spanFetch wraps m.Fetch (NOMADS / DWD / PacIOOS round-trip + GRIB
+// decode) so the trace shows how much of refreshNow is the upstream
+// fetch vs. local I/O. This is usually the bulk of slow refreshes —
+// NOMADS commonly takes 30-60 s for a single GFS hour.
+func (wc *WeatherCache) spanFetch(ctx context.Context, m *WeatherModel, fh int) ([]windRecord, error) {
+	ctx, span := tracer().Start(ctx, "weather.fetch",
+		trace.WithAttributes(
+			attribute.String("weather.model", m.Name),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
+	records, err := m.Fetch(ctx, wc.client, time.Time{}, fh)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return records, err
+}
+
+// spanEncode wraps the JSON encode + atomic rename. Encoding a single
+// GFS hour is ~35 MB of JSON, dominated by float-to-string conversion
+// — typically 100-300 ms.
+func (wc *WeatherCache) spanEncode(ctx context.Context, m *WeatherModel, fh int, records []windRecord) error {
+	_, span := tracer().Start(ctx, "weather.encode",
+		trace.WithAttributes(
+			attribute.String("weather.model", m.Name),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
 	tmp := wc.cachePath(m.Name, fh) + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	enc := json.NewEncoder(f)
 	if err := enc.Encode(records); err != nil {
 		f.Close()
 		os.Remove(tmp)
+		span.RecordError(err)
 		return err
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
+		span.RecordError(err)
 		return err
 	}
 	if err := os.Rename(tmp, wc.cachePath(m.Name, fh)); err != nil {
+		span.RecordError(err)
 		return err
 	}
-	wc.refreshes.Add(1)
-	wc.logger.Infof("weather: refreshed %s fh=%d records=%d", m.Name, fh, len(records))
+	if info, err := os.Stat(wc.cachePath(m.Name, fh)); err == nil {
+		span.SetAttributes(attribute.Int64("weather.bytes", info.Size()))
+	}
 	return nil
+}
+
+// spanWriteGzip wraps writeGzip with a span recording the compressed
+// size so traces show the wire-savings vs. the raw .json size.
+func (wc *WeatherCache) spanWriteGzip(ctx context.Context, modelName string, fh int) error {
+	_, span := tracer().Start(ctx, "weather.gzip",
+		trace.WithAttributes(
+			attribute.String("weather.model", modelName),
+			attribute.Int("weather.fh", fh),
+		),
+	)
+	defer span.End()
+	err := wc.writeGzip(modelName, fh)
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+	if info, err := os.Stat(wc.cacheGzPath(modelName, fh)); err == nil {
+		span.SetAttributes(attribute.Int64("weather.gz_bytes", info.Size()))
+	}
+	return nil
+}
+
+// writeGzip compresses the .json cache file for (model, fh) into a
+// .json.gz sibling. Written atomically (.tmp + rename) so a half-
+// written file can never be served. Caller holds fetchMu.
+func (wc *WeatherCache) writeGzip(modelName string, fh int) error {
+	src := wc.cachePath(modelName, fh)
+	dst := wc.cacheGzPath(modelName, fh)
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	gz, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
+	if err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if _, err := io.Copy(gz, in); err != nil {
+		gz.Close()
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// prewarmStepHours is the forecast-hour step the prewarmer walks. The
+// frontend slider also steps in 3 h increments, so this matches the
+// hours users actually request — wave models advertise StepFh=1 but
+// only ~3 h apart slices are ever scrubbed to.
+const prewarmStepHours = 3
+
+// Prewarm walks each enabled, non-stub weather model and fetches every
+// forecast hour up to MaxFh into the disk cache (incl. the .gz
+// sibling) so the first user scrub to any hour is a HIT instead of a
+// MISS that blocks ~30-60 s on NOMADS. Skips files that are already
+// fresh. Sequential — fetchMu serializes refreshes anyway, and
+// hammering NOMADS in parallel is impolite.
+//
+// Cancellable via Close(); the in-flight HTTP request may run for up
+// to wc.client.Timeout (120 s) after cancel before returning.
+func (wc *WeatherCache) Prewarm(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	wc.prewarmCancel = cancel
+	go wc.runPrewarm(ctx)
+}
+
+func (wc *WeatherCache) runPrewarm(ctx context.Context) {
+	ctx, span := tracer().Start(ctx, "weather.prewarm")
+	defer span.End()
+	started := time.Now()
+	var fetched, skipped int
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("weather.fetched", fetched),
+			attribute.Int("weather.skipped", skipped),
+		)
+	}()
+	for _, m := range listModels() {
+		if m.Disabled || m.Fetch == nil {
+			continue
+		}
+		step := m.StepFh
+		if step < prewarmStepHours {
+			step = prewarmStepHours
+		}
+		// Snap MinFh up to the step grid so the iterator hits valid hours.
+		startFh := m.MinFh
+		if startFh%step != 0 {
+			startFh += step - (startFh % step)
+		}
+		for fh := startFh; fh <= m.MaxFh; fh += step {
+			if ctx.Err() != nil {
+				wc.logger.Infof("weather: prewarm cancelled after %d fetched, %d skipped (%s)",
+					fetched, skipped, time.Since(started).Round(time.Second))
+				return
+			}
+			// Skip cheaply if both .json and .gz are present and fresh.
+			info, err := os.Stat(wc.cachePath(m.Name, fh))
+			if err == nil && time.Since(info.ModTime()) <= wc.refresh {
+				// .json is fresh — make sure the .gz exists so gzip
+				// clients don't pay the on-demand compression on first hit.
+				if _, gzErr := os.Stat(wc.cacheGzPath(m.Name, fh)); gzErr != nil {
+					wc.fetchMu.Lock()
+					if err := wc.writeGzip(m.Name, fh); err != nil {
+						wc.logger.Warnf("weather: prewarm gzip %s fh=%d: %v", m.Name, fh, err)
+					}
+					wc.fetchMu.Unlock()
+				}
+				skipped++
+				continue
+			}
+			if err := wc.refreshNow(ctx, m, fh); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				wc.logger.Warnf("weather: prewarm %s fh=%d: %v", m.Name, fh, err)
+				continue
+			}
+			fetched++
+		}
+	}
+	wc.logger.Infof("weather: prewarm done, %d fetched, %d skipped (%s)",
+		fetched, skipped, time.Since(started).Round(time.Second))
+}
+
+// Close stops the prewarm goroutine. The in-flight HTTP request (if
+// any) is cancelled via ctx, though it may take up to the client
+// timeout to actually return.
+func (wc *WeatherCache) Close() {
+	if wc.prewarmCancel != nil {
+		wc.prewarmCancel()
+	}
 }
 
 // --- ol-wind JSON shape ---------------------------------------------------

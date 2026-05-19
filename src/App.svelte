@@ -2467,8 +2467,10 @@
           onclick={(e) => e.stopPropagation()}
         >
           <button
-            class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300"
+            class="absolute top-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-black bg-opacity-60 text-white text-2xl leading-none hover:bg-opacity-90 focus:outline-none focus:ring-2 focus:ring-white"
             onclick={closeEnlargedImage}
+            aria-label="Close enlarged image"
+            title="Close (Esc)"
           >
             ✕
           </button>

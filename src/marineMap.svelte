@@ -17,6 +17,7 @@
     setupWeatherLayer,
     WIND_COLOR_SCALE,
     WAVE_COLOR_SCALE,
+    colorForValue,
     type WeatherLayerHandle,
   } from "./lib/windLayer";
   import "ol/ol.css";
@@ -75,11 +76,18 @@
   // chart and the cursor wind/wave readout.
   let windHandle: WeatherLayerHandle | null = $state(null);
   let waveHandle: WeatherLayerHandle | null = $state(null);
-  // Constants used by the wave-legend UI. ol-wind's Field carries
-  // wave-height magnitude (metres) since we encoded h·sin/h·cos as u/v
-  // on the backend; convert at display time.
+  // Constants used by the wind/wave legend UIs. ol-wind's Field
+  // carries the magnitude slot — wind speed in m/s for the wind layer,
+  // wave height in m for the wave layer (we encoded h·sin/h·cos as u/v
+  // on the backend). Both display ranges match the maxVelocity passed
+  // to setupWeatherLayer further down so the legend gradient is
+  // pixel-for-pixel what ol-wind paints.
   const WAVE_RANGE_MAX_M = 3;
+  // 15 m/s ≈ 29.16 kt — the wind layer's maxVelocity. Rounded to 29
+  // for the legend so the rightmost tick reads cleanly.
+  const WIND_RANGE_MAX_KT = 29;
   const METERS_TO_FEET = 3.28084;
+  const MS_TO_KT = 1.94384;
   // GFS forecast hour the slider is currently displaying. Snapped to a
   // 3 h step so changes line up with both wind + wave file cadences.
   let weatherForecastHour = $state(0);
@@ -4834,20 +4842,36 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
-  {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && currentZoom <= weatherMaxZoom}
-    <!-- Wave-height legend. Pure-CSS horizontal gradient matched to
-         the ncWMS "rainbow" palette the WMS tiles use; feet labels
-         beneath. Avoiding the GetLegendGraphic PNG sidesteps a
-         caching bug where the legacy 14×140 vertical-orientation
-         response kept rendering even after the URL changed to
-         200×16 horizontal. Sits above OL's ScaleLine (bottom-left). -->
-    <div class="wave-legend">
-      <div class="wave-legend-strip"></div>
-      <div class="wave-legend-ticks">
-        {#each [0, WAVE_RANGE_MAX_M * 0.25, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M] as m}
-          <span>{Math.round(m * METERS_TO_FEET)} ft</span>
-        {/each}
-      </div>
+  {#if (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
+    <!-- Stacked weather legends. Wind on top, waves below — both are
+         pure-CSS horizontal gradients matched to the colour scales
+         exported from windLayer.ts so a glance at the legend matches
+         what the particle layer paints. Avoiding the WMS
+         GetLegendGraphic PNG sidesteps a caching bug where the legacy
+         14×140 vertical-orientation response kept rendering even
+         after the URL changed to 200×16 horizontal. Sits above OL's
+         ScaleLine (bottom-left). -->
+    <div class="weather-legend-stack">
+      {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on}
+        <div class="weather-legend">
+          <div class="weather-legend-strip weather-legend-strip-wind"></div>
+          <div class="weather-legend-ticks">
+            {#each [0, WIND_RANGE_MAX_KT * 0.25, WIND_RANGE_MAX_KT * 0.5, WIND_RANGE_MAX_KT * 0.75, WIND_RANGE_MAX_KT] as kt}
+              <span>{Math.round(kt)} kt</span>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
+        <div class="weather-legend">
+          <div class="weather-legend-strip weather-legend-strip-wave"></div>
+          <div class="weather-legend-ticks">
+            {#each [0, WAVE_RANGE_MAX_M * 0.25, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M] as m}
+              <span>{Math.round(m * METERS_TO_FEET)} ft</span>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -5831,13 +5855,21 @@
             {/if}
             {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
               <span class="data-panel-value">
+                <span
+                  class="weather-swatch"
+                  style="background: {colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}"
+                ></span>
                 wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup>
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
             {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
               <span class="data-panel-value">
-                wave <span class="data-panel-bold">{(cursorInfo.waveM * 3.28084).toFixed(1)}</span><sup>ft</sup>
+                <span
+                  class="weather-swatch"
+                  style="background: {colorForValue(WAVE_COLOR_SCALE, cursorInfo.waveM, WAVE_RANGE_MAX_M)}"
+                ></span>
+                wave <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span><sup>ft</sup>
                 from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
@@ -5968,6 +6000,19 @@
   }
   .data-panel-bold {
     font-weight: 700;
+  }
+  /* Small colour chip placed before a wind/wave readout in the cursor
+     popup so the displayed magnitude is visually tied to the gradient
+     legend bottom-left. Border keeps it visible on both light and
+     dark panel backgrounds. */
+  .weather-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 2px;
+    vertical-align: 0px;
   }
   .data-panel sup {
     font-size: 0.7em;
@@ -6391,16 +6436,21 @@
     color: #0066cc;
   }
 
-  .wave-legend {
+  .weather-legend-stack {
     position: absolute;
     /* Bottom-left stack — bottom→top: Viam logo (6 px), ScaleLine
-       (~50 px), wave legend (80 px). The ScaleLine override below
+       (~50 px), legend stack (80 px). The ScaleLine override below
        lifts OL's distance scale up enough to clear the wordmark
        comfortably. */
     bottom: 80px;
     left: 8px;
     z-index: 10;
     pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .weather-legend {
     background: rgba(255, 255, 255, 0.9);
     padding: 4px 6px 3px 6px;
     border-radius: 4px;
@@ -6412,14 +6462,39 @@
     font-size: 10px;
     color: #444;
   }
-  .wave-legend-strip {
+  .weather-legend-strip {
     display: block;
     width: 200px;
     height: 14px;
     border: 1px solid rgba(0, 0, 0, 0.2);
-    /* Mirrors WAVE_COLOR_SCALE in src/lib/windLayer.ts: near-white at
-       calm (so it reads on a blue basemap), cyan around 2 ft, green
-       around 4–5 ft, yellow/orange around 6–7 ft, deep red at 10 ft. */
+  }
+  /* Mirrors WIND_COLOR_SCALE in src/lib/windLayer.ts: 15 evenly-spaced
+     stops from deep blue at 0 kt through teal/green around 10 kt to
+     yellow at 16 kt, orange at 20 kt, deep red at 28+ kt. */
+  .weather-legend-strip-wind {
+    background: linear-gradient(
+      to right,
+      #0a3d91 0%,
+      #1565c0 7.14%,
+      #1e88e5 14.29%,
+      #4fc3f7 21.43%,
+      #26a69a 28.57%,
+      #2e7d32 35.71%,
+      #66bb6a 42.86%,
+      #cddc39 50%,
+      #fbc02d 57.14%,
+      #f57f17 64.29%,
+      #e65100 71.43%,
+      #d84315 78.57%,
+      #bf360c 85.71%,
+      #b71c1c 92.86%,
+      #7f0000 100%
+    );
+  }
+  /* Mirrors WAVE_COLOR_SCALE in src/lib/windLayer.ts: near-white at
+     calm (so it reads on a blue basemap), cyan around 2 ft, green
+     around 4–5 ft, yellow/orange around 6–7 ft, deep red at 10 ft. */
+  .weather-legend-strip-wave {
     background: linear-gradient(
       to right,
       #f0f7ff 0%,
@@ -6432,13 +6507,13 @@
       #6e0606 100%
     );
   }
-  .wave-legend-ticks {
+  .weather-legend-ticks {
     display: flex;
     justify-content: space-between;
     width: 200px;
     line-height: 1;
   }
-  .wave-legend-ticks > span {
+  .weather-legend-ticks > span {
     white-space: nowrap;
   }
 

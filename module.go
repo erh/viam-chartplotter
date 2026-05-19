@@ -129,8 +129,18 @@ func StartChartplotterServer(
 	draftFt float64,
 	myBoatIconPath string,
 ) (resource.Resource, error) {
+	// Stand up tracing before anything else so even the early-init
+	// errors get captured. Shutdown is wired through chartplotterResource
+	// so spans buffered in the BatchSpanProcessor flush on module unload.
+	tracerShutdown, err := initTracer(logger.Sublogger("tracing"))
+	if err != nil {
+		logger.Warnf("tracing init failed: %v — continuing without spans", err)
+		tracerShutdown = func(context.Context) error { return nil }
+	}
+
 	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
 	if err != nil {
+		_ = tracerShutdown(context.Background())
 		return nil, err
 	}
 	// vmodutils.PrepInModuleServer installs a cookie middleware that
@@ -142,6 +152,11 @@ func StartChartplotterServer(
 	// any outgoing Set-Cookie gets a global Path=/ if it doesn't
 	// already specify one.
 	server.Handler = withCookiePathRoot(server.Handler)
+	// Tracing + slow-request logging wraps the outermost handler so the
+	// span / timing covers cookie middleware too. otelhttp creates a
+	// span per request; the slow-log middleware emits a WARN line for
+	// anything over CHARTPLOTTER_SLOW_LOG_MS (default 500 ms).
+	server.Handler = withTracing(logger.Sublogger("slowReq"), server.Handler)
 
 	root := resolveCacheRoot(cacheRoot)
 
@@ -192,6 +207,11 @@ func StartChartplotterServer(
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
 		weatherCache.Register(mux)
+		// Background prewarm of every model's forecast hours so the
+		// first user scrub to any hour hits the disk cache instead of
+		// blocking on a ~30-60 s NOMADS fetch. Uses its own context so
+		// resource.Close can cancel it on module unload.
+		weatherCache.Prewarm(context.Background())
 		logger.Infof("noaa weather cache: %s", weatherDir)
 	}
 
@@ -233,20 +253,39 @@ func StartChartplotterServer(
 		}
 	}()
 
-	return &chartplotterResource{name: name, server: server}, nil
+	return &chartplotterResource{
+		name:           name,
+		server:         server,
+		weatherCache:   weatherCache,
+		tracerShutdown: tracerShutdown,
+	}, nil
 }
 
 type chartplotterResource struct {
 	resource.AlwaysRebuild
 
-	name   resource.Name
-	server *http.Server
+	name           resource.Name
+	server         *http.Server
+	weatherCache   *WeatherCache
+	tracerShutdown func(context.Context) error
 }
 
 func (r *chartplotterResource) Name() resource.Name { return r.name }
 
 func (r *chartplotterResource) Close(ctx context.Context) error {
-	return r.server.Close()
+	// Cancel the prewarm goroutine first so it doesn't keep hammering
+	// NOMADS after the HTTP server is gone.
+	if r.weatherCache != nil {
+		r.weatherCache.Close()
+	}
+	err := r.server.Close()
+	// Flush buffered spans last — the slow-log middleware emits one on
+	// every request and the batch processor would otherwise drop the
+	// in-flight batch when the process exits.
+	if r.tracerShutdown != nil {
+		_ = r.tracerShutdown(ctx)
+	}
+	return err
 }
 
 func (r *chartplotterResource) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
