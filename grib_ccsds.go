@@ -523,7 +523,14 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 					}
 					newVal = uint64(v)
 				} else {
-					newVal = mask ^ d
+					// Complement branch. libaec's FLUSH writes the
+					// result via put_##KIND which truncates to the
+					// output sample width — for valid encoder input
+					// the truncation is a no-op, but masking here
+					// keeps one bad sample from propagating an
+					// xMax-violating prev into every subsequent block
+					// of the RSI.
+					newVal = (mask ^ d) & xMax
 				}
 				out[i] = newVal
 				prev = newVal

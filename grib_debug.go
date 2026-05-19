@@ -108,6 +108,11 @@ func dumpStats(w io.Writer, values []float64) {
 	mn, mx := values[0], values[0]
 	sum := 0.0
 	nan := 0
+	// Histogram of |v| in physically-meaningful buckets for wind speed.
+	// Anything above 100 m/s is impossible on Earth, so those buckets
+	// pinpoint where the decoder is producing garbage.
+	buckets := []float64{1, 5, 10, 20, 50, 100, 500, 5000}
+	counts := make([]int, len(buckets)+1)
 	for _, v := range values {
 		if math.IsNaN(v) {
 			nan++
@@ -120,9 +125,28 @@ func dumpStats(w io.Writer, values []float64) {
 			mx = v
 		}
 		sum += v
+		av := math.Abs(v)
+		placed := false
+		for i, b := range buckets {
+			if av < b {
+				counts[i]++
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			counts[len(buckets)]++
+		}
 	}
 	mean := sum / float64(len(values)-nan)
 	fmt.Fprintf(w, "values: n=%d min=%v max=%v mean=%v nans=%d\n", len(values), mn, mx, mean, nan)
+	fmt.Fprintf(w, "  |v| histogram:")
+	prev := 0.0
+	for i, b := range buckets {
+		fmt.Fprintf(w, " [%v,%v)=%d", prev, b, counts[i])
+		prev = b
+	}
+	fmt.Fprintf(w, " [%v,inf)=%d\n", prev, counts[len(buckets)])
 	head := values
 	if len(head) > 10 {
 		head = head[:10]
@@ -131,6 +155,15 @@ func dumpStats(w io.Writer, values []float64) {
 	if len(values) > 20 {
 		tail := values[len(values)-10:]
 		fmt.Fprintf(w, "  tail: %v\n", tail)
+	}
+	// Spot a couple of outlier indices to anchor the trace.
+	outliers := 0
+	for i, v := range values {
+		if math.Abs(v) > 100 && outliers < 5 {
+			fmt.Fprintf(w, "  outlier[%d]=%v (sample index modulo block_size=%d, RSI=%d)\n",
+				i, v, i%32, i/(128*32))
+			outliers++
+		}
 	}
 }
 
