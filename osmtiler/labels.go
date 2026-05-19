@@ -70,6 +70,10 @@ func labelSizeForClass(c Class) float64 {
 		return 13
 	case ClassPOI:
 		return 10
+	case ClassLeisure, ClassNatural, ClassLanduse:
+		// Area labels (parks, named landuse) — bigger than POIs so
+		// they read at lower zooms where the polygon's also large.
+		return 14
 	}
 	return 11
 }

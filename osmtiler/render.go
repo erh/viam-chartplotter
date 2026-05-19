@@ -95,6 +95,19 @@ func (r labelRect) overlaps(o labelRect) bool {
 	return r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0
 }
 
+// namedAnchor records where each line label landed so we can skip
+// neighbouring same-name labels — OSM ways are often per-block, so
+// a long avenue like Broadway is a chain of 20+ named ways that
+// would otherwise label every segment.
+type namedAnchor struct {
+	name string
+	x, y float64
+}
+
+// minSameNameLineDist is the centre-to-centre distance (tile pixels)
+// below which two same-name line labels are considered duplicates.
+const minSameNameLineDist = 150.0
+
 // drawLabels paints names for every labellable feature. Point labels
 // (ClassPlace, ClassPOI) sit above their anchor; line labels (named
 // roads) follow the longest left-to-right segment of the way.
@@ -104,6 +117,7 @@ func (r labelRect) overlaps(o labelRect) bool {
 func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64) error {
 	zu8 := uint8(z)
 	var placed []labelRect
+	var placedLineNames []namedAnchor
 
 	// gg caches the active font face; we set per size as we encounter
 	// new classes. Most tiles only have one or two class types in their
@@ -132,10 +146,60 @@ func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, t
 		case GeomPoint:
 			drawPointLabel(dc, f, z, x, y, size, &placed)
 		case GeomLine:
-			drawLineLabel(dc, f, z, x, y, size, &placed)
+			drawLineLabel(dc, f, z, x, y, size, &placed, &placedLineNames)
+		case GeomPolygon:
+			drawAreaLabel(dc, f, z, x, y, size, &placed)
 		}
 	}
 	return nil
+}
+
+// drawAreaLabel places a name at the vertex-average centroid of a
+// polygon (named parks, named landuse, etc.). Polygons whose bbox is
+// narrower than the label's own width are skipped — at low zooms the
+// 100s-of-meters-wide tile cells contain dozens of named small parks
+// whose text would be wider than the park itself.
+//
+// Vertex average is a cheap stand-in for the true area-weighted
+// centroid. For long thin polygons (Riverside Park) the result is
+// roughly in the middle of the spread, which is acceptable; the
+// proper "label point" (pole of inaccessibility) is a v0.4 polish item.
+func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+	var sumLon, sumLat float64
+	for _, c := range f.Coords {
+		sumLon += c.Lon
+		sumLat += c.Lat
+	}
+	n := float64(len(f.Coords))
+	cLon, cLat := sumLon/n, sumLat/n
+
+	px, py := LonLatToTilePx(cLon, cLat, z, x, y)
+	if px < -LabelBuffer || px > TileSize+LabelBuffer ||
+		py < -LabelBuffer || py > TileSize+LabelBuffer {
+		return
+	}
+
+	w, _ := dc.MeasureString(f.Name)
+
+	// Cull small polygons whose visible width can't host the label.
+	nTiles := math.Exp2(float64(z))
+	lonPxPerDeg := 256 * nTiles / 360
+	if (f.MaxLon-f.MinLon)*lonPxPerDeg < w {
+		return
+	}
+
+	const pad = 2.0
+	box := labelRect{
+		x0: px - w/2 - pad, y0: py - size/2 - pad,
+		x1: px + w/2 + pad, y1: py + size/2 + pad,
+	}
+	for _, p := range *placed {
+		if box.overlaps(p) {
+			return
+		}
+	}
+	*placed = append(*placed, box)
+	drawLabelWithHalo(dc, px, py, f.Name)
 }
 
 func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
@@ -166,7 +230,7 @@ func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, place
 // chosen segment placing glyphs one at a time with per-glyph rotation.
 // Halo and fill are each one pass over the glyph run (8 + 1 = 9 total),
 // which is cheap relative to gg's per-glyph state-push overhead.
-func drawLineLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+func drawLineLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect, placedNames *[]namedAnchor) {
 	pts := make([][2]float64, len(f.Coords))
 	for i, c := range f.Coords {
 		px, py := LonLatToTilePx(c.Lon, c.Lat, z, x, y)
@@ -216,6 +280,19 @@ func drawLineLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 	cx := p0[0] + dirX*(cursor+w/2)
 	cy := p0[1] + dirY*(cursor+w/2)
 
+	// Same-name dedup: if another instance of this name landed too
+	// close already, skip this one. Avenues encoded as many small
+	// ways (NYC's per-block tagging) would otherwise label every block.
+	for _, prev := range *placedNames {
+		if prev.name != f.Name {
+			continue
+		}
+		dx, dy := prev.x-cx, prev.y-cy
+		if dx*dx+dy*dy < minSameNameLineDist*minSameNameLineDist {
+			return
+		}
+	}
+
 	// Rotated AABB: |hw·cos| + |hh·sin| in x, |hw·sin| + |hh·cos| in y.
 	hw, hh := w/2, size/2
 	c, s := math.Abs(math.Cos(angle)), math.Abs(math.Sin(angle))
@@ -237,6 +314,7 @@ func drawLineLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 		}
 	}
 	*placed = append(*placed, box)
+	*placedNames = append(*placedNames, namedAnchor{name: f.Name, x: cx, y: cy})
 
 	drawTextAlongLine(dc, f.Name, p0, dirX, dirY, angle, cursor)
 }

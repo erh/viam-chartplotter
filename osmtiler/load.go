@@ -38,12 +38,14 @@ func LoadPBF(ctx context.Context, path string) (*FeatureSet, error) {
 	}
 
 	for _, rd := range relations {
+		minLabelZoom := LabelMinZoom(rd.Class, nil)
 		for _, ring := range assembleRings(rd.OuterWays, memberCoords) {
 			feat := Feature{
-				Class:  rd.Class,
-				Kind:   GeomPolygon,
-				Coords: ring,
-				Name:   rd.Name,
+				Class:        rd.Class,
+				Kind:         GeomPolygon,
+				Coords:       ring,
+				Name:         rd.Name,
+				MinLabelZoom: minLabelZoom,
 			}
 			feat.computeBounds()
 			fs.Features = append(fs.Features, feat)

@@ -170,6 +170,36 @@ func LabelMinZoom(class Class, tags osm.Tags) uint8 {
 		// makes residential-grid cities like Manhattan unreadable
 		// from a wall of street names.
 		return 16
+	case ClassLeisure:
+		// Carto's `leisure=*` lumps parks with gyms; we want parks
+		// labelled early (Central Park at z=12), gyms only with the
+		// rest of the POIs (z=17). Empty-tag fallback matches the
+		// area path because relation-derived polygons don't carry
+		// tags through and the vast majority of those are parks.
+		switch tags.Find("leisure") {
+		case "park", "garden", "nature_reserve", "common", "recreation_ground",
+			"dog_park", "pitch", "":
+			return 13
+		case "playground":
+			return 15
+		}
+		return 17
+	case ClassNatural:
+		switch tags.Find("natural") {
+		case "wood", "forest", "scrub", "heath", "grassland", "meadow",
+			"fell", "tundra", "bare_rock", "scree", "shingle", "sand",
+			"beach", "glacier", "":
+			return 13
+		case "peak", "saddle", "volcano":
+			return 12
+		}
+		return 15
+	case ClassLanduse:
+		switch tags.Find("landuse") {
+		case "forest", "park", "":
+			return 13
+		}
+		return 16
 	}
 	return 0
 }

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -66,35 +69,56 @@ func TestRenderZip10024(t *testing.T) {
 		}
 	}
 
-	totalTiles := 0
+	// Worker pool — RenderTile only reads from fs (which is sorted
+	// and immutable after LoadPBF), so concurrent calls are safe.
+	type job struct{ z, x, y int }
+	jobs := make(chan job, 64)
+	var (
+		wg       sync.WaitGroup
+		rendered atomic.Int64
+		failed   atomic.Int64
+	)
+	workers := runtime.GOMAXPROCS(0)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				data, err := RenderTile(fs, j.z, j.x, j.y)
+				if err != nil {
+					t.Errorf("render z%d/%d/%d: %v", j.z, j.x, j.y, err)
+					failed.Add(1)
+					continue
+				}
+				path := filepath.Join(outDir, fmt.Sprintf("z%02d_%d_%d.png", j.z, j.x, j.y))
+				if err := os.WriteFile(path, data, 0o644); err != nil {
+					t.Errorf("write %s: %v", path, err)
+					failed.Add(1)
+					continue
+				}
+				rendered.Add(1)
+			}
+		}()
+	}
+
 	var zooms []zoomMeta
 	for z := 0; z <= 18; z++ {
 		xMin, yMin, xMax, yMax := TilesCoveringBBox(
 			zip10024MinLon, zip10024MinLat,
 			zip10024MaxLon, zip10024MaxLat, z)
-
-		var rendered int
 		for x := xMin; x <= xMax; x++ {
 			for y := yMin; y <= yMax; y++ {
-				data, err := RenderTile(fs, z, x, y)
-				if err != nil {
-					t.Errorf("render z%d/%d/%d: %v", z, x, y, err)
-					continue
-				}
-				path := filepath.Join(outDir, fmt.Sprintf("z%02d_%d_%d.png", z, x, y))
-				if err := os.WriteFile(path, data, 0o644); err != nil {
-					t.Errorf("write %s: %v", path, err)
-					continue
-				}
-				rendered++
+				jobs <- job{z, x, y}
 			}
 		}
-		totalTiles += rendered
 		zooms = append(zooms, zoomMeta{Z: z, XMin: xMin, XMax: xMax, YMin: yMin, YMax: yMax})
-		t.Logf("z=%2d: %3d tiles (x=[%d..%d] y=[%d..%d])",
-			z, rendered, xMin, xMax, yMin, yMax)
+		t.Logf("z=%2d: queued %d tiles (x=[%d..%d] y=[%d..%d])",
+			z, (xMax-xMin+1)*(yMax-yMin+1), xMin, xMax, yMin, yMax)
 	}
-	t.Logf("total: %d tiles written to %s", totalTiles, outDir)
+	close(jobs)
+	wg.Wait()
+	t.Logf("total: %d tiles written to %s (failed=%d, workers=%d)",
+		rendered.Load(), outDir, failed.Load(), workers)
 
 	indexPath := filepath.Join(outDir, "index.html")
 	if err := writeZoomIndexHTML(indexPath, zooms); err != nil {
