@@ -67,7 +67,13 @@ var allModels = []*WeatherModel{
 	iconGlobalWindStub(),
 	pacioosWaveModel(),
 	pacioosHawaiiWaveModel(),
-	nomadsGFSWaveModel(),
+	// nomads-gfswave is unregistered until we verify NOMADS' actual
+	// current DODS URL pattern. Every variant I've tried (date dir
+	// with/without `gfswave` prefix, gfsv16 suffix, etc.) lands on
+	// NOMADS' '301 Welcome to NOMADS' page with no Location header,
+	// which means the path just doesn't exist. The fetch code stays
+	// in noaa_wave_cache.go + weather_models.go so re-enabling is a
+	// one-line append once a working URL is confirmed.
 }
 
 // findModel does an O(n) lookup — registry is fixed small (~10 entries).
