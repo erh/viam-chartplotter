@@ -425,41 +425,59 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 			}
 		}
 
-		// Preprocessor inverse: convert the per-RSI θ-mapped deltas
-		// back to absolute samples. The mapping turns each signed
-		// difference d (relative to the previous sample) into a
-		// non-negative integer: d≥0 → 2d, d<0 → -2d-1, clipped to
-		// the [0, 2^bps - 1] range.
+		// Preprocessor inverse: convert the AEC-decoded per-sample
+		// mapped values back to absolute samples. libaec's FLUSH
+		// macro in decode.c (NOT the strict CCSDS 121.0-B-3 theta-
+		// mapping) is what we have to match — ecCodes drives libaec
+		// on the encode side, so anything else mis-decodes the wire.
+		//
+		// Two branches, threshold at d/2 ≤ xMax-prev:
+		//
+		//   - In-range (d/2 <= xMax-prev): "alternating" decode.
+		//     Even d → positive delta d/2; odd d → negative delta
+		//     -(d/2 + 1). New sample = prev + delta. This is the
+		//     branch the encoder picks when |delta| fits in
+		//     [-(xMax-prev), +(xMax-prev)], i.e., everything within
+		//     reach via straight subtraction from xMax.
+		//
+		//   - Out-of-range (d/2 > xMax-prev): "complement" decode.
+		//     New sample = xMax XOR d. The encoder picks this branch
+		//     for samples on the far side of prev when alternating
+		//     would require a larger d than the complement does;
+		//     concretely this is the "prev is close to xMax, target
+		//     sample is close to 0" case.
+		//
+		// Previously this code used the strict CCSDS theta formula
+		// (theta = min(prev, xMax-prev)) which produced wildly wrong
+		// values for any block where prev was in the upper half of
+		// the range — that's the "wind bouncing around like crazy"
+		// symptom you saw once the decoder finished without bit-
+		// budget errors.
 		if preprocess {
 			xMax := uint64(1)<<uint(bps) - 1
 			prev := refSample
 			for i := rsiOut + 1; i < len(out); i++ {
-				theta := minU64(prev, xMax-prev)
 				mapped := out[i]
-				var delta int64
-				if mapped <= 2*theta {
+				var newVal uint64
+				if (mapped >> 1) <= xMax-prev {
+					var delta int64
 					if mapped&1 == 0 {
-						delta = int64(mapped) / 2
+						delta = int64(mapped / 2)
 					} else {
-						delta = -(int64(mapped) + 1) / 2
+						delta = -(int64(mapped>>1) + 1)
 					}
+					v := int64(prev) + delta
+					if v < 0 {
+						v = 0
+					} else if v > int64(xMax) {
+						v = int64(xMax)
+					}
+					newVal = uint64(v)
 				} else {
-					// Beyond theta — un-mapped portion is raw signed.
-					if prev <= theta {
-						delta = int64(mapped) - int64(theta)
-					} else {
-						delta = -(int64(mapped) - int64(theta))
-					}
+					newVal = xMax ^ mapped
 				}
-				v := int64(prev) + delta
-				if v < 0 {
-					v = 0
-				}
-				if v > int64(xMax) {
-					v = int64(xMax)
-				}
-				out[i] = uint64(v)
-				prev = uint64(v)
+				out[i] = newVal
+				prev = newVal
 			}
 		}
 
@@ -477,13 +495,6 @@ func aecDecode(packed []byte, bps int, flags byte, blockSize, rsi, n int) ([]uin
 		out = out[:n]
 	}
 	return out, nil
-}
-
-func minU64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // unpackCCSDS is the GRIB2 template-5.42 entry point used by
