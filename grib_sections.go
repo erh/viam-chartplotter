@@ -135,7 +135,7 @@ func signedInt16(u uint16) int {
 // gribPackingInfo carries everything unpack* needs to decode the data
 // values from Section 7 regardless of which packing template is in use.
 type gribPackingInfo struct {
-	template               int // 5.0 simple, 5.2 complex, 5.3 complex+spatial
+	template               int // 5.0 simple, 5.2/5.3 complex, 5.42 CCSDS
 	refValue               float32
 	binaryScale            int
 	decimalScale           int
@@ -150,6 +150,10 @@ type gribPackingInfo struct {
 	groupLengthBits        int
 	spatialDiffOrder       int
 	spatialDiffExtraOctets int
+	// Template 5.42 (CCSDS) extras, unused for other templates.
+	ccsdsFlags     byte
+	ccsdsBlockSize int
+	ccsdsRSI       int
 }
 
 func parsePackingSection(s5 []byte, valuesCount int) (gribPackingInfo, error) {
@@ -188,6 +192,18 @@ func parsePackingSection(s5 []byte, valuesCount int) (gribPackingInfo, error) {
 			p.spatialDiffOrder = int(s5[47])
 			p.spatialDiffExtraOctets = int(s5[48])
 		}
+	case 42:
+		// Template 5.42 (CCSDS) layout — octets (1-indexed in WMO,
+		// 0-indexed offsets into the section body `s5`):
+		//   octet 22 → s5[21]   compression options mask (flags)
+		//   octet 23 → s5[22]   block size
+		//   octets 24-25 → s5[23:25] reference sample interval
+		if len(s5) < 25 {
+			return p, fmt.Errorf("ccsds packing section too short (%d bytes)", len(s5))
+		}
+		p.ccsdsFlags = s5[21]
+		p.ccsdsBlockSize = int(s5[22])
+		p.ccsdsRSI = int(binary.BigEndian.Uint16(s5[23:25]))
 	default:
 		// Unknown — caller decides whether to fail or skip.
 	}
@@ -196,7 +212,7 @@ func parsePackingSection(s5 []byte, valuesCount int) (gribPackingInfo, error) {
 
 // unpackData dispatches the packed bytes through the right per-template
 // decoder. Returns ErrUnsupportedPacking for templates we haven't built
-// pure-Go decoders for (e.g. JPEG2000 = 40, PNG = 41, CCSDS = 42).
+// pure-Go decoders for (e.g. JPEG2000 = 40, PNG = 41).
 func unpackData(packed []byte, p gribPackingInfo) ([]float64, error) {
 	switch p.template {
 	case 0:
@@ -206,6 +222,9 @@ func unpackData(packed []byte, p gribPackingInfo) ([]float64, error) {
 			p.numGroups, p.groupWidthRef, p.groupWidthBits,
 			p.groupLengthRef, p.groupLengthIncrement, p.groupLengthLast, p.groupLengthBits,
 			p.spatialDiffOrder, p.spatialDiffExtraOctets, p.dataValuesCount)
+	case 42:
+		return unpackCCSDS(packed, p.refValue, p.binaryScale, p.decimalScale,
+			p.bitsPerValue, p.ccsdsFlags, p.ccsdsBlockSize, p.ccsdsRSI, p.dataValuesCount)
 	default:
 		return nil, &ErrUnsupportedPacking{Template: p.template}
 	}
@@ -213,9 +232,9 @@ func unpackData(packed []byte, p gribPackingInfo) ([]float64, error) {
 
 // ErrUnsupportedPacking is returned when we walk a GRIB2 message whose
 // data section uses a packing template we don't decode (e.g. JPEG2000
-// for NAM / GFSWAVE, CCSDS for ECMWF). The model registry surfaces this
-// as a "decoder missing" status to the UI instead of a hard server
-// error so the picker can stay populated.
+// for NAM / GFSWAVE). The model registry surfaces this as a "decoder
+// missing" status to the UI instead of a hard server error so the
+// picker can stay populated.
 type ErrUnsupportedPacking struct{ Template int }
 
 func (e *ErrUnsupportedPacking) Error() string {

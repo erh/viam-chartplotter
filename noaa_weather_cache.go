@@ -507,6 +507,10 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 		groupLengthBits         int
 		spatialDiffOrder        int
 		spatialDiffExtraOctets  int
+		// Template 5.42 (CCSDS) extras.
+		ccsdsFlags     byte
+		ccsdsBlockSize int
+		ccsdsRSI       int
 	)
 
 	off := 16
@@ -604,6 +608,19 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 					spatialDiffOrder = int(s[47])
 					spatialDiffExtraOctets = int(s[48])
 				}
+			case 42:
+				// CCSDS / AEC (used by ECMWF Open Data). Section 5
+				// extras live at the same offsets as the table in
+				// grib_sections.go's parsePackingSection:
+				//   octet 22 → s[21] flags (mask per WMO Table 5.40)
+				//   octet 23 → s[22] block size
+				//   octets 24-25 → s[23:25] reference sample interval
+				if len(s) < 25 {
+					return 0, nil, fmt.Errorf("ccsds section too short (%d bytes)", len(s))
+				}
+				ccsdsFlags = s[21]
+				ccsdsBlockSize = int(s[22])
+				ccsdsRSI = int(binary.BigEndian.Uint16(s[23:25]))
 			default:
 				return totalLen, nil, nil // unsupported template (e.g. JPEG2000)
 			}
@@ -640,6 +657,9 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 			numGroups, groupWidthRef, groupWidthBits,
 			groupLengthRef, groupLengthIncrement, groupLengthLast, groupLengthBits,
 			spatialDiffOrder, spatialDiffExtraOctets, dataValuesCount)
+	case 42:
+		values, err = unpackCCSDS(packedData, refValue, binaryScale, decimalScale, bitsPerValue,
+			ccsdsFlags, ccsdsBlockSize, ccsdsRSI, dataValuesCount)
 	default:
 		return totalLen, nil, nil
 	}

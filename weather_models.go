@@ -2,8 +2,10 @@ package vc
 
 import (
 	"bytes"
+	"bufio"
 	"compress/bzip2"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -63,7 +65,7 @@ var allModels = []*WeatherModel{
 	hrrrWindModel(),
 	iconEUWindModel(),
 	namWindStub(),
-	ecmwfWindStub(),
+	ecmwfWindModel(),
 	iconGlobalWindStub(),
 	pacioosWaveModel(),
 	pacioosHawaiiWaveModel(),
@@ -573,15 +575,218 @@ func namWindStub() *WeatherModel {
 	}
 }
 
-func ecmwfWindStub() *WeatherModel {
-	return &WeatherModel{
+// ----------------------------------------------------------------------
+// ECMWF Open Data — 0.25° global IFS HRES forecast. CCSDS/AEC packing
+// (template 5.42) is now decoded in-tree; the model registry calls into
+// fetchECMWFWind which uses the .index sidecar to range-GET just the
+// 10u/10v messages out of the run's monolithic GRIB2 file rather than
+// pulling the whole ~50 MB blob across the wire for every cache miss.
+//
+// Layout:
+//   https://data.ecmwf.int/forecasts/{YYYYMMDD}/{HH}z/ifs/0p25/oper/
+//     {YYYYMMDD}{HH}0000-{step}h-oper-fc.grib2
+//     {YYYYMMDD}{HH}0000-{step}h-oper-fc.index   ← JSON-lines, byte ranges
+//
+// The .index file lists each GRIB2 message inside the .grib2 file with
+// `_offset` and `_length` keys; we read it, find the 10u and 10v entries
+// at levtype=sfc, and issue two Range-bounded GETs against the data
+// file to pull just those messages.
+// ----------------------------------------------------------------------
+
+const ecmwfBaseURL = "https://data.ecmwf.int/forecasts/%s/%02dz/ifs/0p25/oper/%s%02d0000-%dh-oper-fc"
+
+// ecmwfIndexEntry is one JSON line out of the .index sidecar. ECMWF
+// stamps extra keys on each line (class, expver, stream, …); we only
+// care about the ones that identify a wind-at-10m message and the byte
+// range to pull. Numeric fields come through as strings in the actual
+// file, except for `_offset`/`_length` which are JSON numbers.
+type ecmwfIndexEntry struct {
+	Param   string `json:"param"`
+	LevType string `json:"levtype"`
+	Step    string `json:"step"`
+	Offset  int64  `json:"_offset"`
+	Length  int64  `json:"_length"`
+}
+
+func ecmwfWindModel() *WeatherModel {
+	m := &WeatherModel{
 		Name:        "ecmwf",
 		DisplayName: "ECMWF Open Data (0.25° global)",
 		Kind:        "wind",
 		Domain:      "global",
-		Disabled:    true,
-		Reason:      "needs CCSDS/AEC (GRIB2 template 5.42) decoder + .index byte-range subsetting",
+		CycleHours:  []int{0, 6, 12, 18},
+		MinFh:       0,
+		// ECMWF Open Data publishes 0-144 at 3h steps, 150-240 at 6h.
+		// Cap at 144 so the slider's step alignment stays uniform and
+		// fh values in the always-3h zone all resolve to a real message.
+		MaxFh:       144,
+		StepFh:      3,
+		// ECMWF Open Data lands ~7 h after the cycle hour (longer than
+		// NOMADS' GFS); back off accordingly so walkLatestCycle starts
+		// at a run that's actually published.
+		PublishLagH: 7,
 	}
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
+		grib, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+			return fetchECMWFWind10m(ctx, client, t, fh)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return parseECMWFWind10m(grib, runT, fh)
+	}
+	return m
+}
+
+// fetchECMWFWind10m fetches the .index, picks the 10u and 10v entries
+// at levtype=sfc, range-GETs each message out of the run's .grib2 file,
+// and returns a concatenated buffer the GRIB walker can decode as if
+// it were a normal multi-message GRIB2 stream.
+func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
+	date := runTime.Format("20060102")
+	cc := runTime.Hour()
+	base := fmt.Sprintf(ecmwfBaseURL, date, cc, date, cc, fh)
+	indexURL := base + ".index"
+	gribURL := base + ".grib2"
+
+	idxBody, err := fetchURLAnyContent(ctx, client, indexURL)
+	if err != nil {
+		return nil, fmt.Errorf("ECMWF index: %w", err)
+	}
+	uEntry, vEntry, err := pickECMWFWindEntries(idxBody)
+	if err != nil {
+		return nil, fmt.Errorf("ECMWF index pick: %w", err)
+	}
+
+	uMsg, err := fetchRange(ctx, client, gribURL, uEntry.Offset, uEntry.Length)
+	if err != nil {
+		return nil, fmt.Errorf("ECMWF 10u range: %w", err)
+	}
+	vMsg, err := fetchRange(ctx, client, gribURL, vEntry.Offset, vEntry.Length)
+	if err != nil {
+		return nil, fmt.Errorf("ECMWF 10v range: %w", err)
+	}
+
+	// Concatenate so parseECMWFWind10m can walk both messages in a
+	// single pass — both start with the GRIB magic so the walker's
+	// position-relative parsing works unchanged.
+	return append(uMsg, vMsg...), nil
+}
+
+// pickECMWFWindEntries scans the .index JSON-lines body for the 10u and
+// 10v messages at levtype=sfc. Returns descriptive errors if either is
+// missing so the cycle walk-back can try the previous run.
+func pickECMWFWindEntries(idx []byte) (uEntry, vEntry ecmwfIndexEntry, err error) {
+	var uHave, vHave bool
+	sc := bufio.NewScanner(bytes.NewReader(idx))
+	// .index lines for surface fields are short, but pressure-level
+	// runs can include very long lines (every level on one row in some
+	// dumps) — bump the scanner buffer so we don't get token-too-long
+	// errors on those.
+	sc.Buffer(make([]byte, 0, 1024*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var e ecmwfIndexEntry
+		if jerr := json.Unmarshal(line, &e); jerr != nil {
+			// One bad line shouldn't doom the whole walk — skip.
+			continue
+		}
+		if e.LevType != "sfc" {
+			continue
+		}
+		switch e.Param {
+		case "10u":
+			uEntry = e
+			uHave = true
+		case "10v":
+			vEntry = e
+			vHave = true
+		}
+		if uHave && vHave {
+			break
+		}
+	}
+	if serr := sc.Err(); serr != nil {
+		return uEntry, vEntry, fmt.Errorf("scan: %w", serr)
+	}
+	if !uHave || !vHave {
+		return uEntry, vEntry, fmt.Errorf("missing 10u/10v in index (u=%v v=%v)", uHave, vHave)
+	}
+	return uEntry, vEntry, nil
+}
+
+// fetchRange issues a HTTP Range request against url and returns the
+// requested byte slice. Used to grab just the 10u/10v messages out of
+// ECMWF's monolithic per-step GRIB2 file.
+func fetchRange(ctx context.Context, client *http.Client, url string, offset, length int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	// Servers that honour ranges return 206; some buggy ones return
+	// 200 with the full body — accept either and trust the byte slice.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, url)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusOK && int64(len(body)) > length {
+		// Range was ignored — slice down to the window we asked for.
+		body = body[offset : offset+length]
+	}
+	if len(body) < 4 || string(body[:4]) != "GRIB" {
+		return nil, fmt.Errorf("range response is not GRIB2 (size=%d, first=%q)",
+			len(body), string(body[:min(4, len(body))]))
+	}
+	return body, nil
+}
+
+// parseECMWFWind10m walks the (10u, 10v) concatenated GRIB2 buffer and
+// emits the ol-wind 2-record JSON shape. ECMWF stamps centre=98 and
+// parameter category=2 / numbers 2 (UGRD) and 3 (VGRD) so we can use
+// the same wantWind filter as GFS, but we re-stamp the headers after
+// decode just in case a future revision renames the params.
+func parseECMWFWind10m(grib []byte, runTime time.Time, fh int) ([]windRecord, error) {
+	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
+		return paramCat == gribParamCatMomentum &&
+			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
+			surfType == gribSurfaceHeightAboveG &&
+			surfValue == 10
+	}
+	var u, v *windRecord
+	for off := 0; off < len(grib); {
+		end, rec, err := parseGRIBMessage(grib[off:], runTime, fh, wantWind)
+		if err != nil {
+			return nil, fmt.Errorf("ECMWF message @ off=%d: %w", off, err)
+		}
+		if rec != nil {
+			switch rec.Header.ParameterNumber {
+			case gribParamUGRD:
+				u = rec
+			case gribParamVGRD:
+				v = rec
+			}
+		}
+		if end <= 0 {
+			break
+		}
+		off += end
+	}
+	if u == nil || v == nil {
+		return nil, fmt.Errorf("ECMWF: missing 10u/10v (u=%v v=%v)", u != nil, v != nil)
+	}
+	return []windRecord{*u, *v}, nil
 }
 
 func iconGlobalWindStub() *WeatherModel {
