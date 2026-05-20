@@ -16,6 +16,10 @@ import (
 // Matches tile.openstreetmap.org's 256x256 raster output.
 const TileSize = 256
 
+// landBaseColor is painted under all geometry as the "land" fill.
+// Picked to read clearly distinct from the chart's water layer.
+var landBaseColor = color.NRGBA{R: 0xf7, G: 0xee, B: 0xc8, A: 0xff}
+
 // LabelBuffer is the per-side overdraw, in pixels, used by RenderTile
 // for cross-tile label consistency. We rasterise into a canvas that's
 // (TileSize + 2*LabelBuffer) on a side and crop to the inner TileSize
@@ -43,6 +47,15 @@ const bufferedSize = TileSize + 2*LabelBuffer
 // coordinates.
 func RenderTile(fs *FeatureSet, z, x, y int) ([]byte, error) {
 	dc := gg.NewContext(bufferedSize, bufferedSize)
+	// Yellow land base under everything else. OSM-carto picks a
+	// pinkish-beige (`#f2efe9`); the chartplotter wants land
+	// explicitly yellow so it reads distinctly from the chart's
+	// water layer underneath. Water areas of the tile end up yellow
+	// too — proper land/water masking needs coastline polygons,
+	// which we currently filter out. Trade-off documented in
+	// OSM_TILES_PLAN.md.
+	dc.SetColor(landBaseColor)
+	dc.Clear()
 	// Shift the origin so feature projection still treats (0, 0) as
 	// the top-left of the inner tile; everything in the buffer ring
 	// rasterises into the surrounding LabelBuffer pixels.

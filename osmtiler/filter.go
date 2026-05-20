@@ -252,12 +252,25 @@ func LabelMinZoom(class Class, tags osm.Tags) uint8 {
 	case ClassPOI:
 		return 17
 	case ClassRoad:
-		// For now, all named roads at z>=16. Sub-type-aware
-		// thresholds (motorway at z9, residential at z16) come with
-		// the v0.3 carto-style port; without them, lowering this
-		// makes residential-grid cities like Manhattan unreadable
-		// from a wall of street names.
-		return 16
+		// Per-highway-class label thresholds, loosely matching
+		// osm-carto. Without these, a residential-grid city like
+		// Manhattan turns into a wall of street names at z=16 because
+		// every block of every avenue gets a label.
+		switch tags.Find("highway") {
+		case "motorway", "motorway_link", "trunk", "trunk_link":
+			return 11
+		case "primary", "primary_link":
+			return 12
+		case "secondary", "secondary_link":
+			return 13
+		case "tertiary", "tertiary_link":
+			return 14
+		case "unclassified", "residential", "living_street":
+			return 17
+		case "pedestrian", "footway", "cycleway", "path", "bridleway", "steps", "track":
+			return 17
+		}
+		return 18 // service and everything else: only at full zoom
 	case ClassLeisure:
 		// Carto's `leisure=*` lumps parks with gyms; we want parks
 		// labelled early (Central Park at z=12), gyms only with the
