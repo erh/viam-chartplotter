@@ -75,6 +75,22 @@ func loadNodesAndWays(ctx context.Context, path string, memberWays map[osm.WayID
 
 	sc := osmpbf.New(ctx, f, runtime.NumCPU())
 	sc.SkipRelations = true
+	// Drop ways we don't care about at the decoder. A way is worth
+	// keeping if it's a relation member we still need geometry for
+	// (memberWays came from pass 1) OR if it's tagged with something
+	// the classifier accepts. Otherwise we'd allocate millions of
+	// untagged/water-only/boring ways just to throw them out in the
+	// loop below. Nodes can't be filtered the same way — untagged
+	// nodes are way vertices and we need their coordinates.
+	sc.FilterWay = func(w *osm.Way) bool {
+		if _, ok := memberWays[w.ID]; ok {
+			return true
+		}
+		if len(w.Tags) == 0 {
+			return false
+		}
+		return Classify(w.Tags) != ClassSkip
+	}
 	defer sc.Close()
 
 	for sc.Scan() {

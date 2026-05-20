@@ -34,9 +34,17 @@ const LabelBuffer = 64
 
 const bufferedSize = TileSize + 2*LabelBuffer
 
-// RenderTile rasterises the (z, x, y) tile from fs. Background is fully
-// transparent — the chart renderer underneath supplies water and base
-// fills; we draw only land features. Returns PNG bytes.
+// RenderTile rasterises the (z, x, y) tile from one or more
+// FeatureSets. Background is the yellow land base; the chart layer
+// underneath provides water. Returns PNG bytes.
+//
+// Multiple FeatureSets: at low zooms a tile bbox commonly spans
+// multiple state PBFs (a z=8 tile over southern New England covers
+// CT/RI/MA/NY at once). Callers pass every loaded FeatureSet whose
+// region overlaps the tile; we paint features from all of them so
+// the tile doesn't show only one state's content. Each FeatureSet
+// is internally pre-sorted into painter's order; cross-FS ordering
+// is approximate — adequate since states are largely disjoint.
 //
 // Geometry uses the painter's algorithm with per-class fills/strokes
 // from a v0.1 flat palette. After geometry, a label pass paints names
@@ -46,60 +54,53 @@ const bufferedSize = TileSize + 2*LabelBuffer
 // is fully painted on this side and on its neighbour at consistent
 // coordinates.
 func RenderTile(fs *FeatureSet, z, x, y int) ([]byte, error) {
+	if fs == nil {
+		return RenderTileMulti(nil, z, x, y)
+	}
+	return RenderTileMulti([]*FeatureSet{fs}, z, x, y)
+}
+
+// RenderTileMulti is the multi-FeatureSet variant. See RenderTile.
+func RenderTileMulti(fss []*FeatureSet, z, x, y int) ([]byte, error) {
 	dc := gg.NewContext(bufferedSize, bufferedSize)
-	// Yellow land base under everything else. OSM-carto picks a
-	// pinkish-beige (`#f2efe9`); the chartplotter wants land
-	// explicitly yellow so it reads distinctly from the chart's
-	// water layer underneath. Water areas of the tile end up yellow
-	// too — proper land/water masking needs coastline polygons,
-	// which we currently filter out. Trade-off documented in
-	// OSM_TILES_PLAN.md.
 	dc.SetColor(landBaseColor)
 	dc.Clear()
-	// Shift the origin so feature projection still treats (0, 0) as
-	// the top-left of the inner tile; everything in the buffer ring
-	// rasterises into the surrounding LabelBuffer pixels.
 	dc.Translate(LabelBuffer, LabelBuffer)
 
 	tMinLon, tMinLat, tMaxLon, tMaxLat := TileBoundsLonLat(z, x, y)
-	// Expand the lon/lat reject filter so features whose geometry
-	// lives entirely in the buffer ring still get drawn.
 	nTiles := math.Exp2(float64(z))
 	bufDeg := float64(LabelBuffer) / TileSize * 360.0 / nTiles
-	// Latitude pad is approximate (Mercator stretches near the poles);
-	// at chart-use latitudes the lon pad is a close-enough overestimate.
 	eMinLon, eMaxLon := tMinLon-bufDeg, tMaxLon+bufDeg
 	eMinLat, eMaxLat := tMinLat-bufDeg, tMaxLat+bufDeg
 
-	// Geometry pass — split into three sub-passes so road casings
-	// and fills paint as two global sweeps. Otherwise residential
-	// streets' casings would cut across motorway fills wherever they
-	// intersect, instead of appearing to flow under them.
-	//
-	//   1. Non-road geometry (landuse, buildings, leisure, ...)
-	//   2. All road casings, lowest-class first
-	//   3. All road fills, lowest-class first
+	// Geometry sub-passes (per FeatureSet for non-roads, but road
+	// casings/fills get a single global sweep across all FeatureSets
+	// so motorway fills sit on top of any state's residential casings
+	// where their bbox-overlap region's tiles meet).
 	zu8 := uint8(z)
-	type roadCandidate struct {
+	type roadRef struct {
+		fs    *FeatureSet
 		idx   int
 		order int
 	}
-	var roads []roadCandidate
+	var roads []roadRef
 
-	for i := range fs.Features {
-		f := &fs.Features[i]
-		if zu8 < f.MinZoom {
-			continue
+	for _, fs := range fss {
+		for i := range fs.Features {
+			f := &fs.Features[i]
+			if zu8 < f.MinZoom {
+				continue
+			}
+			if f.MaxLon < eMinLon || f.MinLon > eMaxLon ||
+				f.MaxLat < eMinLat || f.MinLat > eMaxLat {
+				continue
+			}
+			if f.Class == ClassRoad {
+				roads = append(roads, roadRef{fs, i, roadClassPaintOrder(f.RoadKind)})
+				continue
+			}
+			drawFeature(dc, f, z, x, y)
 		}
-		if f.MaxLon < eMinLon || f.MinLon > eMaxLon ||
-			f.MaxLat < eMinLat || f.MinLat > eMaxLat {
-			continue
-		}
-		if f.Class == ClassRoad {
-			roads = append(roads, roadCandidate{i, roadClassPaintOrder(f.RoadKind)})
-			continue
-		}
-		drawFeature(dc, f, z, x, y)
 	}
 
 	sort.SliceStable(roads, func(i, j int) bool {
@@ -107,30 +108,33 @@ func RenderTile(fs *FeatureSet, z, x, y int) ([]byte, error) {
 	})
 	scale := roadWidthScale(z)
 	for _, rc := range roads {
-		f := &fs.Features[rc.idx]
+		f := &rc.fs.Features[rc.idx]
 		s := roadStyles[f.RoadKind]
 		strokeRoadAlong(dc, f, z, x, y, s.casingColor, s.casingWidth*scale)
 	}
 	for _, rc := range roads {
-		f := &fs.Features[rc.idx]
+		f := &rc.fs.Features[rc.idx]
 		s := roadStyles[f.RoadKind]
 		strokeRoadAlong(dc, f, z, x, y, s.fillColor, s.fillWidth*scale)
 	}
 
-	// Label pass.
-	placed, err := drawLabels(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat)
-	if err != nil {
-		return nil, err
+	// Label + shield passes run per FeatureSet but share the placed
+	// rect tracker so labels from different states don't overlap each
+	// other any more than within-state labels do.
+	var placed []labelRect
+	for _, fs := range fss {
+		p, err := drawLabelsInto(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat, placed)
+		if err != nil {
+			return nil, err
+		}
+		placed = p
+	}
+	for _, fs := range fss {
+		if err := drawShields(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat, &placed); err != nil {
+			return nil, err
+		}
 	}
 
-	// Shields pass — paints route refs (I-95, NY-9A, ...) on top of
-	// road labels but sharing the same collision tracker so they
-	// don't pile up.
-	if err := drawShields(dc, fs, z, x, y, eMinLon, eMinLat, eMaxLon, eMaxLat, &placed); err != nil {
-		return nil, err
-	}
-
-	// Crop the buffered render down to the inner TileSize × TileSize.
 	inner := image.NewRGBA(image.Rect(0, 0, TileSize, TileSize))
 	draw.Draw(inner, inner.Bounds(), dc.Image(),
 		image.Pt(LabelBuffer, LabelBuffer), draw.Src)
@@ -165,15 +169,19 @@ type namedAnchor struct {
 // below which two same-name line labels are considered duplicates.
 const minSameNameLineDist = 150.0
 
-// drawLabels paints names for every labellable feature. Point labels
-// (ClassPlace, ClassPOI) sit above their anchor; line labels (named
-// roads) follow the longest left-to-right segment of the way.
-// Collisions are resolved greedy first-wins — features are pre-sorted
-// into painter's order at load time, which puts higher-importance
-// classes (Place < POI < Road) first so they claim space.
-func drawLabels(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64) ([]labelRect, error) {
+// drawLabelsInto paints names for every labellable feature in fs.
+// Point labels (ClassPlace, ClassPOI) sit above their anchor; line
+// labels (named roads) follow the longest left-to-right segment of
+// the way. Collisions are resolved greedy first-wins — features are
+// pre-sorted into painter's order at load time, which puts higher-
+// importance classes (Place < POI < Road) first so they claim space.
+//
+// `placed` is the running tracker of label bboxes already claimed by
+// earlier FeatureSets in the same tile — multi-FS rendering threads
+// it through so labels from different states don't collide with each
+// other. Returns the updated placed list.
+func drawLabelsInto(dc *gg.Context, fs *FeatureSet, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64, placed []labelRect) ([]labelRect, error) {
 	zu8 := uint8(z)
-	var placed []labelRect
 	var placedLineNames []namedAnchor
 
 	// gg caches the active font face; we set per size as we encounter

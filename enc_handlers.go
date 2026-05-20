@@ -64,6 +64,30 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
 	mux.HandleFunc("/noaa-enc/structures", h.handleStructures)
 	mux.HandleFunc("/noaa-enc/osm-tile/", h.handleOSMTile)
+	mux.HandleFunc("/noaa-enc/osm-regions", h.handleOSMRegions)
+}
+
+// handleOSMRegions returns a tiny JSON snapshot the frontend polls
+// so it can bump the OSM tile URL's cache-bust token when a new
+// region finishes parsing. Without that, blank tiles cached during
+// the "still loading" window stay stuck in the browser HTTP cache
+// long after the FeatureSet is ready to render them.
+//
+//	GET /noaa-enc/osm-regions
+//	{"epoch": 3, "loaded": ["us-new-york"], "failed": []}
+func (h *ENCHandlers) handleOSMRegions(w http.ResponseWriter, r *http.Request) {
+	mgr := h.renderer.OSMRegionManager()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	if mgr == nil {
+		_, _ = w.Write([]byte(`{"epoch":0,"loaded":[]}` + "\n"))
+		return
+	}
+	snap := mgr.Snapshot()
+	if err := json.NewEncoder(w).Encode(snap); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 // handleOSMTile serves a 256×256 PNG containing only the OSM vector
@@ -90,20 +114,6 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Debug mode: render the water mask itself instead of the masked
-	// OSM tile. Bypasses cache so the user can iterate.
-	if r.URL.Query().Get("debug") == "mask" {
-		pngBytes, err := h.renderer.RenderOSMTileDebugMask(z, x, y)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(pngBytes)
-		return
-	}
-
 	// Reuse the chart tile cache with a distinct style key so OSM tiles
 	// share eviction policy and disk layout with chart tiles. The depth
 	// bucket is irrelevant for OSM — pin it to 0. The version suffix is
@@ -120,17 +130,28 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pngBytes, err := h.renderer.RenderOSMTile(z, x, y)
+	pngBytes, rendered, err := h.renderer.RenderOSMTile(z, x, y)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	const minCacheableTileBytes = 1024
-	if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
-		_ = h.tileCache.Put(cacheKey, 0, z, x, y, pngBytes)
-	}
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if rendered {
+		// Real feature-backed render — disk-cache and tell the
+		// browser to hold onto it for a day.
+		const minCacheableTileBytes = 1024
+		if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
+			_ = h.tileCache.Put(cacheKey, 0, z, x, y, pngBytes)
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	} else {
+		// Fallback transparent PNG (region still loading, or no
+		// covering extract). Cache neither side — the next request
+		// after the region finishes parsing should produce a real
+		// tile and we don't want the browser pinning the blank.
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+	}
 	_, _ = w.Write(pngBytes)
 }
 
@@ -491,13 +512,13 @@ func (h *ENCHandlers) handleCompareTest(w http.ResponseWriter, r *http.Request) 
  lat <input name="lat" value="%.4f" size="10">
  lon <input name="lon" value="%.4f" size="10">
  <button>go</button>
- <span style="color:#888;margin-left:1em">panels: ours | WMS | diff | OSM masked | mask</span>
+ <span style="color:#888;margin-left:1em">panels: ours | WMS | diff | OSM</span>
 </form>
 `, lat, lon, lat, lon)
 	for z := 7; z <= 16; z++ {
 		x, y := lonLatToTile(lon, lat, z)
-		fmt.Fprintf(&buf, `<div class="row"><h2>z=%d  x=%d y=%d</h2><img src="/noaa-enc/compare/%d/%d/%d.png%s"></div>`+"\n",
-			z, x, y, z, x, y, suffix)
+		fmt.Fprintf(&buf, `<div class="row"><h2>z=%d  x=%d y=%d &middot; <a href="/noaa-enc/osm-tile/%d/%d/%d.png%s" style="color:#7af">osm</a></h2><img src="/noaa-enc/compare/%d/%d/%d.png%s"></div>`+"\n",
+			z, x, y, z, x, y, suffix, z, x, y, suffix)
 	}
 	buf.WriteString("</body></html>\n")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -577,9 +598,9 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Five panels side by side: ours | WMS | diff | OSM (masked) | mask debug.
+	// Four panels side by side: ours | WMS | diff | OSM.
 	const panelW = 256
-	const numPanels = 5
+	const numPanels = 4
 	out := image.NewRGBA(image.Rect(0, 0, panelW*numPanels, 256))
 	// White background so transparent areas of any tile are visible.
 	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
@@ -599,19 +620,12 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// OSM tile (raster + chart-water-mask). Failures are non-fatal so the
-	// rest of the compare image still renders.
-	if osmPNG, err := h.renderer.RenderOSMTile(z, x, y); err == nil {
+	// OSM tile from our self-hosted renderer (water already transparent
+	// by design). Failures are non-fatal so the rest of the compare
+	// image still renders.
+	if osmPNG, _, err := h.renderer.RenderOSMTile(z, x, y); err == nil {
 		if osmImg, derr := png.Decode(bytes.NewReader(osmPNG)); derr == nil {
 			draw.Draw(out, image.Rect(3*panelW, 0, 4*panelW, 256), osmImg, image.Point{}, draw.Over)
-		}
-	}
-
-	// Mask-debug panel: magenta over chart-water polygons so you can see
-	// exactly which pixels the mask wipes from the OSM panel.
-	if dbgPNG, err := h.renderer.RenderOSMTileDebugMask(z, x, y); err == nil {
-		if dbgImg, derr := png.Decode(bytes.NewReader(dbgPNG)); derr == nil {
-			draw.Draw(out, image.Rect(4*panelW, 0, 5*panelW, 256), dbgImg, image.Point{}, draw.Over)
 		}
 	}
 
@@ -620,8 +634,7 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	annotatePanel(out, 4, 0, "ours")
 	annotatePanel(out, panelW+4, 0, "WMS")
 	annotatePanel(out, 2*panelW+4, 0, fmt.Sprintf("diff z=%d x=%d y=%d", z, x, y))
-	annotatePanel(out, 3*panelW+4, 0, "OSM masked")
-	annotatePanel(out, 4*panelW+4, 0, "mask")
+	annotatePanel(out, 3*panelW+4, 0, "OSM")
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, out); err != nil {

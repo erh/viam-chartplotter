@@ -2,7 +2,6 @@ package vc
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -19,6 +18,8 @@ import (
 	"golang.org/x/image/font/basicfont"
 
 	"github.com/beetlebugorg/s57/pkg/s57"
+
+	"github.com/erh/viam-chartplotter/osmtiler"
 )
 
 // ENCRenderer turns ENC cells on disk into XYZ PNG tiles in pure Go. It uses the
@@ -30,8 +31,11 @@ import (
 type ENCRenderer struct {
 	catalog *ENCCatalog
 	store   *ENCStore
-	osm     *OSMTileCache // optional; nil disables the OSM-underlay tile layer
-	logger  logging.Logger
+	// osm resolves a lon/lat to a (possibly still-downloading) parsed
+	// OSM FeatureSet for the /noaa-enc/osm-tile/ underlay. Nil disables
+	// the layer entirely.
+	osm    *osmtiler.RegionManager
+	logger logging.Logger
 
 	mu     sync.Mutex
 	charts map[string]*chartEntry
@@ -62,12 +66,17 @@ func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger)
 	}
 }
 
-// SetOSMCache attaches an OSM raster tile cache. When set,
-// /noaa-enc/osm-tile/ fetches the corresponding tile.openstreetmap.org
-// PNG and rasterises it with water areas masked transparent (per the
-// chart's DEPARE polygons) so it composes cleanly under the chart
-// layer. Optional — when nil, the OSM tile endpoint serves blank.
-func (r *ENCRenderer) SetOSMCache(c *OSMTileCache) { r.osm = c }
+// SetOSMRegionManager attaches the region manager that backs the
+// /noaa-enc/osm-tile/ endpoint. When set, RenderOSMTile looks up a
+// region for the requested tile and either renders from its parsed
+// FeatureSet or kicks off a background download/parse if the region
+// is known-but-not-yet-loaded. Optional — when nil, the endpoint
+// serves blank.
+func (r *ENCRenderer) SetOSMRegionManager(m *osmtiler.RegionManager) { r.osm = m }
+
+// OSMRegionManager exposes the attached manager (or nil) so the
+// status endpoint can read its load epoch.
+func (r *ENCRenderer) OSMRegionManager() *osmtiler.RegionManager { return r.osm }
 
 // chartFor returns the parsed chart for a cell, parsing once and reusing the
 // result until the on-disk .000 file's mtime changes.
@@ -776,11 +785,15 @@ const (
 const ENCRenderRulesVersion = 4
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
-// (RenderOSMTile / RenderOSMTileDebugMask). Bump on any change to the OSM
-// fetch, mask, or compositing logic that should invalidate the on-disk
-// cache. Independent from ENC so an ENC bump doesn't rebuild OSM tiles
-// (and vice versa).
-const OSMRenderRulesVersion = 1
+// (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
+// should invalidate the on-disk cache. Independent from ENC so an ENC bump
+// doesn't rebuild OSM tiles (and vice versa).
+//
+// Also mirror this value in src/marineMap.svelte's OSM_RENDER_VERSION so
+// the frontend URL pattern bumps `?osmv=` and busts browser caches on the
+// next page load — otherwise a Go-only bump leaves stale tiles cached
+// client-side for up to a day.
+const OSMRenderRulesVersion = 4
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -1230,10 +1243,72 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	return buf.Bytes(), nil
 }
 
-// RenderOSMTileDebugMask returns a magenta-tinted visualisation of the
-// chart-water mask alone — handy for confirming via /osm-tile?debug=mask
-// that the mask actually paints over the regions we expect.
-func (r *ENCRenderer) RenderOSMTileDebugMask(z, x, y int) ([]byte, error) {
+// RenderOSMTile draws our self-hosted OSM raster for the given XYZ
+// tile. The region manager looks up which extract covers the tile
+// center; if the region is known but not yet parsed, the manager
+// kicks off a background download/parse and we return a blank tile —
+// the next request after parsing finishes will get a populated PNG.
+// Water is omitted by design (the chart layer underneath provides it).
+//
+// The second return value is true when an actual feature-backed
+// render happened, false when this is the transparent fallback
+// (no region attached, region not yet loaded, or no covering
+// region in the catalog). The handler uses this to decide between
+// long-cache (real render) and no-cache (fallback that needs to be
+// re-attempted soon).
+func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
+	t0 := time.Now()
+	if r.osm != nil {
+		tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+		// Use the tile's bbox so every region that overlaps gets
+		// drawn (low-zoom tiles span multiple states) and offshore
+		// tiles still match a region.
+		minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+		maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+		fss, covered := r.osm.FeatureSetsForBBox(minLon, minLat, maxLon, maxLat)
+		if len(fss) > 0 {
+			data, err := osmtiler.RenderTileMulti(fss, z, x, y)
+			if err == nil {
+				// Mask out pixels where the chart says "water" so
+				// the chart's depth-shading shows through the OSM
+				// tile's yellow land base.
+				if masked, mErr := r.maskChartWater(data, z, x, y); mErr == nil {
+					data = masked
+				} else if r.logger != nil {
+					r.logger.Warnf("osm-tile water mask z=%d x=%d y=%d: %v", z, x, y, mErr)
+				}
+				if r.logger != nil && time.Since(t0) > 200*time.Millisecond {
+					r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes, %d region(s))",
+						z, x, y, time.Since(t0).Round(time.Millisecond), len(data), len(fss))
+				}
+				return data, true, nil
+			}
+			if r.logger != nil {
+				r.logger.Warnf("osm-tile render z=%d x=%d y=%d: %v", z, x, y, err)
+			}
+		} else if r.logger != nil && covered {
+			r.logger.Debugf("osm-tile z=%d x=%d y=%d: region(s) still loading", z, x, y)
+		}
+	}
+	dc := gg.NewContext(256, 256)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dc.Image()); err != nil {
+		return nil, false, err
+	}
+	return buf.Bytes(), false, nil
+}
+
+// maskChartWater decodes the rendered OSM PNG, sets every pixel that
+// the chart claims is water (DEPARE / DRGARE / LOKBSN minus LNDARE /
+// BUAARE / BUISGL) to fully transparent, and re-encodes. The OSM
+// renderer paints a yellow land base under everything; without this
+// post-pass the chart's depth shading underneath never shows through.
+func (r *ENCRenderer) maskChartWater(pngBytes []byte, z, x, y int) ([]byte, error) {
+	img, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
@@ -1244,60 +1319,103 @@ func (r *ENCRenderer) RenderOSMTileDebugMask(z, x, y int) ([]byte, error) {
 		return px, py
 	}
 	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
-	dbg := renderOSMWaterMaskDebug(r, z, x, y, minLon, minLat, maxLon, maxLat, bbox, project)
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, dbg); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
+	mask := r.buildChartWaterMask(minLon, minLat, maxLon, maxLat, bbox, project)
 
-// RenderOSMTile draws ONLY the OSM vector underlay (highways + buildings)
-// for the given XYZ tile, on a transparent background. Used by the
-// stand-alone /noaa-enc/osm-tile/ endpoint so the frontend can layer it
-// independently from the chart tile and toggle it without re-rendering
-// the chart. Returns a 1x1 transparent PNG when no Overpass cache is
-// configured, so the layer composes cleanly even when OSM data is
-// unavailable.
-func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, error) {
-	t0 := time.Now()
-	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
-	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
-	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
-
-	dc := gg.NewContext(256, 256)
-	if r.osm != nil {
-		// Fetch the OSM raster for this tile.
-		osmBytes, err := r.osm.Fetch(context.Background(), z, x, y)
-		if err == nil {
-			img, _, decodeErr := image.Decode(bytes.NewReader(osmBytes))
-			if decodeErr == nil {
-				project := func(lon, lat float64) (float64, float64) {
-					mx, my := lonLatToMerc(lon, lat)
-					px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
-					py := (tileYmax - my) / (tileYmax - tileYmin) * 256
-					return px, py
-				}
-				bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
-				masked := maskOSMWater(img, r, z, x, y, minLon, minLat, maxLon, maxLat, bbox, project)
-				dc.DrawImage(masked, 0, 0)
-			} else if r.logger != nil {
-				r.logger.Warnf("osm-tile decode z=%d x=%d y=%d: %v", z, x, y, decodeErr)
+	srcBounds := img.Bounds()
+	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+	for py := 0; py < 256; py++ {
+		for px := 0; px < 256; px++ {
+			_, _, _, ma := mask.At(px, py).RGBA()
+			if ma > 0 {
+				// Water — leave transparent.
+				continue
 			}
-		} else if r.logger != nil {
-			r.logger.Warnf("osm-tile fetch z=%d x=%d y=%d: %v", z, x, y, err)
+			r8, g8, b8, a8 := img.At(srcBounds.Min.X+px, srcBounds.Min.Y+py).RGBA()
+			out.SetNRGBA(px, py, color.NRGBA{
+				R: uint8(r8 >> 8),
+				G: uint8(g8 >> 8),
+				B: uint8(b8 >> 8),
+				A: uint8(a8 >> 8),
+			})
 		}
 	}
 
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, dc.Image()); err != nil {
-		return nil, err
-	}
-	if r.logger != nil && time.Since(t0) > 200*time.Millisecond {
-		r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes)",
-			z, x, y, time.Since(t0).Round(time.Millisecond), buf.Len())
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// buildChartWaterMask rasterises a binary water mask for the supplied
+// tile: opaque pixels where the chart's DEPARE / DRGARE / LOKBSN
+// polygons say water, minus any LNDARE / BUAARE / BUISGL that fall
+// inside (overview-cell DEPARE polygons have imprecise hole rings and
+// would otherwise mask out actual land at the southern tip of
+// Manhattan and similar spots).
+func (r *ENCRenderer) buildChartWaterMask(
+	minLon, minLat, maxLon, maxLat float64,
+	bbox s57.Bounds,
+	project func(lon, lat float64) (float64, float64),
+) image.Image {
+	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+
+	waterCtx := gg.NewContext(256, 256)
+	waterCtx.SetColor(color.RGBA{0, 0, 0, 0})
+	waterCtx.Clear()
+	waterCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
+
+	landCtx := gg.NewContext(256, 256)
+	landCtx.SetColor(color.RGBA{0, 0, 0, 0})
+	landCtx.Clear()
+	landCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
+
+	for _, cell := range cells {
+		chart, err := r.chartFor(cell.Name)
+		if err != nil || chart == nil {
+			continue
+		}
+		for _, f := range chart.FeaturesInBounds(bbox) {
+			geom := f.Geometry()
+			if geom.Type != s57.GeometryTypePolygon {
+				continue
+			}
+			if isOversizedPolygon(geom.Coordinates, bbox, 200) {
+				continue
+			}
+			if isDegeneratePixelPolygon(geom.Coordinates, project) {
+				continue
+			}
+			switch f.ObjectClass() {
+			case "DEPARE", "DRGARE", "LOKBSN":
+				tracePolygonPath(waterCtx, geom.Coordinates, project)
+				waterCtx.SetFillRuleEvenOdd()
+				waterCtx.Fill()
+			case "LNDARE", "BUAARE", "BUISGL":
+				tracePolygonPath(landCtx, geom.Coordinates, project)
+				landCtx.SetFillRuleEvenOdd()
+				landCtx.Fill()
+			}
+		}
+	}
+
+	water := waterCtx.Image()
+	land := landCtx.Image()
+	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+	for py := 0; py < 256; py++ {
+		for px := 0; px < 256; px++ {
+			_, _, _, wa := water.At(px, py).RGBA()
+			if wa == 0 {
+				continue
+			}
+			_, _, _, la := land.At(px, py).RGBA()
+			if la > 0 {
+				continue // land wins
+			}
+			out.SetNRGBA(px, py, color.NRGBA{R: 0, G: 0, B: 0, A: 0xFF})
+		}
+	}
+	return out
 }
 
 // splitRings reconstructs ring boundaries in an S-57 polygon coordinate array.
@@ -1603,162 +1721,6 @@ func tracePolygonPath(dc *gg.Context, coords [][]float64, project func(lon, lat 
 		}
 		dc.ClosePath()
 	}
-}
-
-// buildOSMWaterMask rasterises a binary water mask: opaque-black pixels
-// where the chart calls "water", transparent elsewhere. Uses ALL
-// overlapping cells (regardless of compilation scale) for both passes so
-// we never miss DEPARE coverage just because the cell falls outside the
-// chart's scale-render window — e.g. at z=14 the 1:12k Harbor cells that
-// carry detailed mid-Hudson DEPARE polygons sit just below the chart's
-// scale floor and would otherwise leave a hole in the mask.
-//
-// Two passes:
-//  1. Paint DEPARE / DRGARE / LOKBSN polygons opaque (water).
-//  2. Subtract LNDARE / BUAARE / BUISGL polygons (land) so overview-cell
-//     DEPARE polygons with imprecise hole rings (a known offender at the
-//     southern tip of Manhattan) can't accidentally mask out actual land.
-//
-// Returns the mask image plus per-pass polygon counts for logging.
-func buildOSMWaterMask(
-	r *ENCRenderer,
-	minLon, minLat, maxLon, maxLat float64,
-	bbox s57.Bounds,
-	project func(lon, lat float64) (float64, float64),
-) (image.Image, int, int) {
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
-
-	// We compose two binary alpha images then combine pixel-wise:
-	//   final = water AND NOT land
-	// gg doesn't expose a "destination-out" composite op, so we paint
-	// each pass to its own context and merge in a small loop.
-	waterCtx := gg.NewContext(256, 256)
-	waterCtx.SetColor(color.RGBA{0, 0, 0, 0})
-	waterCtx.Clear()
-	waterCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
-
-	landCtx := gg.NewContext(256, 256)
-	landCtx.SetColor(color.RGBA{0, 0, 0, 0})
-	landCtx.Clear()
-	landCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
-
-	waterPolys, landPolys := 0, 0
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
-			class := f.ObjectClass()
-			geom := f.Geometry()
-			if geom.Type != s57.GeometryTypePolygon {
-				continue
-			}
-			if isOversizedPolygon(geom.Coordinates, bbox, 200) {
-				continue
-			}
-			if isDegeneratePixelPolygon(geom.Coordinates, project) {
-				continue
-			}
-			switch class {
-			case "DEPARE", "DRGARE", "LOKBSN":
-				tracePolygonPath(waterCtx, geom.Coordinates, project)
-				waterCtx.SetFillRuleEvenOdd()
-				waterCtx.Fill()
-				waterPolys++
-			case "LNDARE", "BUAARE", "BUISGL":
-				tracePolygonPath(landCtx, geom.Coordinates, project)
-				landCtx.SetFillRuleEvenOdd()
-				landCtx.Fill()
-				landPolys++
-			}
-		}
-	}
-
-	// Compose: pixel is water iff waterCtx is opaque AND landCtx is
-	// transparent at that point.
-	water := waterCtx.Image()
-	land := landCtx.Image()
-	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
-	for py := 0; py < 256; py++ {
-		for px := 0; px < 256; px++ {
-			_, _, _, wa := water.At(px, py).RGBA()
-			if wa == 0 {
-				continue
-			}
-			_, _, _, la := land.At(px, py).RGBA()
-			if la > 0 {
-				continue // land wins
-			}
-			out.SetNRGBA(px, py, color.NRGBA{R: 0, G: 0, B: 0, A: 0xFF})
-		}
-	}
-	return out, waterPolys, landPolys
-}
-
-// maskOSMWater returns a copy of `src` with pixels covered by the chart's
-// water polygons made fully transparent. The result composes cleanly
-// under our chart layer.
-func maskOSMWater(
-	src image.Image,
-	r *ENCRenderer,
-	z, x, y int,
-	minLon, minLat, maxLon, maxLat float64,
-	bbox s57.Bounds,
-	project func(lon, lat float64) (float64, float64),
-) image.Image {
-	mask, waterPolys, landPolys := buildOSMWaterMask(r, minLon, minLat, maxLon, maxLat, bbox, project)
-	if r.logger != nil {
-		r.logger.Infof("osm-tile mask: z=%d x=%d y=%d water=%d land=%d", z, x, y, waterPolys, landPolys)
-	}
-	bounds := src.Bounds()
-	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
-	for py := 0; py < 256; py++ {
-		for px := 0; px < 256; px++ {
-			_, _, _, ma := mask.At(px, py).RGBA()
-			if ma > 0 {
-				// Water pixel — leave fully transparent.
-				continue
-			}
-			sx := bounds.Min.X + px
-			sy := bounds.Min.Y + py
-			r8, g8, b8, a8 := src.At(sx, sy).RGBA()
-			out.SetNRGBA(px, py, color.NRGBA{
-				R: uint8(r8 >> 8),
-				G: uint8(g8 >> 8),
-				B: uint8(b8 >> 8),
-				A: uint8(a8 >> 8),
-			})
-		}
-	}
-	return out
-}
-
-// renderOSMWaterMaskDebug returns a debug PNG showing the water mask
-// directly: bright magenta where the mask is set (water), transparent
-// elsewhere. Hit /noaa-enc/osm-tile/{z}/{x}/{y}.png?debug=mask to see
-// exactly which pixels the mask is wiping.
-func renderOSMWaterMaskDebug(
-	r *ENCRenderer,
-	z, x, y int,
-	minLon, minLat, maxLon, maxLat float64,
-	bbox s57.Bounds,
-	project func(lon, lat float64) (float64, float64),
-) image.Image {
-	mask, waterPolys, landPolys := buildOSMWaterMask(r, minLon, minLat, maxLon, maxLat, bbox, project)
-	if r.logger != nil {
-		r.logger.Infof("osm-tile mask DEBUG: z=%d x=%d y=%d water=%d land=%d", z, x, y, waterPolys, landPolys)
-	}
-	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
-	for py := 0; py < 256; py++ {
-		for px := 0; px < 256; px++ {
-			_, _, _, ma := mask.At(px, py).RGBA()
-			if ma > 0 {
-				out.SetNRGBA(px, py, color.NRGBA{R: 0xFF, G: 0x00, B: 0xFF, A: 0xC0})
-			}
-		}
-	}
-	return out
 }
 
 // isOversizedPolygon returns true if the polygon's lon/lat bbox is more than

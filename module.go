@@ -19,6 +19,8 @@ import (
 	"go.viam.com/rdk/resource"
 
 	"github.com/erh/vmodutils"
+
+	"github.com/erh/viam-chartplotter/osmtiler"
 )
 
 //go:embed dist
@@ -191,17 +193,18 @@ func StartChartplotterServer(
 		return nil, err
 	}
 	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, draftFt)
-	// OSM raster tile cache for the /noaa-enc/osm-tile/ endpoint. We
-	// fetch tile.openstreetmap.org PNGs and mask out water (per the
-	// chart's DEPARE polygons) so OSM's water labels and tones don't
-	// fight with our chart's depth bands. Disk-cached so each (z,x,y)
-	// is fetched at most once per cache lifetime.
-	osmCache, err := NewOSMTileCache(filepath.Join(root, "osm"), "", logger.Sublogger("osmCache"))
+	// OSM underlay layer — region manager downloads Geofabrik state
+	// extracts on demand into <root>/osm/, parses them, and keeps the
+	// resulting FeatureSets resident. The first tile request to a new
+	// state triggers the download (1–3 GB, then ~5–10 min to parse);
+	// subsequent requests serve immediately. Water is omitted by design
+	// so the chart's depth bands show through.
+	osmRegions, err := osmtiler.NewRegionManager(filepath.Join(root, "osm"), "", logger.Sublogger("osmRegions"))
 	if err != nil {
-		logger.Warnf("osm cache disabled: %v", err)
+		logger.Warnf("osm underlay disabled: %v", err)
 	} else {
-		encRenderer.SetOSMCache(osmCache)
-		logger.Infof("osm tile cache: %s", osmCache.cacheDir)
+		encRenderer.SetOSMRegionManager(osmRegions)
+		logger.Infof("osm underlay cache: %s", filepath.Join(root, "osm"))
 	}
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)

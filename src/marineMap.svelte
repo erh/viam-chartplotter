@@ -2984,8 +2984,30 @@
       // toggleable independently from noaa-local — Overpass cold fetches
       // can be slow, so isolating it lets the chart keep painting at
       // full speed and lets the user disable OSM if the latency hurts.
+      // OSM tile URL cache-busting:
+      //   v        — git hash / dev timestamp, busts when frontend bundle changes
+      //   osmv     — OSMRenderRulesVersion (server-side, see enc_render.go).
+      //              Keep in sync with the Go const so a Go-only edit + restart
+      //              busts browser caches without a frontend rebuild.
+      //   ?osmv=…  — page-load override (anything different from the default
+      //              forces a one-off bust without bumping either constant).
+      const OSM_RENDER_VERSION = "4";
+      const osmRenderVersion = (() => {
+        if (typeof window === "undefined") return OSM_RENDER_VERSION;
+        try {
+          const v = new URLSearchParams(window.location.search).get("osmv");
+          return v && v !== "" ? v : OSM_RENDER_VERSION;
+        } catch {
+          return OSM_RENDER_VERSION;
+        }
+      })();
       const osmTileParams = new URLSearchParams();
       osmTileParams.set("v", tileGenVersion);
+      osmTileParams.set("osmv", osmRenderVersion);
+      const osmTileSource = new XYZ({
+        url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
+        transition: 300,
+      });
       mapGlobal.layerOptions.push({
         name: "osm-detail",
         displayName: "streets",
@@ -2995,12 +3017,41 @@
           opacity: 1,
           preload: 2,
           zIndex: 4,
-          source: new XYZ({
-            url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
-            transition: 300,
-          }),
+          source: osmTileSource,
         }),
       });
+      // Poll the server's region-load epoch. Whenever a region
+      // finishes parsing (or fails) the epoch bumps, and we rewrite
+      // the tile URL with an `epoch=N` token + tell OL to refresh
+      // the source so blank tiles cached during the "still loading"
+      // window get replaced by real renders on next paint.
+      let lastOsmEpoch = -1;
+      const pollOsmEpoch = async () => {
+        try {
+          const res = await fetch("/noaa-enc/osm-regions", { cache: "no-store" });
+          if (!res.ok) return;
+          const data = await res.json();
+          const epoch = typeof data.epoch === "number" ? data.epoch : 0;
+          if (epoch !== lastOsmEpoch) {
+            lastOsmEpoch = epoch;
+            osmTileParams.set("epoch", String(epoch));
+            osmTileSource.setUrl(
+              `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
+            );
+            // setUrl alone leaves OL's in-memory tile cache intact;
+            // refresh() drops it so visible tiles re-request at the
+            // new URL.
+            osmTileSource.refresh();
+          }
+        } catch {
+          // Network blips are fine — we'll retry on the next tick.
+        }
+      };
+      pollOsmEpoch();
+      // The interval lives for the page's lifetime — browser clears it
+      // on unload. We don't register an onDestroy here because
+      // setupLayers runs past Svelte's component-init phase.
+      window.setInterval(pollOsmEpoch, 5000);
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
