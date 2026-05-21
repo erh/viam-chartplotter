@@ -2,6 +2,7 @@ package vc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/image/font/basicfont"
 
 	"github.com/beetlebugorg/s57/pkg/s57"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/erh/viam-chartplotter/osmtiler"
 )
@@ -31,10 +33,10 @@ import (
 type ENCRenderer struct {
 	catalog *ENCCatalog
 	store   *ENCStore
-	// osm resolves a lon/lat to a (possibly still-downloading) parsed
-	// OSM FeatureSet for the /noaa-enc/osm-tile/ underlay. Nil disables
-	// the layer entirely.
-	osm    *osmtiler.RegionManager
+	// osm is the MongoDB collection the /noaa-enc/osm-tile/ underlay
+	// queries. Nil disables the layer entirely — the handler serves
+	// a transparent fallback.
+	osm    *mongo.Collection
 	logger logging.Logger
 
 	mu     sync.Mutex
@@ -66,17 +68,12 @@ func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger)
 	}
 }
 
-// SetOSMRegionManager attaches the region manager that backs the
-// /noaa-enc/osm-tile/ endpoint. When set, RenderOSMTile looks up a
-// region for the requested tile and either renders from its parsed
-// FeatureSet or kicks off a background download/parse if the region
-// is known-but-not-yet-loaded. Optional — when nil, the endpoint
-// serves blank.
-func (r *ENCRenderer) SetOSMRegionManager(m *osmtiler.RegionManager) { r.osm = m }
-
-// OSMRegionManager exposes the attached manager (or nil) so the
-// status endpoint can read its load epoch.
-func (r *ENCRenderer) OSMRegionManager() *osmtiler.RegionManager { return r.osm }
+// SetOSMCollection attaches the MongoDB collection holding ingested
+// OSM features for the /noaa-enc/osm-tile/ underlay. When set,
+// RenderOSMTile runs a $geoIntersects query against this collection
+// for each tile and draws the result. Nil disables the layer — the
+// endpoint returns a transparent fallback PNG and never queries.
+func (r *ENCRenderer) SetOSMCollection(c *mongo.Collection) { r.osm = c }
 
 // chartFor returns the parsed chart for a cell, parsing once and reusing the
 // result until the on-disk .000 file's mtime changes.
@@ -793,7 +790,7 @@ const ENCRenderRulesVersion = 4
 // the frontend URL pattern bumps `?osmv=` and busts browser caches on the
 // next page load — otherwise a Go-only bump leaves stale tiles cached
 // client-side for up to a day.
-const OSMRenderRulesVersion = 4
+const OSMRenderRulesVersion = 7
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -1244,50 +1241,45 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 }
 
 // RenderOSMTile draws our self-hosted OSM raster for the given XYZ
-// tile. The region manager looks up which extract covers the tile
-// center; if the region is known but not yet parsed, the manager
-// kicks off a background download/parse and we return a blank tile —
-// the next request after parsing finishes will get a populated PNG.
-// Water is omitted by design (the chart layer underneath provides it).
+// tile by $geoIntersects-querying the OSM MongoDB collection and
+// painting the returned features. Water is omitted by design — the
+// chart's depth shading provides it through the chart-water mask.
 //
-// The second return value is true when an actual feature-backed
-// render happened, false when this is the transparent fallback
-// (no region attached, region not yet loaded, or no covering
-// region in the catalog). The handler uses this to decide between
-// long-cache (real render) and no-cache (fallback that needs to be
-// re-attempted soon).
+// The second return value is true when a feature-backed render
+// happened, false when this is the transparent fallback (no Mongo
+// collection attached, query failed). The handler uses this to
+// decide between long-cache (real render) and no-cache (fallback).
 func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
 	t0 := time.Now()
 	if r.osm != nil {
-		tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
-		// Use the tile's bbox so every region that overlaps gets
-		// drawn (low-zoom tiles span multiple states) and offshore
-		// tiles still match a region.
-		minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
-		maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
-		fss, covered := r.osm.FeatureSetsForBBox(minLon, minLat, maxLon, maxLat)
-		if len(fss) > 0 {
-			data, err := osmtiler.RenderTileMulti(fss, z, x, y)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		features, _, err := osmtiler.FetchTileFeatures(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
+			IncludeMinZoom: true,
+			ZoomOverride:   -1,
+			PadBuffer:      true,
+		})
+		if err != nil {
+			if r.logger != nil {
+				r.logger.Warnf("osm-tile query z=%d x=%d y=%d: %v", z, x, y, err)
+			}
+		} else {
+			data, err := osmtiler.RenderTileFromFeatures(features, z, x, y)
 			if err == nil {
-				// Mask out pixels where the chart says "water" so
-				// the chart's depth-shading shows through the OSM
-				// tile's yellow land base.
 				if masked, mErr := r.maskChartWater(data, z, x, y); mErr == nil {
 					data = masked
 				} else if r.logger != nil {
 					r.logger.Warnf("osm-tile water mask z=%d x=%d y=%d: %v", z, x, y, mErr)
 				}
 				if r.logger != nil && time.Since(t0) > 200*time.Millisecond {
-					r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes, %d region(s))",
-						z, x, y, time.Since(t0).Round(time.Millisecond), len(data), len(fss))
+					r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes, %d features)",
+						z, x, y, time.Since(t0).Round(time.Millisecond), len(data), len(features))
 				}
 				return data, true, nil
 			}
 			if r.logger != nil {
 				r.logger.Warnf("osm-tile render z=%d x=%d y=%d: %v", z, x, y, err)
 			}
-		} else if r.logger != nil && covered {
-			r.logger.Debugf("osm-tile z=%d x=%d y=%d: region(s) still loading", z, x, y)
 		}
 	}
 	dc := gg.NewContext(256, 256)

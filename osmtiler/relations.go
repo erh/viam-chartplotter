@@ -1,103 +1,19 @@
 package osmtiler
 
-import (
-	"context"
-	"fmt"
-	"os"
-	"runtime"
+import "github.com/paulmach/osm"
 
-	"github.com/paulmach/osm"
-	"github.com/paulmach/osm/osmpbf"
-)
-
-// relationDesc is the slimmed-down view of a multipolygon relation we
-// keep across the two-pass PBF load. We only care about the relation's
-// classification + name and the IDs of its outer-role member ways;
-// member-way geometry is resolved during the second pass.
-type relationDesc struct {
-	Class     Class
-	Name      string
-	OuterWays []osm.WayID
-}
-
-// scanMultipolygonRelations performs the first PBF pass: it walks
-// relations only (SkipNodes / SkipWays at the encoded level) and
-// collects every multipolygon relation whose classification is an
-// area class we want to draw. Returns the descriptors plus the set of
-// member way IDs whose geometry the second pass must remember.
-func scanMultipolygonRelations(ctx context.Context, path string) ([]relationDesc, map[osm.WayID]struct{}, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-
-	sc := osmpbf.New(ctx, f, runtime.NumCPU())
-	sc.SkipNodes = true
-	sc.SkipWays = true
-	// Skip non-area relations (boundary, route, restriction, etc.)
-	// at the decoder so we never allocate them. Cuts pass 1 work
-	// by ~80% on typical state extracts where the bulk of relations
-	// are transit routes and admin boundaries we don't render.
-	sc.FilterRelation = func(r *osm.Relation) bool {
-		if r.Tags.Find("type") != "multipolygon" {
-			return false
-		}
-		class := Classify(r.Tags)
-		return class != ClassSkip && isAreaClass(class)
-	}
-	defer sc.Close()
-
-	var out []relationDesc
-	memberWays := make(map[osm.WayID]struct{})
-
-	for sc.Scan() {
-		r, ok := sc.Object().(*osm.Relation)
-		if !ok {
-			continue
-		}
-		// FilterRelation has already culled the relations we don't
-		// want — anything we see here is a kept multipolygon. We
-		// still need to recompute Class so the dispatch into
-		// relationDesc carries the right value.
-		class := Classify(r.Tags)
-		rd := relationDesc{
-			Class: class,
-			Name:  r.Tags.Find("name"),
-		}
-		for _, m := range r.Members {
-			if m.Type != osm.TypeWay {
-				continue
-			}
-			// Empty role is sometimes used by older data instead of
-			// "outer"; treat it as outer. Inner rings (holes) are
-			// dropped in v0.2a — we drop water anyway, and visible
-			// holes in parks (e.g. lakes) get the same transparent
-			// behavior we want.
-			if m.Role != "outer" && m.Role != "" {
-				continue
-			}
-			wid := osm.WayID(m.Ref)
-			rd.OuterWays = append(rd.OuterWays, wid)
-			memberWays[wid] = struct{}{}
-		}
-		if len(rd.OuterWays) > 0 {
-			out = append(out, rd)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, nil, fmt.Errorf("relations pass: %w", err)
-	}
-	return out, memberWays, nil
-}
-
-// assembleRings stitches the supplied member-way coords into closed
-// rings via greedy endpoint matching. Each ring is emitted with its
-// starting point repeated at the end (Coords[0] == Coords[len-1]).
-// Partial rings — when the member ways don't actually form a closed
-// loop — are dropped silently; OSM data has occasional broken
+// AssembleOuterRings stitches the supplied member-way coords into
+// closed rings via greedy endpoint matching. Each ring is emitted
+// with its starting point repeated at the end (Coords[0] ==
+// Coords[len-1]). Partial rings — when the member ways don't form a
+// closed loop — are dropped silently; OSM data has occasional broken
 // multipolygons and we'd rather omit than render garbage.
-func assembleRings(wayIDs []osm.WayID, coords map[osm.WayID][]LonLat) [][]LonLat {
+//
+// Used by the offline ingest tool (cmd/osmtools) to convert OSM
+// multipolygon relations into renderable polygon features at upsert
+// time. The runtime renderer queries those pre-built polygons from
+// MongoDB and never sees the constituent member ways.
+func AssembleOuterRings(wayIDs []osm.WayID, coords map[osm.WayID][]LonLat) [][]LonLat {
 	available := make(map[osm.WayID]bool, len(wayIDs))
 	for _, id := range wayIDs {
 		if c, ok := coords[id]; ok && len(c) >= 2 {

@@ -7,7 +7,9 @@ require (
 	github.com/beetlebugorg/s57 v0.100.0
 	github.com/erh/vmodutils v0.0.4-0.20250505141807-8c2b0355a0a3
 	github.com/fogleman/gg v1.3.0
+	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0
 	github.com/kellydunn/golang-geo v0.7.0
+	github.com/paulmach/osm v0.9.0
 	github.com/pkg/errors v0.9.1
 	go.mongodb.org/mongo-driver v1.17.4
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.66.0
@@ -72,7 +74,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.1.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.0 // indirect
-	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/golang/geo v0.0.0-20210211234256-740aa86cb551 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
@@ -108,7 +109,6 @@ require (
 	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/muhlemmer/gu v0.3.1 // indirect
 	github.com/paulmach/orb v0.12.0 // indirect
-	github.com/paulmach/osm v0.9.0 // indirect
 	github.com/paulmach/protoscan v0.2.1 // indirect
 	github.com/pion/datachannel v1.5.8 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect

@@ -28,7 +28,8 @@ func realMain() error {
 		return err
 	}
 
-	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6, "", "")
+	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6, "", "",
+		os.Getenv("MONGO_URI"), "osm", "features")
 	if err != nil {
 		return err
 	}

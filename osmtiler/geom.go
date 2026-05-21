@@ -80,14 +80,6 @@ func (f *Feature) computeBounds() {
 	}
 }
 
-// FeatureSet is the in-memory result of LoadPBF. For planet-scale runs
-// we'll replace this with the SQLite per-tile index from the plan; at
-// regional/city scale (this v0.1 slice) holding everything in memory
-// is simpler and keeps the render loop free of I/O.
-type FeatureSet struct {
-	Features []Feature
-}
-
 // --- Web Mercator (EPSG:3857) tile math --------------------------------
 //
 // Standard XYZ tile scheme matching tile.openstreetmap.org:

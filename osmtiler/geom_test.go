@@ -56,10 +56,16 @@ func TestWorldPx_DoublesPerZoom(t *testing.T) {
 func TestTilesCoveringBBox_Zip10024(t *testing.T) {
 	// ZIP 10024 spans roughly the Upper West Side. At z=10 it fits in
 	// a single tile; at z=14 it spans a small handful.
+	const (
+		minLon = -73.990
+		maxLon = -73.965
+		minLat = 40.778
+		maxLat = 40.796
+	)
 	cases := []struct {
-		z              int
-		wantTilesMin   int
-		wantTilesMax   int
+		z            int
+		wantTilesMin int
+		wantTilesMax int
 	}{
 		{0, 1, 1},
 		{6, 1, 1},
@@ -68,9 +74,7 @@ func TestTilesCoveringBBox_Zip10024(t *testing.T) {
 		{18, 100, 400}, // sanity bound — ~234 tiles expected
 	}
 	for _, tc := range cases {
-		xMin, yMin, xMax, yMax := TilesCoveringBBox(
-			zip10024MinLon, zip10024MinLat,
-			zip10024MaxLon, zip10024MaxLat, tc.z)
+		xMin, yMin, xMax, yMax := TilesCoveringBBox(minLon, minLat, maxLon, maxLat, tc.z)
 		n := (xMax - xMin + 1) * (yMax - yMin + 1)
 		if n < tc.wantTilesMin || n > tc.wantTilesMax {
 			t.Errorf("z=%d tiles=%d (x=[%d..%d] y=[%d..%d]), want in [%d..%d]",

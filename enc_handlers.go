@@ -64,30 +64,6 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
 	mux.HandleFunc("/noaa-enc/structures", h.handleStructures)
 	mux.HandleFunc("/noaa-enc/osm-tile/", h.handleOSMTile)
-	mux.HandleFunc("/noaa-enc/osm-regions", h.handleOSMRegions)
-}
-
-// handleOSMRegions returns a tiny JSON snapshot the frontend polls
-// so it can bump the OSM tile URL's cache-bust token when a new
-// region finishes parsing. Without that, blank tiles cached during
-// the "still loading" window stay stuck in the browser HTTP cache
-// long after the FeatureSet is ready to render them.
-//
-//	GET /noaa-enc/osm-regions
-//	{"epoch": 3, "loaded": ["us-new-york"], "failed": []}
-func (h *ENCHandlers) handleOSMRegions(w http.ResponseWriter, r *http.Request) {
-	mgr := h.renderer.OSMRegionManager()
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	if mgr == nil {
-		_, _ = w.Write([]byte(`{"epoch":0,"loaded":[]}` + "\n"))
-		return
-	}
-	snap := mgr.Snapshot()
-	if err := json.NewEncoder(w).Encode(snap); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 }
 
 // handleOSMTile serves a 256×256 PNG containing only the OSM vector

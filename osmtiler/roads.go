@@ -23,7 +23,7 @@ const (
 	RoadPath // pedestrian/footway/cycleway/path/etc.
 )
 
-func roadKindFor(highway string) RoadKind {
+func RoadKindFor(highway string) RoadKind {
 	switch highway {
 	case "motorway", "motorway_link":
 		return RoadMotorway
@@ -171,7 +171,7 @@ func shieldMinZoom(k RoadKind) int {
 // Country-specific shield shapes (US interstate trefoil, UK motorway
 // blue) are out of scope; we use a single rounded rectangle whose
 // border matches the road's casing color so the class is still legible.
-func drawShields(dc *gg.Context, fs *FeatureSet, z, x, y int,
+func drawShields(dc *gg.Context, features []Feature, z, x, y int,
 	tMinLon, tMinLat, tMaxLon, tMaxLat float64,
 	placed *[]labelRect) error {
 	if z < 8 {
@@ -191,8 +191,8 @@ func drawShields(dc *gg.Context, fs *FeatureSet, z, x, y int,
 	var placedRefs []namedAnchor
 	const minSameRefDist = 220.0
 
-	for i := range fs.Features {
-		f := &fs.Features[i]
+	for i := range features {
+		f := &features[i]
 		if f.Class != ClassRoad || f.Ref == "" {
 			continue
 		}

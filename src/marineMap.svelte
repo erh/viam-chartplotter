@@ -2991,7 +2991,7 @@
       //              busts browser caches without a frontend rebuild.
       //   ?osmv=…  — page-load override (anything different from the default
       //              forces a one-off bust without bumping either constant).
-      const OSM_RENDER_VERSION = "4";
+      const OSM_RENDER_VERSION = "7";
       const osmRenderVersion = (() => {
         if (typeof window === "undefined") return OSM_RENDER_VERSION;
         try {
@@ -3020,38 +3020,10 @@
           source: osmTileSource,
         }),
       });
-      // Poll the server's region-load epoch. Whenever a region
-      // finishes parsing (or fails) the epoch bumps, and we rewrite
-      // the tile URL with an `epoch=N` token + tell OL to refresh
-      // the source so blank tiles cached during the "still loading"
-      // window get replaced by real renders on next paint.
-      let lastOsmEpoch = -1;
-      const pollOsmEpoch = async () => {
-        try {
-          const res = await fetch("/noaa-enc/osm-regions", { cache: "no-store" });
-          if (!res.ok) return;
-          const data = await res.json();
-          const epoch = typeof data.epoch === "number" ? data.epoch : 0;
-          if (epoch !== lastOsmEpoch) {
-            lastOsmEpoch = epoch;
-            osmTileParams.set("epoch", String(epoch));
-            osmTileSource.setUrl(
-              `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
-            );
-            // setUrl alone leaves OL's in-memory tile cache intact;
-            // refresh() drops it so visible tiles re-request at the
-            // new URL.
-            osmTileSource.refresh();
-          }
-        } catch {
-          // Network blips are fine — we'll retry on the next tick.
-        }
-      };
-      pollOsmEpoch();
-      // The interval lives for the page's lifetime — browser clears it
-      // on unload. We don't register an onDestroy here because
-      // setupLayers runs past Svelte's component-init phase.
-      window.setInterval(pollOsmEpoch, 5000);
+      // OSM data is now ingested into MongoDB ahead of time, so there's
+      // no "still loading" window to poll for — the tile either renders
+      // or the server has no data. The osmv URL param + osm-render
+      // version bump handles cache-busting across deploys.
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",

@@ -20,7 +20,7 @@ func TestAssembleRings_SingleClosedWay(t *testing.T) {
 	coords := map[osm.WayID][]LonLat{
 		1: pts(0, 0, 1, 0, 1, 1, 0, 1, 0, 0),
 	}
-	got := assembleRings([]osm.WayID{1}, coords)
+	got := AssembleOuterRings([]osm.WayID{1}, coords)
 	if len(got) != 1 {
 		t.Fatalf("rings=%d, want 1", len(got))
 	}
@@ -37,7 +37,7 @@ func TestAssembleRings_TwoWaysHeadToTail(t *testing.T) {
 		1: pts(0, 0, 1, 0, 1, 1),
 		2: pts(1, 1, 0, 1, 0, 0),
 	}
-	got := assembleRings([]osm.WayID{1, 2}, coords)
+	got := AssembleOuterRings([]osm.WayID{1, 2}, coords)
 	if len(got) != 1 {
 		t.Fatalf("rings=%d, want 1", len(got))
 	}
@@ -57,7 +57,7 @@ func TestAssembleRings_ReversedSecondWay(t *testing.T) {
 		1: pts(0, 0, 1, 0, 1, 1),
 		2: pts(0, 0, 0, 1, 1, 1),
 	}
-	got := assembleRings([]osm.WayID{1, 2}, coords)
+	got := AssembleOuterRings([]osm.WayID{1, 2}, coords)
 	if len(got) != 1 {
 		t.Fatalf("rings=%d, want 1", len(got))
 	}
@@ -72,7 +72,7 @@ func TestAssembleRings_TwoIndependentRings(t *testing.T) {
 		1: pts(0, 0, 1, 0, 1, 1, 0, 1, 0, 0),
 		2: pts(10, 10, 11, 10, 11, 11, 10, 11, 10, 10),
 	}
-	got := assembleRings([]osm.WayID{1, 2}, coords)
+	got := AssembleOuterRings([]osm.WayID{1, 2}, coords)
 	if len(got) != 2 {
 		t.Fatalf("rings=%d, want 2", len(got))
 	}
@@ -84,7 +84,7 @@ func TestAssembleRings_UnclosedDropped(t *testing.T) {
 	coords := map[osm.WayID][]LonLat{
 		1: pts(0, 0, 1, 0, 1, 1), // open chain, no partner
 	}
-	got := assembleRings([]osm.WayID{1}, coords)
+	got := AssembleOuterRings([]osm.WayID{1}, coords)
 	if len(got) != 0 {
 		t.Fatalf("rings=%d, want 0 (unclosed must be dropped)", len(got))
 	}
@@ -96,7 +96,7 @@ func TestAssembleRings_MissingMemberWay(t *testing.T) {
 	coords := map[osm.WayID][]LonLat{
 		1: pts(0, 0, 1, 0, 1, 1, 0, 1, 0, 0),
 	}
-	got := assembleRings([]osm.WayID{1, 999}, coords)
+	got := AssembleOuterRings([]osm.WayID{1, 999}, coords)
 	if len(got) != 1 {
 		t.Fatalf("rings=%d, want 1 (missing member tolerated)", len(got))
 	}

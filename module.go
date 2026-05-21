@@ -20,7 +20,8 @@ import (
 
 	"github.com/erh/vmodutils"
 
-	"github.com/erh/viam-chartplotter/osmtiler"
+	"go.mongodb.org/mongo-driver/mongo"
+	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
 )
 
 //go:embed dist
@@ -61,7 +62,26 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// out of the box. Override with a different URL to point at a
 	// staging mirror.
 	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL)
+	// Mongo connection for the OSM tile underlay. Config attribute
+	// wins, env var (MONGO_URI) is the dev-friendly fallback so you
+	// don't have to wire it into config every time. Same idea for
+	// db/coll names; both default to "osm"/"features" when neither
+	// config nor env is set.
+	mongoURI := firstNonEmpty(config.Attributes.String("mongo_uri"), os.Getenv("MONGO_URI"))
+	mongoDB := firstNonEmpty(config.Attributes.String("mongo_db"), os.Getenv("MONGO_DB"), "osm")
+	mongoColl := firstNonEmpty(config.Attributes.String("mongo_coll"), os.Getenv("MONGO_COLL"), "features")
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL, mongoURI, mongoDB, mongoColl)
+}
+
+// firstNonEmpty returns the first non-empty string in vals, or "".
+// Used for the layered "config → env → default" knob resolution.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -138,6 +158,9 @@ func StartChartplotterServer(
 	draftFt float64,
 	myBoatIconPath string,
 	windCDNBaseURL string,
+	mongoURI string,
+	mongoDB string,
+	mongoColl string,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -193,18 +216,26 @@ func StartChartplotterServer(
 		return nil, err
 	}
 	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, draftFt)
-	// OSM underlay layer — region manager downloads Geofabrik state
-	// extracts on demand into <root>/osm/, parses them, and keeps the
-	// resulting FeatureSets resident. The first tile request to a new
-	// state triggers the download (1–3 GB, then ~5–10 min to parse);
-	// subsequent requests serve immediately. Water is omitted by design
-	// so the chart's depth bands show through.
-	osmRegions, err := osmtiler.NewRegionManager(filepath.Join(root, "osm"), "", logger.Sublogger("osmRegions"))
-	if err != nil {
-		logger.Warnf("osm underlay disabled: %v", err)
+	// OSM underlay layer — render by querying a MongoDB collection
+	// populated offline by `osmtools ingest`. The URI is the only
+	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
+	// refuses to render (transparent fallback only) and the frontend
+	// layer is effectively a no-op.
+	if mongoURI != "" {
+		mctx, mcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer mcancel()
+		mclient, err := mongo.Connect(mctx, mongoopts.Client().ApplyURI(mongoURI))
+		if err != nil {
+			logger.Warnf("osm underlay disabled: mongo connect: %v", err)
+		} else if err := mclient.Ping(mctx, nil); err != nil {
+			logger.Warnf("osm underlay disabled: mongo ping: %v", err)
+		} else {
+			coll := mclient.Database(mongoDB).Collection(mongoColl)
+			encRenderer.SetOSMCollection(coll)
+			logger.Infof("osm underlay: mongo %s.%s", mongoDB, mongoColl)
+		}
 	} else {
-		encRenderer.SetOSMRegionManager(osmRegions)
-		logger.Infof("osm underlay cache: %s", filepath.Join(root, "osm"))
+		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
 	}
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)
