@@ -1,10 +1,12 @@
 # Self-hosted OSM raster tiles
 
-A pure-Go pipeline to render our own OSM raster tiles in this module, with
-**no water coloring** (so the chart renderer's water layer shows through).
-Whole-planet coverage. Not byte-identical to tile.openstreetmap.org, but
-visually equivalent at chart-use distance, using openstreetmap-carto's
-palette and zoom thresholds as the spec.
+A pure-Go pipeline to render our own OSM raster tiles in this module.
+Water polygons (`natural=water`, `place=sea|ocean`, `landuse=reservoir|basin`,
+etc.) are kept and rendered as a **transparent carve** through the yellow
+land base, so the chart renderer's depth shading shows through wherever
+OSM says it's water. Whole-planet coverage. Not byte-identical to
+tile.openstreetmap.org, but visually equivalent at chart-use distance,
+using openstreetmap-carto's palette and zoom thresholds as the spec.
 
 ## Pipeline
 
@@ -61,28 +63,35 @@ Smallest end-to-end slice that produces recognisable tiles.
 
 ## Filter rules — what we keep, what we drop
 
-Kept tag families (mirrors osm-carto's `project.mml` minus water):
+**Ingest keeps everything.** Every tagged node, every tagged way, and every
+multipolygon relation lands in Mongo with its full tag map preserved on
+the document. Class is pre-computed at ingest for the render fast path,
+but adding a new render rule (or changing an existing one) is a code +
+re-classify pass, **never a PBF re-ingest**. The only things filtered out
+are coordinate-only nodes (geometry references for ways) and non-
+multipolygon relations like bus routes and boundary chains, which carry no
+geometry that the area renderer can use.
 
-- `highway=*` (incl. paths, tracks)
-- `building=*`
-- `landuse=*` (except `reservoir`, `basin`)
-- `leisure=*` (except `swimming_pool`)
-- `natural=wood|peak|cliff|tree|...` (no `water|coastline|bay|strait|wetland`)
-- `amenity`, `shop`, `tourism`, `historic`, `man_made` (for POIs)
-- `place=country|state|city|town|village|hamlet|island|locality`
-- `boundary=administrative` (admin lines)
-- `railway=*`
-- `aeroway=*`
+Classes recognised by `Classify` today (others fall through to `ClassSkip`
+but are still stored):
 
-Dropped explicitly (the "no water" rule):
-
-- `natural=water|coastline|bay|strait|spring|hot_spring|geyser|wetland`
-- `waterway=*`
-- `place=sea|ocean`
-- `landuse=reservoir|basin|salt_pond`
-- `leisure=swimming_pool|water_park|marina|swimming_area`
-- `man_made=pier|breakwater|groyne` (debatable — these straddle land/water,
-  revisit during render eval)
+- `ClassRoad` — `highway=*`
+- `ClassBuilding` — `building=*`
+- `ClassLanduse` — `landuse=*`
+- `ClassLeisure` — `leisure=*`
+- `ClassNatural` — `natural=wood|peak|cliff|tree|...`
+- `ClassWater` — `natural=water|coastline|bay|strait|wetland`,
+  `waterway=*`, `place=sea|ocean`, `landuse=reservoir|basin|salt_pond`,
+  `leisure=swimming_pool|water_park|marina|swimming_area`.
+  Rendered as a transparent carve through the yellow base; see
+  `carveWater` in `osmtiler/render.go`.
+- `ClassPlace` — `place=country|city|town|village|hamlet|island|locality`
+- `ClassPOI` — `amenity`, `shop`, `tourism`, `historic`, `man_made` (except
+  `pier|breakwater|groyne`, which are deliberately suppressed because they
+  straddle the chart's water boundary)
+- `ClassAdmin` — `boundary=administrative`
+- `ClassRailway` — `railway=*`
+- `ClassAeroway` — `aeroway=*`
 
 ## Index format
 

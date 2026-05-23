@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"image"
 	"image/color"
 	"image/png"
 	"math"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fogleman/gg"
@@ -41,6 +41,11 @@ type ENCRenderer struct {
 
 	mu     sync.Mutex
 	charts map[string]*chartEntry
+
+	// noMongoBlankCount counts blank OSM tiles served because no
+	// MongoDB collection is attached. Used to sample a warning at
+	// 1/20 so misconfigured deployments get noticed without spamming.
+	noMongoBlankCount atomic.Uint64
 }
 
 type chartEntry struct {
@@ -790,7 +795,7 @@ const ENCRenderRulesVersion = 4
 // the frontend URL pattern bumps `?osmv=` and busts browser caches on the
 // next page load — otherwise a Go-only bump leaves stale tiles cached
 // client-side for up to a day.
-const OSMRenderRulesVersion = 7
+const OSMRenderRulesVersion = 12
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -1251,6 +1256,11 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 // decide between long-cache (real render) and no-cache (fallback).
 func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
 	t0 := time.Now()
+	if r.osm == nil {
+		if n := r.noMongoBlankCount.Add(1); n%20 == 1 && r.logger != nil {
+			r.logger.Warnf("osm-tile served blank (no mongo collection attached); %d such tiles so far", n)
+		}
+	}
 	if r.osm != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -1266,11 +1276,6 @@ func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
 		} else {
 			data, err := osmtiler.RenderTileFromFeatures(features, z, x, y)
 			if err == nil {
-				if masked, mErr := r.maskChartWater(data, z, x, y); mErr == nil {
-					data = masked
-				} else if r.logger != nil {
-					r.logger.Warnf("osm-tile water mask z=%d x=%d y=%d: %v", z, x, y, mErr)
-				}
 				if r.logger != nil && time.Since(t0) > 200*time.Millisecond {
 					r.logger.Infof("osm-tile rendered z=%d x=%d y=%d in %s (%d bytes, %d features)",
 						z, x, y, time.Since(t0).Round(time.Millisecond), len(data), len(features))
@@ -1288,126 +1293,6 @@ func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return buf.Bytes(), false, nil
-}
-
-// maskChartWater decodes the rendered OSM PNG, sets every pixel that
-// the chart claims is water (DEPARE / DRGARE / LOKBSN minus LNDARE /
-// BUAARE / BUISGL) to fully transparent, and re-encodes. The OSM
-// renderer paints a yellow land base under everything; without this
-// post-pass the chart's depth shading underneath never shows through.
-func (r *ENCRenderer) maskChartWater(pngBytes []byte, z, x, y int) ([]byte, error) {
-	img, err := png.Decode(bytes.NewReader(pngBytes))
-	if err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-
-	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
-	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
-	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
-	project := func(lon, lat float64) (float64, float64) {
-		mx, my := lonLatToMerc(lon, lat)
-		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
-		py := (tileYmax - my) / (tileYmax - tileYmin) * 256
-		return px, py
-	}
-	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
-	mask := r.buildChartWaterMask(minLon, minLat, maxLon, maxLat, bbox, project)
-
-	srcBounds := img.Bounds()
-	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
-	for py := 0; py < 256; py++ {
-		for px := 0; px < 256; px++ {
-			_, _, _, ma := mask.At(px, py).RGBA()
-			if ma > 0 {
-				// Water — leave transparent.
-				continue
-			}
-			r8, g8, b8, a8 := img.At(srcBounds.Min.X+px, srcBounds.Min.Y+py).RGBA()
-			out.SetNRGBA(px, py, color.NRGBA{
-				R: uint8(r8 >> 8),
-				G: uint8(g8 >> 8),
-				B: uint8(b8 >> 8),
-				A: uint8(a8 >> 8),
-			})
-		}
-	}
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, out); err != nil {
-		return nil, fmt.Errorf("encode: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-// buildChartWaterMask rasterises a binary water mask for the supplied
-// tile: opaque pixels where the chart's DEPARE / DRGARE / LOKBSN
-// polygons say water, minus any LNDARE / BUAARE / BUISGL that fall
-// inside (overview-cell DEPARE polygons have imprecise hole rings and
-// would otherwise mask out actual land at the southern tip of
-// Manhattan and similar spots).
-func (r *ENCRenderer) buildChartWaterMask(
-	minLon, minLat, maxLon, maxLat float64,
-	bbox s57.Bounds,
-	project func(lon, lat float64) (float64, float64),
-) image.Image {
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
-
-	waterCtx := gg.NewContext(256, 256)
-	waterCtx.SetColor(color.RGBA{0, 0, 0, 0})
-	waterCtx.Clear()
-	waterCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
-
-	landCtx := gg.NewContext(256, 256)
-	landCtx.SetColor(color.RGBA{0, 0, 0, 0})
-	landCtx.Clear()
-	landCtx.SetColor(color.RGBA{0, 0, 0, 0xFF})
-
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
-			geom := f.Geometry()
-			if geom.Type != s57.GeometryTypePolygon {
-				continue
-			}
-			if isOversizedPolygon(geom.Coordinates, bbox, 200) {
-				continue
-			}
-			if isDegeneratePixelPolygon(geom.Coordinates, project) {
-				continue
-			}
-			switch f.ObjectClass() {
-			case "DEPARE", "DRGARE", "LOKBSN":
-				tracePolygonPath(waterCtx, geom.Coordinates, project)
-				waterCtx.SetFillRuleEvenOdd()
-				waterCtx.Fill()
-			case "LNDARE", "BUAARE", "BUISGL":
-				tracePolygonPath(landCtx, geom.Coordinates, project)
-				landCtx.SetFillRuleEvenOdd()
-				landCtx.Fill()
-			}
-		}
-	}
-
-	water := waterCtx.Image()
-	land := landCtx.Image()
-	out := image.NewNRGBA(image.Rect(0, 0, 256, 256))
-	for py := 0; py < 256; py++ {
-		for px := 0; px < 256; px++ {
-			_, _, _, wa := water.At(px, py).RGBA()
-			if wa == 0 {
-				continue
-			}
-			_, _, _, la := land.At(px, py).RGBA()
-			if la > 0 {
-				continue // land wins
-			}
-			out.SetNRGBA(px, py, color.NRGBA{R: 0, G: 0, B: 0, A: 0xFF})
-		}
-	}
-	return out
 }
 
 // splitRings reconstructs ring boundaries in an S-57 polygon coordinate array.

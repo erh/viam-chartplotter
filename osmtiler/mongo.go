@@ -165,14 +165,15 @@ func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int,
 // can share the same conversion path.
 func DecodeFeature(raw bson.Raw) (Feature, error) {
 	var d struct {
-		Class        string    `bson:"class"`
-		Kind         string    `bson:"kind"`
-		Name         string    `bson:"name"`
-		Ref          string    `bson:"ref"`
-		RoadKind     string    `bson:"roadKind"`
-		MinZoom      int       `bson:"minZoom"`
-		MinLabelZoom int       `bson:"minLabelZoom"`
-		BBox         []float64 `bson:"bbox"`
+		Class        string            `bson:"class"`
+		Kind         string            `bson:"kind"`
+		Name         string            `bson:"name"`
+		Ref          string            `bson:"ref"`
+		RoadKind     string            `bson:"roadKind"`
+		MinZoom      int               `bson:"minZoom"`
+		MinLabelZoom int               `bson:"minLabelZoom"`
+		BBox         []float64         `bson:"bbox"`
+		Tags         map[string]string `bson:"tags"`
 		Geometry     struct {
 			Type        string `bson:"type"`
 			Coordinates bson.A `bson:"coordinates"`
@@ -194,6 +195,7 @@ func DecodeFeature(raw bson.Raw) (Feature, error) {
 		MinZoom:      uint8(d.MinZoom),
 		MinLabelZoom: uint8(d.MinLabelZoom),
 		RoadKind:     RoadKindFromString(d.RoadKind),
+		Tags:         d.Tags,
 	}
 	if len(d.BBox) == 4 {
 		feat.MinLon = d.BBox[0]
@@ -280,6 +282,8 @@ func ClassFromString(s string) Class {
 		return ClassRailway
 	case "aeroway":
 		return ClassAeroway
+	case "water":
+		return ClassWater
 	}
 	return ClassSkip
 }

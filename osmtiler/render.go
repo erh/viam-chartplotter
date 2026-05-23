@@ -36,7 +36,7 @@ const bufferedSize = TileSize + 2*LabelBuffer
 
 // RenderTileFromFeatures rasterises the (z, x, y) tile from a flat
 // feature slice. Background is the yellow land base; the chart layer
-// underneath provides water. Returns PNG bytes.
+// underneath provides water via maskChartWater. Returns PNG bytes.
 //
 // Geometry uses the painter's algorithm with per-class fills/strokes
 // from a v0.1 flat palette. After geometry, a label pass paints names
@@ -62,6 +62,13 @@ func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
 	eMinLat, eMaxLat := tMinLat-bufDeg, tMaxLat+bufDeg
 
 	zu8 := uint8(z)
+
+	// Water carve pre-pass: ClassWater polygons (natural=water, place=sea,
+	// landuse=reservoir, …) punch transparency into the yellow base so the
+	// chart's depth shading shows through. Done before any other features
+	// paint so roads/buildings/labels over water still appear on top.
+	carveWater(dc, features, z, x, y, zu8, eMinLon, eMinLat, eMaxLon, eMaxLat)
+
 	type roadIdx struct {
 		idx   int
 		order int
@@ -70,6 +77,9 @@ func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
 
 	for i := range features {
 		f := &features[i]
+		if f.Class == ClassWater {
+			continue // already handled by carveWater
+		}
 		if zu8 < f.MinZoom {
 			continue
 		}
@@ -118,6 +128,64 @@ func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+
+// carveWater rasterises every ClassWater polygon into a temporary mask
+// and uses it to clear those pixels in dc to transparent. The yellow
+// land base set by Clear() stays everywhere else; the chart layer below
+// the OSM tile shows through wherever water carved.
+//
+// Why a separate mask context: gg.Context's default source-over composite
+// can't reduce destination alpha (drawing transparent paint is a no-op).
+// We rasterise the carve set once, then image/draw.Src through the mask
+// to replace the dst pixels with fully transparent.
+//
+// Buffer offset (LabelBuffer) is applied via the same translate trick
+// as the main canvas so polygons line up regardless of which canvas
+// rendered them.
+func carveWater(dc *gg.Context, features []Feature, z, x, y int, zu8 uint8, eMinLon, eMinLat, eMaxLon, eMaxLat float64) {
+	var any bool
+	mask := gg.NewContext(bufferedSize, bufferedSize)
+	mask.Translate(LabelBuffer, LabelBuffer)
+	mask.SetColor(color.NRGBA{R: 0, G: 0, B: 0, A: 0xFF})
+	for i := range features {
+		f := &features[i]
+		if f.Class != ClassWater || f.Kind != GeomPolygon {
+			continue
+		}
+		if zu8 < f.MinZoom {
+			continue
+		}
+		if f.MaxLon < eMinLon || f.MinLon > eMaxLon ||
+			f.MaxLat < eMinLat || f.MinLat > eMaxLat {
+			continue
+		}
+		moved := false
+		for _, c := range f.Coords {
+			px, py := LonLatToTilePx(c.Lon, c.Lat, z, x, y)
+			if !moved {
+				mask.MoveTo(px, py)
+				moved = true
+			} else {
+				mask.LineTo(px, py)
+			}
+		}
+		if !moved {
+			continue
+		}
+		mask.ClosePath()
+		mask.Fill()
+		any = true
+	}
+	if !any {
+		return
+	}
+	dst, ok := dc.Image().(*image.RGBA)
+	if !ok {
+		return // gg.Context always returns *image.RGBA; defensive
+	}
+	transparent := image.NewUniform(color.RGBA{R: 0, G: 0, B: 0, A: 0})
+	draw.DrawMask(dst, dst.Bounds(), transparent, image.Point{}, mask.Image(), image.Point{}, draw.Src)
+}
 
 // labelRect is an axis-aligned bounding box used by the within-tile
 // collision tracker. Line labels supply the AABB of their rotated

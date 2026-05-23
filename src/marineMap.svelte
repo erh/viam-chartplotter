@@ -2991,7 +2991,7 @@
       //              busts browser caches without a frontend rebuild.
       //   ?osmv=…  — page-load override (anything different from the default
       //              forces a one-off bust without bumping either constant).
-      const OSM_RENDER_VERSION = "7";
+      const OSM_RENDER_VERSION = "12";
       const osmRenderVersion = (() => {
         if (typeof window === "undefined") return OSM_RENDER_VERSION;
         try {

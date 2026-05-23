@@ -7,10 +7,11 @@ package osmtiler
 import "github.com/paulmach/osm"
 
 // Class labels an OSM feature for the self-hosted tile renderer.
-// The classifier is the choke point that implements the "no water"
-// rule for our own tiles: anything water-related collapses to
-// ClassSkip before it reaches geometry assembly, so the chart
-// renderer's water layer shows through unobstructed.
+// Water-tagged features land in ClassWater so the renderer can carve
+// them out of the yellow land base — see the render path for the
+// painter's order and OSM_TILES_PLAN.md for the rationale. Everything
+// else returns ClassSkip and is stored anyway (we keep the full tag
+// map so render rules can be extended later without a re-ingest).
 type Class uint8
 
 const (
@@ -25,13 +26,14 @@ const (
 	ClassAdmin // boundary=administrative — admin line
 	ClassRailway
 	ClassAeroway
+	ClassWater // natural=water|coastline|bay|... — carved from yellow base
 
 	ClassCount
 )
 
 var classNames = [ClassCount]string{
 	"skip", "road", "building", "landuse", "leisure",
-	"natural", "place", "poi", "admin", "railway", "aeroway",
+	"natural", "place", "poi", "admin", "railway", "aeroway", "water",
 }
 
 func (c Class) String() string {
@@ -42,11 +44,12 @@ func (c Class) String() string {
 }
 
 // Classify returns the renderable class for an OSM tag set, or
-// ClassSkip if the feature should not be drawn. Water-related tag
-// combinations always return ClassSkip.
+// ClassSkip if the feature has no class we currently render.
+// ClassSkip features are still stored (the renderer just skips them);
+// adding a render rule for them later is a code change, not a re-ingest.
 func Classify(tags osm.Tags) Class {
 	if isWater(tags) {
-		return ClassSkip
+		return ClassWater
 	}
 	if v := tags.Find("highway"); v != "" {
 		return ClassRoad

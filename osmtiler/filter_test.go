@@ -50,7 +50,7 @@ func TestClassify_KeptFeatures(t *testing.T) {
 	}
 }
 
-func TestClassify_WaterAlwaysSkipped(t *testing.T) {
+func TestClassify_WaterReturnsClassWater(t *testing.T) {
 	cases := []struct {
 		name string
 		tags osm.Tags
@@ -70,15 +70,15 @@ func TestClassify_WaterAlwaysSkipped(t *testing.T) {
 		{"water park", tags("leisure", "water_park")},
 		{"marina", tags("leisure", "marina", "name", "Boat Basin")},
 		{"swimming area", tags("leisure", "swimming_area")},
-		// Mixed cases: water tag plus a "keep" tag still drops, because
-		// the water classifier runs first.
+		// Mixed cases: water tag plus a "keep" tag still resolves to
+		// water, because the water classifier runs first.
 		{"highway over river", tags("highway", "service", "waterway", "stream")},
 		{"named lake with place tag", tags("natural", "water", "place", "city")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Classify(tc.tags); got != ClassSkip {
-				t.Fatalf("Classify(%v) = %v, want ClassSkip", tc.tags, got)
+			if got := Classify(tc.tags); got != ClassWater {
+				t.Fatalf("Classify(%v) = %v, want ClassWater", tc.tags, got)
 			}
 		})
 	}

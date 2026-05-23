@@ -20,10 +20,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,6 +66,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gentile: %v\n", err)
 			os.Exit(1)
 		}
+	case "downloadpbfs":
+		if err := runDownloadPBFs(args); err != nil {
+			fmt.Fprintf(os.Stderr, "downloadpbfs: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		topUsage()
 	default:
@@ -75,9 +84,10 @@ func topUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: osmtools <subcommand> [flags]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  ingest    Read a .osm.pbf and upsert kept features into MongoDB")
-	fmt.Fprintln(os.Stderr, "  query     Show + count the features a given tile would query for")
-	fmt.Fprintln(os.Stderr, "  gentile   Render a tile PNG by querying the MongoDB collection")
+	fmt.Fprintln(os.Stderr, "  ingest        Read a .osm.pbf and upsert kept features into MongoDB")
+	fmt.Fprintln(os.Stderr, "  query         Show + count the features a given tile would query for")
+	fmt.Fprintln(os.Stderr, "  gentile       Render a tile PNG by querying the MongoDB collection")
+	fmt.Fprintln(os.Stderr, "  downloadpbfs  Fetch every Geofabrik .osm.pbf for a continent key")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, `Run "osmtools <subcommand> --help" for subcommand flags.`)
 }
@@ -93,6 +103,8 @@ func runIngest(args []string) error {
 	region := fs.String("region", "", "region key recorded on every document (defaults to PBF basename)")
 	batchSize := fs.Int("batch", 1000, "bulk upsert batch size")
 	procs := fs.Int("procs", runtime.NumCPU(), "PBF decoder workers")
+	force := fs.Bool("force", false,
+		"re-ingest even when an ingest-meta doc says this region's PBF hash already matches")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,6 +116,10 @@ func runIngest(args []string) error {
 		base := filepath.Base(*pbfPath)
 		base = strings.TrimSuffix(base, ".osm.pbf")
 		base = strings.TrimSuffix(base, ".pbf")
+		// Geofabrik names downloads `<leaf>-latest.osm.pbf`; if the
+		// file still has that trailing -latest we don't want it
+		// leaking into the region key recorded in MongoDB.
+		base = strings.TrimSuffix(base, "-latest")
 		*region = base
 		fmt.Fprintf(os.Stderr, "no --region given, using %q derived from filename\n", *region)
 	}
@@ -119,6 +135,7 @@ func runIngest(args []string) error {
 		region:    *region,
 		batchSize: *batchSize,
 		procs:     *procs,
+		force:     *force,
 	})
 }
 
@@ -130,6 +147,7 @@ type ingestOpts struct {
 	region    string
 	batchSize int
 	procs     int
+	force     bool
 }
 
 // featureDoc is the BSON shape we write to MongoDB. _id is a stable
@@ -140,20 +158,21 @@ type ingestOpts struct {
 // index on it and use $geoIntersects to query features for a tile bbox
 // without rebuilding any of this in application code.
 type featureDoc struct {
-	ID           string      `bson:"_id"`
-	Region       string      `bson:"region"`
-	OSMType      string      `bson:"osmType"`
-	OSMID        int64       `bson:"osmID"`
-	RingIndex    int         `bson:"ringIndex,omitempty"`
-	Class        string      `bson:"class"`
-	Kind         string      `bson:"kind"`
-	Name         string      `bson:"name,omitempty"`
-	Ref          string      `bson:"ref,omitempty"`
-	RoadKind     string      `bson:"roadKind,omitempty"`
-	MinZoom      int         `bson:"minZoom"`
-	MinLabelZoom int         `bson:"minLabelZoom"`
-	BBox         [4]float64  `bson:"bbox"` // [minLon, minLat, maxLon, maxLat]
-	Geometry     interface{} `bson:"geometry"`
+	ID           string            `bson:"_id"`
+	Region       string            `bson:"region"`
+	OSMType      string            `bson:"osmType"`
+	OSMID        int64             `bson:"osmID"`
+	RingIndex    int               `bson:"ringIndex,omitempty"`
+	Class        string            `bson:"class"`
+	Kind         string            `bson:"kind"`
+	Name         string            `bson:"name,omitempty"`
+	Ref          string            `bson:"ref,omitempty"`
+	RoadKind     string            `bson:"roadKind,omitempty"`
+	MinZoom      int               `bson:"minZoom"`
+	MinLabelZoom int               `bson:"minLabelZoom"`
+	BBox         [4]float64        `bson:"bbox"` // [minLon, minLat, maxLon, maxLat]
+	Geometry     interface{}       `bson:"geometry"`
+	Tags         map[string]string `bson:"tags,omitempty"`
 }
 
 func ingest(ctx context.Context, opts ingestOpts) error {
@@ -178,6 +197,27 @@ func ingest(ctx context.Context, opts ingestOpts) error {
 
 	if err := ensureFeatureIndexes(ctx, coll); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
+	}
+
+	// 1b. Hash the PBF and check ingest-meta — if a previous ingest
+	//     of this region recorded the same hash and the collection
+	//     still has roughly the expected number of feature docs,
+	//     there's nothing new to write. Saves ~minutes per re-run.
+	hashStart := time.Now()
+	pbfHash, pbfSize, err := hashFile(opts.pbfPath)
+	if err != nil {
+		return fmt.Errorf("hash pbf: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "pbf hash: sha256:%s… (%s, %s)\n",
+		pbfHash[:12], humanBytes(pbfSize), time.Since(hashStart).Round(time.Millisecond))
+
+	if !opts.force {
+		if skip, why := shouldSkipIngest(ctx, coll, opts.region, pbfHash); skip {
+			fmt.Fprintf(os.Stderr, "skip: %s\n", why)
+			return nil
+		} else if why != "" {
+			fmt.Fprintf(os.Stderr, "re-ingest: %s\n", why)
+		}
 	}
 
 	// 2. Pass 1 — relations only. Identify the multipolygons we'll
@@ -215,7 +255,104 @@ func ingest(ctx context.Context, opts ingestOpts) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "done: %d upserts (%d batches)\n", w.upserted, w.batches)
 	}
+
+	// Persist the ingest-meta so a future run on the same PBF can
+	// short-circuit. Count the actual region docs in the collection
+	// (BulkWrite Ordered=false can have left a few behind) so the
+	// skip-tolerance check has a true baseline.
+	actualCount, err := coll.CountDocuments(ctx, bson.M{"region": opts.region})
+	if err != nil {
+		return fmt.Errorf("post-count: %w", err)
+	}
+	if err := writeIngestMeta(ctx, coll, opts.region, pbfHash, pbfSize, actualCount); err != nil {
+		return fmt.Errorf("write ingest meta: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "ingest-meta: region=%s hash=%s… docs=%d\n",
+		opts.region, pbfHash[:12], actualCount)
 	return nil
+}
+
+// ----- ingest-meta helpers -------------------------------------------------
+
+// ingestMetaID returns the _id we use for the per-region meta doc.
+// Lives in the same collection as the features so we don't have to
+// configure / index a second collection; the `_ingest_meta:` prefix
+// guarantees no collision with feature documents (whose ids look
+// like "<region>:<osmType>:<osmID>[:<ring>]").
+func ingestMetaID(region string) string { return "_ingest_meta:" + region }
+
+// shouldSkipIngest returns (true, why) when the recorded meta says
+// this PBF has already been fully ingested and the collection still
+// has ~the expected number of region docs. Returns (false, why)
+// when we recognize the region but think it needs re-ingest, with
+// `why` describing the reason. (false, "") means no prior meta.
+func shouldSkipIngest(ctx context.Context, coll *mongo.Collection, region, pbfHash string) (bool, string) {
+	var meta struct {
+		PBFHash  string `bson:"pbfHash"`
+		DocCount int64  `bson:"docCount"`
+	}
+	err := coll.FindOne(ctx, bson.M{"_id": ingestMetaID(region)}).Decode(&meta)
+	if err != nil {
+		return false, ""
+	}
+	if meta.PBFHash != pbfHash {
+		return false, fmt.Sprintf("PBF hash changed (was %s… now %s…)",
+			truncHash(meta.PBFHash), truncHash(pbfHash))
+	}
+	actual, err := coll.CountDocuments(ctx, bson.M{"region": region})
+	if err != nil {
+		return false, fmt.Sprintf("count docs: %v", err)
+	}
+	// Tolerate up to 5% missing (manual cleanup, partial bulk-write
+	// rejects, etc.). Below that we re-ingest to refill.
+	minOK := meta.DocCount * 95 / 100
+	if actual < minOK {
+		return false, fmt.Sprintf("doc count too low (have %d, expected ~%d, recorded %d)",
+			actual, minOK, meta.DocCount)
+	}
+	return true, fmt.Sprintf("already ingested: hash sha256:%s… matches, %d docs in collection (recorded %d)",
+		truncHash(pbfHash), actual, meta.DocCount)
+}
+
+// writeIngestMeta upserts the meta document for one region.
+func writeIngestMeta(ctx context.Context, coll *mongo.Collection, region, pbfHash string, pbfSize, docCount int64) error {
+	doc := bson.M{
+		"_id":        ingestMetaID(region),
+		"region":     region,
+		"pbfHash":    pbfHash,
+		"pbfSize":    pbfSize,
+		"docCount":   docCount,
+		"ingestedAt": time.Now(),
+	}
+	_, err := coll.UpdateOne(ctx,
+		bson.M{"_id": doc["_id"]},
+		bson.M{"$set": doc},
+		options.Update().SetUpsert(true))
+	return err
+}
+
+// hashFile streams a SHA-256 over the file at path and returns the
+// hex digest plus the number of bytes read. Used to detect "is this
+// PBF byte-identical to the one we ingested before?"
+func hashFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+func truncHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 // ----- PBF walk ------------------------------------------------------------
@@ -239,11 +376,14 @@ func scanRelations(ctx context.Context, pbfPath string, procs int) ([]relDesc, m
 	sc.SkipNodes = true
 	sc.SkipWays = true
 	sc.FilterRelation = func(r *osm.Relation) bool {
-		if r.Tags.Find("type") != "multipolygon" {
-			return false
-		}
-		c := osmtiler.Classify(r.Tags)
-		return c != osmtiler.ClassSkip && isAreaClass(c)
+		// Keep every multipolygon. We used to gate on the class
+		// classifier here, which is what made adding a new render
+		// rule a re-ingest event — every refinement we've ever done
+		// needed the relation pass re-run. Storing all multipolygons
+		// is the "ingest cleanly, no filtering" rule from
+		// OSM_TILES_PLAN.md; classification happens at render time
+		// from the stored tag map.
+		return r.Tags.Find("type") == "multipolygon"
 	}
 	defer sc.Close()
 
@@ -301,10 +441,10 @@ func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.W
 		if _, ok := memberWays[wy.ID]; ok {
 			return true
 		}
-		if len(wy.Tags) == 0 {
-			return false
-		}
-		return osmtiler.Classify(wy.Tags) != osmtiler.ClassSkip
+		// Keep every tagged way. The classifier no longer gates here
+		// (was: drop if ClassSkip); see the FilterRelation comment for
+		// the rationale.
+		return len(wy.Tags) > 0
 	}
 	defer sc.Close()
 
@@ -318,11 +458,10 @@ func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.W
 			if len(e.Tags) == 0 {
 				continue
 			}
-			class := osmtiler.Classify(e.Tags)
-			if class == osmtiler.ClassSkip {
-				continue
-			}
-			doc := nodeDoc(opts.region, e, class)
+			// Every tagged node is stored (was: dropped if ClassSkip).
+			// Class is still pre-computed so the renderer fast-path
+			// doesn't have to re-classify from tags per query.
+			doc := nodeDoc(opts.region, e, osmtiler.Classify(e.Tags))
 			if err := w.upsert(ctx, doc); err != nil {
 				return nil, err
 			}
@@ -342,11 +481,8 @@ func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.W
 			if len(e.Tags) == 0 || len(coords) < 2 {
 				continue
 			}
-			class := osmtiler.Classify(e.Tags)
-			if class == osmtiler.ClassSkip {
-				continue
-			}
-			doc := wayDoc(opts.region, e, class, coords)
+			// Every tagged way with valid geometry is stored.
+			doc := wayDoc(opts.region, e, osmtiler.Classify(e.Tags), coords)
 			if err := w.upsert(ctx, doc); err != nil {
 				return nil, err
 			}
@@ -387,6 +523,7 @@ func nodeDoc(region string, n *osm.Node, class osmtiler.Class) featureDoc {
 			"type":        "Point",
 			"coordinates": []float64{n.Lon, n.Lat},
 		},
+		Tags: tagsAsMap(n.Tags),
 	}
 }
 
@@ -413,7 +550,23 @@ func wayDoc(region string, w *osm.Way, class osmtiler.Class, coords []osmtiler.L
 		doc.RoadKind = roadKindName(osmtiler.RoadKindFor(w.Tags.Find("highway")))
 	}
 	doc.Geometry = geometryForRing(kind, coords)
+	doc.Tags = tagsAsMap(w.Tags)
 	return doc
+}
+
+// tagsAsMap copies the osm.Tags slice into a plain map[string]string for
+// BSON storage. Returns nil for an empty input so the BSON ",omitempty"
+// tag elides the field on disk for tagless features (only happens for
+// relation rings that pick up tags from their parent relation).
+func tagsAsMap(tags osm.Tags) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(tags))
+	for _, t := range tags {
+		m[t.Key] = t.Value
+	}
+	return m
 }
 
 // geometryForRing builds a 2dsphere-acceptable GeoJSON object from
@@ -490,6 +643,7 @@ func relRingDoc(region string, rd relDesc, ringIdx int, coords []osmtiler.LonLat
 		MinLabelZoom: int(osmtiler.LabelMinZoom(rd.Class, rd.Tags)),
 		BBox:         bboxOf(coords),
 		Geometry:     geometryForRing("polygon", coords),
+		Tags:         tagsAsMap(rd.Tags),
 	}
 }
 
@@ -656,10 +810,243 @@ func lonLatRing(coords []osmtiler.LonLat) [][]float64 {
 
 func isAreaClass(c osmtiler.Class) bool {
 	switch c {
-	case osmtiler.ClassBuilding, osmtiler.ClassLanduse, osmtiler.ClassLeisure, osmtiler.ClassNatural:
+	case osmtiler.ClassBuilding, osmtiler.ClassLanduse, osmtiler.ClassLeisure, osmtiler.ClassNatural, osmtiler.ClassWater:
 		return true
 	}
 	return false
+}
+
+// ----- downloadpbfs --------------------------------------------------------
+
+func runDownloadPBFs(args []string) error {
+	fs := flag.NewFlagSet("downloadpbfs", flag.ContinueOnError)
+	continent := fs.String("continent", "",
+		"continent key from the static catalog; one of: "+strings.Join(continentNames(), ", "))
+	all := fs.Bool("all", false,
+		"fetch Geofabrik's index-v1.json and download every leaf extract (very large; combine with --parent/--filter to narrow)")
+	parent := fs.String("parent", "",
+		"with --all, restrict to descendants of this Geofabrik id (e.g. 'europe', 'us')")
+	filter := fs.String("filter", "",
+		"with --all, only download extracts whose id contains this substring")
+	includeParents := fs.Bool("include-parents", false,
+		"with --all, also download non-leaf extracts (parent regions are redundant when their children are downloaded)")
+	dir := fs.String("dir", "", "destination directory for the .osm.pbf files (required)")
+	force := fs.Bool("force", false, "re-download files that already exist on disk")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		fs.Usage()
+		return fmt.Errorf("--dir is required")
+	}
+	if (*continent == "" && !*all) || (*continent != "" && *all) {
+		fs.Usage()
+		return fmt.Errorf("exactly one of --continent or --all is required")
+	}
+
+	var sources []pbfSource
+	if *all {
+		got, err := loadGeofabrikIndex(*parent, *filter, *includeParents)
+		if err != nil {
+			return fmt.Errorf("geofabrik index: %w", err)
+		}
+		sources = got
+		label := "geofabrik"
+		if *parent != "" {
+			label += " parent=" + *parent
+		}
+		if *filter != "" {
+			label += " filter=" + *filter
+		}
+		fmt.Fprintf(os.Stderr, "matched %d extracts in %s\n", len(sources), label)
+	} else {
+		got, ok := pbfContinents[*continent]
+		if !ok {
+			return fmt.Errorf("unknown continent %q; valid: %s",
+				*continent, strings.Join(continentNames(), ", "))
+		}
+		sources = got
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("no PBFs matched the filter")
+	}
+	if err := os.MkdirAll(*dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", *dir, err)
+	}
+
+	client := &http.Client{
+		// State / country PBFs can be 1–3 GB on a slow link; keep
+		// the overall budget generous instead of relying on default
+		// keepalive timing.
+		Timeout: 30 * time.Minute,
+	}
+	const userAgent = "viam-chartplotter osmtools (+https://github.com/erh/viam-chartplotter)"
+
+	fmt.Fprintf(os.Stderr, "downloading %d PBFs for %s → %s\n", len(sources), *continent, *dir)
+	var fetched, skipped, failed int
+	totalStart := time.Now()
+
+	for i, src := range sources {
+		// Save as `<geofabrik-id>.osm.pbf` (e.g. us-new-york.osm.pbf)
+		// so the filename matches the region key recorded in MongoDB
+		// — `ingest` then defaults --region from the filename and
+		// the doc trail stays consistent end-to-end.
+		dst := filepath.Join(*dir, src.Name+".osm.pbf")
+		if !*force {
+			if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+				fmt.Fprintf(os.Stderr, "  [%2d/%d] %-30s cached %s (%s)\n",
+					i+1, len(sources), src.Name, filepath.Base(dst), humanBytes(info.Size()))
+				skipped++
+				continue
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "  [%2d/%d] %-30s downloading… ", i+1, len(sources), src.Name)
+		n, err := downloadPBF(client, userAgent, src.URL, dst)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			failed++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", humanBytes(n))
+		fetched++
+	}
+
+	fmt.Fprintf(os.Stderr, "done: %d fetched, %d cached, %d failed in %s\n",
+		fetched, skipped, failed, time.Since(totalStart).Round(time.Second))
+	if failed > 0 {
+		return fmt.Errorf("%d download(s) failed", failed)
+	}
+	return nil
+}
+
+// downloadPBF streams the URL to <dst>.part and renames on success
+// so an interrupted run never leaves a half-PBF on disk that looks
+// valid to the next ingest. Returns the byte count written.
+func downloadPBF(client *http.Client, userAgent, url, dst string) (int64, error) {
+	partPath := dst + ".part"
+	_ = os.Remove(partPath)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("http %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(partPath)
+	if err != nil {
+		return 0, err
+	}
+	n, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(partPath)
+		return 0, fmt.Errorf("read body: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(partPath)
+		return 0, fmt.Errorf("close: %w", closeErr)
+	}
+	if err := os.Rename(partPath, dst); err != nil {
+		_ = os.Remove(partPath)
+		return 0, fmt.Errorf("rename: %w", err)
+	}
+	return n, nil
+}
+
+// loadGeofabrikIndex fetches index-v1.json from Geofabrik, parses the
+// FeatureCollection, and returns the .osm.pbf URL for every entry
+// matching the given filters. By default we keep only leaves
+// (entries no other entry lists as `parent`) so a download run that
+// asks for "europe" doesn't also pull france and bavaria — that
+// would be wire bytes spent on data already inside the larger file.
+func loadGeofabrikIndex(parent, substr string, includeParents bool) ([]pbfSource, error) {
+	const indexURL = "https://download.geofabrik.de/index-v1.json"
+	req, err := http.NewRequest(http.MethodGet, indexURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "viam-chartplotter osmtools (+https://github.com/erh/viam-chartplotter)")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d fetching index-v1.json", resp.StatusCode)
+	}
+
+	var idx struct {
+		Features []struct {
+			Properties struct {
+				ID     string            `json:"id"`
+				Parent string            `json:"parent"`
+				Name   string            `json:"name"`
+				URLs   map[string]string `json:"urls"`
+			} `json:"properties"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&idx); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+
+	// Build the set of ids that have at least one child so we can
+	// identify leaves: a leaf is any id that no other id lists as
+	// `parent`. We treat the top-level continents as non-leaves —
+	// they're always parents of one or more countries.
+	hasChild := map[string]bool{}
+	for _, f := range idx.Features {
+		if f.Properties.Parent != "" {
+			hasChild[f.Properties.Parent] = true
+		}
+	}
+
+	// Descendant check: walk the parent chain up from id, return
+	// true if we hit the requested ancestor.
+	parentOf := map[string]string{}
+	for _, f := range idx.Features {
+		parentOf[f.Properties.ID] = f.Properties.Parent
+	}
+	isDescendant := func(id, ancestor string) bool {
+		if ancestor == "" {
+			return true
+		}
+		for cur := id; cur != ""; cur = parentOf[cur] {
+			if cur == ancestor {
+				return true
+			}
+		}
+		return false
+	}
+
+	var out []pbfSource
+	for _, f := range idx.Features {
+		p := f.Properties
+		pbfURL := p.URLs["pbf"]
+		if pbfURL == "" {
+			continue
+		}
+		if !includeParents && hasChild[p.ID] {
+			continue
+		}
+		if parent != "" && !isDescendant(p.ID, parent) {
+			continue
+		}
+		if substr != "" && !strings.Contains(p.ID, substr) {
+			continue
+		}
+		out = append(out, pbfSource{Name: p.ID, URL: pbfURL})
+	}
+	return out, nil
 }
 
 // ----- shared flag set for query / gentile --------------------------------

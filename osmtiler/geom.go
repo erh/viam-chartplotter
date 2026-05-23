@@ -57,6 +57,13 @@ type Feature struct {
 	// feature; the per-feature string-header cost is real but
 	// kept here so the renderer doesn't need a side table.
 	Ref string
+
+	// Tags is the raw OSM tag map preserved from ingest. The renderer
+	// usually consults the pre-computed Class / Kind / Ref / RoadKind
+	// fields rather than reach into Tags, but keeping the raw map lets
+	// us add new render rules later without another PBF re-ingest —
+	// reclassification can run as a Mongo update pass.
+	Tags map[string]string
 }
 
 // computeBounds fills in MinLon/MaxLon/MinLat/MaxLat from Coords.
