@@ -219,8 +219,16 @@ func GeomMinZoom(class Class, tags osm.Tags) uint8 {
 		return LabelMinZoom(class, tags)
 	case ClassPOI:
 		return 14
+	case ClassWater:
+		// Water carves at every zoom — the yellow land base is always
+		// drawn, so the carve has to be too, or the chart's water
+		// shows through everywhere at low zoom and disappears at high.
+		return 0
 	}
-	return 0
+	// Anything not in the switch — including ClassSkip — is never
+	// rendered. 255 is a sentinel above the max OSM zoom (~22) so the
+	// renderer's `minZoom <= z` filter never matches these features.
+	return 255
 }
 
 // LabelMinZoom returns the smallest zoom at which a feature should be
