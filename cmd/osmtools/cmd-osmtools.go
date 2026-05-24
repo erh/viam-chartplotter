@@ -33,6 +33,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/paulmach/osm"
@@ -96,47 +97,158 @@ func topUsage() {
 
 func runIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
-	pbfPath := fs.String("pbf", "", "path to input .osm.pbf (required)")
+	pbfFlag := fs.String("pbf", "",
+		"path to input .osm.pbf (kept for back-compat; you can also pass PBF paths as positional args)")
 	mongoURI := fs.String("mongo", "", "MongoDB connection URI (required)")
 	dbName := fs.String("db", "osm", "MongoDB database name")
 	collName := fs.String("coll", "features", "MongoDB collection name")
-	region := fs.String("region", "", "region key recorded on every document (defaults to PBF basename)")
+	region := fs.String("region", "",
+		"region key recorded on every document (only valid with a single PBF; multi-file mode derives one region per file)")
 	batchSize := fs.Int("batch", 1000, "bulk upsert batch size")
-	procs := fs.Int("procs", runtime.NumCPU(), "PBF decoder workers")
+	procs := fs.Int("procs", 0,
+		"PBF decoder workers per file (default: runtime.NumCPU() / workers, min 1)")
+	workers := fs.Int("workers", 0,
+		"concurrent PBF ingest workers when multiple PBFs are given (default min(8, len(paths)))")
 	force := fs.Bool("force", false,
 		"re-ingest even when an ingest-meta doc says this region's PBF hash already matches")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *pbfPath == "" || *mongoURI == "" {
+	if *mongoURI == "" {
 		fs.Usage()
-		return fmt.Errorf("--pbf and --mongo are required")
+		return fmt.Errorf("--mongo is required")
 	}
-	if *region == "" {
-		base := filepath.Base(*pbfPath)
-		base = strings.TrimSuffix(base, ".osm.pbf")
-		base = strings.TrimSuffix(base, ".pbf")
-		// Geofabrik names downloads `<leaf>-latest.osm.pbf`; if the
-		// file still has that trailing -latest we don't want it
-		// leaking into the region key recorded in MongoDB.
-		base = strings.TrimSuffix(base, "-latest")
-		*region = base
-		fmt.Fprintf(os.Stderr, "no --region given, using %q derived from filename\n", *region)
+
+	// Collect PBF paths from --pbf (back-compat) plus positional args.
+	// Positional usage: `osmtools ingest --mongo ... a.pbf b.pbf c.pbf`.
+	var pbfPaths []string
+	if *pbfFlag != "" {
+		pbfPaths = append(pbfPaths, *pbfFlag)
+	}
+	pbfPaths = append(pbfPaths, fs.Args()...)
+	if len(pbfPaths) == 0 {
+		fs.Usage()
+		return fmt.Errorf("no PBF paths given; pass with --pbf or as positional args")
+	}
+	if *region != "" && len(pbfPaths) > 1 {
+		return fmt.Errorf("--region is only valid with a single PBF; with %d files each region is derived from the filename",
+			len(pbfPaths))
+	}
+
+	if *workers <= 0 {
+		*workers = 8
+		if *workers > len(pbfPaths) {
+			*workers = len(pbfPaths)
+		}
+	}
+	if *procs <= 0 {
+		// Default per-file decoder thread count. With N workers running
+		// in parallel and the same NumCPU as before, we'd oversubscribe
+		// massively; divide so total active threads ≈ NumCPU.
+		*procs = runtime.NumCPU() / *workers
+		if *procs < 1 {
+			*procs = 1
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	return ingest(ctx, ingestOpts{
-		pbfPath:   *pbfPath,
-		mongoURI:  *mongoURI,
-		dbName:    *dbName,
-		collName:  *collName,
-		region:    *region,
-		batchSize: *batchSize,
-		procs:     *procs,
-		force:     *force,
-	})
+	// One Mongo connection, shared across all worker goroutines. The
+	// driver pool is goroutine-safe and lets us amortise the setup cost
+	// (connect + ensureFeatureIndexes is non-trivial against a remote
+	// Mongo). Workers each grab the same *mongo.Collection.
+	connectCtx, connectCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer connectCancel()
+	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(*mongoURI))
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		_ = client.Disconnect(dctx)
+	}()
+	if err := client.Ping(connectCtx, nil); err != nil {
+		return fmt.Errorf("mongo ping: %w", err)
+	}
+	coll := client.Database(*dbName).Collection(*collName)
+	fmt.Fprintf(os.Stderr, "connected to %s.%s\n", *dbName, *collName)
+	if err := ensureFeatureIndexes(ctx, coll); err != nil {
+		return fmt.Errorf("ensure indexes: %w", err)
+	}
+
+	// Per-file ingest opts. Derive a region key from each filename
+	// unless the caller explicitly supplied one (single-file only).
+	jobs := make([]ingestOpts, len(pbfPaths))
+	multi := len(pbfPaths) > 1
+	for i, p := range pbfPaths {
+		jobOpts := ingestOpts{
+			pbfPath:   p,
+			mongoURI:  *mongoURI,
+			dbName:    *dbName,
+			collName:  *collName,
+			batchSize: *batchSize,
+			procs:     *procs,
+			force:     *force,
+		}
+		if *region != "" {
+			jobOpts.region = *region
+		} else {
+			jobOpts.region = deriveRegionFromPBF(p)
+		}
+		if multi {
+			jobOpts.out = &prefixWriter{prefix: jobOpts.region}
+		}
+		jobs[i] = jobOpts
+	}
+
+	fmt.Fprintf(os.Stderr, "ingesting %d PBF(s) with up to %d workers (%d decoder threads each)\n",
+		len(jobs), *workers, *procs)
+
+	// Worker pool: cap concurrency at *workers, surface the first
+	// error so we don't keep churning on the rest, but let in-flight
+	// workers drain rather than hard-cancel mid-batch (a hard cancel
+	// would leave a partial ingest-meta record that could confuse a
+	// later re-run).
+	sem := make(chan struct{}, *workers)
+	var wg sync.WaitGroup
+	errs := make([]error, len(jobs))
+	for i := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			errs[idx] = ingest(ctx, coll, jobs[idx])
+		}(i)
+	}
+	wg.Wait()
+
+	// Aggregate. Return the first failure; print the rest so the
+	// operator can see them all in one go.
+	var firstErr error
+	for i, e := range errs {
+		if e == nil {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[%s] FAILED: %v\n", jobs[i].region, e)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", jobs[i].region, e)
+		}
+	}
+	return firstErr
+}
+
+// deriveRegionFromPBF turns "europe/germany-latest.osm.pbf" into
+// "germany". Strips the directory, the ".osm.pbf"/".pbf" extension, and
+// the Geofabrik convention "-latest" suffix.
+func deriveRegionFromPBF(path string) string {
+	base := filepath.Base(path)
+	base = strings.TrimSuffix(base, ".osm.pbf")
+	base = strings.TrimSuffix(base, ".pbf")
+	base = strings.TrimSuffix(base, "-latest")
+	return base
 }
 
 type ingestOpts struct {
@@ -148,6 +260,55 @@ type ingestOpts struct {
 	batchSize int
 	procs     int
 	force     bool
+	// out receives all human-readable progress log lines. nil falls
+	// back to os.Stderr so the single-file path keeps its old shape.
+	// Parallel multi-file mode wires a region-prefixed writer here so
+	// the operator can tell whose progress is whose at a glance.
+	out io.Writer
+}
+
+func (o ingestOpts) writer() io.Writer {
+	if o.out != nil {
+		return o.out
+	}
+	return os.Stderr
+}
+
+// stderrLineMu serialises whole-line writes to os.Stderr across
+// prefixWriters from different workers, so a long progress line from
+// region A never interleaves with one from region B at the byte level.
+// Each prefixWriter still has its own per-goroutine partial-line buffer.
+var stderrLineMu sync.Mutex
+
+// prefixWriter prepends "[<prefix>] " to every newline-terminated line
+// written into it before forwarding to os.Stderr under stderrLineMu.
+// Partial trailing lines are buffered until a newline arrives.
+type prefixWriter struct {
+	prefix string
+	buf    []byte
+}
+
+func (pw *prefixWriter) Write(p []byte) (int, error) {
+	pw.buf = append(pw.buf, p...)
+	for {
+		i := -1
+		for j, b := range pw.buf {
+			if b == '\n' {
+				i = j
+				break
+			}
+		}
+		if i < 0 {
+			break
+		}
+		line := pw.buf[:i+1]
+		stderrLineMu.Lock()
+		_, _ = os.Stderr.WriteString("[" + pw.prefix + "] ")
+		_, _ = os.Stderr.Write(line)
+		stderrLineMu.Unlock()
+		pw.buf = pw.buf[i+1:]
+	}
+	return len(p), nil
 }
 
 // featureDoc is the BSON shape we write to MongoDB. _id is a stable
@@ -175,85 +336,68 @@ type featureDoc struct {
 	Tags         map[string]string `bson:"tags,omitempty"`
 }
 
-func ingest(ctx context.Context, opts ingestOpts) error {
-	// 1. Connect to MongoDB up front so a bad URI fails before we
-	//    spend minutes parsing a PBF.
-	connectCtx, connectCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer connectCancel()
-	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(opts.mongoURI))
-	if err != nil {
-		return fmt.Errorf("mongo connect: %w", err)
-	}
-	defer func() {
-		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer dcancel()
-		_ = client.Disconnect(dctx)
-	}()
-	if err := client.Ping(connectCtx, nil); err != nil {
-		return fmt.Errorf("mongo ping: %w", err)
-	}
-	coll := client.Database(opts.dbName).Collection(opts.collName)
-	fmt.Fprintf(os.Stderr, "connected to %s.%s\n", opts.dbName, opts.collName)
+// ingest processes a single PBF into the given collection. Caller owns
+// the Mongo connection and is responsible for having already run
+// ensureFeatureIndexes — both are one-shot setup that's shared across
+// all PBFs in a parallel multi-file ingest.
+func ingest(ctx context.Context, coll *mongo.Collection, opts ingestOpts) error {
+	out := opts.writer()
 
-	if err := ensureFeatureIndexes(ctx, coll); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
-	}
-
-	// 1b. Hash the PBF and check ingest-meta — if a previous ingest
-	//     of this region recorded the same hash and the collection
-	//     still has roughly the expected number of feature docs,
-	//     there's nothing new to write. Saves ~minutes per re-run.
+	// Hash the PBF and check ingest-meta — if a previous ingest
+	// of this region recorded the same hash and the collection
+	// still has roughly the expected number of feature docs,
+	// there's nothing new to write. Saves ~minutes per re-run.
 	hashStart := time.Now()
 	pbfHash, pbfSize, err := hashFile(opts.pbfPath)
 	if err != nil {
 		return fmt.Errorf("hash pbf: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "pbf hash: sha256:%s… (%s, %s)\n",
+	fmt.Fprintf(out, "pbf hash: sha256:%s… (%s, %s)\n",
 		pbfHash[:12], humanBytes(pbfSize), time.Since(hashStart).Round(time.Millisecond))
 
 	if !opts.force {
 		if skip, why := shouldSkipIngest(ctx, coll, opts.region, pbfHash); skip {
-			fmt.Fprintf(os.Stderr, "skip: %s\n", why)
+			fmt.Fprintf(out, "skip: %s\n", why)
 			return nil
 		} else if why != "" {
-			fmt.Fprintf(os.Stderr, "re-ingest: %s\n", why)
+			fmt.Fprintf(out, "re-ingest: %s\n", why)
 		}
 	}
 
-	// 2. Pass 1 — relations only. Identify the multipolygons we'll
-	//    later emit, plus the way IDs they reference so we know to
-	//    keep their geometry in pass 2.
+	// Pass 1 — relations only. Identify the multipolygons we'll
+	// later emit, plus the way IDs they reference so we know to
+	// keep their geometry in pass 2.
 	relPass, memberWays, err := scanRelations(ctx, opts.pbfPath, opts.procs)
 	if err != nil {
 		return fmt.Errorf("relations pass: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "pass 1: %d multipolygon relations, %d member way ids\n",
+	fmt.Fprintf(out, "pass 1: %d multipolygon relations, %d member way ids\n",
 		len(relPass), len(memberWays))
 
-	// 3. Pass 2 — nodes + ways. Emit node POIs / way features
-	//    directly; stash coords for relation members. After pass 2
-	//    we stitch and emit the multipolygon features.
-	w := newUpserter(coll, opts.batchSize)
+	// Pass 2 — nodes + ways. Emit node POIs / way features directly;
+	// stash coords for relation members. After pass 2 we stitch and
+	// emit the multipolygon features.
+	w := newUpserter(coll, opts.batchSize, out)
 	memberCoords, err := scanNodesAndWays(ctx, opts, memberWays, w)
 	if err != nil {
 		return fmt.Errorf("nodes/ways pass: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "pass 2: emitted %d node/way features, kept %d member way geometries\n",
+	fmt.Fprintf(out, "pass 2: emitted %d node/way features, kept %d member way geometries\n",
 		w.emitted, len(memberCoords))
 
 	if err := emitRelations(ctx, opts, relPass, memberCoords, w); err != nil {
 		return fmt.Errorf("emit relations: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "emitted %d total features\n", w.emitted)
+	fmt.Fprintf(out, "emitted %d total features\n", w.emitted)
 
 	if err := w.flush(ctx); err != nil {
 		return fmt.Errorf("final flush: %w", err)
 	}
 	if w.bulkErrors > 0 {
-		fmt.Fprintf(os.Stderr, "done: %d upserts (%d batches, %d docs rejected by server)\n",
+		fmt.Fprintf(out, "done: %d upserts (%d batches, %d docs rejected by server)\n",
 			w.upserted, w.batches, w.bulkErrors)
 	} else {
-		fmt.Fprintf(os.Stderr, "done: %d upserts (%d batches)\n", w.upserted, w.batches)
+		fmt.Fprintf(out, "done: %d upserts (%d batches)\n", w.upserted, w.batches)
 	}
 
 	// Persist the ingest-meta so a future run on the same PBF can
@@ -267,7 +411,7 @@ func ingest(ctx context.Context, opts ingestOpts) error {
 	if err := writeIngestMeta(ctx, coll, opts.region, pbfHash, pbfSize, actualCount); err != nil {
 		return fmt.Errorf("write ingest meta: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "ingest-meta: region=%s hash=%s… docs=%d\n",
+	fmt.Fprintf(out, "ingest-meta: region=%s hash=%s… docs=%d\n",
 		opts.region, pbfHash[:12], actualCount)
 	return nil
 }
@@ -426,7 +570,7 @@ func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.W
 	defer f.Close()
 
 	if info, err := f.Stat(); err == nil {
-		fmt.Fprintf(os.Stderr, "pass 2: scanning %.1f MB of PBF\n", float64(info.Size())/(1<<20))
+		fmt.Fprintf(opts.writer(), "pass 2: scanning %.1f MB of PBF\n", float64(info.Size())/(1<<20))
 	}
 
 	sc := osmpbf.New(ctx, f, opts.procs)
@@ -652,7 +796,27 @@ func relRingDoc(region string, rd relDesc, ringIdx int, coords []osmtiler.LonLat
 // collection comes up correctly without a separate mongo-shell step.
 // Idempotent — re-running the same spec is a no-op; a clashing
 // pre-existing index returns an error so the operator can decide.
+//
+// The geo index is partial on `minZoom < 255`. Tagged-but-not-yet-
+// rendered features (fences, power lines, raw `surface=*` ways) carry
+// the sentinel minZoom=255 — see GeomMinZoom's fall-through — so they
+// land in the collection but skip the 2dsphere index cost. Promoting a
+// doc to a real class via updateMany sets its minZoom to a real value
+// and the partial index picks it up automatically. The semantic match
+// is intentional: the renderer's own `minZoom <= z` filter already
+// excludes anything with minZoom=255 at every real zoom, so the index
+// stays aligned with what the query path actually consults.
+//
+// Note: MongoDB's partial filter expression syntax only accepts $eq,
+// $gt(e), $lt(e), $in, $type, $exists, $and; $ne is rejected. Hence the
+// $lt over the sentinel rather than the more natural "class != skip".
 func ensureFeatureIndexes(ctx context.Context, coll *mongo.Collection) error {
+	// CreateMany is idempotent when the spec matches an existing index
+	// of the same name — no rebuild. If you ever change this spec on a
+	// collection that already has a `geo_minZoom_class` index, you'll
+	// get an IndexOptionsConflict at create time; in that case drop
+	// the old index by hand once
+	// (`db.features.dropIndex("geo_minZoom_class")`) and re-run ingest.
 	models := []mongo.IndexModel{
 		{
 			// Primary render query: $geoIntersects on a tile bbox,
@@ -664,7 +828,9 @@ func ensureFeatureIndexes(ctx context.Context, coll *mongo.Collection) error {
 				{Key: "minZoom", Value: 1},
 				{Key: "class", Value: 1},
 			},
-			Options: options.Index().SetName("geo_minZoom_class"),
+			Options: options.Index().
+				SetName("geo_minZoom_class").
+				SetPartialFilterExpression(bson.M{"minZoom": bson.M{"$lt": 255}}),
 		},
 		{
 			// Admin/inspection queries that don't pin geography
@@ -686,6 +852,7 @@ func ensureFeatureIndexes(ctx context.Context, coll *mongo.Collection) error {
 type upserter struct {
 	coll      *mongo.Collection
 	batchSize int
+	out       io.Writer
 	pending   []mongo.WriteModel
 	emitted   int
 	upserted  int
@@ -707,8 +874,11 @@ type upserter struct {
 	loggedSample bool
 }
 
-func newUpserter(coll *mongo.Collection, batchSize int) *upserter {
-	return &upserter{coll: coll, batchSize: batchSize}
+func newUpserter(coll *mongo.Collection, batchSize int, out io.Writer) *upserter {
+	if out == nil {
+		out = os.Stderr
+	}
+	return &upserter{coll: coll, batchSize: batchSize, out: out}
 }
 
 func (u *upserter) setProgress(bytesFn func() int64, total int64) {
@@ -734,7 +904,7 @@ func (u *upserter) upsert(ctx context.Context, doc featureDoc) error {
 			pct := float64(read) / float64(u.progressTotal) * 100
 			msg = fmt.Sprintf("%s, %.1f%% of file", msg, pct)
 		}
-		fmt.Fprintln(os.Stderr, msg)
+		fmt.Fprintln(u.out, msg)
 		u.lastLog = time.Now()
 	}
 	return nil
@@ -759,7 +929,7 @@ func (u *upserter) flush(ctx context.Context) error {
 			u.bulkErrors += len(bwe.WriteErrors)
 			if !u.loggedSample && len(bwe.WriteErrors) > 0 {
 				we := bwe.WriteErrors[0]
-				fmt.Fprintf(os.Stderr, "  warn: %d docs rejected by server in batch; sample [code=%d]: %s\n",
+				fmt.Fprintf(u.out, "  warn: %d docs rejected by server in batch; sample [code=%d]: %s\n",
 					len(bwe.WriteErrors), we.Code, we.Message)
 				u.loggedSample = true
 			}
