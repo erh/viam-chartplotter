@@ -6,6 +6,7 @@
 
   import { Logger } from "tslog";
   import type { BoatInfo, PositionPoint } from "./lib/BoatInfo";
+  import { fetchGarminDecimatedTrack, bboxKey, type Bbox } from "./lib/garminTrack";
 
   import { Coordinate } from "tsgeo/Coordinate";
   import { DecimalMinutes } from "tsgeo/Formatter/Coordinate/DecimalMinutes";
@@ -70,6 +71,10 @@
     pos: new Coordinate(0, 0),
     posHistory: [],
     posHistoryLastCheck: 0,
+    // Long-term own-boat track from the garmin-position-decimated data
+    // pipeline, scoped to the current map viewport. (Re)fetched whenever
+    // the map's bounding box changes; rendered faded under posHistory.
+    posHistoryDecimated: [] as PositionPoint[],
     posString: "n/a",
     speed: 0.0,
     temp: 0.0,
@@ -182,6 +187,10 @@
   // the contract on the airstream component itself, mirrored on the client.
   let airstreamLayerActive = $state(false);
   let airstreamBboxDebounce: number | undefined;
+
+  // Debounce for the map's historical-track bbox callback so a drag/zoom
+  // doesn't fire a cloud query per intermediate frame.
+  let historicalBboxDebounce: number | undefined;
 
   function gotNewData() {
     globalData.lastData = new Date();
@@ -686,6 +695,58 @@
     }, 800);
   }
 
+  // ---- garmin-position-decimated historical track ------------------------
+  //
+  // The map fires onHistoricalBboxChange on first render and whenever the
+  // viewport settles. We (re)query the garmin-position-decimated pipeline for
+  // our own boat's track in that bbox (see ./lib/garminTrack) and hand the
+  // points to MarineMap as the faded long-term track.
+  //
+  // lastHistoricalBbox holds the most recent viewport; decimatedFetchedKey is
+  // the bbox we've already resolved. The cloud loop retries lastHistoricalBbox
+  // until it matches — that covers the initial emit firing before the cloud
+  // client has finished connecting.
+  let lastHistoricalBbox: Bbox | null = null;
+  let decimatedFetchedKey = "";
+  let decimatedFetchInFlight = false;
+
+  function onHistoricalBboxChange(bbox: Bbox) {
+    lastHistoricalBbox = bbox;
+    if (historicalBboxDebounce !== undefined) {
+      clearTimeout(historicalBboxDebounce);
+    }
+    historicalBboxDebounce = window.setTimeout(() => {
+      historicalBboxDebounce = undefined;
+      void updateGarminDecimatedTrack(bbox);
+    }, 600);
+  }
+
+  async function updateGarminDecimatedTrack(bbox: Bbox) {
+    if (!globalCloudClient || !globalClientCloudMetaData) return;
+    if (decimatedFetchInFlight) return;
+    var key = bboxKey(bbox);
+    if (key === decimatedFetchedKey) return;
+    var partId = globalClientCloudMetaData.machinePartId;
+    if (!partId) return;
+    var orgId = globalClientCloudMetaData.primaryOrgId;
+
+    decimatedFetchInFlight = true;
+    try {
+      globalData.posHistoryDecimated = await fetchGarminDecimatedTrack(
+        globalCloudClient.dataClient,
+        orgId,
+        partId,
+        bbox
+      );
+      decimatedFetchedKey = key;
+    } catch (e: any) {
+      // Leave decimatedFetchedKey unset so the cloud loop retries.
+      console.log("garmin decimated geo query threw:", e?.message || String(e));
+    } finally {
+      decimatedFetchInFlight = false;
+    }
+  }
+
   function acPowerVoltAverage(data) {
     var total = 0;
     var num = 0;
@@ -1076,6 +1137,12 @@
       try {
         await updateMachineConfig(globalCloudClient.appClient);
         await updateGaugeGraphs(globalCloudClient.dataClient);
+        // Retry the decimated-track fetch for the current viewport until it
+        // succeeds. Covers the map's initial bbox emit landing before the
+        // cloud client connected; a no-op once decimatedFetchedKey matches.
+        if (lastHistoricalBbox && bboxKey(lastHistoricalBbox) !== decimatedFetchedKey) {
+          await updateGarminDecimatedTrack(lastHistoricalBbox);
+        }
       } catch (error) {
         console.log("updateGaugeGraphs error: " + error);
       }
@@ -2054,6 +2121,8 @@
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
       positionHistorical={globalData.posHistory}
+      positionHistoricalDecimated={globalData.posHistoryDecimated}
+      onHistoricalBboxChange={onHistoricalBboxChange}
       onBoatPopupOpen={onBoatPopupOpen}
       bind:aisTracksNeeded={globalData.aisTracksNeeded}
       bind:depthColorTrack={globalData.showDepthOnTrack}

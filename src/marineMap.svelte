@@ -743,6 +743,8 @@
     zoomModifier,
     boats,
     positionHistorical,
+    positionHistoricalDecimated,
+    onHistoricalBboxChange,
     // $bindable so the in-map layers panel can flip the toggle and the
     // parent (App.svelte) sees the change reactively.
     depthColorTrack = $bindable(false),
@@ -775,6 +777,11 @@
     zoomModifier?: number;
     boats?: BoatInfo[];
     positionHistorical?: PositionPoint[];
+    /** Long-term decimated own-boat track (from the garmin-position-decimated
+     *  data pipeline), scoped to the current viewport. Drawn on the same
+     *  "myBoat" track layer as positionHistorical but rendered faded so the
+     *  recent track stands out on top of it. */
+    positionHistoricalDecimated?: PositionPoint[];
     depthColorTrack?: boolean;
     /** True when a depth sensor is configured. Gates whether the
      *  "color track by depth" toggle is shown in the layers panel. */
@@ -840,6 +847,13 @@
     onAirstreamBboxChange?: (
       bbox: { minLon: number; minLat: number; maxLon: number; maxLat: number } | null
     ) => void;
+    /** Called whenever the viewport settles (and once on first render) with the
+     *  current lon/lat extent. App.svelte uses this to (re)query the
+     *  garmin-position-decimated pipeline for the historical track in view.
+     *  Unlike onAirstreamBboxChange this fires regardless of any layer toggle. */
+    onHistoricalBboxChange?: (
+      bbox: { minLon: number; minLat: number; maxLon: number; maxLat: number }
+    ) => void;
   } = $props();
 
   // Create derived values for reactivity tracking
@@ -859,6 +873,12 @@
     const _myBoat = myBoatKey;
     const _visible = visibleBoatsKey;
     const _wps = navWaypointsKey;
+    // Track the track arrays directly so updates re-render even when the
+    // boat is stationary (otherwise the historical/decimated tracks would
+    // only paint on the next boat-movement tick that happens to re-run this
+    // effect). Reading the references here registers them as dependencies.
+    const _ph = positionHistorical;
+    const _phd = positionHistoricalDecimated;
     updateFromData();
   });
 
@@ -1290,17 +1310,62 @@
       }
     }
 
-    // Render historical tracks (clear and re-render when data changes to pick up depth)
-    if (positionHistorical) {
+    // Render historical tracks (clear and re-render when data changes to pick up depth).
+    // The recent live track (positionHistorical) and the faded long-term
+    // decimated track (positionHistoricalDecimated) share the "myBoat" layer
+    // so they toggle together; the key folds in both so a change to either
+    // triggers a clean re-render.
+    if (positionHistorical || positionHistoricalDecimated) {
+      const decLen = positionHistoricalDecimated?.length ?? 0;
       const posKey =
-        positionHistorical.length +
+        (positionHistorical?.length ?? 0) +
         "-" +
-        (positionHistorical.length > 0 ? (positionHistorical[0].depth ?? "n") : "");
+        (positionHistorical && positionHistorical.length > 0
+          ? (positionHistorical[0].depth ?? "n")
+          : "") +
+        "-d" +
+        decLen;
       if (mapInternalState.lastPosHistoricalKey !== posKey) {
         clearHistoricalTrackFeatures("myBoat");
         mapInternalState.lastPosHistoricalKey = posKey;
       }
-      renderHistoricalTrack("myBoat", positionHistorical, "myBoat");
+      // Decimated first so the bright recent track paints over it.
+      if (positionHistoricalDecimated && decLen > 0) {
+        const before = mapGlobal.trackFeatures.getLength();
+        renderHistoricalTrack("myBoat", positionHistoricalDecimated, "myBoatDecimated", true);
+        const after = mapGlobal.trackFeatures.getLength();
+        const trackOpt = mapGlobal.layerOptions.find((l) => l.name === "track");
+        const boatOpt = mapGlobal.layerOptions.find((l) => l.name === "boat");
+        const onMap = mapGlobal.trackLayer
+          ? mapGlobal.map?.getLayers().getArray().includes(mapGlobal.trackLayer)
+          : false;
+        console.log(
+          "[decimated render] points=" +
+            decLen +
+            " trackFeatures " +
+            before +
+            "->" +
+            after +
+            " visibleMyBoat=" +
+            effectiveVisibleBoats.has("myBoat") +
+            " | trackLayerOn=" +
+            trackOpt?.on +
+            " boatLayerOn=" +
+            boatOpt?.on +
+            " trackLayer.visible=" +
+            mapGlobal.trackLayer?.getVisible() +
+            " trackLayerOnMap=" +
+            onMap +
+            " sample=" +
+            JSON.stringify(positionHistoricalDecimated.slice(0, 2))
+        );
+        // Force the track layer to re-evaluate styles/geometry in case the
+        // collection-change auto-render didn't fire this tick.
+        mapGlobal.trackLayer?.changed();
+      }
+      if (positionHistorical) {
+        renderHistoricalTrack("myBoat", positionHistorical, "myBoat");
+      }
     }
 
     if (boats) {
@@ -2063,7 +2128,11 @@
       }
 
       const isGap = feature.get("isGap");
-      const opacity = isGap ? 0.33 : 1.0;
+      const decimated = feature.get("decimated");
+      // Decimated (long-term pipeline) track is drawn faded and thin so
+      // the recent live track reads clearly on top of it.
+      let opacity = isGap ? 0.33 : 1.0;
+      if (decimated) opacity *= 0.5;
       const depth = feature.get("depth");
 
       let color;
@@ -2076,7 +2145,7 @@
       return new Style({
         stroke: new Stroke({
           color: color,
-          width: 2,
+          width: decimated ? 1.5 : 2,
           lineDash: isGap ? [2, 6] : undefined,
         }),
       });
@@ -2104,7 +2173,8 @@
     boatId: string = "myBoat",
     isGap: boolean = false,
     depth?: number,
-    ts?: number
+    ts?: number,
+    decimated: boolean = false
   ) {
     const { featureIds, features, type } = getTrackCollections(boatId);
 
@@ -2125,6 +2195,9 @@
         // Millis. Records when the boat arrived at the *end* of this
         // segment so the hover tooltip can answer "what time was I here?"
         ts: ts,
+        // True for segments from the long-term decimated pipeline track —
+        // styled faded so the recent live track reads on top of it.
+        decimated: decimated,
       })
     );
 
@@ -2241,7 +2314,8 @@
   function renderHistoricalTrack(
     boatId: string,
     history: PositionPoint[],
-    idPrefix: string
+    idPrefix: string,
+    decimated: boolean = false
   ): void {
     const now = Date.now();
     const realtimeWindowStart = now - realtimeWindowMs;
@@ -2280,7 +2354,8 @@
             boatId,
             isGap,
             p.depth,
-            ts ?? undefined
+            ts ?? undefined,
+            decimated
           );
         }
       }
@@ -3627,6 +3702,11 @@
   // re-fire the callback. Rounded to keep this a coarse comparison.
   let lastAirstreamBboxKey = "";
 
+  // Same idea for onHistoricalBboxChange (the garmin-position-decimated
+  // track query). Tracked separately because that callback fires
+  // regardless of layer toggles, so its emit cadence is independent.
+  let lastHistoricalBboxKey = "";
+
   // After a zoom (or any view settle), put the boat back at its configured
   // anchor pixel — center for "center" mode, 80% down for "bottom" mode.
   // OL's default scroll/pinch zoom anchors at the cursor, which would
@@ -3671,6 +3751,26 @@
     if (key === lastAirstreamBboxKey) return;
     lastAirstreamBboxKey = key;
     onAirstreamBboxChange({ minLon, minLat, maxLon, maxLat });
+  }
+
+  function maybeEmitHistoricalBbox() {
+    if (!onHistoricalBboxChange) return;
+    if (!mapGlobal.map || !mapGlobal.view) return;
+    const size = mapGlobal.map.getSize();
+    if (!size) return;
+    const extent = mapGlobal.view.calculateExtent(size);
+    // Round to 0.01° (~1 km) so a tiny drift doesn't re-fire the (cloud)
+    // pipeline query. The decimated track barely changes at that scale.
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const minLon = round(extent[0]);
+    const minLat = round(extent[1]);
+    const maxLon = round(extent[2]);
+    const maxLat = round(extent[3]);
+    if (!Number.isFinite(minLon) || minLat >= maxLat || minLon >= maxLon) return;
+    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
+    if (key === lastHistoricalBboxKey) return;
+    lastHistoricalBboxKey = key;
+    onHistoricalBboxChange({ minLon, minLat, maxLon, maxLat });
   }
 
   function maybePrefetchNoaaTiles() {
@@ -3930,6 +4030,7 @@
     mapGlobal.map.on("moveend", () => {
       maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
+      maybeEmitHistoricalBbox();
       maybeReanchorOnBoat();
       // Only persist when the user is intentionally off-boat; otherwise the
       // boat-follow tracker would constantly overwrite the cookie with the
@@ -4447,6 +4548,11 @@
         },
         focusBoat,
       });
+
+      // Kick off the first historical-track query for the initial viewport.
+      // moveend doesn't fire for the programmatic initial center/zoom, so
+      // emit once here now that updateSize has given us a valid extent.
+      maybeEmitHistoricalBbox();
     }, 100);
   }
 
