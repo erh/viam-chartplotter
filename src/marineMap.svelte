@@ -1799,21 +1799,34 @@
     const geom = feature.getGeometry();
     const geomType = geom?.getType();
     const styles: Style[] = [];
-    if (geomType === "LineString" || geomType === "Polygon" || geomType === "MultiLineString") {
-      // Trace lines/polygons in a translucent amber so the structure
-      // is visible at zoom levels where the icon alone would be lost
-      // in the chart detail. The icon (added below) still pins the
-      // hover anchor to the first vertex.
+    if (
+      geomType === "LineString" ||
+      geomType === "Polygon" ||
+      geomType === "MultiLineString" ||
+      geomType === "MultiPolygon"
+    ) {
+      // At z>=14 the tile is built with skip=BRIDGE,CBLOHD,... so this
+      // vector trace is the *sole* renderer for the structure — it has to
+      // stand in for the bold chart symbol, not just hint at it. So draw
+      // bridges as a solid amber bar with a thick dark outline, and
+      // overhead cables/pipes/conveyors as a thick dashed line (the dash
+      // reads as "overhead"). The icon (added below) still pins the hover
+      // anchor. A translucent fill here would wash out and read as "no
+      // bridge, just the label".
+      const isBridge = class_ === "BRIDGE";
       styles.push(
         new Style({
           stroke: new Stroke({
-            color: class_ === "BRIDGE" ? "rgba(133,77,14,0.85)" : "rgba(180,83,9,0.85)",
-            width: 2,
+            color: isBridge ? "rgba(120,53,15,0.95)" : "rgba(154,52,18,0.95)",
+            width: isBridge ? 3 : 3,
+            // Solid for bridges (a physical deck); dashed for overhead
+            // cables/pipes/conveyors so they don't read as a solid span.
+            lineDash: isBridge ? undefined : [8, 5],
           }),
           fill: new Fill({
-            color: class_ === "BRIDGE"
-              ? "rgba(250,204,21,0.18)"
-              : "rgba(253,230,138,0.15)",
+            color: isBridge
+              ? "rgba(250,204,21,0.55)"
+              : "rgba(253,230,138,0.4)",
           }),
         })
       );

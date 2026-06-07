@@ -393,74 +393,119 @@ func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Stru
 			if !inside {
 				continue
 			}
-			// Drop structures whose geometry comes back from the s57 lib
-			// with phantom-segment jumps — concatenated raw edges from a
-			// topology-resolution fallback. Their vertex bags include
-			// km-scale jumps to disconnected sub-features, so the centroid
-			// used for the dedup key below lands on neither real bridge
-			// and can coincide with an unrelated bridge's centroid inside
-			// the 10 m dedup grid, collapsing two distinct structures
-			// into one. Finer-scale cells almost always carry a clean
-			// encoding of the same bridge; if every cell's encoding is
-			// phantom the feature drops out of the hover layer, which
-			// beats showing a merged-but-wrong popup.
-			if hasPhantomEdge(geom.Coordinates, structurePhantomJumpM) {
-				continue
-			}
 			props := map[string]any{}
 			for _, k := range StructureAttributeKeys {
 				if v, ok := f.Attribute(k); ok {
 					props[k] = v
 				}
 			}
-			var sg StructureGeom
+
+			// emit stores one structure geometry into the dedup map, keyed
+			// on its OWN centroid so distinct sub-features (e.g. the two
+			// deck edges of a long bridge recovered below) get separate
+			// keys instead of colliding on a shared midpoint. Props are
+			// copied per geometry so the downstream hideIcon flag, applied
+			// per-Structure, doesn't leak between a bridge's deck edges.
+			emit := func(sg StructureGeom, coords [][]float64) {
+				var sumLon, sumLat float64
+				var n int
+				for _, c := range coords {
+					if len(c) >= 2 {
+						sumLon += c[0]
+						sumLat += c[1]
+						n++
+					}
+				}
+				if n == 0 {
+					return
+				}
+				cLon := sumLon / float64(n)
+				cLat := sumLat / float64(n)
+				name := ""
+				if v, ok := props["OBJNAM"]; ok {
+					if s, ok := v.(string); ok {
+						name = s
+					}
+				}
+				k := key{
+					class: class,
+					name:  name,
+					lonQ:  int64(cLon * dedupQ),
+					latQ:  int64(cLat * dedupQ),
+				}
+				p := make(map[string]any, len(props))
+				for kk, vv := range props {
+					p[kk] = vv
+				}
+				s := Structure{Class: class, Geometry: sg, Properties: p}
+				if existing, ok := seen[k]; !ok || len(p) > len(existing.Properties) {
+					seen[k] = s
+				}
+			}
+
+			// Phantom geometry: the s57 lib sometimes hands a structure
+			// back as flat-concatenated raw edges with km-scale diagonals
+			// between disconnected sub-features (see structurePhantomJumpM).
+			// We used to drop the whole feature, which for a long bridge
+			// left only the short approach fragments so the bridge never
+			// crossed the water.
+			if hasPhantomEdge(geom.Coordinates, structurePhantomJumpM) {
+				runs, _ := splitPathOnLongJumps(geom.Coordinates, structurePhantomJumpM)
+				var maxRun float64
+				for _, r := range runs {
+					if l := pathLengthM(r); l > maxRun {
+						maxRun = l
+					}
+				}
+				span, a, b := farthestPairM(geom.Coordinates)
+				// A bridge's deck is its long axis. When the split preserves
+				// most of that axis as a clean run (the deck was densely
+				// sampled — e.g. the Manhattan Bridge), stroke the runs so
+				// the line follows the real deck. When it doesn't — the deck
+				// fragments into sub-300 m stubs (the Brooklyn Bridge), or
+				// the whole span is a single 2-point edge (overview cells) —
+				// the runs miss the crossing entirely. Fall back to a
+				// straight line between the two farthest vertices: the deck
+				// axis, which still spans the channel like NOAA draws it. The
+				// span cap rejects pathological cross-feature concatenations
+				// (a diagonal to a genuinely unrelated structure). Bridges
+				// only: for cables/pipes a feature can hold several distinct
+				// spans and a farthest-pair line would wrongly join them.
+				//
+				// The vertex floor is what keeps overview cells from
+				// littering the chart: a 1:350k cell encodes a bridge as a
+				// bare 2–3 point centerline whose single edge is itself a
+				// >300 m "jump", so it has no clean run and trips the
+				// fallback — but those coarse stubs are misplaced relative
+				// to the detailed-cell bridge and paint as random diagonals
+				// across the city. A genuinely-fragmented detailed footprint
+				// (the Brooklyn Bridge) carries 8+ vertices; require that so
+				// the coarse stubs fall through to the (empty) run path and
+				// drop, exactly as they did before bridges were recovered.
+				if class == "BRIDGE" && len(geom.Coordinates) >= phantomMinVertices &&
+					maxRun < 0.5*span && span > 0 && span <= phantomSpanCapM {
+					line := [][]float64{a, b}
+					emit(StructureGeom{Type: "LineString", Coordinates: line}, line)
+				} else {
+					for _, run := range runs {
+						emit(StructureGeom{Type: "LineString", Coordinates: run}, run)
+					}
+				}
+				continue
+			}
 			switch geom.Type {
 			case s57.GeometryTypePoint:
-				sg = StructureGeom{Type: "Point", Coordinates: geom.Coordinates[0]}
+				emit(StructureGeom{Type: "Point", Coordinates: geom.Coordinates[0]}, geom.Coordinates)
 			case s57.GeometryTypeLineString:
-				sg = StructureGeom{Type: "LineString", Coordinates: geom.Coordinates}
+				emit(StructureGeom{Type: "LineString", Coordinates: geom.Coordinates}, geom.Coordinates)
 			case s57.GeometryTypePolygon:
 				// Wrap the single ring as GeoJSON Polygon coordinates
 				// expect: [outer-ring, ...holes]. Holes aren't surfaced
 				// by the s57 library at this level so we always emit a
 				// one-ring polygon.
-				sg = StructureGeom{Type: "Polygon", Coordinates: [][][]float64{geom.Coordinates}}
+				emit(StructureGeom{Type: "Polygon", Coordinates: [][][]float64{geom.Coordinates}}, geom.Coordinates)
 			default:
 				continue
-			}
-			// Centroid for dedup so the same bridge in two cells (which
-			// often differ in segmentation/first-vertex) maps to the
-			// same key. Plain unweighted mean of vertices — close enough
-			// for grouping; not used for rendering.
-			var sumLon, sumLat float64
-			var n int
-			for _, c := range geom.Coordinates {
-				if len(c) >= 2 {
-					sumLon += c[0]
-					sumLat += c[1]
-					n++
-				}
-			}
-			if n == 0 {
-				continue
-			}
-			cLon := sumLon / float64(n)
-			cLat := sumLat / float64(n)
-			name := ""
-			if v, ok := props["OBJNAM"]; ok {
-				if s, ok := v.(string); ok {
-					name = s
-				}
-			}
-			k := key{
-				class: class,
-				name:  name,
-				lonQ:  int64(cLon * dedupQ),
-				latQ:  int64(cLat * dedupQ),
-			}
-			s := Structure{Class: class, Geometry: sg, Properties: props}
-			if existing, ok := seen[k]; !ok || len(props) > len(existing.Properties) {
-				seen[k] = s
 			}
 		}
 	}
@@ -1339,6 +1384,55 @@ func splitRings(coords [][]float64) [][][]float64 {
 // self-closes vertex-equality at start. Real bridge/cable footprints have
 // vertex spacing under ~100 m even at 1:80k cells, so 300 m is unambiguous.
 const structurePhantomJumpM = 300.0
+
+// phantomMinVertices is the smallest vertex count a phantom BRIDGE feature
+// must have for the farthest-pair span fallback (see Structures). Detailed-cell
+// bridge footprints that fragment carry 8+ vertices; coarse overview-cell
+// centerlines are 2–3 points and below this floor, so they drop instead of
+// painting misplaced diagonals.
+const phantomMinVertices = 6
+
+// phantomSpanCapM bounds the farthest-pair fallback used to recover a long
+// bridge's spanning deck from a phantom feature (see Structures). No single
+// BRIDGE object in NOAA ENCs spans more than ~2 km; a farthest-pair distance
+// beyond this means the phantom concatenated genuinely unrelated features, so
+// we decline to draw a diagonal joining them.
+const phantomSpanCapM = 3000.0
+
+// pathLengthM sums the ground distance along a coord run in metres.
+func pathLengthM(coords [][]float64) float64 {
+	var sum float64
+	for i := 1; i < len(coords); i++ {
+		if len(coords[i]) < 2 || len(coords[i-1]) < 2 {
+			continue
+		}
+		sum += haversineMeters(coords[i-1][1], coords[i-1][0], coords[i][1], coords[i][0])
+	}
+	return sum
+}
+
+// farthestPairM returns the greatest ground distance between any two vertices
+// and the pair itself. For a long thin structure (a bridge deck) the farthest
+// pair are its two ends, so the segment a→b approximates the deck axis even
+// when the vertex ordering is scrambled by the s57 phantom-edge fallback.
+// O(n^2); structure features carry only a handful of vertices.
+func farthestPairM(coords [][]float64) (dist float64, a, b []float64) {
+	for i := 0; i < len(coords); i++ {
+		if len(coords[i]) < 2 {
+			continue
+		}
+		for j := i + 1; j < len(coords); j++ {
+			if len(coords[j]) < 2 {
+				continue
+			}
+			d := haversineMeters(coords[i][1], coords[i][0], coords[j][1], coords[j][0])
+			if d > dist {
+				dist, a, b = d, coords[i], coords[j]
+			}
+		}
+	}
+	return dist, a, b
+}
 
 // classNeedsPhantomEdgeRepair reports whether splitPathOnLongJumps /
 // hasPhantomEdge should be applied to features of this class. The phantom-
