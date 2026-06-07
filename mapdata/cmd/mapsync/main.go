@@ -1,18 +1,18 @@
-// osmtools is a multi-purpose CLI for the chartplotter's OSM data
+// mapsync is a multi-purpose CLI for the chartplotter's OSM data
 // pipeline. Today it has one subcommand:
 //
-//	osmtools ingest --pbf <path> --mongo <uri> --region <key>
+//	mapsync ingest --pbf <path> --mongo <uri> --region <key>
 //
 // More subcommands (e.g. region inspection, tile prerender, mongo
 // query helpers) can be added to the dispatch table in main().
 //
 // Usage examples:
 //
-//	osmtools ingest --pbf /tmp/NewYork.osm.pbf \
+//	mapsync ingest --pbf /tmp/NewYork.osm.pbf \
 //	                --mongo mongodb://localhost:27017 \
 //	                --region us-new-york
 //
-//	osmtools ingest --pbf /tmp/NewYork.osm.pbf \
+//	mapsync ingest --pbf /tmp/NewYork.osm.pbf \
 //	                --mongo "mongodb+srv://user:pass@cluster.example.net/?retryWrites=true" \
 //	                --db osm --coll features \
 //	                --region us-new-york
@@ -27,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +43,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-	"github.com/erh/viam-chartplotter/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 func main() {
@@ -72,6 +73,21 @@ func main() {
 			fmt.Fprintf(os.Stderr, "downloadpbfs: %v\n", err)
 			os.Exit(1)
 		}
+	case "noaa-sync":
+		if err := runNOAASync(args); err != nil {
+			fmt.Fprintf(os.Stderr, "noaa-sync: %v\n", err)
+			os.Exit(1)
+		}
+	case "noaa-ingest":
+		if err := runNOAAIngest(args); err != nil {
+			fmt.Fprintf(os.Stderr, "noaa-ingest: %v\n", err)
+			os.Exit(1)
+		}
+	case "noaa-query":
+		if err := runNOAAQuery(args); err != nil {
+			fmt.Fprintf(os.Stderr, "noaa-query: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		topUsage()
 	default:
@@ -82,15 +98,20 @@ func main() {
 }
 
 func topUsage() {
-	fmt.Fprintln(os.Stderr, "Usage: osmtools <subcommand> [flags]")
+	fmt.Fprintln(os.Stderr, "Usage: mapsync <subcommand> [flags]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  ingest        Read a .osm.pbf and upsert kept features into MongoDB")
-	fmt.Fprintln(os.Stderr, "  query         Show + count the features a given tile would query for")
-	fmt.Fprintln(os.Stderr, "  gentile       Render a tile PNG by querying the MongoDB collection")
-	fmt.Fprintln(os.Stderr, "  downloadpbfs  Fetch every Geofabrik .osm.pbf for a continent key")
+	fmt.Fprintln(os.Stderr, "  OSM (osm_* collections):")
+	fmt.Fprintln(os.Stderr, "    ingest        Read a .osm.pbf and upsert kept features into MongoDB")
+	fmt.Fprintln(os.Stderr, "    query         Show + count the features a given tile would query for")
+	fmt.Fprintln(os.Stderr, "    gentile       Render a tile PNG by querying the MongoDB collection")
+	fmt.Fprintln(os.Stderr, "    downloadpbfs  Fetch every Geofabrik .osm.pbf for a continent key")
+	fmt.Fprintln(os.Stderr, "  NOAA ENC (noaa collection):")
+	fmt.Fprintln(os.Stderr, "    noaa-sync     Download NOAA ENC cells overlapping a bbox to disk")
+	fmt.Fprintln(os.Stderr, "    noaa-ingest   Parse ENC cells and upsert their features into MongoDB")
+	fmt.Fprintln(os.Stderr, "    noaa-query    Count NOAA features intersecting a bbox, grouped by object class")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Run "osmtools <subcommand> --help" for subcommand flags.`)
+	fmt.Fprintln(os.Stderr, `Run "mapsync <subcommand> --help" for subcommand flags.`)
 }
 
 // ----- ingest --------------------------------------------------------------
@@ -101,14 +122,18 @@ func runIngest(args []string) error {
 		"path to input .osm.pbf (kept for back-compat; you can also pass PBF paths as positional args)")
 	mongoURI := fs.String("mongo", "", "MongoDB connection URI (required)")
 	dbName := fs.String("db", "osm", "MongoDB database name")
-	collName := fs.String("coll", "features", "MongoDB collection name")
+	// --coll is gone — we now write to fixed per-bucket collection names
+	// (osm_overview/coastal/detail/skip). The bucket split is the
+	// whole point of this rev; one collection-name knob would mean either
+	// per-bucket prefixes (operational noise) or breaking back-compat
+	// silently (worse). Easier to make it explicit.
 	region := fs.String("region", "",
 		"region key recorded on every document (only valid with a single PBF; multi-file mode derives one region per file)")
 	batchSize := fs.Int("batch", 1000, "bulk upsert batch size")
 	procs := fs.Int("procs", 0,
 		"PBF decoder workers per file (default: runtime.NumCPU() / workers, min 1)")
 	workers := fs.Int("workers", 0,
-		"concurrent PBF ingest workers when multiple PBFs are given (default min(8, len(paths)))")
+		"concurrent PBF ingest workers when multiple PBFs are given (default min(2, len(paths)); tune up for larger boxes)")
 	force := fs.Bool("force", false,
 		"re-ingest even when an ingest-meta doc says this region's PBF hash already matches")
 	if err := fs.Parse(args); err != nil {
@@ -120,7 +145,7 @@ func runIngest(args []string) error {
 	}
 
 	// Collect PBF paths from --pbf (back-compat) plus positional args.
-	// Positional usage: `osmtools ingest --mongo ... a.pbf b.pbf c.pbf`.
+	// Positional usage: `mapsync ingest --mongo ... a.pbf b.pbf c.pbf`.
 	var pbfPaths []string
 	if *pbfFlag != "" {
 		pbfPaths = append(pbfPaths, *pbfFlag)
@@ -136,7 +161,7 @@ func runIngest(args []string) error {
 	}
 
 	if *workers <= 0 {
-		*workers = 8
+		*workers = 2
 		if *workers > len(pbfPaths) {
 			*workers = len(pbfPaths)
 		}
@@ -172,10 +197,16 @@ func runIngest(args []string) error {
 	if err := client.Ping(connectCtx, nil); err != nil {
 		return fmt.Errorf("mongo ping: %w", err)
 	}
-	coll := client.Database(*dbName).Collection(*collName)
-	fmt.Fprintf(os.Stderr, "connected to %s.%s\n", *dbName, *collName)
-	if err := ensureFeatureIndexes(ctx, coll); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
+	db := client.Database(*dbName)
+	colls := osmtiler.OpenOSMCollections(db)
+	fmt.Fprintf(os.Stderr, "connected to %s (%s/%s/%s/%s)\n",
+		*dbName, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, osmtiler.CollSkip)
+	for _, b := range []osmtiler.MinZoomBucket{
+		osmtiler.BucketOverview, osmtiler.BucketCoastal, osmtiler.BucketDetail, osmtiler.BucketSkip,
+	} {
+		if err := ensureFeatureIndexes(ctx, colls.For(b), b); err != nil {
+			return fmt.Errorf("ensure indexes %s: %w", b.CollectionName(), err)
+		}
 	}
 
 	// Per-file ingest opts. Derive a region key from each filename
@@ -187,7 +218,6 @@ func runIngest(args []string) error {
 			pbfPath:   p,
 			mongoURI:  *mongoURI,
 			dbName:    *dbName,
-			collName:  *collName,
 			batchSize: *batchSize,
 			procs:     *procs,
 			force:     *force,
@@ -220,7 +250,7 @@ func runIngest(args []string) error {
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			errs[idx] = ingest(ctx, coll, jobs[idx])
+			errs[idx] = ingest(ctx, colls, jobs[idx])
 		}(i)
 	}
 	wg.Wait()
@@ -255,7 +285,6 @@ type ingestOpts struct {
 	pbfPath   string
 	mongoURI  string
 	dbName    string
-	collName  string
 	region    string
 	batchSize int
 	procs     int
@@ -336,16 +365,16 @@ type featureDoc struct {
 	Tags         map[string]string `bson:"tags,omitempty"`
 }
 
-// ingest processes a single PBF into the given collection. Caller owns
-// the Mongo connection and is responsible for having already run
-// ensureFeatureIndexes — both are one-shot setup that's shared across
-// all PBFs in a parallel multi-file ingest.
-func ingest(ctx context.Context, coll *mongo.Collection, opts ingestOpts) error {
+// ingest processes a single PBF into the four bucket collections.
+// Caller owns the Mongo connection and is responsible for having
+// already run ensureFeatureIndexes on each bucket — both are one-shot
+// setup that's shared across all PBFs in a parallel multi-file ingest.
+func ingest(ctx context.Context, colls *osmtiler.OSMCollections, opts ingestOpts) error {
 	out := opts.writer()
 
 	// Hash the PBF and check ingest-meta — if a previous ingest
-	// of this region recorded the same hash and the collection
-	// still has roughly the expected number of feature docs,
+	// of this region recorded the same hash and the collections
+	// still have roughly the expected number of feature docs,
 	// there's nothing new to write. Saves ~minutes per re-run.
 	hashStart := time.Now()
 	pbfHash, pbfSize, err := hashFile(opts.pbfPath)
@@ -356,7 +385,7 @@ func ingest(ctx context.Context, coll *mongo.Collection, opts ingestOpts) error 
 		pbfHash[:12], humanBytes(pbfSize), time.Since(hashStart).Round(time.Millisecond))
 
 	if !opts.force {
-		if skip, why := shouldSkipIngest(ctx, coll, opts.region, pbfHash); skip {
+		if skip, why := shouldSkipIngest(ctx, colls, opts.region, pbfHash); skip {
 			fmt.Fprintf(out, "skip: %s\n", why)
 			return nil
 		} else if why != "" {
@@ -377,43 +406,60 @@ func ingest(ctx context.Context, coll *mongo.Collection, opts ingestOpts) error 
 	// Pass 2 — nodes + ways. Emit node POIs / way features directly;
 	// stash coords for relation members. After pass 2 we stitch and
 	// emit the multipolygon features.
-	w := newUpserter(coll, opts.batchSize, out)
+	w := newBucketRouter(colls, opts.batchSize, out)
 	memberCoords, err := scanNodesAndWays(ctx, opts, memberWays, w)
 	if err != nil {
 		return fmt.Errorf("nodes/ways pass: %w", err)
 	}
 	fmt.Fprintf(out, "pass 2: emitted %d node/way features, kept %d member way geometries\n",
-		w.emitted, len(memberCoords))
+		w.emitted(), len(memberCoords))
 
 	if err := emitRelations(ctx, opts, relPass, memberCoords, w); err != nil {
 		return fmt.Errorf("emit relations: %w", err)
 	}
-	fmt.Fprintf(out, "emitted %d total features\n", w.emitted)
+	fmt.Fprintf(out, "emitted %d total features\n", w.emitted())
 
 	if err := w.flush(ctx); err != nil {
 		return fmt.Errorf("final flush: %w", err)
 	}
-	if w.bulkErrors > 0 {
+	if be := w.bulkErrors(); be > 0 {
 		fmt.Fprintf(out, "done: %d upserts (%d batches, %d docs rejected by server)\n",
-			w.upserted, w.batches, w.bulkErrors)
+			w.upserted(), w.batches(), be)
 	} else {
-		fmt.Fprintf(out, "done: %d upserts (%d batches)\n", w.upserted, w.batches)
+		fmt.Fprintf(out, "done: %d upserts (%d batches)\n", w.upserted(), w.batches())
 	}
 
 	// Persist the ingest-meta so a future run on the same PBF can
-	// short-circuit. Count the actual region docs in the collection
-	// (BulkWrite Ordered=false can have left a few behind) so the
-	// skip-tolerance check has a true baseline.
-	actualCount, err := coll.CountDocuments(ctx, bson.M{"region": opts.region})
+	// short-circuit. Count the actual region docs across all four
+	// bucket collections (BulkWrite Ordered=false can have left a few
+	// behind in any bucket) so the skip-tolerance check has a true
+	// baseline. The meta doc itself lives in the overview collection
+	// (any single one would do — overview is just the convention).
+	actualCount, err := countRegionDocs(ctx, colls, opts.region)
 	if err != nil {
 		return fmt.Errorf("post-count: %w", err)
 	}
-	if err := writeIngestMeta(ctx, coll, opts.region, pbfHash, pbfSize, actualCount); err != nil {
+	if err := writeIngestMeta(ctx, colls.Overview, opts.region, pbfHash, pbfSize, actualCount); err != nil {
 		return fmt.Errorf("write ingest meta: %w", err)
 	}
 	fmt.Fprintf(out, "ingest-meta: region=%s hash=%s… docs=%d\n",
 		opts.region, pbfHash[:12], actualCount)
 	return nil
+}
+
+// countRegionDocs sums the per-bucket doc counts for the given region.
+func countRegionDocs(ctx context.Context, colls *osmtiler.OSMCollections, region string) (int64, error) {
+	var total int64
+	for _, b := range []osmtiler.MinZoomBucket{
+		osmtiler.BucketOverview, osmtiler.BucketCoastal, osmtiler.BucketDetail, osmtiler.BucketSkip,
+	} {
+		n, err := colls.For(b).CountDocuments(ctx, bson.M{"region": region})
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", b.CollectionName(), err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // ----- ingest-meta helpers -------------------------------------------------
@@ -426,16 +472,19 @@ func ingest(ctx context.Context, coll *mongo.Collection, opts ingestOpts) error 
 func ingestMetaID(region string) string { return "_ingest_meta:" + region }
 
 // shouldSkipIngest returns (true, why) when the recorded meta says
-// this PBF has already been fully ingested and the collection still
-// has ~the expected number of region docs. Returns (false, why)
+// this PBF has already been fully ingested and the bucket collections
+// still hold ~the expected number of region docs. Returns (false, why)
 // when we recognize the region but think it needs re-ingest, with
 // `why` describing the reason. (false, "") means no prior meta.
-func shouldSkipIngest(ctx context.Context, coll *mongo.Collection, region, pbfHash string) (bool, string) {
+//
+// The meta lives in the overview collection by convention (any single
+// one would do); the doc count is summed across all four buckets.
+func shouldSkipIngest(ctx context.Context, colls *osmtiler.OSMCollections, region, pbfHash string) (bool, string) {
 	var meta struct {
 		PBFHash  string `bson:"pbfHash"`
 		DocCount int64  `bson:"docCount"`
 	}
-	err := coll.FindOne(ctx, bson.M{"_id": ingestMetaID(region)}).Decode(&meta)
+	err := colls.Overview.FindOne(ctx, bson.M{"_id": ingestMetaID(region)}).Decode(&meta)
 	if err != nil {
 		return false, ""
 	}
@@ -443,7 +492,7 @@ func shouldSkipIngest(ctx context.Context, coll *mongo.Collection, region, pbfHa
 		return false, fmt.Sprintf("PBF hash changed (was %s… now %s…)",
 			truncHash(meta.PBFHash), truncHash(pbfHash))
 	}
-	actual, err := coll.CountDocuments(ctx, bson.M{"region": region})
+	actual, err := countRegionDocs(ctx, colls, region)
 	if err != nil {
 		return false, fmt.Sprintf("count docs: %v", err)
 	}
@@ -454,7 +503,7 @@ func shouldSkipIngest(ctx context.Context, coll *mongo.Collection, region, pbfHa
 		return false, fmt.Sprintf("doc count too low (have %d, expected ~%d, recorded %d)",
 			actual, minOK, meta.DocCount)
 	}
-	return true, fmt.Sprintf("already ingested: hash sha256:%s… matches, %d docs in collection (recorded %d)",
+	return true, fmt.Sprintf("already ingested: hash sha256:%s… matches, %d docs across buckets (recorded %d)",
 		truncHash(pbfHash), actual, meta.DocCount)
 }
 
@@ -562,91 +611,209 @@ func scanRelations(ctx context.Context, pbfPath string, procs int) ([]relDesc, m
 	return out, members, sc.Err()
 }
 
-func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.WayID]struct{}, w *upserter) (map[osm.WayID][]osmtiler.LonLat, error) {
-	f, err := os.Open(opts.pbfPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
+// scanNodesAndWays drives pass 2 of the ingest. To bound memory on
+// state-sized PBFs we split it into three sub-passes through the file,
+// each filtering down to a single element type:
+//
+//  1. ways → collect the set of node IDs the kept-ways actually
+//     reference (`neededNodes`). Without this filter we'd be forced to
+//     buffer every node coord in the PBF (most are unused); for
+//     California that's a ~3 GB map per worker. Pre-filtering trims
+//     it to roughly the half that's actually referenced.
+//  2. nodes → store only `neededNodes` coords in a packed `nodeStore`,
+//     and emit POI docs for tagged nodes as we go. Untagged nodes that
+//     aren't in `neededNodes` are simply dropped on the floor.
+//  3. ways again → with the now-populated nodeStore, build per-way
+//     coord slices and emit way docs + relation `memberCoords`.
+//
+// The extra two PBF reads cost wall-clock (~30s per pass on a 1 GB
+// extract from local disk), but pay for themselves many times over in
+// reduced RAM peak — which matters more for parallel ingest, where
+// peak × workers is the figure that fits in physical memory.
+//
+// `memberWays` is the set of way IDs the relations pass flagged as
+// outer-ring members; we keep those + every tagged way.
+func scanNodesAndWays(ctx context.Context, opts ingestOpts, memberWays map[osm.WayID]struct{}, w *bucketRouter) (map[osm.WayID][]osmtiler.LonLat, error) {
+	out := opts.writer()
 
-	if info, err := f.Stat(); err == nil {
-		fmt.Fprintf(opts.writer(), "pass 2: scanning %.1f MB of PBF\n", float64(info.Size())/(1<<20))
-	}
-
-	sc := osmpbf.New(ctx, f, opts.procs)
-	sc.SkipRelations = true
-	// Wire bytes-read into the upserter's periodic log so the
-	// operator gets a percentage-of-file progress without us having
-	// to pre-scan for an element count.
-	if info, err := f.Stat(); err == nil {
-		w.setProgress(sc.FullyScannedBytes, info.Size())
-	}
-	sc.FilterWay = func(wy *osm.Way) bool {
+	// Predicate shared by passes 1 and 3: do we want this way's
+	// geometry? Both passes need exactly the same set so the per-way
+	// node IDs we collected match the per-way coords we'll resolve.
+	keepWay := func(wy *osm.Way) bool {
 		if _, ok := memberWays[wy.ID]; ok {
 			return true
 		}
-		// Keep every tagged way. The classifier no longer gates here
-		// (was: drop if ClassSkip); see the FilterRelation comment for
-		// the rationale.
 		return len(wy.Tags) > 0
 	}
-	defer sc.Close()
 
-	nodes := map[osm.NodeID]osmtiler.LonLat{}
-	memberCoords := map[osm.WayID][]osmtiler.LonLat{}
-
-	for sc.Scan() {
-		switch e := sc.Object().(type) {
-		case *osm.Node:
-			nodes[e.ID] = osmtiler.LonLat{Lon: e.Lon, Lat: e.Lat}
-			if len(e.Tags) == 0 {
-				continue
-			}
-			// Every tagged node is stored (was: dropped if ClassSkip).
-			// Class is still pre-computed so the renderer fast-path
-			// doesn't have to re-classify from tags per query.
-			doc := nodeDoc(opts.region, e, osmtiler.Classify(e.Tags))
-			if err := w.upsert(ctx, doc); err != nil {
-				return nil, err
-			}
-
-		case *osm.Way:
-			coords := make([]osmtiler.LonLat, 0, len(e.Nodes))
-			for _, n := range e.Nodes {
-				p, ok := nodes[n.ID]
-				if !ok {
-					continue
-				}
-				coords = append(coords, p)
-			}
-			if _, want := memberWays[e.ID]; want && len(coords) >= 2 {
-				memberCoords[e.ID] = coords
-			}
-			if len(e.Tags) == 0 || len(coords) < 2 {
-				continue
-			}
-			// Every tagged way with valid geometry is stored.
-			doc := wayDoc(opts.region, e, osmtiler.Classify(e.Tags), coords)
-			if err := w.upsert(ctx, doc); err != nil {
-				return nil, err
-			}
-		}
+	info, statErr := os.Stat(opts.pbfPath)
+	if statErr == nil {
+		fmt.Fprintf(out, "pass 2: scanning %.1f MB of PBF (3 sub-passes for memory budget)\n",
+			float64(info.Size())/(1<<20))
 	}
-	return memberCoords, sc.Err()
+
+	// --- pass 2a: walk ways, collect needed node IDs --------------
+	neededNodes := map[osm.NodeID]struct{}{}
+	if err := withWaysOnlyScanner(ctx, opts, keepWay, func(wy *osm.Way) error {
+		for _, n := range wy.Nodes {
+			neededNodes[n.ID] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("pass 2a (way node ids): %w", err)
+	}
+	fmt.Fprintf(out, "pass 2a: %d distinct nodes referenced by kept ways\n", len(neededNodes))
+
+	// --- pass 2b: walk nodes, store the ones we need + emit POIs --
+	nodes := newNodeStore()
+	nodes.hint(len(neededNodes))
+	if err := withNodesOnlyScanner(ctx, opts, func(n *osm.Node) bool {
+		// Keep the node if it's referenced by a kept way OR carries
+		// tags (every tagged node becomes a POI doc). Either way the
+		// decoder hands it back to us; we decide what to do with it
+		// in the body below.
+		if _, need := neededNodes[n.ID]; need {
+			return true
+		}
+		return len(n.Tags) > 0
+	}, func(n *osm.Node) error {
+		if _, need := neededNodes[n.ID]; need {
+			nodes.Set(n.ID, n.Lon, n.Lat)
+		}
+		if len(n.Tags) == 0 {
+			return nil
+		}
+		doc := nodeDoc(opts.region, n, osmtiler.Classify(n.Tags))
+		return w.upsert(ctx, doc)
+	}); err != nil {
+		return nil, fmt.Errorf("pass 2b (node store): %w", err)
+	}
+	fmt.Fprintf(out, "pass 2b: stored %d node coords\n", nodes.Len())
+
+	// Drop the needed-set now that nodeStore is populated — saves
+	// ~16 bytes per node ID before we go into pass 2c.
+	neededNodes = nil
+
+	// --- pass 2c: walk ways again, emit docs and memberCoords ------
+	memberCoords := map[osm.WayID][]osmtiler.LonLat{}
+	if err := withWaysOnlyScanner(ctx, opts, keepWay, func(e *osm.Way) error {
+		coords := make([]osmtiler.LonLat, 0, len(e.Nodes))
+		for _, n := range e.Nodes {
+			p, ok := nodes.Get(n.ID)
+			if !ok {
+				continue
+			}
+			coords = append(coords, p)
+		}
+		if _, want := memberWays[e.ID]; want && len(coords) >= 2 {
+			memberCoords[e.ID] = coords
+		}
+		if len(e.Tags) == 0 || len(coords) < 2 {
+			return nil
+		}
+		doc := wayDoc(opts.region, e, osmtiler.Classify(e.Tags), coords)
+		return w.upsert(ctx, doc)
+	}); err != nil {
+		return nil, fmt.Errorf("pass 2c (way docs): %w", err)
+	}
+
+	return memberCoords, nil
 }
 
-func emitRelations(ctx context.Context, opts ingestOpts, rels []relDesc, memberCoords map[osm.WayID][]osmtiler.LonLat, w *upserter) error {
+// withWaysOnlyScanner opens the PBF, runs `cb` for each way the filter
+// admits, and tears the scanner down on the way out. Nodes and
+// relations blobs are skipped at the protobuf level so the decoder
+// doesn't pay the deserialization cost (the bytes still get read off
+// disk, but that's bounded by I/O).
+func withWaysOnlyScanner(ctx context.Context, opts ingestOpts, filter func(*osm.Way) bool, cb func(*osm.Way) error) error {
+	f, err := os.Open(opts.pbfPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := osmpbf.New(ctx, f, opts.procs)
+	sc.SkipNodes = true
+	sc.SkipRelations = true
+	sc.FilterWay = filter
+	defer sc.Close()
+	for sc.Scan() {
+		wy, ok := sc.Object().(*osm.Way)
+		if !ok {
+			continue
+		}
+		if err := cb(wy); err != nil {
+			return err
+		}
+	}
+	return sc.Err()
+}
+
+// withNodesOnlyScanner does the equivalent for nodes — only blobs
+// containing nodes are decoded; ways and relations are skipped.
+func withNodesOnlyScanner(ctx context.Context, opts ingestOpts, filter func(*osm.Node) bool, cb func(*osm.Node) error) error {
+	f, err := os.Open(opts.pbfPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := osmpbf.New(ctx, f, opts.procs)
+	sc.SkipWays = true
+	sc.SkipRelations = true
+	sc.FilterNode = filter
+	defer sc.Close()
+	for sc.Scan() {
+		n, ok := sc.Object().(*osm.Node)
+		if !ok {
+			continue
+		}
+		if err := cb(n); err != nil {
+			return err
+		}
+	}
+	return sc.Err()
+}
+
+func emitRelations(ctx context.Context, opts ingestOpts, rels []relDesc, memberCoords map[osm.WayID][]osmtiler.LonLat, w *bucketRouter) error {
+	skippedHuge := 0
 	for _, rd := range rels {
 		rings := osmtiler.AssembleOuterRings(rd.OuterWays, memberCoords)
 		for i, ring := range rings {
+			if len(ring) > maxRingVertices {
+				// Greenland / Nunavut / Antarctica coastline rings can
+				// run to millions of vertices, exceeding MongoDB's 16 MB
+				// BSON doc limit and getting the whole batch rejected
+				// client-side. Drop the ring with a log line — the rest
+				// of the relation's rings (and every other relation in
+				// this PBF) should still ingest cleanly.
+				//
+				// Long-term fix would be Douglas-Peucker simplification
+				// at the per-zoom level we render at, but for a chart
+				// underlay even a missing Greenland is fine — the chart
+				// itself draws the coastline.
+				skippedHuge++
+				fmt.Fprintf(opts.writer(),
+					"  warn: skipping relation %d ring %d (%q): %d vertices > %d limit\n",
+					rd.ID, i, rd.Name, len(ring), maxRingVertices)
+				continue
+			}
 			doc := relRingDoc(opts.region, rd, i, ring)
 			if err := w.upsert(ctx, doc); err != nil {
 				return err
 			}
 		}
 	}
+	if skippedHuge > 0 {
+		fmt.Fprintf(opts.writer(), "skipped %d rings over %d vertices\n", skippedHuge, maxRingVertices)
+	}
 	return nil
 }
+
+// maxRingVertices is the per-ring vertex cap we use to keep an
+// assembled multipolygon below MongoDB's 16 MB BSON doc limit. At
+// ~24 bytes per [lon,lat] pair (2 doubles + BSON array overhead),
+// 500_000 vertices serialise to roughly 12 MB — comfortably under
+// 16 MB once the doc's metadata (tags, region, class, …) is added.
+const maxRingVertices = 500_000
 
 // ----- doc builders --------------------------------------------------------
 
@@ -791,59 +958,49 @@ func relRingDoc(region string, rd relDesc, ringIdx int, coords []osmtiler.LonLat
 	}
 }
 
-// ensureFeatureIndexes creates the indexes the tile-render query
-// path expects. Called at the start of every ingest run so a fresh
-// collection comes up correctly without a separate mongo-shell step.
-// Idempotent — re-running the same spec is a no-op; a clashing
-// pre-existing index returns an error so the operator can decide.
+// ensureFeatureIndexes creates the indexes the tile-render query path
+// expects for a single bucket collection. Called once per bucket at the
+// start of every ingest run so fresh collections come up correctly
+// without a separate mongo-shell step. Idempotent when the spec matches
+// an existing same-named index (no rebuild); spec mismatch returns
+// IndexOptionsConflict so the operator can decide. If you change the
+// spec on a populated collection, drop the old index by hand once
+// (`db.features_<bucket>.dropIndex("geo_minZoom_class")`) and re-run.
 //
-// The geo index is partial on `minZoom < 255`. Tagged-but-not-yet-
-// rendered features (fences, power lines, raw `surface=*` ways) carry
-// the sentinel minZoom=255 — see GeomMinZoom's fall-through — so they
-// land in the collection but skip the 2dsphere index cost. Promoting a
-// doc to a real class via updateMany sets its minZoom to a real value
-// and the partial index picks it up automatically. The semantic match
-// is intentional: the renderer's own `minZoom <= z` filter already
-// excludes anything with minZoom=255 at every real zoom, so the index
-// stays aligned with what the query path actually consults.
-//
-// Note: MongoDB's partial filter expression syntax only accepts $eq,
-// $gt(e), $lt(e), $in, $type, $exists, $and; $ne is rejected. Hence the
-// $lt over the sentinel rather than the more natural "class != skip".
-func ensureFeatureIndexes(ctx context.Context, coll *mongo.Collection) error {
-	// CreateMany is idempotent when the spec matches an existing index
-	// of the same name — no rebuild. If you ever change this spec on a
-	// collection that already has a `geo_minZoom_class` index, you'll
-	// get an IndexOptionsConflict at create time; in that case drop
-	// the old index by hand once
-	// (`db.features.dropIndex("geo_minZoom_class")`) and re-run ingest.
+// The skip bucket gets only the region index — it holds minZoom=255
+// docs the renderer never $geoIntersects-queries, so the 2dsphere
+// index would be pure overhead.
+func ensureFeatureIndexes(ctx context.Context, coll *mongo.Collection, bucket osmtiler.MinZoomBucket) error {
 	models := []mongo.IndexModel{
 		{
-			// Primary render query: $geoIntersects on a tile bbox,
-			// optionally filtered by minZoom (range) and class. The
-			// compound key serves bbox-only, bbox+minZoom, and the
-			// full bbox+minZoom+class via index-prefix matching.
+			// Admin/inspection queries that don't pin geography
+			// (e.g. "all docs in this region", border-dedup work,
+			// post-ingest region count).
+			Keys:    bson.D{{Key: "region", Value: 1}},
+			Options: options.Index().SetName("region_1"),
+		},
+	}
+	if bucket != osmtiler.BucketSkip {
+		// Primary render query: $geoIntersects on a tile bbox, optionally
+		// filtered by minZoom (range) and class. The compound key serves
+		// bbox-only, bbox+minZoom, and the full bbox+minZoom+class via
+		// index-prefix matching. No partial filter needed — the bucket
+		// split already restricts this collection to a known minZoom
+		// range, so every doc here is queryable.
+		models = append(models, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "geometry", Value: "2dsphere"},
 				{Key: "minZoom", Value: 1},
 				{Key: "class", Value: 1},
 			},
-			Options: options.Index().
-				SetName("geo_minZoom_class").
-				SetPartialFilterExpression(bson.M{"minZoom": bson.M{"$lt": 255}}),
-		},
-		{
-			// Admin/inspection queries that don't pin geography
-			// (e.g. "all docs in this region", border-dedup work).
-			Keys:    bson.D{{Key: "region", Value: 1}},
-			Options: options.Index().SetName("region_1"),
-		},
+			Options: options.Index().SetName("geo_minZoom_class"),
+		})
 	}
 	created, err := coll.Indexes().CreateMany(ctx, models)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "indexes ready: %v\n", created)
+	fmt.Fprintf(os.Stderr, "indexes ready for %s: %v\n", bucket.CollectionName(), created)
 	return nil
 }
 
@@ -857,14 +1014,6 @@ type upserter struct {
 	emitted   int
 	upserted  int
 	batches   int
-	lastLog   time.Time
-
-	// Progress reporting: if set, the 5-second log line tacks on
-	// "N.N% of file" so the operator has a sense of wall-clock
-	// remaining. PBF has no header element-count, so bytes-read is
-	// the most honest signal we can give.
-	progressBytes func() int64
-	progressTotal int64
 
 	// Per-doc-failure tracking. With Ordered=false BulkWrite, the
 	// 2dsphere validator can reject individual docs without us
@@ -881,11 +1030,6 @@ func newUpserter(coll *mongo.Collection, batchSize int, out io.Writer) *upserter
 	return &upserter{coll: coll, batchSize: batchSize, out: out}
 }
 
-func (u *upserter) setProgress(bytesFn func() int64, total int64) {
-	u.progressBytes = bytesFn
-	u.progressTotal = total
-}
-
 func (u *upserter) upsert(ctx context.Context, doc featureDoc) error {
 	u.pending = append(u.pending,
 		mongo.NewUpdateOneModel().
@@ -897,16 +1041,9 @@ func (u *upserter) upsert(ctx context.Context, doc featureDoc) error {
 	if len(u.pending) >= u.batchSize {
 		return u.flush(ctx)
 	}
-	if time.Since(u.lastLog) > 5*time.Second {
-		msg := fmt.Sprintf("  ... %d emitted (%d upserted)", u.emitted, u.upserted)
-		if u.progressBytes != nil && u.progressTotal > 0 {
-			read := u.progressBytes()
-			pct := float64(read) / float64(u.progressTotal) * 100
-			msg = fmt.Sprintf("%s, %.1f%% of file", msg, pct)
-		}
-		fmt.Fprintln(u.out, msg)
-		u.lastLog = time.Now()
-	}
+	// Periodic progress is the bucketRouter's job in the bucket-split
+	// world — one aggregate "N emitted" line beats four uncoordinated
+	// per-collection lines.
 	return nil
 }
 
@@ -943,6 +1080,176 @@ func (u *upserter) flush(ctx context.Context) error {
 	u.batches++
 	u.pending = u.pending[:0]
 	return nil
+}
+
+// ----- bucket router -------------------------------------------------------
+
+// bucketRouter holds one upserter per minZoom-bucket collection and
+// routes each upserted doc to the right one based on its minZoom. The
+// public interface (upsert / flush) mirrors *upserter so the scan
+// functions don't care which one they have. Aggregate counters
+// (emitted / upserted / batches / bulkErrors) sum across all four
+// buckets; the periodic progress line lives here, not on the inner
+// upserters, so the operator sees one cohesive log stream instead of
+// four interleaved ones.
+type bucketRouter struct {
+	overview, coastal, detail, skip *upserter
+	out                             io.Writer
+
+	lastLog time.Time
+}
+
+func newBucketRouter(colls *osmtiler.OSMCollections, batchSize int, out io.Writer) *bucketRouter {
+	if out == nil {
+		out = os.Stderr
+	}
+	return &bucketRouter{
+		overview: newUpserter(colls.Overview, batchSize, out),
+		coastal:  newUpserter(colls.Coastal, batchSize, out),
+		detail:   newUpserter(colls.Detail, batchSize, out),
+		skip:     newUpserter(colls.Skip, batchSize, out),
+		out:      out,
+	}
+}
+
+// upsertersInBucketOrder enumerates the four upserters in the same
+// order as the bucket enum so iteration is deterministic.
+func (r *bucketRouter) all() []*upserter {
+	return []*upserter{r.overview, r.coastal, r.detail, r.skip}
+}
+
+// pickUpserter routes a doc by its pre-computed minZoom field.
+func (r *bucketRouter) pickUpserter(doc featureDoc) *upserter {
+	switch osmtiler.BucketForMinZoom(uint8(doc.MinZoom)) {
+	case osmtiler.BucketOverview:
+		return r.overview
+	case osmtiler.BucketCoastal:
+		return r.coastal
+	case osmtiler.BucketDetail:
+		return r.detail
+	default:
+		return r.skip
+	}
+}
+
+func (r *bucketRouter) upsert(ctx context.Context, doc featureDoc) error {
+	u := r.pickUpserter(doc)
+	if err := u.upsert(ctx, doc); err != nil {
+		return err
+	}
+	if time.Since(r.lastLog) > 5*time.Second {
+		msg := fmt.Sprintf("  ... %d emitted (%d upserted) [overview=%d coastal=%d detail=%d skip=%d]",
+			r.emitted(), r.upserted(),
+			r.overview.emitted, r.coastal.emitted, r.detail.emitted, r.skip.emitted)
+		fmt.Fprintln(r.out, msg)
+		r.lastLog = time.Now()
+	}
+	return nil
+}
+
+func (r *bucketRouter) flush(ctx context.Context) error {
+	for _, u := range r.all() {
+		if err := u.flush(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *bucketRouter) emitted() int {
+	n := 0
+	for _, u := range r.all() {
+		n += u.emitted
+	}
+	return n
+}
+
+func (r *bucketRouter) upserted() int {
+	n := 0
+	for _, u := range r.all() {
+		n += u.upserted
+	}
+	return n
+}
+
+func (r *bucketRouter) batches() int {
+	n := 0
+	for _, u := range r.all() {
+		n += u.batches
+	}
+	return n
+}
+
+func (r *bucketRouter) bulkErrors() int {
+	n := 0
+	for _, u := range r.all() {
+		n += u.bulkErrors
+	}
+	return n
+}
+
+// ----- nodeStore -----------------------------------------------------------
+
+// nodeStore is the per-PBF in-memory cache of node coords used during
+// pass 2 to resolve way geometry. The naive `map[osm.NodeID]LonLat`
+// implementation costs ~32 bytes per entry (8-byte key + 16-byte LonLat
+// + ~8 bytes of bucket overhead at typical Go-map load); for a
+// California-sized PBF (~100M nodes) that's ~3.2 GB per worker.
+//
+// nodeStore packs each coord pair into a single uint64 by quantising
+// lon/lat to int32 micro-degrees (0.1 m precision at the equator), so
+// the value half drops 16→8 bytes. Same key, smaller value → ~22 bytes
+// per entry (~30% saving). Combined with the 3-pass scan that drops
+// unreferenced nodes entirely, peak memory falls to roughly a third of
+// the original map.
+type nodeStore struct {
+	m map[osm.NodeID]uint64
+}
+
+func newNodeStore() *nodeStore {
+	return &nodeStore{m: map[osm.NodeID]uint64{}}
+}
+
+// hint pre-sizes the map. Use the count returned by the needed-node-IDs
+// scan so the map doesn't grow-and-realloc its way up to final size,
+// which is by far the costliest part of building a 100M-entry map.
+func (s *nodeStore) hint(n int) {
+	if n > len(s.m) {
+		s.m = make(map[osm.NodeID]uint64, n)
+	}
+}
+
+func (s *nodeStore) Set(id osm.NodeID, lon, lat float64) {
+	s.m[id] = packLonLat(lon, lat)
+}
+
+func (s *nodeStore) Get(id osm.NodeID) (osmtiler.LonLat, bool) {
+	p, ok := s.m[id]
+	if !ok {
+		return osmtiler.LonLat{}, false
+	}
+	return unpackLonLat(p), true
+}
+
+func (s *nodeStore) Len() int { return len(s.m) }
+
+// packLonLat folds two float64 lon/lat values into one uint64 by
+// rounding each to int32 micro-degrees. Lon ∈ [-180, 180] × 1e7 fits
+// comfortably in int32 (range ±2.1e9), and 1e-7° ≈ 11 mm at the equator
+// — far below the precision OSM contributors edit at.
+func packLonLat(lon, lat float64) uint64 {
+	li := int32(math.Round(lon * 1e7))
+	la := int32(math.Round(lat * 1e7))
+	return uint64(uint32(li))<<32 | uint64(uint32(la))
+}
+
+func unpackLonLat(p uint64) osmtiler.LonLat {
+	li := int32(p >> 32)
+	la := int32(p)
+	return osmtiler.LonLat{
+		Lon: float64(li) / 1e7,
+		Lat: float64(la) / 1e7,
+	}
 }
 
 // ----- helpers -------------------------------------------------------------
@@ -1050,7 +1357,7 @@ func runDownloadPBFs(args []string) error {
 		// keepalive timing.
 		Timeout: 30 * time.Minute,
 	}
-	const userAgent = "viam-chartplotter osmtools (+https://github.com/erh/viam-chartplotter)"
+	const userAgent = "viam-chartplotter mapsync (+https://github.com/erh/viam-chartplotter)"
 
 	fmt.Fprintf(os.Stderr, "downloading %d PBFs for %s → %s\n", len(sources), *continent, *dir)
 	var fetched, skipped, failed int
@@ -1144,7 +1451,7 @@ func loadGeofabrikIndex(parent, substr string, includeParents bool) ([]pbfSource
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "viam-chartplotter osmtools (+https://github.com/erh/viam-chartplotter)")
+	req.Header.Set("User-Agent", "viam-chartplotter mapsync (+https://github.com/erh/viam-chartplotter)")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1229,7 +1536,6 @@ func loadGeofabrikIndex(parent, substr string, includeParents bool) ([]pbfSource
 type tileQueryOpts struct {
 	mongoURI string
 	dbName   string
-	collName string
 	osmtiler.QueryOptions
 }
 
@@ -1237,7 +1543,6 @@ func addTileQueryFlags(fs *flag.FlagSet) *tileQueryOpts {
 	o := &tileQueryOpts{}
 	fs.StringVar(&o.mongoURI, "mongo", "", "MongoDB connection URI (required)")
 	fs.StringVar(&o.dbName, "db", "osm", "MongoDB database name")
-	fs.StringVar(&o.collName, "coll", "features", "MongoDB collection name")
 	fs.BoolVar(&o.IncludeMinZoom, "min-zoom", true,
 		"include {minZoom: {$lte: z}} so only features visible at this zoom are returned")
 	fs.IntVar(&o.ZoomOverride, "zoom", -1,
@@ -1279,11 +1584,13 @@ func runQuery(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("filter (paste into mongosh):")
-	fmt.Printf("  db.%s.find(%s).count()\n", opts.collName, indentJSON(string(pretty), "  "))
+	fmt.Println("filter (paste into mongosh, run against each bucket):")
+	fmt.Printf("  db.%s.find(%s).count()\n", osmtiler.CollOverview, indentJSON(string(pretty), "  "))
+	fmt.Printf("  db.%s.find(%s).count()\n", osmtiler.CollCoastal, indentJSON(string(pretty), "  "))
+	fmt.Printf("  db.%s.find(%s).count()\n", osmtiler.CollDetail, indentJSON(string(pretty), "  "))
 	fmt.Println()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(opts.mongoURI))
 	if err != nil {
@@ -1297,14 +1604,27 @@ func runQuery(args []string) error {
 	if err := client.Ping(ctx, nil); err != nil {
 		return fmt.Errorf("mongo ping: %w", err)
 	}
-	coll := client.Database(opts.dbName).Collection(opts.collName)
+	colls := osmtiler.OpenOSMCollections(client.Database(opts.dbName))
 
-	start := time.Now()
-	count, err := coll.CountDocuments(ctx, filter)
-	if err != nil {
-		return fmt.Errorf("count: %w", err)
+	// Count per bucket so the operator can see where the cost lands —
+	// at low zoom most of the time should be in overview; coastal
+	// dominates at z=8..11; detail at z=12+.
+	var total int64
+	var totalElapsed time.Duration
+	for _, b := range []osmtiler.MinZoomBucket{
+		osmtiler.BucketOverview, osmtiler.BucketCoastal, osmtiler.BucketDetail,
+	} {
+		start := time.Now()
+		n, err := colls.For(b).CountDocuments(ctx, filter)
+		elapsed := time.Since(start)
+		if err != nil {
+			return fmt.Errorf("count %s: %w", b.CollectionName(), err)
+		}
+		fmt.Printf("  %-20s %8d features in %s\n", b.CollectionName(), n, elapsed.Round(time.Millisecond))
+		total += n
+		totalElapsed += elapsed
 	}
-	fmt.Printf("count       %d features in %s\n", count, time.Since(start).Round(time.Millisecond))
+	fmt.Printf("count       %d features in %s (sum across buckets)\n", total, totalElapsed.Round(time.Millisecond))
 	return nil
 }
 
@@ -1345,14 +1665,14 @@ func runGenTile(args []string) error {
 	if err := client.Ping(ctx, nil); err != nil {
 		return fmt.Errorf("mongo ping: %w", err)
 	}
-	coll := client.Database(opts.dbName).Collection(opts.collName)
+	colls := osmtiler.OpenOSMCollections(client.Database(opts.dbName))
 
 	// Pad the bbox so the renderer has the cross-tile label-overdraw
 	// features it expects (LabelBuffer pixels worth on each side).
 	q := opts.QueryOptions
 	q.PadBuffer = true
 	queryStart := time.Now()
-	features, stats, err := osmtiler.FetchTileFeatures(ctx, coll, z, x, y, q)
+	features, stats, err := osmtiler.FetchTileFeaturesMulti(ctx, colls, z, x, y, q)
 	if err != nil {
 		return err
 	}
@@ -1406,7 +1726,6 @@ func humanBytes(n int64) string {
 	}
 	return fmt.Sprintf("%d B", n)
 }
-
 
 // parseTileCoord parses a "z/x/y" string into integer components.
 func parseTileCoord(s string) (z, x, y int, err error) {

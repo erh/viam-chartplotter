@@ -14,14 +14,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
 	"golang.org/x/image/font/basicfont"
 
 	"github.com/beetlebugorg/s57/pkg/s57"
-	"go.mongodb.org/mongo-driver/mongo"
 
-	"github.com/erh/viam-chartplotter/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 // ENCRenderer turns ENC cells on disk into XYZ PNG tiles in pure Go. It uses the
@@ -31,12 +32,12 @@ import (
 // This is a deliberately minimal style — no S-52 — but readable enough to plot a
 // course: water/land fills, coastline, depth contours, soundings, navaids.
 type ENCRenderer struct {
-	catalog *ENCCatalog
-	store   *ENCStore
-	// osm is the MongoDB collection the /noaa-enc/osm-tile/ underlay
-	// queries. Nil disables the layer entirely — the handler serves
-	// a transparent fallback.
-	osm    *mongo.Collection
+	catalog *noaa.Catalog
+	store   *noaa.Store
+	// osm is the set of per-minZoom-bucket MongoDB collections the
+	// /noaa-enc/osm-tile/ underlay queries. Nil disables the layer
+	// entirely — the handler serves a transparent fallback.
+	osm    *osmtiler.OSMCollections
 	logger logging.Logger
 
 	mu     sync.Mutex
@@ -64,7 +65,7 @@ const (
 	passPoints
 )
 
-func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger) *ENCRenderer {
+func NewENCRenderer(catalog *noaa.Catalog, store *noaa.Store, logger logging.Logger) *ENCRenderer {
 	return &ENCRenderer{
 		catalog: catalog,
 		store:   store,
@@ -73,12 +74,12 @@ func NewENCRenderer(catalog *ENCCatalog, store *ENCStore, logger logging.Logger)
 	}
 }
 
-// SetOSMCollection attaches the MongoDB collection holding ingested
-// OSM features for the /noaa-enc/osm-tile/ underlay. When set,
-// RenderOSMTile runs a $geoIntersects query against this collection
-// for each tile and draws the result. Nil disables the layer — the
-// endpoint returns a transparent fallback PNG and never queries.
-func (r *ENCRenderer) SetOSMCollection(c *mongo.Collection) { r.osm = c }
+// SetOSMCollections attaches the per-bucket MongoDB collections that
+// hold ingested OSM features. When set, RenderOSMTile fans a
+// $geoIntersects query out across the buckets the tile zoom needs and
+// draws the merged result. Nil disables the layer — the endpoint
+// returns a transparent fallback PNG and never queries.
+func (r *ENCRenderer) SetOSMCollections(c *osmtiler.OSMCollections) { r.osm = c }
 
 // chartFor returns the parsed chart for a cell, parsing once and reusing the
 // result until the on-disk .000 file's mtime changes.
@@ -514,17 +515,17 @@ func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Stru
 // whether a bridge feature deserves an interactive hover target. Match is
 // case-insensitive and whitespace-trimmed.
 var genericBridgeNames = map[string]struct{}{
-	"bridge":             {},
-	"footbridge":         {},
-	"foot bridge":        {},
-	"pedestrian bridge":  {},
-	"railway bridge":     {},
-	"rail bridge":        {},
-	"rr bridge":          {},
-	"r.r. bridge":        {},
-	"road bridge":        {},
-	"highway bridge":     {},
-	"hwy bridge":         {},
+	"bridge":            {},
+	"footbridge":        {},
+	"foot bridge":       {},
+	"pedestrian bridge": {},
+	"railway bridge":    {},
+	"rail bridge":       {},
+	"rr bridge":         {},
+	"r.r. bridge":       {},
+	"road bridge":       {},
+	"highway bridge":    {},
+	"hwy bridge":        {},
 }
 
 // isUninformativeStructure reports whether a BRIDGE feature would render as
@@ -795,7 +796,7 @@ const ENCRenderRulesVersion = 4
 // the frontend URL pattern bumps `?osmv=` and busts browser caches on the
 // next page load — otherwise a Go-only bump leaves stale tiles cached
 // client-side for up to a day.
-const OSMRenderRulesVersion = 12
+const OSMRenderRulesVersion = 14
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -860,7 +861,6 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// CScale is the compilation-scale denominator, so larger CScale = coarser.
 	sort.SliceStable(cells, func(i, j int) bool { return cells[i].CScale > cells[j].CScale })
 
-
 	// Area-fill base pass: at chart-detail zoom we use ALL overlapping
 	// cells (no scale filter) because fine-scale Berthing cells often have
 	// only the on-the-water detail (DEPARE, COALNE) — the LNDARE / BUAARE
@@ -898,12 +898,12 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 		// has already claimed authoritative coverage for.
 		const mw = 32
 		var mask [mw * mw]bool
-		cellsFinest := make([]ENCCell, len(allCellsRaw))
+		cellsFinest := make([]noaa.Cell, len(allCellsRaw))
 		copy(cellsFinest, allCellsRaw)
 		sort.SliceStable(cellsFinest, func(i, j int) bool {
 			return cellsFinest[i].CScale < cellsFinest[j].CScale
 		})
-		toPxBox := func(c ENCCell) (xmin, ymin, xmax, ymax int) {
+		toPxBox := func(c noaa.Cell) (xmin, ymin, xmax, ymax int) {
 			fx := func(lon float64) int {
 				if lon <= minLon {
 					return 0
@@ -959,9 +959,9 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, error
 	// harbour cells still need to drive narrow-band shading at z=7..9
 	// without coverage gating (the continent-scale LNDARE filter would
 	// otherwise drop them).
-	var allCellsForDEPARE []ENCCell
+	var allCellsForDEPARE []noaa.Cell
 	if z < 10 {
-		allCellsForDEPARE = make([]ENCCell, len(allCellsRaw))
+		allCellsForDEPARE = make([]noaa.Cell, len(allCellsRaw))
 		copy(allCellsForDEPARE, allCellsRaw)
 		sort.SliceStable(allCellsForDEPARE, func(i, j int) bool {
 			return allCellsForDEPARE[i].CScale > allCellsForDEPARE[j].CScale
@@ -1264,7 +1264,7 @@ func (r *ENCRenderer) RenderOSMTile(z, x, y int) ([]byte, bool, error) {
 	if r.osm != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		features, _, err := osmtiler.FetchTileFeatures(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
+		features, _, err := osmtiler.FetchTileFeaturesMulti(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
 			IncludeMinZoom: true,
 			ZoomOverride:   -1,
 			PadBuffer:      true,
@@ -1795,83 +1795,6 @@ func zoomSymbolScale(z int) float64 {
 	}
 }
 
-// minZoomForFeature returns the lowest map zoom at which an S-57 object
-// class should render. Below this, the feature is dropped so coarse zooms
-// aren't blanketed in symbols. Matches the spirit of S-52 scale-dependent
-// symbology — NOAA's WMS thins out wrecks, obstructions, soundings, and
-// minor navaids at zoomed-out scales for exactly this reason. Tuned by
-// eyeballing the compare test against z=12/14/16 NOAA tiles.
-func minZoomForFeature(class string) int {
-	switch class {
-	// Major area fills — always show.
-	case "LNDARE", "DEPARE", "DRGARE", "BUAARE", "UNSARE", "LOKBSN":
-		return 0
-	// Single buildings (commercial / conspicuous structures): only at
-	// chart-detail zoom.
-	case "BUISGL":
-		return 14
-	// Coastline + depth contours — always.
-	case "COALNE", "DEPCNT":
-		return 0
-	// Shoreline construction (piers, jetties, seawalls): hundreds per
-	// harbour cell, way too dense at coastal zoom. Show only at chart
-	// detail.
-	case "SLCONS":
-		return 15
-	// Major navaids visible at overview. NOAA renders these at z=9
-	// (sometimes z=8) so a sailor scanning a chart at coastal scale still
-	// sees major lights, lateral marks, and major hazards.
-	case "BOYLAT", "BCNLAT", "LIGHTS":
-		return 9
-	case "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
-		return 11
-	case "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
-		return 13
-	// Topmarks attach to buoys/beacons and only make sense at chart-detail
-	// zoom; smaller and they're indistinguishable from their parent symbol.
-	case "TOPMAR":
-		return 14
-	case "DAYMAR":
-		return 14
-	// Hazards. Wrecks/obstructions are dense in harbour cells; only show
-	// at chart-detail zoom. Underwater rocks even more so.
-	case "WRECKS", "OBSTRN":
-		return 15
-	case "UWTROC":
-		return 16
-	// Soundings: NOAA renders depth labels at z=9 already (offshore tiles
-	// show "65", "83", "95"-style depth labels). They're the densest
-	// feature class, so dropping them at z<9 keeps the chart readable.
-	case "SOUNDG":
-		return 9
-	// Mooring/pile/anchorage: harbour-detail zoom.
-	case "MORFAC", "PILPNT", "MOORNG", "ACHBRT":
-		return 15
-	// Linear features.
-	case "RIVERS", "BRIDGE", "CAUSWY":
-		return 11
-	// Overhead structures: cables, pipes, conveyors. The structures
-	// vector layer kicks in at z >= 13 and is responsible for the
-	// hover-able icon; below that the tile must draw the structure
-	// itself, otherwise it would disappear off the chart between
-	// coastal and harbour zoom. Same z=11 threshold as BRIDGE so all
-	// four classes show up together when the vector layer is off.
-	case "CBLOHD", "PIPOHD", "CONVYR":
-		return 11
-	// Channel limits / fairways / restricted areas — magenta lines show
-	// at z=9 in NOAA charts (busy in our renders below that).
-	case "FAIRWY", "RECTRC", "NAVLNE", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
-		return 9
-	case "PIPSOL", "CBLSUB":
-		return 15
-	case "DAMCON", "PONTON":
-		return 14
-	case "DOCARE", "HRBFAC", "HRBARE", "PIPARE":
-		return 13
-	}
-	return 14
-}
-
 // drawFeature dispatches to the right pass based on the feature's object class
 // and geometry. Anything we don't recognise is silently skipped. `scale` is a
 // zoom-derived multiplier applied to stroke widths and symbol sizes.
@@ -1883,7 +1806,7 @@ func drawFeature(dc *gg.Context, f *s57.Feature, pass drawPass, project func(lon
 		return
 	}
 	class := f.ObjectClass()
-	if z < minZoomForFeature(class) {
+	if z < noaa.MinZoomForObjectClass(class) {
 		return
 	}
 
@@ -2954,4 +2877,3 @@ func lonLatToMerc(lon, lat float64) (x, y float64) {
 	y = math.Log(math.Tan(math.Pi/4+rad/2)) / math.Pi * mercatorMax
 	return
 }
-

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"github.com/beetlebugorg/s57/pkg/s57"
 	"go.viam.com/rdk/logging"
 )
@@ -29,11 +31,11 @@ func TestDumpPhantomJumpsForArea(t *testing.T) {
 	maxLat := envOrFloat(t, "PA_MAXLAT", 34.75)
 	cacheDir := envOr("PA_CACHE_DIR", filepath.Join(mustUserCacheDir(t), "viam-chartplotter", "noaa-enc"))
 	logger := logging.NewTestLogger(t)
-	catalog, err := NewENCCatalog(cacheDir, logger)
+	catalog, err := noaa.NewCatalog(cacheDir, logger)
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	store, err := NewENCStore(cacheDir, catalog, logger)
+	store, err := noaa.NewStore(cacheDir, catalog, logger)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -58,15 +60,15 @@ func TestDumpPhantomJumpsForArea(t *testing.T) {
 	t.Logf("flagging features with any edge > %.0f m", threshold)
 
 	type hit struct {
-		class   string
-		id      int64
-		cell    string
-		geom    string
-		npts    int
-		worst   float64
-		bboxW   float64
-		bboxH   float64
-		coords  [][]float64
+		class  string
+		id     int64
+		cell   string
+		geom   string
+		npts   int
+		worst  float64
+		bboxW  float64
+		bboxH  float64
+		coords [][]float64
 	}
 	var hits []hit
 
@@ -174,11 +176,11 @@ func TestDumpPhantomJumpsForTile(t *testing.T) {
 
 	cacheDir := envOr("PH_CACHE_DIR", filepath.Join(mustUserCacheDir(t), "viam-chartplotter", "noaa-enc"))
 	logger := logging.NewTestLogger(t)
-	catalog, err := NewENCCatalog(cacheDir, logger)
+	catalog, err := noaa.NewCatalog(cacheDir, logger)
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	store, err := NewENCStore(cacheDir, catalog, logger)
+	store, err := noaa.NewStore(cacheDir, catalog, logger)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -201,9 +203,9 @@ func TestDumpPhantomJumpsForTile(t *testing.T) {
 	// Per-class summary: class -> count of features with at least one
 	// jump > threshold, max jump distance seen.
 	type classStat struct {
-		nFeat   int
-		nBad    int
-		maxJump float64
+		nFeat     int
+		nBad      int
+		maxJump   float64
 		exampleID int64
 	}
 	stats := map[string]*classStat{}

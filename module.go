@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -22,6 +24,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/mongo"
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 //go:embed dist
@@ -202,11 +206,11 @@ func StartChartplotterServer(
 		wmsCache.cacheDir, wmsCache.maxBytes, wmsCache.staleAfter)
 
 	encDir := filepath.Join(root, "noaa-enc")
-	catalog, err := NewENCCatalog(encDir, logger.Sublogger("encCatalog"))
+	catalog, err := noaa.NewCatalog(encDir, logger.Sublogger("encCatalog"))
 	if err != nil {
 		return nil, err
 	}
-	encStore, err := NewENCStore(encDir, catalog, logger.Sublogger("encStore"))
+	encStore, err := noaa.NewStore(encDir, catalog, logger.Sublogger("encStore"))
 	if err != nil {
 		return nil, err
 	}
@@ -230,9 +234,18 @@ func StartChartplotterServer(
 		} else if err := mclient.Ping(mctx, nil); err != nil {
 			logger.Warnf("osm underlay disabled: mongo ping: %v", err)
 		} else {
-			coll := mclient.Database(mongoDB).Collection(mongoColl)
-			encRenderer.SetOSMCollection(coll)
-			logger.Infof("osm underlay: mongo %s.%s", mongoDB, mongoColl)
+			// mongoColl is no longer a single collection — features are
+			// partitioned across per-minZoom-bucket collections (see
+			// osmtiler.OpenOSMCollections). The configured "collection
+			// name" is kept in StartChartplotterServer's signature for
+			// back-compat with existing module configs, but ignored here;
+			// the bucket collections have fixed names within the chosen
+			// database.
+			_ = mongoColl
+			colls := osmtiler.OpenOSMCollections(mclient.Database(mongoDB))
+			encRenderer.SetOSMCollections(colls)
+			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s",
+				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail)
 		}
 	} else {
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")

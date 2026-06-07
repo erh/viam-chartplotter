@@ -25,7 +25,7 @@ import (
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
-	"github.com/erh/viam-chartplotter/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 func main() {

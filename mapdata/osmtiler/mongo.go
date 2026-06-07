@@ -4,11 +4,134 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// MinZoom buckets — features are partitioned across collections by
+// their pre-computed minZoom so a low-zoom tile query touches a small
+// index. Without this split, the global-bbox $geoIntersects at z=7
+// walked the full 200M-doc index and took 20+ seconds. Sizes are tuned
+// empirically: most data clusters in the coastal bucket (residential
+// landuse, town labels, secondary roads), so detail can keep its own
+// big index without slowing down low-zoom queries.
+//
+// The "everything-skip" sentinel (minZoom=255 from GeomMinZoom's
+// fall-through) lives in BucketSkip; it's not in any tile-query path
+// so its bucket exists only to give those docs somewhere to land at
+// ingest time. None of the runtime fan-out code queries it.
+type MinZoomBucket int
+
+const (
+	BucketOverview MinZoomBucket = iota // minZoom 0..7
+	BucketCoastal                       // minZoom 8..11
+	BucketDetail                        // minZoom 12..22
+	BucketSkip                          // minZoom == 255 (never rendered)
+)
+
+// Collection names. Suffixes match the bucket-name convention so it's
+// obvious in mongosh which collection holds what.
+const (
+	CollOverview = "osm_overview"
+	CollCoastal  = "osm_coastal"
+	CollDetail   = "osm_detail"
+	CollSkip     = "osm_skip"
+)
+
+// BucketForMinZoom routes a feature to its bucket. The boundaries are:
+// overview (0..7) for low-zoom-only features (country/state labels,
+// motorways, coastline, big forests); coastal (8..11) for the bulk of
+// readable detail (towns, secondary roads, parks, residential landuse,
+// city POIs); detail (12+) for chart-zoom-only (residential streets,
+// buildings, single POIs). Sentinel minZoom=255 lands in skip.
+func BucketForMinZoom(minZoom uint8) MinZoomBucket {
+	switch {
+	case minZoom == 255:
+		return BucketSkip
+	case minZoom <= 7:
+		return BucketOverview
+	case minZoom <= 11:
+		return BucketCoastal
+	default:
+		return BucketDetail
+	}
+}
+
+// CollectionName returns the configured collection name for a bucket.
+func (b MinZoomBucket) CollectionName() string {
+	switch b {
+	case BucketOverview:
+		return CollOverview
+	case BucketCoastal:
+		return CollCoastal
+	case BucketDetail:
+		return CollDetail
+	case BucketSkip:
+		return CollSkip
+	}
+	return ""
+}
+
+// bucketsForQueryZoom returns the bucket set a tile-render query at
+// effective zoom z should consult. Always includes overview; adds
+// coastal when there's a chance of an in-range minZoom; adds detail
+// when chart-detail zoom is being asked for. Skip is never queried.
+func bucketsForQueryZoom(effectiveZoom int) []MinZoomBucket {
+	switch {
+	case effectiveZoom <= 7:
+		return []MinZoomBucket{BucketOverview}
+	case effectiveZoom <= 11:
+		return []MinZoomBucket{BucketOverview, BucketCoastal}
+	default:
+		return []MinZoomBucket{BucketOverview, BucketCoastal, BucketDetail}
+	}
+}
+
+// OSMCollections bundles the per-bucket Mongo collections the
+// renderer fans out across. Constructed once from a *mongo.Database
+// via OpenOSMCollections.
+type OSMCollections struct {
+	Overview *mongo.Collection
+	Coastal  *mongo.Collection
+	Detail   *mongo.Collection
+	Skip     *mongo.Collection
+}
+
+// OpenOSMCollections grabs the four bucket collections from a database
+// handle. Naming is fixed (CollOverview / CollCoastal / CollDetail /
+// CollSkip) — the database's name is the only knob.
+func OpenOSMCollections(db *mongo.Database) *OSMCollections {
+	if db == nil {
+		return nil
+	}
+	return &OSMCollections{
+		Overview: db.Collection(CollOverview),
+		Coastal:  db.Collection(CollCoastal),
+		Detail:   db.Collection(CollDetail),
+		Skip:     db.Collection(CollSkip),
+	}
+}
+
+// For returns the bucket's collection by enum.
+func (c *OSMCollections) For(b MinZoomBucket) *mongo.Collection {
+	if c == nil {
+		return nil
+	}
+	switch b {
+	case BucketOverview:
+		return c.Overview
+	case BucketCoastal:
+		return c.Coastal
+	case BucketDetail:
+		return c.Detail
+	case BucketSkip:
+		return c.Skip
+	}
+	return nil
+}
 
 // tileQueryProjection lists fields the cursor SHOULDN'T return — the
 // upsert-only identity columns the runtime renderer never touches.
@@ -24,12 +147,36 @@ var tileQueryProjection = bson.M{
 	"ringIndex": 0,
 }
 
-// RenderZoomOffset is the default gap between the tile's own zoom
-// and the maxZoom of features the renderer asks for. Higher offset
-// = coarser, less cluttered tiles; the renderer at z=14 shows the
-// feature set that would be drawn at z=11 instead. Tunes how "busy"
-// every tile feels without changing the tile's pixel coordinates.
+// RenderZoomOffset is how many zoom levels we "back off" the minZoom
+// filter at chart-detail zooms — at z > 10 we render the feature set
+// that would normally appear at z-RenderZoomOffset, which thins out
+// residential streets / POIs / minor landuse on tiles where the user
+// already has the chart for context. At z ≤ 10 the offset is dropped
+// (we filter at the tile's actual zoom) so coastal overviews show the
+// natural-zoom feature set rather than artificially-coarsened one.
+// See effectiveQueryZoom.
 const RenderZoomOffset = 3
+
+// effectiveQueryZoom returns the minZoom threshold we send to Mongo for
+// a tile at zoom z. It's max(11, z - RenderZoomOffset):
+//
+//   - Floor of 11 means every tile at z ≤ 14 renders the z=11 feature
+//     set — town labels, secondary roads, residential landuse, parks,
+//     etc. all show through. At coastal-overview zooms (z=5..10) that
+//     was the missing density: with the previous "effective=z" rule a
+//     z=9 tile in rural area looked empty because the GeomMinZoom
+//     thresholds for those mid-importance classes are 10..11.
+//   - Offset takes over at z ≥ 15 (z-3 ≥ 12), thinning out clutter for
+//     chart-detail zooms where the user already has the chart underneath.
+//
+// Monotonic in z, so zooming in never reduces the visible feature set.
+func effectiveQueryZoom(z int) int {
+	zoom := z - RenderZoomOffset
+	if zoom < 11 {
+		zoom = 11
+	}
+	return zoom
+}
 
 // QueryOptions bundles the optional filter knobs for a tile query.
 // The zero value (with IncludeMinZoom=true) gives you "features at
@@ -90,10 +237,7 @@ func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
 	filter := bson.M{
 		"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
 	}
-	zoom := z - RenderZoomOffset
-	if zoom < 0 {
-		zoom = 0
-	}
+	zoom := effectiveQueryZoom(z)
 	if opts.ZoomOverride >= 0 {
 		zoom = opts.ZoomOverride
 	}
@@ -118,14 +262,10 @@ type FetchStats struct {
 	DecodeFail int   // docs we couldn't decode and skipped
 }
 
-// FetchTileFeatures runs the standard tile-bbox query and decodes
-// every matching document into a Feature ready to pass to
-// RenderTileFromFeatures. Returns a non-nil slice of length zero if
-// the tile has no matches; the renderer is happy to draw an empty
-// tile (yellow base only, no features).
-//
-// The FetchStats return summarises wire-level work done — handy for
-// surfacing per-tile data-transfer cost in dev tooling.
+// FetchTileFeatures runs the standard tile-bbox query against a single
+// collection and decodes every matching document. Building block for
+// the multi-bucket fan-out (FetchTileFeaturesMulti) and the inspection
+// subcommands in cmd/osmtools.
 func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int, opts QueryOptions) ([]Feature, FetchStats, error) {
 	if coll == nil {
 		return nil, FetchStats{}, fmt.Errorf("osmtiler: nil mongo collection")
@@ -157,6 +297,67 @@ func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int,
 		return nil, stats, fmt.Errorf("cursor: %w", err)
 	}
 	return features, stats, nil
+}
+
+// FetchTileFeaturesMulti is the runtime renderer's fetch — fans out
+// across the bucket collections that overlap the query zoom, runs the
+// fetches in parallel, and returns the merged Feature list with
+// per-bucket stats summed. Order of features in the returned slice is
+// not stable across calls; the renderer's painter algorithm sorts by
+// class anyway, and intra-class draw order was never deterministic
+// from a single-collection cursor either.
+func FetchTileFeaturesMulti(ctx context.Context, colls *OSMCollections, z, x, y int, opts QueryOptions) ([]Feature, FetchStats, error) {
+	if colls == nil {
+		return nil, FetchStats{}, fmt.Errorf("osmtiler: nil OSMCollections")
+	}
+	// Decide which buckets to consult from the effective zoom — we use
+	// the same effectiveQueryZoom as the per-collection filter, so a
+	// ZoomOverride trickles through consistently.
+	zoom := effectiveQueryZoom(z)
+	if opts.ZoomOverride >= 0 {
+		zoom = opts.ZoomOverride
+	}
+	buckets := bucketsForQueryZoom(zoom)
+
+	// Fan out: one goroutine per bucket. Each goroutine runs an
+	// independent Mongo Find; the driver pool handles concurrency.
+	type result struct {
+		feats []Feature
+		stats FetchStats
+		err   error
+	}
+	results := make([]result, len(buckets))
+	var wg sync.WaitGroup
+	for i, b := range buckets {
+		coll := colls.For(b)
+		if coll == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, coll *mongo.Collection) {
+			defer wg.Done()
+			feats, stats, err := FetchTileFeatures(ctx, coll, z, x, y, opts)
+			results[i] = result{feats: feats, stats: stats, err: err}
+		}(i, coll)
+	}
+	wg.Wait()
+
+	// Aggregate. A single bucket erroring shouldn't black out the whole
+	// tile (the other buckets' features are still useful), so we record
+	// the first error but keep the partial result.
+	var firstErr error
+	var total FetchStats
+	merged := make([]Feature, 0, 64)
+	for i, r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", buckets[i].CollectionName(), r.err)
+		}
+		total.Docs += r.stats.Docs
+		total.BytesRead += r.stats.BytesRead
+		total.DecodeFail += r.stats.DecodeFail
+		merged = append(merged, r.feats...)
+	}
+	return merged, total, firstErr
 }
 
 // DecodeFeature turns a raw BSON feature document (the shape written

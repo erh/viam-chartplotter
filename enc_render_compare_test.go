@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
 	"golang.org/x/image/font/basicfont"
@@ -107,11 +109,11 @@ func TestCompareWithWMS(t *testing.T) {
 	t.Logf("tiles:      %v", tiles)
 
 	logger := logging.NewTestLogger(t)
-	catalog, err := NewENCCatalog(cacheDir, logger)
+	catalog, err := noaa.NewCatalog(cacheDir, logger)
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	store, err := NewENCStore(cacheDir, catalog, logger)
+	store, err := noaa.NewStore(cacheDir, catalog, logger)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -220,10 +222,10 @@ type gridRow struct {
 // good for a quick visual review of all five tiles at once.
 func writeGrid(path string, rows []gridRow) error {
 	const (
-		panelW    = 768
-		panelH    = 256
-		headerH   = 28 // tile coords + metric line
-		paddingH  = 4
+		panelW   = 768
+		panelH   = 256
+		headerH  = 28 // tile coords + metric line
+		paddingH = 4
 	)
 	rowH := panelH + headerH + paddingH
 	totalH := rowH*len(rows) + paddingH
@@ -269,7 +271,7 @@ func writeGrid(path string, rows []gridRow) error {
 // exceeds N — useful as a "fraction of the tile that visibly disagrees"
 // metric without being thrown off by tiny anti-aliasing differences.
 type cmpMetric struct {
-	avgDelta            float64
+	avgDelta             float64
 	pctOver30, pctOver60 float64
 }
 
@@ -390,4 +392,3 @@ func splitCSV(s string) []string {
 	}
 	return out
 }
-

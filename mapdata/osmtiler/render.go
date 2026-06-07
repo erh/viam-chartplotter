@@ -128,7 +128,6 @@ func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-
 // carveWater rasterises every ClassWater polygon into a temporary mask
 // and uses it to clear those pixels in dc to transparent. The yellow
 // land base set by Clear() stays everywhere else; the chart layer below

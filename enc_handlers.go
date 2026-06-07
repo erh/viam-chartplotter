@@ -13,21 +13,23 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"github.com/fogleman/gg"
 	"golang.org/x/image/font/basicfont"
 )
 
 // ENCHandlers exposes the ENC catalog/store/renderer via HTTP under /noaa-enc/.
 type ENCHandlers struct {
-	catalog          *ENCCatalog
-	store            *ENCStore
+	catalog          *noaa.Catalog
+	store            *noaa.Store
 	renderer         *ENCRenderer
 	tileCache        *ENCTileCache
 	wmsCache         *NoaaCache // for the /compare endpoint; may be nil
 	defaultSafeDepth float64    // feet; used when ?sd= is absent
 }
 
-func NewENCHandlers(catalog *ENCCatalog, store *ENCStore, renderer *ENCRenderer, tileCache *ENCTileCache, wmsCache *NoaaCache, defaultSafeDepthFt float64) *ENCHandlers {
+func NewENCHandlers(catalog *noaa.Catalog, store *noaa.Store, renderer *ENCRenderer, tileCache *ENCTileCache, wmsCache *NoaaCache, defaultSafeDepthFt float64) *ENCHandlers {
 	if defaultSafeDepthFt <= 0 {
 		defaultSafeDepthFt = 6
 	}
@@ -130,7 +132,6 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = w.Write(pngBytes)
 }
-
 
 type encPrefetchRequest struct {
 	MinLon   float64 `json:"minLon"`
@@ -243,8 +244,8 @@ func (h *ENCHandlers) handleDebugTile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"tile": map[string]int{"z": z, "x": x, "y": y},
-		"bbox": []float64{minLon, minLat, maxLon, maxLat},
+		"tile":  map[string]int{"z": z, "x": x, "y": y},
+		"bbox":  []float64{minLon, minLat, maxLon, maxLat},
 		"cells": report,
 	})
 }

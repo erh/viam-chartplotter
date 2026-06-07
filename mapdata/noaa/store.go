@@ -1,4 +1,4 @@
-package vc
+package noaa
 
 import (
 	"archive/zip"
@@ -16,9 +16,9 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// CellManifestEntry records what we have on disk for a given ENC cell so we know
+// ManifestEntry records what we have on disk for a given ENC cell so we know
 // whether NOAA's catalog has a newer edition or update to pull.
-type CellManifestEntry struct {
+type ManifestEntry struct {
 	Name         string    `json:"name"`
 	Edition      int       `json:"edition"`
 	Update       int       `json:"update"`
@@ -26,16 +26,16 @@ type CellManifestEntry struct {
 	SourceSize   int64     `json:"source_size"`
 }
 
-// ENCStore manages on-disk copies of NOAA ENC cells: download, extract, version
+// Store manages on-disk copies of NOAA ENC cells: download, extract, version
 // tracking, and exposing where the .000 file lives for downstream renderers.
-type ENCStore struct {
+type Store struct {
 	rootDir string
-	catalog *ENCCatalog
+	catalog *Catalog
 	client  *http.Client
 	logger  logging.Logger
 
 	mu       sync.Mutex
-	manifest map[string]CellManifestEntry
+	manifest map[string]ManifestEntry
 
 	// cellLocks serialises downloadAndExtract calls per cell so two concurrent
 	// SyncBBox requests that both want the same cell don't race on RemoveAll →
@@ -46,16 +46,16 @@ type ENCStore struct {
 	cellLocks sync.Map // map[string]*sync.Mutex
 }
 
-func NewENCStore(rootDir string, catalog *ENCCatalog, logger logging.Logger) (*ENCStore, error) {
+func NewStore(rootDir string, catalog *Catalog, logger logging.Logger) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(rootDir, "cells"), 0o755); err != nil {
 		return nil, fmt.Errorf("enc store: mkdir %q: %w", rootDir, err)
 	}
-	s := &ENCStore{
+	s := &Store{
 		rootDir:  rootDir,
 		catalog:  catalog,
 		client:   &http.Client{Timeout: 5 * time.Minute},
 		logger:   logger,
-		manifest: map[string]CellManifestEntry{},
+		manifest: map[string]ManifestEntry{},
 	}
 	s.loadManifest()
 	return s, nil
@@ -63,18 +63,18 @@ func NewENCStore(rootDir string, catalog *ENCCatalog, logger logging.Logger) (*E
 
 // lockCell returns a per-cell mutex (lazily created). Hold it for the duration
 // of any download / extract / manifest update for that cell.
-func (s *ENCStore) lockCell(name string) *sync.Mutex {
+func (s *Store) lockCell(name string) *sync.Mutex {
 	v, _ := s.cellLocks.LoadOrStore(name, &sync.Mutex{})
 	return v.(*sync.Mutex)
 }
 
-func (s *ENCStore) manifestPath() string { return filepath.Join(s.rootDir, "cells.json") }
+func (s *Store) manifestPath() string { return filepath.Join(s.rootDir, "cells.json") }
 
-func (s *ENCStore) cellDir(name string) string { return filepath.Join(s.rootDir, "cells", name) }
+func (s *Store) cellDir(name string) string { return filepath.Join(s.rootDir, "cells", name) }
 
 // S57Path returns the path to the cell's primary S-57 file (.000) on disk, or "" if
 // the cell isn't downloaded yet.
-func (s *ENCStore) S57Path(name string) string {
+func (s *Store) S57Path(name string) string {
 	p := filepath.Join(s.cellDir(name), name+".000")
 	if _, err := os.Stat(p); err != nil {
 		return ""
@@ -82,12 +82,12 @@ func (s *ENCStore) S57Path(name string) string {
 	return p
 }
 
-func (s *ENCStore) loadManifest() {
+func (s *Store) loadManifest() {
 	data, err := os.ReadFile(s.manifestPath())
 	if err != nil {
 		return
 	}
-	var m map[string]CellManifestEntry
+	var m map[string]ManifestEntry
 	if err := json.Unmarshal(data, &m); err != nil {
 		return
 	}
@@ -96,7 +96,7 @@ func (s *ENCStore) loadManifest() {
 	s.mu.Unlock()
 }
 
-func (s *ENCStore) saveManifestLocked() error {
+func (s *Store) saveManifestLocked() error {
 	data, err := json.MarshalIndent(s.manifest, "", "  ")
 	if err != nil {
 		return err
@@ -110,7 +110,7 @@ func (s *ENCStore) saveManifestLocked() error {
 
 // needsDownload returns true if we don't have this cell, or NOAA has a newer
 // edition/update than what's recorded locally.
-func (s *ENCStore) needsDownload(c ENCCell) bool {
+func (s *Store) needsDownload(c Cell) bool {
 	s.mu.Lock()
 	entry, ok := s.manifest[c.Name]
 	s.mu.Unlock()
@@ -129,7 +129,7 @@ func (s *ENCStore) needsDownload(c ENCCell) bool {
 // SyncBBox ensures every active ENC cell whose coverage overlaps the given lon/lat
 // box is present at the latest edition+update on disk. Cells already up to date are
 // skipped. Concurrency is bounded by parallel (default 4 if <= 0).
-func (s *ENCStore) SyncBBox(
+func (s *Store) SyncBBox(
 	ctx context.Context,
 	minLon, minLat, maxLon, maxLat float64,
 	minScale, maxScale, parallel int,
@@ -145,7 +145,7 @@ func (s *ENCStore) SyncBBox(
 
 	// Count needed up-front so the start log is informative even before any
 	// individual cell fetches finish.
-	var toDownload []ENCCell
+	var toDownload []Cell
 	for _, c := range cells {
 		if s.needsDownload(c) {
 			toDownload = append(toDownload, c)
@@ -195,7 +195,7 @@ func (s *ENCStore) SyncBBox(
 	return downloaded, skipped, nil
 }
 
-func (s *ENCStore) downloadAndExtract(ctx context.Context, c ENCCell) error {
+func (s *Store) downloadAndExtract(ctx context.Context, c Cell) error {
 	// Serialise per-cell so concurrent SyncBBox callers don't race on
 	// RemoveAll/MkdirAll for the same target directory.
 	cellLock := s.lockCell(c.Name)
@@ -264,7 +264,7 @@ func (s *ENCStore) downloadAndExtract(ctx context.Context, c ENCCell) error {
 	}
 
 	s.mu.Lock()
-	s.manifest[c.Name] = CellManifestEntry{
+	s.manifest[c.Name] = ManifestEntry{
 		Name:         c.Name,
 		Edition:      c.Edition,
 		Update:       c.Update,
@@ -324,7 +324,7 @@ func extractFlat(f *zip.File, target string) error {
 
 // Stats returns the number of cells we have on disk and the total bytes in the
 // store directory.
-func (s *ENCStore) Stats() (cells int, bytes int64) {
+func (s *Store) Stats() (cells int, bytes int64) {
 	s.mu.Lock()
 	cells = len(s.manifest)
 	s.mu.Unlock()
@@ -339,4 +339,4 @@ func (s *ENCStore) Stats() (cells int, bytes int64) {
 }
 
 // RootDir returns the directory backing this store.
-func (s *ENCStore) RootDir() string { return s.rootDir }
+func (s *Store) RootDir() string { return s.rootDir }

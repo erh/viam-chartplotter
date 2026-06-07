@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"github.com/beetlebugorg/s57/pkg/s57"
 	"go.viam.com/rdk/logging"
 )
@@ -29,11 +31,11 @@ func TestDumpDEPAREForTile(t *testing.T) {
 
 	cacheDir := envOr("DEP_CACHE_DIR", filepath.Join(mustUserCacheDir(t), "viam-chartplotter", "noaa-enc"))
 	logger := logging.NewTestLogger(t)
-	catalog, err := NewENCCatalog(cacheDir, logger)
+	catalog, err := noaa.NewCatalog(cacheDir, logger)
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	store, err := NewENCStore(cacheDir, catalog, logger)
+	store, err := noaa.NewStore(cacheDir, catalog, logger)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

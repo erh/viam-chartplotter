@@ -16,7 +16,7 @@ vite.config.ts.timestamp-*
 bin/
 module.tar.gz
 test.make
-osmtools
+mapsync
 
 # Generated CSS from Tailwind
 src/output.css

@@ -1,4 +1,4 @@
-package vc
+package noaa
 
 import (
 	"context"
@@ -23,10 +23,10 @@ const (
 	catalogTTL = 7 * 24 * time.Hour
 )
 
-// ENCCell describes one S-57 cell from NOAA's product catalog. Only the fields we
+// Cell describes one S-57 cell from NOAA's product catalog. Only the fields we
 // actually consume are unmarshaled; unknown XML elements are ignored. Coverage is
 // reduced to a simple bbox after parsing.
-type ENCCell struct {
+type Cell struct {
 	Name      string      `xml:"name"`
 	LName     string      `xml:"lname"`
 	CScale    int         `xml:"cscale"`
@@ -58,11 +58,11 @@ type encVertex struct {
 }
 
 type encProductCatalog struct {
-	XMLName xml.Name  `xml:"EncProductCatalog"`
-	Cells   []ENCCell `xml:"cell"`
+	XMLName xml.Name `xml:"EncProductCatalog"`
+	Cells   []Cell   `xml:"cell"`
 }
 
-func (c *ENCCell) computeBBox() {
+func (c *Cell) computeBBox() {
 	c.MinLon, c.MinLat = 180, 90
 	c.MaxLon, c.MaxLat = -180, -90
 	for _, p := range c.Coverage.Panels {
@@ -83,30 +83,30 @@ func (c *ENCCell) computeBBox() {
 	}
 }
 
-func (c *ENCCell) hasCoverage() bool { return c.MaxLon >= c.MinLon && c.MaxLat >= c.MinLat }
+func (c *Cell) hasCoverage() bool { return c.MaxLon >= c.MinLon && c.MaxLat >= c.MinLat }
 
 // Overlaps returns true if the cell's coverage bbox intersects the given lon/lat box.
-func (c *ENCCell) Overlaps(minLon, minLat, maxLon, maxLat float64) bool {
+func (c *Cell) Overlaps(minLon, minLat, maxLon, maxLat float64) bool {
 	return !(c.MaxLon < minLon || c.MinLon > maxLon || c.MaxLat < minLat || c.MinLat > maxLat)
 }
 
-// ENCCatalog manages NOAA's ENC product catalog: fetching, on-disk persistence, and
+// Catalog manages NOAA's ENC product catalog: fetching, on-disk persistence, and
 // fast bbox-overlap queries against the parsed cell list.
-type ENCCatalog struct {
+type Catalog struct {
 	cacheDir string
 	client   *http.Client
 	logger   logging.Logger
 
 	mu      sync.RWMutex
-	cells   []ENCCell
+	cells   []Cell
 	fetched time.Time
 }
 
-func NewENCCatalog(cacheDir string, logger logging.Logger) (*ENCCatalog, error) {
+func NewCatalog(cacheDir string, logger logging.Logger) (*Catalog, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("enc catalog: mkdir %q: %w", cacheDir, err)
 	}
-	cat := &ENCCatalog{
+	cat := &Catalog{
 		cacheDir: cacheDir,
 		client:   &http.Client{Timeout: 60 * time.Second},
 		logger:   logger,
@@ -117,11 +117,11 @@ func NewENCCatalog(cacheDir string, logger logging.Logger) (*ENCCatalog, error) 
 	return cat, nil
 }
 
-func (c *ENCCatalog) catalogPath() string {
+func (c *Catalog) catalogPath() string {
 	return filepath.Join(c.cacheDir, "ENCProdCat.xml")
 }
 
-func (c *ENCCatalog) loadFromDisk() error {
+func (c *Catalog) loadFromDisk() error {
 	info, err := os.Stat(c.catalogPath())
 	if err != nil {
 		return err
@@ -143,7 +143,7 @@ func (c *ENCCatalog) loadFromDisk() error {
 
 // EnsureFresh refetches the catalog if the local copy is missing or older than
 // catalogTTL. Always safe to call repeatedly.
-func (c *ENCCatalog) EnsureFresh(ctx context.Context) error {
+func (c *Catalog) EnsureFresh(ctx context.Context) error {
 	c.mu.RLock()
 	fresh := !c.fetched.IsZero() && time.Since(c.fetched) < catalogTTL
 	c.mu.RUnlock()
@@ -153,7 +153,7 @@ func (c *ENCCatalog) EnsureFresh(ctx context.Context) error {
 	return c.refresh(ctx)
 }
 
-func (c *ENCCatalog) refresh(ctx context.Context) error {
+func (c *Catalog) refresh(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, encProdCatURL, nil)
 	if err != nil {
 		return err
@@ -190,12 +190,12 @@ func (c *ENCCatalog) refresh(ctx context.Context) error {
 	return nil
 }
 
-func parseCatalog(data []byte) ([]ENCCell, error) {
+func parseCatalog(data []byte) ([]Cell, error) {
 	var cat encProductCatalog
 	if err := xml.Unmarshal(data, &cat); err != nil {
 		return nil, err
 	}
-	out := make([]ENCCell, 0, len(cat.Cells))
+	out := make([]Cell, 0, len(cat.Cells))
 	for _, cell := range cat.Cells {
 		if cell.Status != "" && !strings.EqualFold(cell.Status, "Active") {
 			continue
@@ -212,10 +212,10 @@ func parseCatalog(data []byte) ([]ENCCell, error) {
 // CellsForBBox returns active cells whose coverage overlaps the given lon/lat box,
 // optionally filtered to those whose CScale is in [minScale, maxScale]. Pass 0 to
 // disable a scale bound.
-func (c *ENCCatalog) CellsForBBox(minLon, minLat, maxLon, maxLat float64, minScale, maxScale int) []ENCCell {
+func (c *Catalog) CellsForBBox(minLon, minLat, maxLon, maxLat float64, minScale, maxScale int) []Cell {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	var out []ENCCell
+	var out []Cell
 	for _, cell := range c.cells {
 		if !cell.Overlaps(minLon, minLat, maxLon, maxLat) {
 			continue
@@ -232,14 +232,14 @@ func (c *ENCCatalog) CellsForBBox(minLon, minLat, maxLon, maxLat float64, minSca
 }
 
 // CellCount returns the number of active cells in the parsed catalog.
-func (c *ENCCatalog) CellCount() int {
+func (c *Catalog) CellCount() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.cells)
 }
 
 // FetchedAt returns when the catalog was last fetched (zero if never).
-func (c *ENCCatalog) FetchedAt() time.Time {
+func (c *Catalog) FetchedAt() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.fetched

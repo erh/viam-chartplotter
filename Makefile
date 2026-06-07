@@ -56,5 +56,5 @@ $(OSM_NYC_PBF):
 .PHONY: osm10024test
 osm10024test: $(OSM_NYC_PBF)
 	OSM_NYC_PBF=$(OSM_NYC_PBF) OSM_TILES_OUT=$(OSM_TILES_OUT) \
-		go test -run TestRenderZip10024 -v ./osmtiler -timeout 5m
+		go test -run TestRenderZip10024 -v ./mapdata/osmtiler -timeout 5m
 	$(OPEN) $(OSM_TILES_OUT)/index.html
