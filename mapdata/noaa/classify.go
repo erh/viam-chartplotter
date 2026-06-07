@@ -1,5 +1,73 @@
 package noaa
 
+// MinZoomForFeature is the attribute-aware minimum zoom for a feature. It
+// refines MinZoomForObjectClass for the two classes that dominate low-zoom
+// query volume — depth contours and soundings — so the indexed `minZoom <= z`
+// filter sheds them when zoomed out instead of shipping thousands of
+// full-resolution geometries per tile. Everything else falls back to the
+// class-level threshold.
+//
+// Computed at ingest and stored on each FeatureDoc; changing it requires a
+// re-ingest. The renderer's per-class MinZoomForObjectClass guard stays as-is
+// (it only ever sees features the query already admitted).
+func MinZoomForFeature(class string, attrs map[string]any) int {
+	switch class {
+	case "DEPCNT":
+		// Depth contours: show only "standard" depths when zoomed out; the
+		// dense intermediate contours (which make up the bulk of low-zoom
+		// payload) wait for chart-detail zoom. VALDCO is the contour depth
+		// in metres.
+		if v, ok := numAttr(attrs, "VALDCO"); ok {
+			if isStandardContour(v) {
+				return 9
+			}
+			return 13
+		}
+		return 11 // unknown depth: middle ground
+	case "SOUNDG":
+		// Individual soundings are unreadable below chart-detail zoom and are
+		// the densest point class; hold them to z>=12.
+		return 12
+	}
+	return MinZoomForObjectClass(class)
+}
+
+// isStandardContour reports whether a depth-contour value (metres) is one of
+// the canonical contours a chart shows at coastal/overview scale.
+func isStandardContour(m float64) bool {
+	// Round to nearest 0.1 m to absorb float noise, then match the standard
+	// metric contour ladder NOAA emphasises at small scale.
+	r := int(m*10 + 0.5)
+	switch r {
+	case 0, 20, 50, 100, 200, 300, 500, 1000, 2000, 3000, 5000, 10000, 20000:
+		// 0, 2, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000, 2000 m
+		return true
+	}
+	return false
+}
+
+// numAttr reads a numeric S-57 attribute as float64, tolerating the several
+// numeric types BSON / the s57 lib may hand back.
+func numAttr(attrs map[string]any, key string) (float64, bool) {
+	v, ok := attrs[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
 // MinZoomForObjectClass returns the lowest map zoom at which an S-57 object
 // class should render. Below this, the feature is dropped so coarse zooms
 // aren't blanketed in symbols. Matches the spirit of S-52 scale-dependent

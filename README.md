@@ -15,6 +15,9 @@ under `/noaa-wms/`, and renders ENC vector tiles under `/noaa-enc/`.
 | `draft`                | number | no       | `6`     | Boat's draft in feet. Drives depth shading at chart-detail zoom: DEPMS covers 3.3 ft → draft, DEPMD covers draft → 2×draft, DEPDW (safe water, white) is ≥ 2×draft. Per-request override via `?sd=N` on tile URLs.            |
 | `safe_depth_ft`        | number | no       | —       | Legacy alias for `draft`. Used when `draft` is not set.                                                                                                                                                                      |
 | `myboat_icon_path`     | string | no       | bundled icon | Absolute path to a PNG used as the boat marker on the chart. Falls back to the bundled icon when unset.                                                                                                                  |
+| `mongo_uri`            | string | no       | env `MONGO_URI` | MongoDB connection URI holding the ingested map data (`osm_*` + `noaa` collections). Enables the vector chart + OSM underlay. Env `MONGO_URI` is the fallback.                                                          |
+| `mongo_db`             | string | no       | `osm` (env `MONGO_DB`) | Database name within Mongo that holds the collections.                                                                                                                                                         |
+| `tile_server_base_url` | string | no       | see below | Base URL of a separate map+weather server the frontend should fetch tiles/weather from (e.g. `http://host:8989`). Empty = same-origin (this server serves its own tiles). When unset but Mongo is configured, defaults to `http://localhost:8989`. |
 
 ### Sample config
 
@@ -31,6 +34,58 @@ under `/noaa-wms/`, and renders ENC vector tiles under `/noaa-enc/`.
   }
 }
 ```
+
+### Map + weather server only
+
+For a fleet, run one instance as a shared **map + weather server** that renders
+tiles and serves weather straight from MongoDB, and point the chartplotter app
+instances at it. (Today this is a chartplotter instance with Mongo configured;
+the rendering reads `osm_*` + `noaa` from Mongo, so it needs no local ENC/OSM
+files. A dedicated headless tile server — no UI — is planned.)
+
+Backend (serves `/noaa-enc/tile/...` and `/noaa-weather/...` from Mongo on
+:8989):
+
+```json
+{
+  "name": "mapserver",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:chartplotter",
+  "attributes": {
+    "port": 8989,
+    "mongo_uri": "mongodb://db-host:27017",
+    "mongo_db": "osm"
+  }
+}
+```
+
+App instances fetch tiles/weather from it instead of rendering locally:
+
+```json
+{
+  "name": "chartplotter",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:chartplotter",
+  "attributes": {
+    "port": 8888,
+    "tile_server_base_url": "http://map-host:8989"
+  }
+}
+```
+
+**Resolving the map-server address** (highest precedence first):
+
+1. `tile_server_base_url` config attribute (explicit override)
+2. if Mongo is configured (so a backend is expected) → `http://localhost:8989`
+   (`DefaultTileServerURL`)
+3. otherwise empty → same-origin (this instance serves its own tiles)
+
+So an app configured with Mongo automatically points at a local `:8989` map
+server, and any deployment overrides that with the `tile_server_base_url`
+attribute. Populate the database with the `make ingest-*` targets (see
+[Building](#building)).
 
 ### Depth shading bands
 

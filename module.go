@@ -26,6 +26,7 @@ import (
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
+	"github.com/erh/viam-chartplotter/render"
 )
 
 //go:embed dist
@@ -74,8 +75,24 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	mongoURI := firstNonEmpty(config.Attributes.String("mongo_uri"), os.Getenv("MONGO_URI"))
 	mongoDB := firstNonEmpty(config.Attributes.String("mongo_db"), os.Getenv("MONGO_DB"), "osm")
 	mongoColl := firstNonEmpty(config.Attributes.String("mongo_coll"), os.Getenv("MONGO_COLL"), "features")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL, mongoURI, mongoDB, mongoColl)
+	// Base URL of the map+weather (tile) server the frontend should fetch
+	// tiles/weather from. Set via the tile_server_base_url config attribute.
+	// When unset but Mongo is configured we assume a render/data server is
+	// reachable on the conventional port and default to DefaultTileServerURL.
+	// Empty means same-origin (this server serves its own tiles). Exposed to
+	// the frontend via /app-config.
+	tileServerBaseURL := config.Attributes.String("tile_server_base_url")
+	if tileServerBaseURL == "" && mongoURI != "" {
+		tileServerBaseURL = DefaultTileServerURL
+	}
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
 }
+
+// DefaultTileServerURL is the map+weather server address the frontend falls
+// back to when Mongo is configured but no explicit tile_server_base_url /
+// TILE_SERVER_URL is given. It points at the conventional render server port on
+// the same host; override per deployment.
+const DefaultTileServerURL = "http://localhost:8989"
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
 // Used for the layered "config → env → default" knob resolution.
@@ -165,6 +182,7 @@ func StartChartplotterServer(
 	mongoURI string,
 	mongoDB string,
 	mongoColl string,
+	tileServerBaseURL string,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -214,12 +232,20 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	encRenderer := NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
-	encTileCache, err := NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
+	encRenderer := render.NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
+	encTileCache, err := render.NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
 	if err != nil {
 		return nil, err
 	}
-	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, draftFt)
+	// The /compare debug endpoint fetches a NOAA WMS tile via the WMS cache.
+	// render/ doesn't import the WMS cache (would be an import cycle), so we
+	// inject the fetch: build the canonical query here and hit the cache.
+	wmsFetch := func(ctx context.Context, z, x, y int, layers string) ([]byte, error) {
+		canonical := wmsCanonicalForTile(tileXYZ{x: x, y: y, z: z}, layers)
+		b, _, _, err := wmsCache.fetch(ctx, canonical, "image/png")
+		return b, err
+	}
+	encHandlers := render.NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsFetch, draftFt)
 	// OSM underlay layer — render by querying a MongoDB collection
 	// populated offline by `osmtools ingest`. The URI is the only
 	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
@@ -242,10 +268,15 @@ func StartChartplotterServer(
 			// the bucket collections have fixed names within the chosen
 			// database.
 			_ = mongoColl
-			colls := osmtiler.OpenOSMCollections(mclient.Database(mongoDB))
+			db := mclient.Database(mongoDB)
+			colls := osmtiler.OpenOSMCollections(db)
 			encRenderer.SetOSMCollections(colls)
-			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s",
-				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail)
+			// ENC chart now renders from the noaa feature collection in the
+			// same database (populated by `mapsync noaa-ingest`), instead of
+			// parsing .000 files off disk at request time.
+			encRenderer.SetNOAACollection(noaa.OpenCollection(db))
+			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s",
+				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA)
 		}
 	} else {
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
@@ -289,6 +320,19 @@ func StartChartplotterServer(
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]string{"instance": instanceID})
 	})
+
+	// /app-config exposes runtime settings the frontend needs but can't know at
+	// build time. tileServerBaseURL tells the app where to fetch map tiles and
+	// weather: empty = same-origin (this server), otherwise a separate
+	// map+weather server (e.g. http://host:8989). See DefaultTileServerURL.
+	mux.HandleFunc("/app-config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]string{"tileServerBaseURL": tileServerBaseURL})
+	})
+	if tileServerBaseURL != "" {
+		logger.Infof("tile/weather server base URL: %s (frontend will fetch tiles+weather from here)", tileServerBaseURL)
+	}
 
 	// Optional override for the user's-own-boat marker icon. Resolved once at
 	// startup; if the file is missing or unreadable we log and fall back to the

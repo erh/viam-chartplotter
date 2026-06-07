@@ -11,8 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
+	"github.com/erh/viam-chartplotter/render"
+
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/fogleman/gg"
 	"go.viam.com/rdk/logging"
@@ -117,7 +122,7 @@ func TestCompareWithWMS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	renderer := NewENCRenderer(catalog, store, logger)
+	renderer := render.NewENCRenderer(catalog, store, logger)
 	wmsCache, err := NewNoaaCache(wmsCacheDir, 0, logger)
 	if err != nil {
 		t.Fatalf("wms cache: %v", err)
@@ -128,19 +133,46 @@ func TestCompareWithWMS(t *testing.T) {
 		t.Logf("catalog refresh: %v (continuing with whatever is on disk)", err)
 	}
 
+	// The renderer reads ENC features from MongoDB (not disk), so the test
+	// needs a Mongo to render against. Skip cleanly if one isn't reachable —
+	// this is an integration test, not a unit test. MONGO_URI/MONGO_DB match
+	// the module's env knobs (default mongodb://localhost:27017, db "osm").
+	mongoURI := envOr("MONGO_URI", "mongodb://localhost:27017")
+	mongoDB := envOr("MONGO_DB", "osm")
+	mctx, mcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer mcancel()
+	mclient, err := mongo.Connect(mctx, options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		t.Skipf("mongo connect (%s): %v — start Mongo or set MONGO_URI to run this test", mongoURI, err)
+	}
+	if err := mclient.Ping(mctx, nil); err != nil {
+		t.Skipf("mongo ping (%s): %v — start Mongo to run this test", mongoURI, err)
+	}
+	defer func() { _ = mclient.Disconnect(context.Background()) }()
+	noaaColl := noaa.OpenCollection(mclient.Database(mongoDB))
+	if err := noaa.EnsureIndexes(ctx, noaaColl); err != nil {
+		t.Fatalf("ensure noaa indexes: %v", err)
+	}
+	renderer.SetNOAACollection(noaaColl)
+	t.Logf("mongo:      %s/%s", mongoURI, mongoDB)
+
 	safeDepthM := safeDepthFt / feetPerMetre
 
-	// One render per tile: prefetch its bbox, render ours, fetch WMS, save the
-	// 3-panel image, log the metric.
+	// One render per tile: ensure its bbox is ingested into Mongo, render ours,
+	// fetch WMS, save the 3-panel image, log the metric.
 	var rows []gridRow
 	for _, tile := range tiles {
 		if doPrefetch {
 			minLon, minLat, maxLon, maxLat := tileLonLatBBox(tile)
-			dl, sk, err := store.SyncBBox(ctx, minLon, minLat, maxLon, maxLat, 0, 0, 4)
+			// IngestBBox syncs the overlapping cells to disk then parses them
+			// into the noaa collection (deduped, so reruns are cheap). This is
+			// what `mapsync noaa-ingest` does; doing it here makes the test
+			// self-seeding given just a running Mongo + network.
+			st, err := noaa.IngestBBox(ctx, noaaColl, store, minLon, minLat, maxLon, maxLat, 0, 0, 4, nil)
 			if err != nil {
-				t.Logf("z=%d x=%d y=%d prefetch: %v", tile.z, tile.x, tile.y, err)
-			} else if dl > 0 || sk > 0 {
-				t.Logf("z=%d x=%d y=%d prefetch: %d downloaded, %d skipped", tile.z, tile.x, tile.y, dl, sk)
+				t.Logf("z=%d x=%d y=%d ingest: %v", tile.z, tile.x, tile.y, err)
+			} else if st.Cells > 0 {
+				t.Logf("z=%d x=%d y=%d ingest: %d cells, %d features", tile.z, tile.x, tile.y, st.Cells, st.Docs)
 			}
 		}
 
@@ -148,9 +180,9 @@ func TestCompareWithWMS(t *testing.T) {
 		// the WMS-matched output. ECDIS-style rendering deliberately diverges
 		// from NOAA WMS (bold safety contour, two-tone soundings, topmarks)
 		// and would skew the diff numbers.
-		ourBytes, err := renderer.RenderTile(tile.z, tile.x, tile.y, RenderOptions{
+		ourBytes, _, err := renderer.RenderTile(tile.z, tile.x, tile.y, render.RenderOptions{
 			SafeDepthM: safeDepthM,
-			Style:      StyleWMS,
+			Style:      render.StyleWMS,
 		})
 		if err != nil {
 			t.Errorf("z=%d x=%d y=%d render: %v", tile.z, tile.x, tile.y, err)
@@ -204,8 +236,21 @@ func TestCompareWithWMS(t *testing.T) {
 			sumPct60 += r.metric.pctOver60
 		}
 		n := float64(len(rows))
+		avg := sumAvg / n
 		t.Logf("summary: tiles=%d  avg_rgb_diff=%.2f  pct_diff>30=%.2f%%  pct_diff>60=%.2f%%",
-			len(rows), sumAvg/n, sumPct30/n, sumPct60/n)
+			len(rows), avg, sumPct30/n, sumPct60/n)
+		// Regression gate: a gross render fault (e.g. land fills painted over
+		// open water) shows up as a large mean RGB delta vs NOAA's WMS. The
+		// default cap is lenient — our minimalist style legitimately differs
+		// from S-52 — and is meant to catch big regressions, not fine detail.
+		// Tighten via CMP_MAX_AVG_DELTA once a good baseline is established.
+		maxAvg := envOrFloat(t, "CMP_MAX_AVG_DELTA", 120)
+		if avg > maxAvg {
+			t.Errorf("mean avg_rgb_diff %.2f exceeds CMP_MAX_AVG_DELTA %.2f — render likely regressed vs NOAA WMS; inspect panels in %s",
+				avg, maxAvg, outDir)
+		}
+	} else {
+		t.Error("no tiles rendered — is the noaa collection seeded? run `mapsync noaa-ingest` or set CMP_PREFETCH=1")
 	}
 }
 

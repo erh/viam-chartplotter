@@ -1,4 +1,4 @@
-package vc
+package render
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestRenderZ6Z7Comparison(t *testing.T) {
 		{6, 19, 24, "/tmp/t6-after.png"},
 		{7, 38, 48, "/tmp/t7-after.png"},
 	} {
-		png, err := renderer.RenderTile(tile.z, tile.x, tile.y, RenderOptions{
+		png, _, err := renderer.RenderTile(tile.z, tile.x, tile.y, RenderOptions{
 			SafeDepthM: 1.8288,
 			Style:      StyleECDIS,
 		})

@@ -50,9 +50,26 @@ const bufferedSize = TileSize + 2*LabelBuffer
 // tile — the runtime path queries MongoDB via the helpers in
 // mongo.go; the offline ingest does the bbox assignment server-side.
 func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
+	return renderTileFromFeatures(features, z, x, y, false)
+}
+
+// RenderTileFromFeaturesTransparent renders the OSM layer over a transparent
+// background instead of the opaque land base. Use this when compositing the
+// OSM layer UNDERNEATH an ENC chart: the chart owns land/water colour, and a
+// beige base would otherwise show through the chart's (intentionally
+// transparent) deep-water areas as "yellow water". Only OSM land/road/building
+// ink is contributed; water polygons are simply not painted (they'd be holes
+// in a base that no longer exists).
+func RenderTileFromFeaturesTransparent(features []Feature, z, x, y int) ([]byte, error) {
+	return renderTileFromFeatures(features, z, x, y, true)
+}
+
+func renderTileFromFeatures(features []Feature, z, x, y int, transparentBase bool) ([]byte, error) {
 	dc := gg.NewContext(bufferedSize, bufferedSize)
-	dc.SetColor(landBaseColor)
-	dc.Clear()
+	if !transparentBase {
+		dc.SetColor(landBaseColor)
+		dc.Clear()
+	}
 	dc.Translate(LabelBuffer, LabelBuffer)
 
 	tMinLon, tMinLat, tMaxLon, tMaxLat := TileBoundsLonLat(z, x, y)
@@ -66,8 +83,11 @@ func RenderTileFromFeatures(features []Feature, z, x, y int) ([]byte, error) {
 	// Water carve pre-pass: ClassWater polygons (natural=water, place=sea,
 	// landuse=reservoir, …) punch transparency into the yellow base so the
 	// chart's depth shading shows through. Done before any other features
-	// paint so roads/buildings/labels over water still appear on top.
-	carveWater(dc, features, z, x, y, zu8, eMinLon, eMinLat, eMaxLon, eMaxLat)
+	// paint so roads/buildings/labels over water still appear on top. Skipped
+	// when there's no opaque base to carve (transparent-underlay mode).
+	if !transparentBase {
+		carveWater(dc, features, z, x, y, zu8, eMinLon, eMinLat, eMaxLon, eMaxLat)
+	}
 
 	type roadIdx struct {
 		idx   int

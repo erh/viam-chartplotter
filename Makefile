@@ -58,3 +58,49 @@ osm10024test: $(OSM_NYC_PBF)
 	OSM_NYC_PBF=$(OSM_NYC_PBF) OSM_TILES_OUT=$(OSM_TILES_OUT) \
 		go test -run TestRenderZip10024 -v ./mapdata/osmtiler -timeout 5m
 	$(OPEN) $(OSM_TILES_OUT)/index.html
+
+
+# -- ingest map data into MongoDB -------------------------------------------
+# Parse/sync OSM + NOAA ENC data into the shared Mongo database the renderer
+# reads (osm_* + noaa collections). Override MONGO / MONGO_DB on the CLI, e.g.
+#   make ingest-noaa MONGO=mongodb://localhost:27017
+MONGO     ?= mongodb://erh-23big.local:27017
+MONGO_DB  ?= osm
+OSM_CACHE ?= $(HOME)/Library/Caches/viam-chartplotter/osm
+ENC_CACHE ?= $(HOME)/Library/Caches/viam-chartplotter/noaa-enc/cells
+
+# Atlantic-seaboard states, Geofabrik us-<state> naming. $(wildcard ...) keeps
+# only the extracts actually downloaded (grab more with `mapsync downloadpbfs`).
+EASTCOAST_STATES = maine new-hampshire massachusetts rhode-island connecticut \
+	new-york new-jersey delaware maryland district-of-columbia virginia \
+	north-carolina south-carolina georgia florida
+EASTCOAST_PBFS = $(wildcard $(foreach s,$(EASTCOAST_STATES),$(OSM_CACHE)/us-$(s).osm.pbf))
+ALL_OSM_PBFS   = $(wildcard $(OSM_CACHE)/*.osm.pbf)
+
+.PHONY: mapsync render-cmd ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all
+
+# Always rebuild the CLI so an ingest never runs against a stale binary.
+mapsync:
+	go build -o mapsync ./mapdata/cmd/mapsync
+
+# Render tiles for a lat/lon straight from Mongo to disk (fast debug loop):
+#   ./render-cmd --lat 32.79 --lon -79.86 --zoom 13
+render-cmd:
+	go build -o render-cmd ./cmd/render
+
+# Parse every downloaded ENC cell (.000) into the `noaa` collection. Upserts in
+# place, so it's safe to re-run after a parser change (find|xargs handles the
+# thousands-of-cells arg list).
+ingest-noaa: mapsync
+	find $(ENC_CACHE) -name '*.000' -print0 | xargs -0 ./mapsync noaa-ingest --mongo $(MONGO) --db $(MONGO_DB)
+
+# Ingest the downloaded Atlantic-coast state extracts into the osm_* collections.
+ingest-osm-eastcoast: mapsync
+	./mapsync ingest --mongo $(MONGO) --db $(MONGO_DB) $(EASTCOAST_PBFS)
+
+# Ingest every downloaded OSM extract (all states + countries in the cache).
+ingest-osm-all: mapsync
+	./mapsync ingest --mongo $(MONGO) --db $(MONGO_DB) $(ALL_OSM_PBFS)
+
+# Everything: all OSM extracts then all ENC cells.
+ingest-all: ingest-osm-all ingest-noaa

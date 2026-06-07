@@ -106,7 +106,7 @@ func ParseCell(cellName, path string) (ParseResult, error) {
 			FeatureID:   f.ID(),
 			Kind:        kind,
 			Name:        objectName(f),
-			MinZoom:     MinZoomForObjectClass(f.ObjectClass()),
+			MinZoom:     MinZoomForFeature(f.ObjectClass(), f.Attributes()),
 			BBox:        bbox,
 			Geometry:    geom,
 			Attributes:  f.Attributes(),
@@ -204,26 +204,105 @@ func geoJSONGeometry(g s57.Geometry) (any, string, [4]float64, bool) {
 		if len(g.Coordinates) > maxPolygonVertices {
 			return nil, "", [4]float64{}, false
 		}
-		ring := make([][]float64, 0, len(g.Coordinates)+1)
+		pts := make([][]float64, 0, len(g.Coordinates))
 		for _, c := range g.Coordinates {
 			if len(c) < 2 {
 				continue
 			}
 			accum(c[0], c[1])
-			ring = append(ring, []float64{c[0], c[1]})
+			pts = append(pts, []float64{c[0], c[1]})
 		}
-		if len(ring) < 3 {
+		// The s57 lib concatenates every ring (outer + holes, or multiple
+		// disjoint outer rings) into one flat list, each ring self-closed.
+		// Storing that as a single GeoJSON ring makes a self-intersecting
+		// loop the 2dsphere index rejects ("Can't extract geo keys"), which
+		// silently dropped the big mainland LNDARE / harbour DEPARE polygons.
+		// Split into proper rings, orient each CCW (MongoDB's right-hand
+		// rule), and emit MultiPolygon (one polygon per ring) when there's
+		// more than one. The renderer re-concatenates + even-odd fills, so
+		// holes still render correctly.
+		var rings [][][]float64
+		for _, r := range splitS57Rings(pts) {
+			r = closeRing(r)
+			if len(r) < 4 {
+				continue // need >= 3 distinct vertices + closing point
+			}
+			orientCCW(r)
+			rings = append(rings, r)
+		}
+		switch len(rings) {
+		case 0:
 			return nil, "", [4]float64{}, false
+		case 1:
+			return map[string]any{
+				"type":        "Polygon",
+				"coordinates": [][][]float64{rings[0]},
+			}, "polygon", bbox, true
+		default:
+			mp := make([][][][]float64, 0, len(rings))
+			for _, r := range rings {
+				mp = append(mp, [][][]float64{r})
+			}
+			return map[string]any{
+				"type":        "MultiPolygon",
+				"coordinates": mp,
+			}, "polygon", bbox, true
 		}
-		// GeoJSON polygons must be explicitly closed (first == last).
-		first, last := ring[0], ring[len(ring)-1]
-		if first[0] != last[0] || first[1] != last[1] {
-			ring = append(ring, []float64{first[0], first[1]})
-		}
-		return map[string]any{
-			"type":        "Polygon",
-			"coordinates": [][][]float64{ring},
-		}, "polygon", bbox, true
 	}
 	return nil, "", [4]float64{}, false
+}
+
+// splitS57Rings splits the s57 concatenated-ring coordinate convention (each
+// constituent ring self-closed: first vertex == last) into separate rings. A
+// trailing unclosed fragment is returned as its own ring.
+func splitS57Rings(coords [][]float64) [][][]float64 {
+	var rings [][][]float64
+	if len(coords) == 0 {
+		return rings
+	}
+	start := 0
+	for i := 1; i < len(coords); i++ {
+		if coords[i][0] == coords[start][0] && coords[i][1] == coords[start][1] {
+			rings = append(rings, coords[start:i+1])
+			start = i + 1
+			if start >= len(coords) {
+				break
+			}
+		}
+	}
+	if start < len(coords) {
+		rings = append(rings, coords[start:])
+	}
+	return rings
+}
+
+// closeRing ensures a ring's first and last vertices coincide.
+func closeRing(r [][]float64) [][]float64 {
+	if len(r) < 3 {
+		return r
+	}
+	if r[0][0] != r[len(r)-1][0] || r[0][1] != r[len(r)-1][1] {
+		r = append(r, []float64{r[0][0], r[0][1]})
+	}
+	return r
+}
+
+// ringSignedArea is the shoelace signed area in lon/lat; positive = CCW.
+func ringSignedArea(r [][]float64) float64 {
+	var a float64
+	for i := 0; i+1 < len(r); i++ {
+		a += r[i][0]*r[i+1][1] - r[i+1][0]*r[i][1]
+	}
+	return a / 2
+}
+
+// orientCCW reverses a ring in place if it's clockwise, so MongoDB's 2dsphere
+// (right-hand rule: exterior rings CCW) indexes it as the enclosed area rather
+// than its complement.
+func orientCCW(r [][]float64) {
+	if ringSignedArea(r) < 0 {
+		for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+			r[i], r[j] = r[j], r[i]
+		}
+	}
 }

@@ -1,7 +1,8 @@
-package vc
+package render
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
 
@@ -19,17 +21,23 @@ import (
 	"golang.org/x/image/font/basicfont"
 )
 
+// WMSFetch fetches a NOAA WMS PNG for a tile + layer set, used only by the
+// /compare debug endpoint. Injected as a function so this package doesn't
+// depend on the WMS cache implementation (package vc's *NoaaCache, which builds
+// the canonical query and caches the result). May be nil.
+type WMSFetch func(ctx context.Context, z, x, y int, layers string) ([]byte, error)
+
 // ENCHandlers exposes the ENC catalog/store/renderer via HTTP under /noaa-enc/.
 type ENCHandlers struct {
 	catalog          *noaa.Catalog
 	store            *noaa.Store
 	renderer         *ENCRenderer
 	tileCache        *ENCTileCache
-	wmsCache         *NoaaCache // for the /compare endpoint; may be nil
-	defaultSafeDepth float64    // feet; used when ?sd= is absent
+	wmsFetch         WMSFetch // for the /compare endpoint; may be nil
+	defaultSafeDepth float64  // feet; used when ?sd= is absent
 }
 
-func NewENCHandlers(catalog *noaa.Catalog, store *noaa.Store, renderer *ENCRenderer, tileCache *ENCTileCache, wmsCache *NoaaCache, defaultSafeDepthFt float64) *ENCHandlers {
+func NewENCHandlers(catalog *noaa.Catalog, store *noaa.Store, renderer *ENCRenderer, tileCache *ENCTileCache, wmsFetch WMSFetch, defaultSafeDepthFt float64) *ENCHandlers {
 	if defaultSafeDepthFt <= 0 {
 		defaultSafeDepthFt = 6
 	}
@@ -38,7 +46,7 @@ func NewENCHandlers(catalog *noaa.Catalog, store *noaa.Store, renderer *ENCRende
 		store:            store,
 		renderer:         renderer,
 		tileCache:        tileCache,
-		wmsCache:         wmsCache,
+		wmsFetch:         wmsFetch,
 		defaultSafeDepth: defaultSafeDepthFt,
 	}
 }
@@ -61,6 +69,7 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
 	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
+	mux.HandleFunc("/noaa-enc/debug-mongo/", h.handleDebugMongo)
 	mux.HandleFunc("/noaa-enc/compare/test", h.handleCompareTest)
 	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
 	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
@@ -216,6 +225,38 @@ func (h *ENCHandlers) handleDebug(w http.ResponseWriter, r *http.Request) {
 // DebugBBox so the response shape is identical.
 //
 //	GET /noaa-enc/debug-tile/{z}/{x}/{y}
+//
+// handleDebugMongo reports what the renderer actually pulls from MongoDB for a
+// tile — feature counts by class/cell/scale/kind plus query time. This is the
+// Mongo-truth counterpart to /debug-tile (which reads the disk catalog) and the
+// fastest way to see why a tile renders empty or wrong.
+//
+//	GET /noaa-enc/debug-mongo/{z}/{x}/{y}
+func (h *ENCHandlers) handleDebugMongo(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/noaa-enc/debug-mongo/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 {
+		http.Error(w, "bad path: expected /noaa-enc/debug-mongo/{z}/{x}/{y}", http.StatusBadRequest)
+		return
+	}
+	z, errZ := strconv.Atoi(parts[0])
+	x, errX := strconv.Atoi(parts[1])
+	y, errY := strconv.Atoi(strings.TrimSuffix(parts[2], ".png"))
+	if errZ != nil || errX != nil || errY != nil {
+		http.Error(w, "bad coords", http.StatusBadRequest)
+		return
+	}
+	report, err := h.renderer.TileFeatureReport(z, x, y)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(report)
+}
+
 func (h *ENCHandlers) handleDebugTile(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/noaa-enc/debug-tile/")
 	parts := strings.Split(rest, "/")
@@ -397,7 +438,12 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	// is bumped whenever code changes alter the rendered pixels without a
 	// URL change — old vN directories then become inert and re-rendering
 	// happens on the next request.
-	cacheKey := "v" + strconv.Itoa(ENCRenderRulesVersion) + "-" + style.String()
+	// "merged" + the OSM render version because handleTile now composites the
+	// OSM underlay beneath the ENC chart server-side (replacing the browser's
+	// two-layer stack). The marker keeps these tiles in their own cache shard,
+	// distinct from any legacy ENC-only tiles.
+	cacheKey := "v" + strconv.Itoa(ENCRenderRulesVersion) +
+		"-merged" + strconv.Itoa(OSMRenderRulesVersion) + "-" + style.String()
 	if skipNavaids {
 		cacheKey += "-nonavaids"
 	}
@@ -417,7 +463,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pngBytes, err := h.renderer.RenderTile(z, x, y, RenderOptions{
+	pngBytes, _, mt, err := h.renderer.RenderMergedTile(z, x, y, RenderOptions{
 		SafeDepthM:      safeDepthM,
 		Style:           style,
 		SkipNavaids:     skipNavaids,
@@ -428,6 +474,12 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Surface the render breakdown so a slow tile can be attributed to the
+	// Mongo query vs the draw vs the OSM underlay vs the composite. Visible in
+	// browser devtools (Server-Timing) and curl -D-.
+	w.Header().Set("Server-Timing", fmt.Sprintf(
+		"db;dur=%.1f, draw;dur=%.1f, osm;dur=%.1f, composite;dur=%.1f, feats;desc=%q;dur=0",
+		mt.ENC.QueryMS, mt.ENC.DrawMS, mt.OSMMS, mt.CompositeMS, strconv.Itoa(mt.ENC.Features)))
 	// Don't cache visually-empty tiles. A fully-transparent 256x256 PNG is
 	// ~768 bytes; anything that small means the renderer had nothing to draw,
 	// most likely because the underlying cells haven't been downloaded yet.
@@ -511,7 +563,7 @@ func (h *ENCHandlers) handleCompareTest(w http.ResponseWriter, r *http.Request) 
 //
 //	GET /noaa-enc/compare/{z}/{x}/{y}.png[?sd=N]
 func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
-	if h.wmsCache == nil {
+	if h.wmsFetch == nil {
 		http.Error(w, "wms cache not configured", http.StatusNotFound)
 		return
 	}
@@ -543,13 +595,14 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	// browser. Default-on (?navaids=, ?osm=, ?landfill= absent) gives the
 	// raw "match NOAA WMS" render the compare endpoint was originally
 	// designed for; pass any of them to see the live-layer variant.
-	ourPNG, err := h.renderer.RenderTile(z, x, y, RenderOptions{
+	opts := RenderOptions{
 		SafeDepthM:      safeDepthM,
 		Style:           ParseRenderStyle(r.URL.Query().Get("style")),
 		SkipNavaids:     r.URL.Query().Get("navaids") == "0",
 		TransparentLand: r.URL.Query().Get("landfill") == "0",
 		SkipClasses:     parseSkipClasses(r.URL.Query().Get("skip")),
-	})
+	}
+	ourPNG, encT, err := h.renderer.RenderTile(z, x, y, opts)
 	if err != nil {
 		http.Error(w, "render: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -562,12 +615,27 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 
 	// Match the LAYERS the frontend's noaa TileWMS layer uses so this
 	// request shares the cache with whatever the user already browsed —
-	// otherwise every /compare hit MISSes and fetches NOAA upstream.
-	canonical := wmsCanonicalForTile(tileXYZ{z: z, x: x, y: y}, "0,1,2,3,4,5,6")
-	wmsBytes, _, _, err := h.wmsCache.fetch(r.Context(), canonical, "image/png")
+	// otherwise every /compare hit MISSes and fetches NOAA upstream. The
+	// canonical-query + cache lookup lives behind the injected wmsFetch.
+	if h.wmsFetch == nil {
+		http.Error(w, "wms compare not configured", http.StatusNotImplemented)
+		return
+	}
+	wmsStart := time.Now()
+	wmsBytes, err := h.wmsFetch(r.Context(), z, x, y, "0,1,2,3,4,5,6")
+	wmsMS := float64(time.Since(wmsStart).Microseconds()) / 1000.0
 	if err != nil {
 		http.Error(w, "wms: "+err.Error(), http.StatusBadGateway)
 		return
+	}
+	// Attribute the request time so a slow /compare is unambiguous: our render
+	// (db+draw) vs the NOAA WMS upstream fetch (often the whole cost on a cold
+	// z=9 tile). Visible as Server-Timing in devtools/curl AND in the logs.
+	w.Header().Set("Server-Timing", fmt.Sprintf("db;dur=%.1f, draw;dur=%.1f, wms;dur=%.1f", encT.QueryMS, encT.DrawMS, wmsMS))
+	w.Header().Set("X-ENC-Features", strconv.Itoa(encT.Features))
+	if lg := h.renderer.Logger(); lg != nil {
+		lg.Infof("compare z=%d x=%d y=%d: enc-db=%.0fms enc-draw=%.0fms wms=%.0fms feats=%d",
+			z, x, y, encT.QueryMS, encT.DrawMS, wmsMS, encT.Features)
 	}
 	wmsImg, err := png.Decode(bytes.NewReader(wmsBytes))
 	if err != nil {
@@ -575,43 +643,61 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Four panels side by side: ours | WMS | diff | OSM.
+	// Five panels: ENC | OSM | MERGED | WMS | diff. MERGED is the exact tile
+	// the app shows (ENC over the OSM underlay), so you can see what the user
+	// actually gets — and the diff panel compares THAT against NOAA's WMS.
 	const panelW = 256
-	const numPanels = 4
+	const numPanels = 5
 	out := image.NewRGBA(image.Rect(0, 0, panelW*numPanels, 256))
 	// White background so transparent areas of any tile are visible.
 	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
-	draw.Draw(out, image.Rect(0, 0, panelW, 256), ourImg, image.Point{}, draw.Over)
-	draw.Draw(out, image.Rect(panelW, 0, 2*panelW, 256), wmsImg, image.Point{}, draw.Over)
+	const (
+		colENC = iota
+		colOSM
+		colMerged
+		colWMS
+		colDiff
+	)
+	draw.Draw(out, image.Rect(colENC*panelW, 0, (colENC+1)*panelW, 256), ourImg, image.Point{}, draw.Over)
+	draw.Draw(out, image.Rect(colWMS*panelW, 0, (colWMS+1)*panelW, 256), wmsImg, image.Point{}, draw.Over)
 
-	// Diff panel: per-pixel RGB distance between ours and WMS, grayscale.
+	// OSM underlay from our self-hosted renderer. Failures are non-fatal.
+	if osmPNG, _, oerr := h.renderer.RenderOSMTile(z, x, y); oerr == nil {
+		if osmImg, derr := png.Decode(bytes.NewReader(osmPNG)); derr == nil {
+			draw.Draw(out, image.Rect(colOSM*panelW, 0, (colOSM+1)*panelW, 256), osmImg, image.Point{}, draw.Over)
+		}
+	}
+
+	// MERGED: exactly what the app composites — OSM under ENC, using the
+	// frontend's per-zoom params (BrowserMergedOptions: land transparent so OSM
+	// streets show, navaids/structures dropped where vector layers take over).
+	mergedOpts := BrowserMergedOptions(z, safeDepthM)
+	if mergedPNG, _, _, merr := h.renderer.RenderMergedTile(z, x, y, mergedOpts); merr == nil {
+		if mergedImg, derr := png.Decode(bytes.NewReader(mergedPNG)); derr == nil {
+			draw.Draw(out, image.Rect(colMerged*panelW, 0, (colMerged+1)*panelW, 256), mergedImg, image.Point{}, draw.Over)
+		}
+	}
+
+	// Diff panel: per-pixel RGB distance between the MERGED app view and WMS.
 	for py := range 256 {
 		for px := range 256 {
-			o := color.RGBAModel.Convert(out.At(px, py)).(color.RGBA)
-			n := color.RGBAModel.Convert(out.At(panelW+px, py)).(color.RGBA)
+			o := color.RGBAModel.Convert(out.At(colMerged*panelW+px, py)).(color.RGBA)
+			n := color.RGBAModel.Convert(out.At(colWMS*panelW+px, py)).(color.RGBA)
 			d := absInt(int(o.R)-int(n.R)) + absInt(int(o.G)-int(n.G)) + absInt(int(o.B)-int(n.B))
 			if d > 255 {
 				d = 255
 			}
-			out.SetRGBA(2*panelW+px, py, color.RGBA{R: uint8(d), G: uint8(d), B: uint8(d), A: 255})
-		}
-	}
-
-	// OSM tile from our self-hosted renderer (water already transparent
-	// by design). Failures are non-fatal so the rest of the compare
-	// image still renders.
-	if osmPNG, _, err := h.renderer.RenderOSMTile(z, x, y); err == nil {
-		if osmImg, derr := png.Decode(bytes.NewReader(osmPNG)); derr == nil {
-			draw.Draw(out, image.Rect(3*panelW, 0, 4*panelW, 256), osmImg, image.Point{}, draw.Over)
+			out.SetRGBA(colDiff*panelW+px, py, color.RGBA{R: uint8(d), G: uint8(d), B: uint8(d), A: 255})
 		}
 	}
 
 	// Panel labels so anyone looking at /tmp/foo.png or the network response
 	// knows which is which without checking the handler source.
-	annotatePanel(out, 4, 0, "ours")
-	annotatePanel(out, panelW+4, 0, "WMS")
-	annotatePanel(out, 2*panelW+4, 0, fmt.Sprintf("diff z=%d x=%d y=%d", z, x, y))
-	annotatePanel(out, 3*panelW+4, 0, "OSM")
+	annotatePanel(out, colENC*panelW+4, 0, "ENC")
+	annotatePanel(out, colOSM*panelW+4, 0, "OSM")
+	annotatePanel(out, colMerged*panelW+4, 0, "MERGED (app)")
+	annotatePanel(out, colWMS*panelW+4, 0, "WMS")
+	annotatePanel(out, colDiff*panelW+4, 0, fmt.Sprintf("diff z=%d/%d/%d", z, x, y))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, out); err != nil {

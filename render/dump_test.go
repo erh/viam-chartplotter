@@ -1,4 +1,4 @@
-package vc
+package render
 
 import (
 	"bytes"
@@ -167,7 +167,7 @@ func renderMosaic(t *testing.T, renderer *ENCRenderer, centerLon, centerLat floa
 			for j := range jobs {
 				tx := x0 + j.col
 				ty := y0 + j.row
-				pngBytes, err := renderer.RenderTile(z, tx, ty, RenderOptions{
+				pngBytes, _, err := renderer.RenderTile(z, tx, ty, RenderOptions{
 					SafeDepthM: 8.0 / feetPerMetre,
 					Style:      StyleWMS,
 				})

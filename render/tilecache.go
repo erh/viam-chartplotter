@@ -1,4 +1,4 @@
-package vc
+package render
 
 import (
 	"fmt"
