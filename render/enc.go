@@ -99,6 +99,12 @@ const osmMergeMinZoom = 12
 const (
 	lowZoomBandCeilingZoom = 9
 	lowZoomMaxUsageBand    = 3
+	// contourSurfaceMaxZoom: at or below this zoom, depth contours (DEPCNT) are
+	// pulled regardless of their stored minZoom (≈11). NOAA shows the major
+	// fathom contours from overview zoom, and below z11 the zoom filter would
+	// otherwise drop them — leaving z10 in particular with zero contours (the
+	// band ceiling only covers z≤9). At z≥11 they come through normally.
+	contourSurfaceMaxZoom = 10
 )
 
 // logSlowQuery logs a MongoDB query that exceeded slowQueryThreshold, with the
@@ -131,13 +137,16 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	// at band 2 leaves z7/z8 with almost no depth. Higher zooms keep the full
 	// in-memory logic, where land/water base classes paint regardless of window.
 	maxBand := 0
-	var alwaysClasses []string
 	if z <= lowZoomBandCeilingZoom {
 		maxBand = lowZoomMaxUsageBand
-		// Surface the coarse depth contours at overview zoom. They're stored at
-		// minZoom≈11 (so the zoom filter drops them), but NOAA shows the major
-		// fathom contours from z7 and the band ceiling keeps only coarse-cell
-		// ones — without them the deep (white) water reads as "no depth data".
+	}
+	// Surface the coarse depth contours below z11 regardless of their stored
+	// minZoom (≈11) — see contourSurfaceMaxZoom. At z≤9 the band ceiling keeps
+	// only coarse-cell contours; at z10 there's no ceiling but the contours
+	// present are the same coarse fathom ladder, so no dense clutter. Without
+	// this z10 shows zero contours and the deep (white) water reads as blank.
+	var alwaysClasses []string
+	if z <= contourSurfaceMaxZoom {
 		alwaysClasses = []string{"DEPCNT"}
 	}
 
