@@ -66,18 +66,14 @@ func TestGoldenTiles(t *testing.T) {
 	var rows []image.Image
 	for z := minZoom; z <= maxZoom; z++ {
 		x, y := lonLatToTile(lon, lat, z)
-		// The two outputs we control: ENC-only and the MERGED app tile. WMS and
-		// the standalone OSM panel are excluded (external / nondeterministic /
-		// times out at low zoom).
-		encPNG, _, err := r.RenderTile(z, x, y, RenderOptions{SafeDepthM: 6 / feetPerMetre, Style: StyleWMS})
-		if err != nil {
-			t.Fatalf("z=%d render enc: %v", z, err)
-		}
+		// The MERGED app tile — exactly what the frontend composites. WMS and the
+		// standalone OSM panel are excluded (external / nondeterministic / times
+		// out at low zoom).
 		mergedPNG, _, _, err := r.RenderMergedTile(z, x, y, BrowserMergedOptions(z, 6/feetPerMetre))
 		if err != nil {
 			t.Fatalf("z=%d render merged: %v", z, err)
 		}
-		rows = append(rows, goldenRow(z, mustDecode(t, encPNG), mustDecode(t, mergedPNG)))
+		rows = append(rows, goldenRow(z, mustDecode(t, mergedPNG)))
 	}
 	got := vstack(rows...)
 
@@ -88,7 +84,7 @@ func TestGoldenTiles(t *testing.T) {
 		if err := writePNGFile(goldenPath, got); err != nil {
 			t.Fatalf("write golden: %v", err)
 		}
-		t.Logf("seeded golden: %s (z%d..z%d, panels: ENC | MERGED)", goldenPath, minZoom, maxZoom)
+		t.Logf("seeded golden: %s (z%d..z%d, panel: MERGED)", goldenPath, minZoom, maxZoom)
 		return
 	}
 
@@ -103,23 +99,21 @@ func TestGoldenTiles(t *testing.T) {
 		_ = writePNGFile(filepath.Join(outDir, "golden.png"), golden)
 		_ = writePNGFile(filepath.Join(outDir, "actual.png"), got)
 		_ = writePNGFile(filepath.Join(outDir, "diff.png"), diff)
-		t.Errorf("%d pixels differ from golden — see %s/{golden,actual,diff}.png (rows z%d..z%d, panels: ENC | MERGED)",
+		t.Errorf("%d pixels differ from golden — see %s/{golden,actual,diff}.png (rows z%d..z%d, panel: MERGED)",
 			ndiff, outDir, minZoom, maxZoom)
 	} else {
 		t.Logf("golden matches (z%d..z%d)", minZoom, maxZoom)
 	}
 }
 
-// goldenRow builds one labeled row: [z-label | ENC | MERGED].
-func goldenRow(z int, enc, merged image.Image) image.Image {
+// goldenRow builds one labeled row: [z-label | MERGED].
+func goldenRow(z int, merged image.Image) image.Image {
 	const labelW = 44
 	h := 256
-	w := labelW + enc.Bounds().Dx() + 2 + merged.Bounds().Dx()
+	w := labelW + merged.Bounds().Dx()
 	out := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(out, out.Bounds(), image.White, image.Point{}, draw.Src)
-	draw.Draw(out, image.Rect(labelW, 0, labelW+enc.Bounds().Dx(), h), enc, enc.Bounds().Min, draw.Over)
-	mx := labelW + enc.Bounds().Dx() + 2
-	draw.Draw(out, image.Rect(mx, 0, mx+merged.Bounds().Dx(), h), merged, merged.Bounds().Min, draw.Over)
+	draw.Draw(out, image.Rect(labelW, 0, w, h), merged, merged.Bounds().Min, draw.Over)
 	dc := gg.NewContextForRGBA(out)
 	dc.SetFontFace(basicfont.Face7x13)
 	dc.SetColor(color.Black)
