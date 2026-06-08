@@ -935,7 +935,11 @@ const (
 // surfaced at z7-10; deterministic (scale,_id) paint order; coastal land
 // painted at z<10 (no blue-on-land); NAVLNE/RECTRC drawn black not magenta;
 // overview geo markers (state borders/names, major cities) at z7-11.
-const ENCRenderRulesVersion = 9
+// v10: overview line cleanup — magenta area-limits (FAIRWY/ACHARE/RESARE) dashed
+// + gated to z>=13; recommended tracks/nav lines (RECTRC/NAVLNE) no longer
+// force-drawn at overview; coastline (COALNE/SLCONS) suppressed at z10-12 so the
+// land/water fill edge is the coast (no coarse line floating/breaking on land).
+const ENCRenderRulesVersion = 10
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -1275,6 +1279,25 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 		if transparentLand && isLandClass(f.class) {
 			continue
 		}
+		// Harbour magenta limits (fairways, anchorages, restricted areas) are
+		// detail-zoom linework: at overview NOAA doesn't show them, and over our
+		// coarse overview coastline their boundaries stray onto land as weird
+		// floating magenta. Gate them to detail zoom; offshore routes
+		// (DWRTPT/TWRTPT) and everything else are unaffected.
+		if z < harborLimitMinZoom && isHarborLimitClass(f.class) {
+			continue
+		}
+		// Coastline at overview zooms where fine cells are present (z10–12): skip
+		// the line and let the land/water fill edge be the coast. The fills paint
+		// finest-per-pixel (window bypassed), so a windowed coastline is coarse
+		// and floats off the boundary, and drawing only the finest one breaks
+		// where coarser cells cover. The fill edge is the gap-free, finest-per-
+		// region coastline already. Below z10 the band ceiling keeps fills and
+		// coastline on the same coarse bands (aligned); at z13+ tiles are single-
+		// cell — both keep their drawn coast line.
+		if isCoastlineClass(f.class) && z > lowZoomBandCeilingZoom && z < harborLimitMinZoom {
+			continue
+		}
 		if !windowOK(f) && !(z >= 9 && isChannelClass(f.class)) && f.class != "DEPCNT" {
 			continue
 		}
@@ -1424,12 +1447,44 @@ func isWaterBaseClass(class string) bool {
 	return false
 }
 
-// isChannelClass reports the navigationally-critical channel/fairway linework
-// that must show from z>=9 even when the cell-scale window would exclude its
-// (fine, harbour-cell) source.
+// isChannelClass reports offshore traffic routes (deep-water route / traffic-
+// separation route parts) that must show from z>=9 even when the cell-scale
+// window would exclude their source. These are coarse, large-area routes NOAA
+// shows at overview. Recommended tracks (RECTRC), navigation lines (NAVLNE) and
+// harbour fairways (FAIRWY) are intentionally NOT here — they're harbour-detail
+// linework that streaks across overview tiles or strays onto land; they fall
+// back to the scale window (and the harborLimitMinZoom gate) instead.
 func isChannelClass(class string) bool {
 	switch class {
-	case "FAIRWY", "RECTRC", "NAVLNE", "DWRTPT", "TWRTPT":
+	case "DWRTPT", "TWRTPT":
+		return true
+	}
+	return false
+}
+
+// harborLimitMinZoom is the lowest zoom at which harbour magenta area-limits
+// (see isHarborLimitClass) are drawn. Below it they're suppressed: NOAA doesn't
+// show them at overview, and our coarse overview coastline puts their limits on
+// land. At/above it the normal scale window includes the harbour cells that
+// carry them.
+const harborLimitMinZoom = 13
+
+// isHarborLimitClass reports the harbour-detail magenta area-limit classes
+// gated to detail zoom by harborLimitMinZoom.
+func isHarborLimitClass(class string) bool {
+	switch class {
+	case "FAIRWY", "ACHARE", "RESARE":
+		return true
+	}
+	return false
+}
+
+// isCoastlineClass reports the land/water boundary line classes. At overview
+// zooms where fine cells are present they're suppressed (the fill edge is the
+// coast); see the line pass.
+func isCoastlineClass(class string) bool {
+	switch class {
+	case "COALNE", "SLCONS":
 		return true
 	}
 	return false
