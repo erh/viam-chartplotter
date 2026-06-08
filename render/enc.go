@@ -1637,20 +1637,31 @@ var overviewPlaceTypes = map[string]bool{
 	"city": true, "town": true,
 }
 
-// filterOverviewMarkers keeps the overview chart context legible: only state/
-// country borders (admin_level ≤ 4 — county and city limits are noise at this
-// scale and return with full OSM at z >= osmMergeMinZoom) and settlement/region
-// labels (overviewPlaceTypes). ClassAdmin minZoom is a flat 4 regardless of
-// admin_level (the ingest doesn't carry level into minZoom), so we gate on the
-// admin_level tag here; place labels are further gated by minLabelZoom in the
-// renderer. z7/z8 are unaffected — they never reached the finer levels/types.
+// filterOverviewMarkers keeps the overview chart context legible: admin borders
+// (zoom-gated by level, see below) and settlement/region labels
+// (overviewPlaceTypes). ClassAdmin minZoom is a flat 4 regardless of admin_level
+// (the ingest doesn't carry level into minZoom), so we gate on the admin_level
+// tag here; place labels are further gated by minLabelZoom in the renderer.
 func filterOverviewMarkers(feats []osmtiler.Feature, z int) []osmtiler.Feature {
 	out := make([]osmtiler.Feature, 0, len(feats))
 	for _, f := range feats {
 		switch f.Class {
 		case osmtiler.ClassAdmin:
 			lvl, err := strconv.Atoi(strings.TrimSpace(f.Tags["admin_level"]))
-			if err != nil || lvl > 4 {
+			if err != nil {
+				continue
+			}
+			// State/country borders (≤4) at every overview zoom. From z9 also
+			// admit county-level (≤6): inland US state borders share ways with
+			// county boundaries and are tagged at county level in the data, so
+			// without this the state line is invisible on land at overview.
+			// City/town limits (level ≥7) stay out — genuine clutter at overview;
+			// they return with full OSM at z>=osmMergeMinZoom.
+			maxLevel := 4
+			if z >= 9 {
+				maxLevel = 6
+			}
+			if lvl > maxLevel {
 				continue
 			}
 		case osmtiler.ClassPlace:

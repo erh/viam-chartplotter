@@ -88,8 +88,16 @@ endif
 OSM_CACHE ?= $(CACHE_DIR)/viam-chartplotter/osm
 ENC_CACHE ?= $(CACHE_DIR)/viam-chartplotter/noaa-enc/cells
 
+# Extra flags forwarded to `mapsync ingest`. Pass --force to re-ingest regions
+# whose PBF is unchanged but the ingest CODE changed (the dedup is by PBF hash,
+# so a code change alone is otherwise skipped) — needed after an ingest-logic
+# change like the admin-boundary support. Tune --workers N for parallelism vs.
+# memory on large planet-scale batches (each worker buffers a whole PBF).
+#   make ingest-osm-all MONGO=… INGEST_FLAGS="--force --workers 3"
+INGEST_FLAGS ?=
+
 # Atlantic-seaboard states, Geofabrik us-<state> naming. $(wildcard ...) keeps
-# only the extracts actually downloaded (grab more with `mapsync downloadpbfs`).
+# only the extracts actually downloaded.
 EASTCOAST_STATES = maine new-hampshire massachusetts rhode-island connecticut \
 	new-york new-jersey delaware maryland district-of-columbia virginia \
 	north-carolina south-carolina georgia florida
@@ -125,11 +133,11 @@ ingest-noaa: datasync
 
 # Ingest the downloaded Atlantic-coast state extracts into the osm_* collections.
 ingest-osm-eastcoast: mapsync
-	./mapsync ingest --mongo $(MONGO) --db $(MONGO_DB) $(EASTCOAST_PBFS)
+	./mapsync ingest $(INGEST_FLAGS) --mongo $(MONGO) --db $(MONGO_DB) $(EASTCOAST_PBFS)
 
 # Ingest every downloaded OSM extract (all states + countries in the cache).
 ingest-osm-all: mapsync
-	./mapsync ingest --mongo $(MONGO) --db $(MONGO_DB) $(ALL_OSM_PBFS)
+	./mapsync ingest $(INGEST_FLAGS) --mongo $(MONGO) --db $(MONGO_DB) $(ALL_OSM_PBFS)
 
 # Everything: all OSM extracts then all ENC cells.
 ingest-all: ingest-osm-all ingest-noaa

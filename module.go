@@ -260,6 +260,10 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
+	// Age rendered tiles off disk so the cache doesn't grow without bound and
+	// stale-version tiles (left after an ENCRenderRulesVersion bump) get
+	// reclaimed. 30-day TTL, swept daily; cleans once on start.
+	encTileCache.StartCleaner(logger.Sublogger("tileCleaner"), 30*24*time.Hour, 24*time.Hour)
 	// The /compare debug endpoint fetches a NOAA WMS tile via the WMS cache.
 	// render/ doesn't import the WMS cache (would be an import cycle), so we
 	// inject the fetch: build the canonical query here and hit the cache.
@@ -388,6 +392,7 @@ func StartChartplotterServer(
 		name:           name,
 		server:         server,
 		weatherCache:   weatherCache,
+		tileCache:      encTileCache,
 		tracerShutdown: tracerShutdown,
 	}, nil
 }
@@ -398,6 +403,7 @@ type chartplotterResource struct {
 	name           resource.Name
 	server         *http.Server
 	weatherCache   *weather.WeatherCache
+	tileCache      *render.ENCTileCache
 	tracerShutdown func(context.Context) error
 }
 
@@ -414,6 +420,9 @@ func (r *chartplotterResource) Close(ctx context.Context) error {
 	// NOMADS after the HTTP server is gone.
 	if r.weatherCache != nil {
 		r.weatherCache.Close()
+	}
+	if r.tileCache != nil {
+		r.tileCache.StopCleaner()
 	}
 	err := r.server.Close()
 	// Flush buffered spans last — the slow-log middleware emits one on

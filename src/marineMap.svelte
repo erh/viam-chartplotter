@@ -2823,9 +2823,15 @@
     const noaaWmsUrl = noaaCacheReachable()
       ? api("/noaa-wms/proxy")
       : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
+    // Extended mode: when no chart host is reachable (no local module / tile
+    // server and no /app-config base), our self-rendered noaa-local tiles would
+    // hit a dead/blank host. Default to NOAA's WMS directly so the chart still
+    // works standalone; when a host IS reachable this stays off (noaa-local is
+    // the chart) as before.
+    const extendedMode = !noaaCacheReachable();
     mapGlobal.layerOptions.push({
       name: "noaa",
-      on: false,
+      on: extendedMode,
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
@@ -2987,7 +2993,10 @@
 
       mapGlobal.layerOptions.push({
         name: "noaa-local",
-        on: true,
+        // Off in extended mode — there's no host to serve our merged tiles, so
+        // requesting them would just 404 against a blank/dead origin. The NOAA
+        // WMS layer above is on instead.
+        on: !extendedMode,
         layer: new TileLayer({
           opacity: 1,
           preload: 2,
@@ -3015,7 +3024,7 @@
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
-        on: true,
+        on: !extendedMode,
         layer: navaidLayer,
         parent: "noaa-local",
         // Below z=12 the icons clutter without adding navigational
@@ -3028,7 +3037,7 @@
       mapGlobal.layerOptions.push({
         name: "noaa-structures",
         displayName: "structures",
-        on: true,
+        on: !extendedMode,
         layer: structureLayer,
         parent: "noaa-local",
         // One zoom level tighter than navaids — bridges/cables are
