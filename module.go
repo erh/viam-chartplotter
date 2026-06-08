@@ -46,6 +46,20 @@ var Model = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithM
 // /noaa-weather endpoints with permissive CORS.
 const DefaultHostedTileServer = "http://nycmaps.checkmatemaps.com/"
 
+// ResolveTileServerBaseURL decides where the frontend fetches tiles+weather:
+// an explicit tile_server_base_url wins; otherwise, when this instance has no
+// Mongo of its own, fall back to the public hosted server so tiles and weather
+// work with zero setup; otherwise "" (same-origin, this instance serves them).
+func ResolveTileServerBaseURL(explicit, mongoURI string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if mongoURI == "" {
+		return DefaultHostedTileServer
+	}
+	return ""
+}
+
 func init() {
 	resource.RegisterComponent(
 		generic.API,
@@ -78,18 +92,11 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	mongoDB := firstNonEmpty(config.Attributes.String("mongo_db"), os.Getenv("MONGO_DB"), "osm")
 	mongoColl := firstNonEmpty(config.Attributes.String("mongo_coll"), os.Getenv("MONGO_COLL"), "features")
 	// Base URL of a SEPARATE map+weather (tile) server the frontend should fetch
-	// tiles/weather from. Empty (the default) means same-origin — this instance
-	// serves its own tiles. Only set this for a split deployment where a
-	// dedicated tile server (cmd/tileserver) owns rendering. Exposed to the
-	// frontend via /app-config.
-	tileServerBaseURL := config.Attributes.String("tile_server_base_url")
-	// Without Mongo this instance has no charts/weather of its own to render, so
-	// point the frontend at the public hosted map+weather server — tiles and
-	// weather still work out of the box. An explicit tile_server_base_url wins.
-	if tileServerBaseURL == "" && mongoURI == "" {
-		tileServerBaseURL = DefaultHostedTileServer
-		logger.Infof("mongo_uri unset — frontend will use hosted tiles+weather at %s", DefaultHostedTileServer)
-	}
+	// tiles/weather from. An explicit tile_server_base_url is for a split
+	// deployment (dedicated cmd/tileserver owns rendering); otherwise, with no
+	// Mongo here, fall back to the hosted server; otherwise same-origin. Exposed
+	// to the frontend via /app-config.
+	tileServerBaseURL := ResolveTileServerBaseURL(config.Attributes.String("tile_server_base_url"), mongoURI)
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
 }
 
