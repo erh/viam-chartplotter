@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go.viam.com/rdk/logging"
 	"log"
 	"net/http"
 	"os"
@@ -98,8 +99,9 @@ func runPublish() {
 	defer cancel()
 
 	client := &http.Client{Timeout: 120 * time.Second}
+	logger := logging.NewLogger("wind-publisher")
 	t0 := time.Now()
-	cycle, err := publish.BuildECMWFCycle(ctx, client, m)
+	cycle, err := publish.BuildECMWFCycle(ctx, client, m, logger)
 	if err != nil {
 		log.Fatalf("build cycle: %v", err)
 	}
@@ -108,7 +110,7 @@ func runPublish() {
 		len(cycle.FHs), len(cycle.Tiles), len(cycle.FHs)*len(cycle.Tiles))
 
 	if *r2Flag {
-		up, err := publish.NewR2UploaderFromEnv()
+		up, err := publish.NewR2UploaderFromEnv(logger)
 		if err != nil {
 			log.Fatalf("r2: %v", err)
 		}

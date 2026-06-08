@@ -485,7 +485,7 @@ func (wc *WeatherCache) spanFetch(ctx context.Context, m *WeatherModel, fh int) 
 		),
 	)
 	defer span.End()
-	records, err := m.Fetch(ctx, wc.client, time.Time{}, fh)
+	records, err := m.Fetch(ctx, wc.client, time.Time{}, fh, wc.logger)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -543,7 +543,7 @@ func (wc *WeatherCache) spanFetchBytes(ctx context.Context, m *WeatherModel, fh 
 		),
 	)
 	defer span.End()
-	body, err := m.FetchBytes(ctx, wc.client, time.Time{}, fh)
+	body, err := m.FetchBytes(ctx, wc.client, time.Time{}, fh, wc.logger)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

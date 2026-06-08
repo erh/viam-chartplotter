@@ -190,7 +190,7 @@ func (p *windPublisher) reconfigure(cfg *WindPublisherConfig) error {
 			APIToken:        cfg.R2APIToken,
 			SecretAccessKey: cfg.R2SecretAccessKey,
 			Bucket:          cfg.effectiveBucket(),
-		})
+		}, p.logger)
 		if err != nil {
 			return fmt.Errorf("r2 setup: %w", err)
 		}
@@ -289,7 +289,7 @@ func (p *windPublisher) maybePublishOne(ctx context.Context, cfg *WindPublisherC
 	p.logger.Infof("publisher: starting %s cycle=%s build", modelName, currentStr)
 	t0 := time.Now()
 	client := &http.Client{Timeout: 120 * time.Second}
-	cycle, err := BuildECMWFCycle(ctx, client, m)
+	cycle, err := BuildECMWFCycle(ctx, client, m, p.logger)
 	if err != nil {
 		p.logger.Warnf("publisher: build %s cycle=%s: %v", modelName, currentStr, err)
 		return

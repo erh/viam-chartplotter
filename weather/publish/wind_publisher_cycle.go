@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/erh/viam-chartplotter/weather"
-	"log"
+	"go.viam.com/rdk/logging"
 	"net/http"
 	"os"
 	"sort"
@@ -79,7 +79,7 @@ type TileManifest struct {
 // Slow path: per cycle, ~49 fhs × (GRIB fetch + decode + 36 crops +
 // 36 gzips). Expect ~5-15 minutes on a small VM for a successful
 // cycle. Run inside a goroutine; cancel via ctx to abort.
-func BuildECMWFCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel) (*PublishedCycle, error) {
+func BuildECMWFCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel, logger logging.Logger) (*PublishedCycle, error) {
 	if m == nil || m.Fetch == nil {
 		return nil, fmt.Errorf("wind-publisher: model nil or has no Fetch")
 	}
@@ -97,11 +97,11 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *weather.Weathe
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		cycle, err := buildOneCycle(ctx, client, m, candidate)
+		cycle, err := buildOneCycle(ctx, client, m, candidate, logger)
 		if err == nil {
 			return cycle, nil
 		}
-		log.Printf("publisher: cycle %s incomplete (%v) — trying previous cycle",
+		logger.Infof("publisher: cycle %s incomplete (%v) — trying previous cycle",
 			candidate.Format("20060102T15"), err)
 		lastErr = err
 		candidate = weather.PreviousCycle(candidate, m.CycleHours)
@@ -134,7 +134,7 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *weather.Weathe
 // "all-tiles-cached-but-the-raw-cache-was-wiped" scenario still
 // produces a coherent error rather than silently skipping a missing
 // fh.
-func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel, cycleT time.Time) (*PublishedCycle, error) {
+func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel, cycleT time.Time, logger logging.Logger) (*PublishedCycle, error) {
 	tiles := weather.AllTiles()
 	cycle := &PublishedCycle{
 		Model:     m.Name,
@@ -165,12 +165,12 @@ func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherM
 			for k, blob := range cached {
 				cycle.TileBlobs[k] = blob
 			}
-			log.Printf("tileCache: ALL-HIT cycle=%s fh=%d tiles=%d (skipped decode + encode)",
+			logger.Debugf("tileCache: ALL-HIT cycle=%s fh=%d tiles=%d (skipped decode + encode)",
 				cycleT.UTC().Format("20060102T15"), fh, len(tiles))
 			continue
 		}
 
-		records, err := fetchAndDecodeForPublish(ctx, client, cycleT, fh)
+		records, err := fetchAndDecodeForPublish(ctx, client, cycleT, fh, logger)
 		if err != nil {
 			return nil, fmt.Errorf("fh=%d: %w", fh, err)
 		}
@@ -191,7 +191,7 @@ func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherM
 			if werr := writeTileBlobCache(m.Name, cycleT, fh, tile.Key, blob); werr != nil {
 				// Cache write is best-effort; the in-memory blob
 				// still gets uploaded.
-				log.Printf("tileCache: write %s: %v", tileCachePath(m.Name, cycleT, fh, tile.Key), werr)
+				logger.Warnf("tileCache: write %s: %v", tileCachePath(m.Name, cycleT, fh, tile.Key), werr)
 			}
 			cycle.TileBlobs[pk] = blob
 		}
@@ -211,8 +211,8 @@ func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherM
 // weren't yet cached, which matters because ECMWF rate-limits
 // aggressively and a full cycle is ~85 MB of unnecessary traffic on
 // re-fetch.
-func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, cycleT time.Time, fh int) ([]weather.WindRecord, error) {
-	grib, err := weather.CachedFetchECMWFWind10m(ctx, client, cycleT, fh)
+func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, cycleT time.Time, fh int, logger logging.Logger) ([]weather.WindRecord, error) {
+	grib, err := weather.CachedFetchECMWFWind10m(ctx, client, cycleT, fh, logger)
 	if err != nil {
 		return nil, err
 	}

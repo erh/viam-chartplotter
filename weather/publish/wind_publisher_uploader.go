@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go.viam.com/rdk/logging"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -87,14 +87,15 @@ func (c R2Config) resolvedSecret() string {
 // Safe for concurrent UploadCycle calls but a single cycle's uploads
 // are parallel-bounded internally.
 type R2Uploader struct {
-	cfg R2Config
-	s3  *s3.S3
+	logger logging.Logger
+	cfg    R2Config
+	s3     *s3.S3
 }
 
 // NewR2Uploader builds the uploader against an explicit config. Use
 // NewR2UploaderFromEnv when invoking from a CLI / Viam resource where
 // secrets live in env vars or attributes.
-func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
+func NewR2Uploader(cfg R2Config, logger logging.Logger) (*R2Uploader, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -108,7 +109,7 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 			return nil, fmt.Errorf("r2: derive access_key_id from api_token: %w", err)
 		}
 		cfg.AccessKeyID = id
-		log.Printf("r2: derived access_key_id=%s from api_token via cloudflare /verify", id)
+		logger.Debugf("r2: derived access_key_id=%s from api_token via cloudflare /verify", id)
 	}
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 	sess, err := session.NewSession(&aws.Config{
@@ -122,7 +123,7 @@ func NewR2Uploader(cfg R2Config) (*R2Uploader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("r2 session: %w", err)
 	}
-	return &R2Uploader{cfg: cfg, s3: s3.New(sess)}, nil
+	return &R2Uploader{cfg: cfg, s3: s3.New(sess), logger: logger}, nil
 }
 
 // cloudflareVerifyTokenID hits Cloudflare's /user/tokens/verify
@@ -199,7 +200,7 @@ func cloudflareVerifyTokenID(ctx context.Context, token string) (string, error) 
 // Convenient for cmd/wind-publisher and dev workflows; in production
 // the Viam resource constructor reads from component attributes
 // instead.
-func NewR2UploaderFromEnv() (*R2Uploader, error) {
+func NewR2UploaderFromEnv(logger logging.Logger) (*R2Uploader, error) {
 	bucket := os.Getenv("R2_BUCKET")
 	if bucket == "" {
 		bucket = DefaultECMWFR2Bucket
@@ -210,7 +211,7 @@ func NewR2UploaderFromEnv() (*R2Uploader, error) {
 		SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
 		APIToken:        os.Getenv("R2_API_TOKEN"),
 		Bucket:          bucket,
-	})
+	}, logger)
 }
 
 // uploadConcurrency caps in-flight PUTs per UploadCycle. 8 is enough
@@ -305,7 +306,7 @@ func (u *R2Uploader) UploadCycle(ctx context.Context, cycle *PublishedCycle) err
 		return fmt.Errorf("put latest: %w", err)
 	}
 
-	log.Printf("r2: published cycle %s/%s — %d tile blobs (%.1f MB gzipped) + manifest in %d files",
+	u.logger.Infof("r2: published cycle %s/%s — %d tile blobs (%.1f MB gzipped) + manifest in %d files",
 		cycle.Model, cycleStr,
 		len(cycle.FHs)*len(cycle.Tiles), float64(totalBytes)/(1024*1024),
 		len(cycle.FHs)*len(cycle.Tiles)+2)

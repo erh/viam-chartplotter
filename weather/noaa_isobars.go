@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.viam.com/rdk/logging"
 	"math"
 	"net/http"
 	"time"
@@ -71,13 +72,13 @@ func gfsIsobarsModel() *WeatherModel {
 		StepFh:      3,
 		PublishLagH: 4,
 	}
-	m.FetchBytes = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]byte, error) {
+	m.FetchBytes = func(ctx context.Context, client *http.Client, _ time.Time, fh int, logger logging.Logger) ([]byte, error) {
 		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsGFSPRMSLURLTemplate, cc, fh, date, cc)
 			return fetchURL(ctx, client, url)
-		})
+		}, logger)
 		if err != nil {
 			return nil, err
 		}

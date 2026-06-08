@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+
+	"go.viam.com/rdk/logging"
 	"math"
 	"net/http"
 	"os"
@@ -71,24 +72,24 @@ func ecmwfRawCachePath(runTime time.Time, fh int) string {
 // at a glance: a healthy publisher resume after a crash should show
 // HIT for every fh it already processed and MISS only for the new
 // ones.
-func CachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
+func CachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]byte, error) {
 	cycleStr := runTime.UTC().Format("20060102T15")
 	path := ecmwfRawCachePath(runTime, fh)
 	if path == "" {
-		log.Printf("ecmwfCache: DISABLED cycle=%s fh=%d (no raw cache dir set)", cycleStr, fh)
+		logger.Debugf("ecmwfCache: DISABLED cycle=%s fh=%d (no raw cache dir set)", cycleStr, fh)
 	} else if b, err := os.ReadFile(path); err == nil {
-		log.Printf("ecmwfCache: HIT cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(b), path)
+		logger.Debugf("ecmwfCache: HIT cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(b), path)
 		return b, nil
 	} else if !os.IsNotExist(err) {
 		// Real I/O error reading the cache file — log it so it's
 		// obvious rather than silently re-fetching. We still
 		// proceed to fetch from ECMWF.
-		log.Printf("ecmwfCache: ERR cycle=%s fh=%d path=%s read: %v (will refetch)", cycleStr, fh, path, err)
+		logger.Warnf("ecmwfCache: ERR cycle=%s fh=%d path=%s read: %v (will refetch)", cycleStr, fh, path, err)
 	} else {
-		log.Printf("ecmwfCache: MISS cycle=%s fh=%d path=%s", cycleStr, fh, path)
+		logger.Debugf("ecmwfCache: MISS cycle=%s fh=%d path=%s", cycleStr, fh, path)
 	}
 
-	grib, err := fetchECMWFWind10m(ctx, client, runTime, fh)
+	grib, err := fetchECMWFWind10m(ctx, client, runTime, fh, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -99,12 +100,12 @@ func CachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime t
 		tmp := path + ".tmp"
 		if werr := os.WriteFile(tmp, grib, 0o644); werr == nil {
 			if rerr := os.Rename(tmp, path); rerr != nil {
-				log.Printf("ecmwfCache: write rename %s: %v", path, rerr)
+				logger.Warnf("ecmwfCache: write rename %s: %v", path, rerr)
 			} else {
-				log.Printf("ecmwfCache: STORE cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(grib), path)
+				logger.Debugf("ecmwfCache: STORE cycle=%s fh=%d bytes=%d path=%s", cycleStr, fh, len(grib), path)
 			}
 		} else {
-			log.Printf("ecmwfCache: write %s: %v", path, werr)
+			logger.Warnf("ecmwfCache: write %s: %v", path, werr)
 		}
 	}
 	return grib, nil
@@ -136,14 +137,14 @@ type WeatherModel struct {
 	// May return ErrUnsupportedPacking — the cache layer logs that
 	// distinctly so a deploy can tell "upstream missing" from "decoder
 	// missing".
-	Fetch func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error)
+	Fetch func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error)
 	// FetchBytes is the alternative path for models whose on-the-wire
 	// shape isn't the ol-wind 2-record JSON — currently isobars (GeoJSON
 	// LineString FeatureCollection) and (eventually) lightning strokes.
 	// When set, the cache writes the returned bytes straight to disk
 	// instead of json-encoding []WindRecord. Exactly one of Fetch /
 	// FetchBytes must be set on an enabled model.
-	FetchBytes func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error)
+	FetchBytes func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]byte, error)
 }
 
 // snapFh snaps fh to [MinFh, MaxFh] aligned to StepFh.
@@ -208,6 +209,7 @@ func WalkLatestCycle(
 	m *WeatherModel,
 	fh int,
 	fetch func(ctx context.Context, runTime time.Time) ([]byte, error),
+	logger logging.Logger,
 ) ([]byte, time.Time, error) {
 	if len(m.CycleHours) == 0 {
 		return nil, time.Time{}, fmt.Errorf("model %s has no cycle hours", m.Name)
@@ -220,11 +222,11 @@ func WalkLatestCycle(
 		start := time.Now()
 		body, err := fetch(ctx, candidate)
 		if err == nil {
-			log.Printf("weather: %s WalkLatestCycle hit cycle=%s fh=%d attempt=%d dur=%s bytes=%d",
+			logger.Debugf("weather: %s WalkLatestCycle hit cycle=%s fh=%d attempt=%d dur=%s bytes=%d",
 				m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), len(body))
 			return body, candidate, nil
 		}
-		log.Printf("weather: %s WalkLatestCycle MISS cycle=%s fh=%d attempt=%d dur=%s err=%v",
+		logger.Debugf("weather: %s WalkLatestCycle MISS cycle=%s fh=%d attempt=%d dur=%s err=%v",
 			m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), err)
 		lastErr = err
 		// Step back to the prior cycle. CycleHours are sorted; find the
@@ -354,13 +356,13 @@ func gfsWindModel() *WeatherModel {
 		StepFh:      3,
 		PublishLagH: 4,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsGFSURLTemplate, cc, fh, date, cc)
 			return fetchURL(ctx, client, url)
-		})
+		}, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -406,17 +408,17 @@ func hrrrWindModel() *WeatherModel {
 		StepFh:      1,
 		PublishLagH: 2,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsHRRRURLTemplate, cc, fh, date)
 			return fetchURL(ctx, client, url)
-		})
+		}, logger)
 		if err != nil {
 			return nil, err
 		}
-		return decodeHRRRWind(body, runT, fh)
+		return decodeHRRRWind(body, runT, fh, logger)
 	}
 	return m
 }
@@ -424,7 +426,7 @@ func hrrrWindModel() *WeatherModel {
 // decodeHRRRWind walks the HRRR GRIB2, parses UGRD and VGRD on the LC
 // grid, reprojects each onto the regular lat/lon CONUS subgrid, and
 // emits the ol-wind 2-record JSON shape.
-func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]WindRecord, error) {
+func decodeHRRRWind(grib []byte, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
 		return paramCat == gribParamCatMomentum &&
 			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
@@ -481,7 +483,7 @@ func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]WindRecord, error
 	// rdk logger through the model registry.
 	uMin, uMax := minMax(u)
 	vMin, vMax := minMax(v)
-	log.Printf("HRRR decoded fh=%d: grid Nx=%d Ny=%d La1=%.3f Lo1=%.3f LaD=%.3f LoV=%.3f Latin1=%.3f Latin2=%.3f Dx=%.1fm Dy=%.1fm scan=%d R=%.0fm; u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
+	logger.Debugf("HRRR decoded fh=%d: grid Nx=%d Ny=%d La1=%.3f Lo1=%.3f LaD=%.3f LoV=%.3f Latin1=%.3f Latin2=%.3f Dx=%.1fm Dy=%.1fm scan=%d R=%.0fm; u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
 		fh, grid.Nx, grid.Ny, grid.La1, grid.Lo1, grid.LaD, grid.LoV,
 		grid.Latin1, grid.Latin2, grid.Dx, grid.Dy, grid.ScanMode, grid.EarthRadius,
 		uMin, uMax, vMin, vMax)
@@ -495,7 +497,7 @@ func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]WindRecord, error
 	}
 	uLLmin, uLLmax := minMax(uLL)
 	vLLmin, vLLmax := minMax(vLL)
-	log.Printf("HRRR reprojected fh=%d: Nlon=%d Nlat=%d u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
+	logger.Debugf("HRRR reprojected fh=%d: Nlon=%d Nlat=%d u∈[%.2f,%.2f] v∈[%.2f,%.2f]",
 		fh, Nlon, Nlat, uLLmin, uLLmax, vLLmin, vLLmax)
 	hdr := windHeader{
 		Center:                     7, // NCEP
@@ -543,10 +545,15 @@ func iconEUWindModel() *WeatherModel {
 		CycleHours:  []int{0, 6, 12, 18},
 		MinFh:       0,
 		MaxFh:       120,
-		StepFh:      1,
+		// DWD publishes ICON-EU hourly to f078, then 3-hourly to f120 — so a
+		// 1 h step 404s on every non-multiple-of-3 hour past 78 (e.g. f079,
+		// f119). Multiples of 3 exist across the whole range, and the frontend
+		// scrubs in 3 h steps anyway, so a 3 h step covers f000..f120 with no
+		// gaps and no 404 spam.
+		StepFh:      3,
 		PublishLagH: 4,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 		// ICON-EU ships U_10M and V_10M as two independent .grib2.bz2
 		// files — we fetch them in series (cycle walk-back uses the
 		// U_10M file as the probe, and assumes V_10M ships at the same
@@ -569,7 +576,7 @@ func iconEUWindModel() *WeatherModel {
 			}
 			bodyU = decoded
 			return decoded, nil
-		})
+		}, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -639,7 +646,7 @@ func waveModelFor(name, displayName, domain string, cfg waveDatasetConfig) *Weat
 		StepFh:      1,
 		PublishLagH: 5,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]WindRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 		now := time.Now().UTC().Truncate(time.Hour)
 		gfsCycle := now.Add(-time.Duration(gfsPublishLagHours) * time.Hour)
 		gfsCycle = time.Date(gfsCycle.Year(), gfsCycle.Month(), gfsCycle.Day(),
@@ -741,13 +748,13 @@ func ecmwfWindModel() *WeatherModel {
 		// at a run that's actually published.
 		PublishLagH: 7,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]WindRecord, error) {
 		// CachedFetchECMWFWind10m handles the raw-bytes disk cache
 		// (project-wide rule: every upstream fetch goes through a
 		// cache). On a cache hit, ECMWF isn't touched at all.
 		grib, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
-			return CachedFetchECMWFWind10m(ctx, client, t, fh)
-		})
+			return CachedFetchECMWFWind10m(ctx, client, t, fh, logger)
+		}, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -760,14 +767,14 @@ func ecmwfWindModel() *WeatherModel {
 // at levtype=sfc, range-GETs each message out of the run's .grib2 file,
 // and returns a concatenated buffer the GRIB walker can decode as if
 // it were a normal multi-message GRIB2 stream.
-func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
+func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int, logger logging.Logger) ([]byte, error) {
 	date := runTime.Format("20060102")
 	cc := runTime.Hour()
 	base := fmt.Sprintf(ecmwfBaseURL, date, cc, date, cc, fh)
 	indexURL := base + ".index"
 	gribURL := base + ".grib2"
 
-	idxBody, err := ecmwfGet(ctx, client, indexURL, "")
+	idxBody, err := ecmwfGet(ctx, client, indexURL, "", logger)
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF index: %w", err)
 	}
@@ -776,11 +783,11 @@ func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Ti
 		return nil, fmt.Errorf("ECMWF index pick: %w", err)
 	}
 
-	uMsg, err := ecmwfGetRange(ctx, client, gribURL, uEntry.Offset, uEntry.Length)
+	uMsg, err := ecmwfGetRange(ctx, client, gribURL, uEntry.Offset, uEntry.Length, logger)
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF 10u range: %w", err)
 	}
-	vMsg, err := ecmwfGetRange(ctx, client, gribURL, vEntry.Offset, vEntry.Length)
+	vMsg, err := ecmwfGetRange(ctx, client, gribURL, vEntry.Offset, vEntry.Length, logger)
 	if err != nil {
 		return nil, fmt.Errorf("ECMWF 10v range: %w", err)
 	}
@@ -840,7 +847,7 @@ func pickECMWFWindEntries(idx []byte) (uEntry, vEntry ecmwfIndexEntry, err error
 // Data's WAF responds 429 to the default Go User-Agent within a few
 // hits per minute; setting a descriptive UA per their docs avoids
 // the throttle and matches what we ask of users of cmd/ecmwf-probe.
-func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string) ([]byte, error) {
+func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string, logger logging.Logger) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -853,16 +860,16 @@ func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string) ([
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("ecmwfGet: %s range=%q dur=%s err=%v", url, rangeHdr, time.Since(start), err)
+		logger.Debugf("ecmwfGet: %s range=%q dur=%s err=%v", url, rangeHdr, time.Since(start), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		log.Printf("ecmwfGet: %s range=%q dur=%s status=%d", url, rangeHdr, time.Since(start), resp.StatusCode)
+		logger.Debugf("ecmwfGet: %s range=%q dur=%s status=%d", url, rangeHdr, time.Since(start), resp.StatusCode)
 		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, url)
 	}
 	body, err := io.ReadAll(resp.Body)
-	log.Printf("ecmwfGet: %s range=%q dur=%s status=%d bytes=%d",
+	logger.Debugf("ecmwfGet: %s range=%q dur=%s status=%d bytes=%d",
 		url, rangeHdr, time.Since(start), resp.StatusCode, len(body))
 	return body, err
 }
@@ -870,8 +877,8 @@ func ecmwfGet(ctx context.Context, client *http.Client, url, rangeHdr string) ([
 // ecmwfGetRange is the byte-range variant — same UA-shaping as
 // ecmwfGet but slices a 200-with-full-body response down to the
 // requested window if a misbehaving cache ignored the Range header.
-func ecmwfGetRange(ctx context.Context, client *http.Client, url string, offset, length int64) ([]byte, error) {
-	body, err := ecmwfGet(ctx, client, url, fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+func ecmwfGetRange(ctx context.Context, client *http.Client, url string, offset, length int64, logger logging.Logger) ([]byte, error) {
+	body, err := ecmwfGet(ctx, client, url, fmt.Sprintf("bytes=%d-%d", offset, offset+length-1), logger)
 	if err != nil {
 		return nil, err
 	}
