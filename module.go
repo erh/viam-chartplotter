@@ -247,17 +247,12 @@ func StartChartplotterServer(
 	logger.Infof("noaa wms cache: %s (max %d bytes, stale after %s)",
 		wmsCache.cacheDir, wmsCache.maxBytes, wmsCache.staleAfter)
 
+	// Rendering reads ENC features from MongoDB (datasync keeps it populated);
+	// the disk ENC catalog/store + on-demand .000 download pipeline is retired.
+	// encDir is now only the parent of the rendered-tile PNG cache.
 	encDir := filepath.Join(root, "noaa-enc")
-	catalog, err := noaa.NewCatalog(encDir, logger.Sublogger("encCatalog"))
-	if err != nil {
-		return nil, err
-	}
-	encStore, err := noaa.NewStore(encDir, catalog, logger.Sublogger("encStore"))
-	if err != nil {
-		return nil, err
-	}
 	encRenderer := render.NewENCRenderer(logger.Sublogger("encRender"))
-	encTileCache, err := render.NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
+	encTileCache, err := render.NewENCTileCache(filepath.Join(encDir, "tiles"))
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +264,7 @@ func StartChartplotterServer(
 		b, _, _, err := wmsCache.fetch(ctx, canonical, "image/png")
 		return b, err
 	}
-	encHandlers := render.NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsFetch, draftFt)
+	encHandlers := render.NewENCHandlers(encRenderer, encTileCache, wmsFetch, draftFt)
 	// OSM underlay layer — render by querying a MongoDB collection
 	// populated offline by `osmtools ingest`. The URI is the only
 	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
@@ -311,7 +306,7 @@ func StartChartplotterServer(
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
 	}
 	encHandlers.Register(mux)
-	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)
+	logger.Infof("noaa enc renderer ready (mongo-backed; tile cache %s, default draft=%.1f ft)", filepath.Join(encDir, "tiles"), draftFt)
 
 	// NOAA GFS weather cache. Serves /noaa-weather/gfs/latest.json which
 	// the frontend wind layer (ol-wind) consumes. Disk cache lives under

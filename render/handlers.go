@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/erh/viam-chartplotter/mapdata/noaa"
-
 	"github.com/fogleman/gg"
 	"golang.org/x/image/font/basicfont"
 )
@@ -27,23 +25,19 @@ import (
 // the canonical query and caches the result). May be nil.
 type WMSFetch func(ctx context.Context, z, x, y int, layers string) ([]byte, error)
 
-// ENCHandlers exposes the ENC catalog/store/renderer via HTTP under /noaa-enc/.
+// ENCHandlers exposes the Mongo-backed ENC renderer via HTTP under /noaa-enc/.
 type ENCHandlers struct {
-	catalog          *noaa.Catalog
-	store            *noaa.Store
 	renderer         *ENCRenderer
 	tileCache        *ENCTileCache
 	wmsFetch         WMSFetch // for the /compare endpoint; may be nil
 	defaultSafeDepth float64  // feet; used when ?sd= is absent
 }
 
-func NewENCHandlers(catalog *noaa.Catalog, store *noaa.Store, renderer *ENCRenderer, tileCache *ENCTileCache, wmsFetch WMSFetch, defaultSafeDepthFt float64) *ENCHandlers {
+func NewENCHandlers(renderer *ENCRenderer, tileCache *ENCTileCache, wmsFetch WMSFetch, defaultSafeDepthFt float64) *ENCHandlers {
 	if defaultSafeDepthFt <= 0 {
 		defaultSafeDepthFt = 6
 	}
 	return &ENCHandlers{
-		catalog:          catalog,
-		store:            store,
 		renderer:         renderer,
 		tileCache:        tileCache,
 		wmsFetch:         wmsFetch,
@@ -64,8 +58,6 @@ func safeDepthBucket(safeDepthFt float64) int {
 }
 
 func (h *ENCHandlers) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/noaa-enc/prefetch", h.handlePrefetch)
-	mux.HandleFunc("/noaa-enc/stats", h.handleStats)
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
 	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
@@ -140,55 +132,6 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Pragma", "no-cache")
 	}
 	_, _ = w.Write(pngBytes)
-}
-
-type encPrefetchRequest struct {
-	MinLon   float64 `json:"minLon"`
-	MinLat   float64 `json:"minLat"`
-	MaxLon   float64 `json:"maxLon"`
-	MaxLat   float64 `json:"maxLat"`
-	MinScale int     `json:"minScale,omitempty"`
-	MaxScale int     `json:"maxScale,omitempty"`
-}
-
-type encPrefetchResponse struct {
-	Downloaded int `json:"downloaded"`
-	Skipped    int `json:"skipped"`
-}
-
-func (h *ENCHandlers) handlePrefetch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req encPrefetchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	dl, sk, err := h.store.SyncBBox(
-		r.Context(),
-		req.MinLon, req.MinLat, req.MaxLon, req.MaxLat,
-		req.MinScale, req.MaxScale, 4,
-	)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(encPrefetchResponse{Downloaded: dl, Skipped: sk})
-}
-
-func (h *ENCHandlers) handleStats(w http.ResponseWriter, r *http.Request) {
-	cellsLocal, bytes := h.store.Stats()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"catalog_fetched":  h.catalog.FetchedAt(),
-		"catalog_cells":    h.catalog.CellCount(),
-		"cells_downloaded": cellsLocal,
-		"store_bytes":      bytes,
-		"store_dir":        h.store.RootDir(),
-	})
 }
 
 // handleDebug reports, for the bbox in the query string, every overlapping cell

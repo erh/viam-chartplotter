@@ -3612,7 +3612,7 @@
   // the page is served from anywhere else we skip both the proxy URL and the prefetch
   // calls and let OpenLayers hit NOAA directly.
   // Whether the Go module's noaa-enc + noaa-wms endpoints are reachable on
-  // the current origin. Probed once at mount via /noaa-enc/stats; falls
+  // the current origin. Probed once at mount via /noaa-wms/stats; falls
   // back to the legacy port heuristic for environments where the probe
   // hasn't completed yet (so layer setup at first render still picks the
   // right URL when running locally on :5173 / :8888).
@@ -3627,16 +3627,12 @@
 
   async function probeNoaaCache() {
     try {
-      const resp = await fetch(api("/noaa-enc/stats"), { method: "GET" });
+      const resp = await fetch(api("/noaa-wms/stats"), { method: "GET" });
       noaaCacheProbeResult = resp.ok;
     } catch {
       noaaCacheProbeResult = false;
     }
   }
-
-  // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
-  // spam the backend with overlapping cell-download jobs.
-  let lastNoaaPrefetchKey = "";
 
   // Last bbox we emitted to onAirstreamBboxChange so trivial pans don't
   // re-fire the callback. Rounded to keep this a coarse comparison.
@@ -3688,36 +3684,6 @@
     onAirstreamBboxChange({ minLon, minLat, maxLon, maxLat });
   }
 
-  function maybePrefetchNoaaTiles() {
-    if (!noaaCacheReachable()) return;
-    // Either noaa-local or noaa-ecdis being on warrants a prefetch — both
-    // pull from the same ENC cell store, just with different render styles.
-    const local = findLayerByName("noaa-local");
-    const ecdis = findLayerByName("noaa-ecdis");
-    if (!((local && local.on) || (ecdis && ecdis.on))) return;
-    if (!mapGlobal.map || !mapGlobal.view) return;
-
-    const size = mapGlobal.map.getSize();
-    if (!size) return;
-    const extent = mapGlobal.view.calculateExtent(size);
-    // Round bbox to ~0.01 deg so trivial pans share a key.
-    const round = (n: number) => Math.round(n * 100) / 100;
-    const minLon = round(extent[0]);
-    const minLat = round(extent[1]);
-    const maxLon = round(extent[2]);
-    const maxLat = round(extent[3]);
-    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
-    if (key === lastNoaaPrefetchKey) return;
-    lastNoaaPrefetchKey = key;
-
-    fetch(api("/noaa-enc/prefetch"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
-    }).catch(() => {
-      // Best-effort: prefetch failures shouldn't disrupt the UI.
-    });
-  }
 
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
@@ -3803,7 +3769,6 @@
         }
       }
     }
-    maybePrefetchNoaaTiles();
   }
 
   function pointDiff(x: number[], y: number[]): number {
@@ -3943,10 +3908,7 @@
       mapGlobal.map.addInteraction(new BoatAnchoredMouseWheelZoom());
     }
 
-    // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
-    // current viewport. The handler is a no-op when the noaa layer is off.
     mapGlobal.map.on("moveend", () => {
-      maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
       maybeReanchorOnBoat();
       // Only persist when the user is intentionally off-boat; otherwise the
@@ -5556,10 +5518,6 @@
               }
             }
             saveLayerStates();
-            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
-              lastNoaaPrefetchKey = "";
-              maybePrefetchNoaaTiles();
-            }
           }}
           disabled={isParentOff}
         />

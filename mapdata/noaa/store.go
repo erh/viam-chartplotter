@@ -322,21 +322,3 @@ func extractFlat(f *zip.File, target string) error {
 	return err
 }
 
-// Stats returns the number of cells we have on disk and the total bytes in the
-// store directory.
-func (s *Store) Stats() (cells int, bytes int64) {
-	s.mu.Lock()
-	cells = len(s.manifest)
-	s.mu.Unlock()
-	_ = filepath.Walk(s.rootDir, func(_ string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		bytes += info.Size()
-		return nil
-	})
-	return cells, bytes
-}
-
-// RootDir returns the directory backing this store.
-func (s *Store) RootDir() string { return s.rootDir }
