@@ -566,6 +566,15 @@ func drawLine(dc *gg.Context, f *Feature, z, x, y int) {
 }
 
 func drawPolygon(dc *gg.Context, f *Feature, z, x, y int) {
+	// Place features are point/label features: their style's fill is the small
+	// place-DOT colour, meant for a centroid circle (drawPoint), not an area
+	// fill. Some places carry a polygon geometry (place=island/sea/bay — e.g.
+	// "Long Island" is a 41k-point polygon covering a whole z13 tile); filling
+	// it paints the tile near-black. Skip the area fill; the label still draws
+	// from the centroid via drawLabelsInto.
+	if f.Class == ClassPlace {
+		return
+	}
 	style := classStyle(f.Class, z)
 	if style.fill == nil && style.stroke == nil {
 		return

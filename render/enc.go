@@ -926,7 +926,11 @@ const (
 // is never white where OSM lacks low-zoom data.
 // v8: single coarse→fine area pass (finest cell wins) so fine barrier-
 // island LNDARE paints over coarse shallow DEPARE (tan island, not blue).
-const ENCRenderRulesVersion = 8
+// v9: overview-zoom batch — usageBand-ceiling query + coarse depth contours
+// surfaced at z7-10; deterministic (scale,_id) paint order; coastal land
+// painted at z<10 (no blue-on-land); NAVLNE/RECTRC drawn black not magenta;
+// overview geo markers (state borders/names, major cities) at z7-11.
+const ENCRenderRulesVersion = 9
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -939,7 +943,10 @@ const ENCRenderRulesVersion = 8
 // client-side for up to a day.
 // v15: OSM underlay renders over a transparent base in the merged tile (no
 // beige land base bleeding through the chart's transparent deep-water).
-const OSMRenderRulesVersion = 15
+// v16: place features never area-fill — a place=island polygon (e.g. "Long
+// Island", a tile-filling 41k-point polygon) no longer paints the tile near-
+// black with the place-dot colour.
+const OSMRenderRulesVersion = 16
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
