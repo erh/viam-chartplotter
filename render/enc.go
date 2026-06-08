@@ -2713,12 +2713,26 @@ func lineStroke(class string, f encFeature, safeDepthM float64, style RenderStyl
 			}
 		}
 		return s52DEPCN, 0.6
-	case "NAVLNE", "RECTRC", "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
-		// Channel limit / recommended track / fairway / anchorage / deep-
-		// water route / restricted area — magenta boundary line.
-		// At overview zoom these are the most navigationally meaningful
-		// features on screen (NOAA WMS makes them dominant); bump weight
-		// so they don't disappear when zoomSymbolScale is still 1.0.
+	case "NAVLNE", "RECTRC":
+		// Navigation line / recommended track: BLACK in S-52 (LS(...,CHBLK)) —
+		// these are the leading/range lines through fixed marks, not area
+		// boundaries. We previously drew them magenta like the fairway/anchorage
+		// boundaries below, but NOAA renders them black (a magenta leading line
+		// is wrong — only the area-limit classes are magenta).
+		w := 0.8
+		switch {
+		case z <= 10:
+			w = 1.4
+		case z == 11:
+			w = 1.1
+		}
+		return s52CHBLK, w
+	case "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
+		// Fairway / anchorage / deep-water route / traffic route / restricted
+		// area — magenta boundary line. At overview zoom these are the most
+		// navigationally meaningful features on screen (NOAA WMS makes them
+		// dominant); bump weight so they don't disappear when zoomSymbolScale
+		// is still 1.0.
 		w := 0.8
 		switch {
 		case z <= 10:

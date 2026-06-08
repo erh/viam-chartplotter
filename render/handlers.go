@@ -661,10 +661,15 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	draw.Draw(out, image.Rect(colENC*panelW, 0, (colENC+1)*panelW, 256), ourImg, image.Point{}, draw.Over)
 	draw.Draw(out, image.Rect(colWMS*panelW, 0, (colWMS+1)*panelW, 256), wmsImg, image.Point{}, draw.Over)
 
-	// MERGED: exactly what the app composites — OSM ink in the ENC chart, using
-	// the frontend's per-zoom params (BrowserMergedOptions: land transparent so
-	// OSM streets show, navaids/structures dropped where vector layers take over).
+	// MERGED: what the user actually sees in the app — the merged raster PLUS
+	// the interactive vector navaid/structure layer the frontend overlays at
+	// z>=12. The served tile (BrowserMergedOptions) drops navaids/structures so
+	// the vector layer can own them, but this debug panel re-enables them in the
+	// raster so it's representative of the on-screen result rather than showing
+	// a bare tile. (The golden test still renders the as-served tile.)
 	mergedOpts := BrowserMergedOptions(z, safeDepthM)
+	mergedOpts.SkipNavaids = false
+	mergedOpts.SkipClasses = nil
 	if mergedPNG, _, _, merr := h.renderer.RenderMergedTile(z, x, y, mergedOpts); merr == nil {
 		if mergedImg, derr := png.Decode(bytes.NewReader(mergedPNG)); derr == nil {
 			draw.Draw(out, image.Rect(colMerged*panelW, 0, (colMerged+1)*panelW, 256), mergedImg, image.Point{}, draw.Over)
