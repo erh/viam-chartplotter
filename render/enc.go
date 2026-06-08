@@ -1095,8 +1095,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 	if err != nil {
 		return nil, timing, err
 	}
-	// Coarsest first so finer-cell polygons paint last and win.
-	sort.SliceStable(features, func(i, j int) bool { return features[i].scale > features[j].scale })
+	sortFeaturesForPaint(features)
 
 	b, drawMS, err := r.drawENCTile(features, z, x, y, opts)
 	timing.DrawMS = drawMS
@@ -1105,6 +1104,21 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 			z, x, y, timing.QueryMS, timing.DrawMS, timing.Features)
 	}
 	return b, timing, err
+}
+
+// sortFeaturesForPaint orders features coarsest-cell first so finer-cell
+// polygons paint last and win. Ties (equal scale) break on the doc _id so the
+// paint order is fully deterministic — independent of the order MongoDB returns
+// documents in (which varies with the chosen index, e.g. band_geo vs
+// geo_minZoom_class). Without the tiebreak, the same tile could differ by a
+// few boundary pixels run-to-run as the query plan changed.
+func sortFeaturesForPaint(features []*mongoFeature) {
+	sort.Slice(features, func(i, j int) bool {
+		if features[i].scale != features[j].scale {
+			return features[i].scale > features[j].scale
+		}
+		return features[i].id < features[j].id
+	})
 }
 
 // drawENCTile paints already-queried, already-sorted (coarsest-first) ENC
@@ -1499,7 +1513,7 @@ func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte,
 	if err != nil {
 		return nil, false, mt, err
 	}
-	sort.SliceStable(features, func(i, j int) bool { return features[i].scale > features[j].scale })
+	sortFeaturesForPaint(features)
 
 	// ENC base: force land fill on regardless of the caller's TransparentLand —
 	// in the merge the ENC tan land is the authoritative land base (OSM draws

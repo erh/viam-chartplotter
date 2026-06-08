@@ -23,6 +23,7 @@ type encFeature interface {
 // cell compilation scale so the renderer can paint coarse cells before fine
 // ones (finest wins), reproducing the old per-cell coarse→fine layering.
 type mongoFeature struct {
+	id    string // doc _id — stable tiebreaker for deterministic paint order
 	class string
 	geom  s57.Geometry
 	attrs map[string]any
@@ -104,6 +105,7 @@ func featureFromDoc(d noaa.FeatureDoc) (*mongoFeature, bool) {
 		attrs = map[string]any{}
 	}
 	return &mongoFeature{
+		id:    d.ID,
 		class: d.ObjectClass,
 		geom:  g,
 		attrs: attrs,

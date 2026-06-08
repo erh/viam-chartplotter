@@ -40,6 +40,20 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 			Options: options.Index().SetName("geo_minZoom_class"),
 		},
 		{
+			// Overview-zoom tiles add a usage-band ceiling (usageBand <= N) to the
+			// query. With usageBand as the index PREFIX (before the 2dsphere key)
+			// the band predicate bounds the geo scan, so a huge z7 box examines
+			// only the coarse-band features it paints (~2.5k docs / ~2s) instead
+			// of every feature it intersects (~39k / ~7s). Field order is what
+			// matters: a discriminator AFTER a 2dsphere key can't bound the scan
+			// (an earlier {geometry, scale} attempt did not prune) — it must lead.
+			Keys: bson.D{
+				{Key: "usageBand", Value: 1},
+				{Key: "geometry", Value: "2dsphere"},
+			},
+			Options: options.Index().SetName("band_geo"),
+		},
+		{
 			Keys:    bson.D{{Key: "cell", Value: 1}},
 			Options: options.Index().SetName("cell_1"),
 		},
