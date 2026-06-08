@@ -21,10 +21,6 @@
     type WeatherLayerHandle,
   } from "./lib/windLayer";
   import {
-    WindCDNClient,
-    loadServerWindConfig,
-  } from "./lib/windTiles";
-  import {
     setupIsobarLayer,
     type IsobarLayerHandle,
   } from "./lib/isobarLayer";
@@ -2756,7 +2752,7 @@
     const y = Math.floor(
       ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
     );
-    const origin = window.location.origin;
+    const origin = tileBase || window.location.origin;
     const tileUrl = `${origin}/noaa-enc/tile/${z}/${x}/${y}.png`;
     const compareUrl = `${origin}/noaa-enc/compare/${z}/${x}/${y}.png`;
     const compareAllUrl = `${origin}/noaa-enc/compare/test?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
@@ -2778,6 +2774,27 @@
     }
   }
 
+
+  // tileBase is the origin of the map+weather server the app fetches tiles and
+  // weather from. Empty = same-origin (this server). Set from /app-config at
+  // startup (loadAppConfig), so an app on :8888 can pull tiles/weather from a
+  // separate map server on :8989. api() prefixes every backend URL with it.
+  let tileBase = "";
+  function api(path: string): string {
+    return `${tileBase}${path}`;
+  }
+  async function loadAppConfig(): Promise<void> {
+    try {
+      const resp = await fetch("/app-config");
+      if (!resp.ok) return;
+      const cfg = await resp.json();
+      if (cfg && typeof cfg.tileServerBaseURL === "string") {
+        tileBase = cfg.tileServerBaseURL.replace(/\/$/, "");
+      }
+    } catch {
+      // No /app-config (older server) or fetch failed → stay same-origin.
+    }
+  }
 
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
@@ -2804,7 +2821,7 @@
     // proxied by Vite), we route through `/noaa-wms/proxy` so the disk cache
     // absorbs repeat tile fetches; otherwise we hit NOAA directly.
     const noaaWmsUrl = noaaCacheReachable()
-      ? "/noaa-wms/proxy"
+      ? api("/noaa-wms/proxy")
       : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
     mapGlobal.layerOptions.push({
       name: "noaa",
@@ -2861,7 +2878,7 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/navaids?` +
+            api(`/noaa-enc/navaids?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
@@ -2902,7 +2919,7 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/structures?` +
+            api(`/noaa-enc/structures?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
@@ -2984,36 +3001,17 @@
                   : z >= VECTOR_TILE_NAVAID_MIN_Z
                     ? midParams
                     : overviewParams;
-              return `/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`;
+              return api(`/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`);
             },
             transition: 300,
           }),
         }),
       });
 
-      // OSM vector underlay as its own tile layer, served from
-      // /noaa-enc/osm-tile/. Renders highways + buildings only; depth
-      // and chart features come from noaa-local on top. Defaults on,
-      // toggleable independently from noaa-local — Overpass cold fetches
-      // can be slow, so isolating it lets the chart keep painting at
-      // full speed and lets the user disable OSM if the latency hurts.
-      const osmTileParams = new URLSearchParams();
-      osmTileParams.set("v", tileGenVersion);
-      mapGlobal.layerOptions.push({
-        name: "osm-detail",
-        displayName: "streets",
-        on: true,
-        parent: "noaa-local",
-        layer: new TileLayer({
-          opacity: 1,
-          preload: 2,
-          zIndex: 4,
-          source: new XYZ({
-            url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
-            transition: 300,
-          }),
-        }),
-      });
+      // OSM detail (streets/buildings/land) is now composited INTO the
+      // noaa-local tile server-side (the merged ENC+OSM tile), so there's no
+      // separate osm-detail layer anymore — that would draw OSM twice. The
+      // standalone /noaa-enc/osm-tile endpoint still exists for debugging.
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
@@ -3052,7 +3050,7 @@
           preload: 2,
           zIndex: 6,
           source: new XYZ({
-            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`,
+            url: api(`/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`),
             transition: 300,
           }),
         }),
@@ -3120,72 +3118,9 @@
         window.setTimeout(ensureRendered, 200);
       };
       const initialFh = nowForecastHour(null); // 0 until we know the run time
-      // ECMWF tile-CDN client: when the server config exposes a
-      // windCDNBaseURL, route ECMWF wind fetches through the
-      // wind-publisher's R2 output instead of asking this module to
-      // decode/encode global JSON on every request. Falls back to the
-      // legacy local endpoint on any CDN error so a CDN outage doesn't
-      // kill the wind layer. setupLayers() isn't async, so we lazy-
-      // load the config inside the fetchData callback below — the
-      // shared promise dedupes if the first scrub fires before the
-      // config arrives.
-      let ecmwfTileClientPromise: Promise<WindCDNClient | null> | null = null;
-      const getECMWFTileClient = (): Promise<WindCDNClient | null> => {
-        if (!ecmwfTileClientPromise) {
-          ecmwfTileClientPromise = loadServerWindConfig()
-            .catch(() => null)
-            .then((cfg) => {
-              const base = cfg?.windCDNBaseURL ?? "";
-              return base ? new WindCDNClient(base, "ecmwf", cfg?.tileGrid) : null;
-            });
-        }
-        return ecmwfTileClientPromise;
-      };
-      // Reads the live viewport at fetch time so a user pan that
-      // crosses tile boundaries triggers a re-fetch on the next slider
-      // event. ol-wind's setData call rebinds the field on each
-      // loadInto, so panning + the next scrub gives us the right tile.
-      const viewportBbox = (): [number, number, number, number] => {
-        const ext = mapGlobal.view?.calculateExtent?.(
-          mapGlobal.map?.getSize?.() ?? [800, 600],
-        );
-        if (Array.isArray(ext) && ext.length === 4) {
-          return [ext[0], ext[1], ext[2], ext[3]];
-        }
-        // Sensible default (Atlantic-ish) so a viewport-less fetch
-        // still resolves to a valid tile.
-        return [-80, 30, -60, 50];
-      };
-      // Prefer ECMWF as the default wind model when the CDN is up
-      // and serving fresh data — it's higher-fidelity than GFS at
-      // short range AND it's served from R2 (free fan-out at fleet
-      // scale). Fall back to "gfs" (the existing default, fetched
-      // locally from NOMADS) when the CDN's latest.json is
-      // unreachable or stale, so a publisher outage doesn't take
-      // the wind layer down for the fleet.
-      //
-      // setupLayers isn't async, so we do this as a promise chain
-      // that resolves before setupWeatherLayer is called. The
-      // probe is fast (a single fetch of a ~5 KB JSON pointer) and
-      // dedupes with the regular per-fh fetch path (the lazy
-      // getECMWFTileClient caches the client and the LatestPointer).
-      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-      const probeECMWF: Promise<void> = getECMWFTileClient()
-        .then(async (client) => {
-          if (!client) return;
-          const latest = await client.getLatest();
-          const age = Date.now() - Date.parse(latest.publishedAt);
-          if (Number.isFinite(age) && age < STALE_THRESHOLD_MS) {
-            windModel = "ecmwf";
-            console.log(`wind layer default: ecmwf (CDN fresh, publishedAt=${latest.publishedAt})`);
-          } else {
-            console.log(`wind layer default: gfs (ECMWF CDN stale, ${age}ms old)`);
-          }
-        })
-        .catch((e) => {
-          console.warn("wind layer default: gfs (ECMWF CDN probe failed):", e);
-        });
-      probeECMWF.then(() => setupWindLayer());
+      // All wind models (incl. ECMWF) are served from Mongo by weathersync
+      // via /noaa-weather/data/{model}/latest.json. No CDN/tile path.
+      setupWindLayer();
 
       function setupWindLayer() {
         setupWeatherLayer(mapGlobal, {
@@ -3193,66 +3128,14 @@
         displayName: "wind",
         parent: "weather",
         initialModel: windModel,
-        dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
+        dataUrlFor: (model, fh) => api(`/noaa-weather/data/${model}/latest.json`),
         fetchData: async (model, fh) => {
-          const fetchLocal = async () => {
-            const resp = await fetch(`/noaa-weather/data/${model}/latest.json?fh=${fh}`);
-            if (!resp.ok) {
-              const body = await resp.text().catch(() => "");
-              return { error: body.trim() || `HTTP ${resp.status}` };
-            }
-            return { data: await resp.json() };
-          };
-          // Only ECMWF is tile-published right now. Other models stay
-          // on the local URL-based fetch.
-          if (model !== "ecmwf") return fetchLocal();
-          const client = await getECMWFTileClient();
-          // No CDN configured at all (dev mode): use the local
-          // decoder. Distinct from the configured-but-stale case
-          // below; this path is the only one a single-instance
-          // deployment ever takes.
-          if (!client) return fetchLocal();
-
-          // STALE-ONLY FALLBACK POLICY: the local endpoint hits
-          // ECMWF Open Data directly. At fleet scale (~10K
-          // chartplotters) a transient CDN hiccup must NOT push
-          // every client onto ECMWF — that's the failure mode the
-          // wind-publisher exists to prevent. So we only fall back
-          // when the publisher is GENUINELY broken (no fresh
-          // publish in 24h). Other errors surface to the UI but
-          // keep the chartplotter on the CDN.
-          const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-          try {
-            const latest = await client.getLatest();
-            const publishedAt = Date.parse(latest.publishedAt);
-            if (Number.isFinite(publishedAt) && Date.now() - publishedAt > STALE_THRESHOLD_MS) {
-              const hoursOld = ((Date.now() - publishedAt) / 3_600_000).toFixed(1);
-              console.warn(`ECMWF CDN data is ${hoursOld}h old (>24h), falling back to local fetch`);
-              return fetchLocal();
-            }
-          } catch (e) {
-            // latest.json itself unreachable — can't determine
-            // freshness. Refuse to fall back: a CDN outage flipping
-            // 10K clients to direct-fetch would crush ECMWF. The
-            // user sees a missing/stale wind layer until the CDN
-            // recovers, which is the right pressure on the
-            // publisher operator.
-            return { error: `ECMWF CDN unreachable (${e}); not falling back to protect ECMWF` };
+          const resp = await fetch(api(`/noaa-weather/data/${model}/latest.json?fh=${fh}`));
+          if (!resp.ok) {
+            const body = await resp.text().catch(() => "");
+            return { error: body.trim() || `HTTP ${resp.status}` };
           }
-
-          // CDN is fresh: fetch the tile. A tile-level failure here
-          // (404, 5xx) is a publisher bug, not a reason to fall
-          // back — surface the error so it gets noticed and fixed.
-          try {
-            const tileUrl = await client.urlFor(viewportBbox(), fh);
-            const resp = await fetch(tileUrl);
-            if (!resp.ok) {
-              return { error: `ECMWF CDN tile fetch: HTTP ${resp.status}` };
-            }
-            return { data: await resp.json() };
-          } catch (e) {
-            return { error: `ECMWF CDN tile fetch: ${e}` };
-          }
+          return { data: await resp.json() };
         },
         colorScale: WIND_COLOR_SCALE,
         minVelocity: 0,
@@ -3316,7 +3199,7 @@
         displayName: "waves",
         parent: "weather",
         initialModel: waveModel,
-        dataUrlFor: (model) => `/noaa-weather/data/${model}/latest.json`,
+        dataUrlFor: (model) => api(`/noaa-weather/data/${model}/latest.json`),
         colorScale: WAVE_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 3,
@@ -3376,7 +3259,7 @@
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
       // registry endpoint isn't reachable for some reason.
-      fetch("/noaa-weather/models")
+      fetch(api("/noaa-weather/models"))
         .then((r) => (r.ok ? r.json() : []))
         .then((list: WeatherModelMeta[]) => {
           weatherModels = Array.isArray(list) ? list : [];
@@ -3610,7 +3493,7 @@
   // the page is served from anywhere else we skip both the proxy URL and the prefetch
   // calls and let OpenLayers hit NOAA directly.
   // Whether the Go module's noaa-enc + noaa-wms endpoints are reachable on
-  // the current origin. Probed once at mount via /noaa-enc/stats; falls
+  // the current origin. Probed once at mount via /noaa-wms/stats; falls
   // back to the legacy port heuristic for environments where the probe
   // hasn't completed yet (so layer setup at first render still picks the
   // right URL when running locally on :5173 / :8888).
@@ -3625,16 +3508,12 @@
 
   async function probeNoaaCache() {
     try {
-      const resp = await fetch("/noaa-enc/stats", { method: "GET" });
+      const resp = await fetch(api("/noaa-wms/stats"), { method: "GET" });
       noaaCacheProbeResult = resp.ok;
     } catch {
       noaaCacheProbeResult = false;
     }
   }
-
-  // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
-  // spam the backend with overlapping cell-download jobs.
-  let lastNoaaPrefetchKey = "";
 
   // Last bbox we emitted to onAirstreamBboxChange so trivial pans don't
   // re-fire the callback. Rounded to keep this a coarse comparison.
@@ -3686,36 +3565,6 @@
     onAirstreamBboxChange({ minLon, minLat, maxLon, maxLat });
   }
 
-  function maybePrefetchNoaaTiles() {
-    if (!noaaCacheReachable()) return;
-    // Either noaa-local or noaa-ecdis being on warrants a prefetch — both
-    // pull from the same ENC cell store, just with different render styles.
-    const local = findLayerByName("noaa-local");
-    const ecdis = findLayerByName("noaa-ecdis");
-    if (!((local && local.on) || (ecdis && ecdis.on))) return;
-    if (!mapGlobal.map || !mapGlobal.view) return;
-
-    const size = mapGlobal.map.getSize();
-    if (!size) return;
-    const extent = mapGlobal.view.calculateExtent(size);
-    // Round bbox to ~0.01 deg so trivial pans share a key.
-    const round = (n: number) => Math.round(n * 100) / 100;
-    const minLon = round(extent[0]);
-    const minLat = round(extent[1]);
-    const maxLon = round(extent[2]);
-    const maxLat = round(extent[3]);
-    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
-    if (key === lastNoaaPrefetchKey) return;
-    lastNoaaPrefetchKey = key;
-
-    fetch("/noaa-enc/prefetch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
-    }).catch(() => {
-      // Best-effort: prefetch failures shouldn't disrupt the UI.
-    });
-  }
 
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
@@ -3801,7 +3650,6 @@
         }
       }
     }
-    maybePrefetchNoaaTiles();
   }
 
   function pointDiff(x: number[], y: number[]): number {
@@ -3821,6 +3669,9 @@
     // Probe before setupLayers so the noaa-local / noaa-ecdis / noaa-wms
     // layers register with the correct origin assumption regardless of
     // which port the Go module is bound to.
+    // Resolve where to fetch tiles/weather (same-origin or a separate map
+    // server) first, so the cache probe and every layer URL use the right base.
+    await loadAppConfig();
     await probeNoaaCache();
     setupLayers();
 
@@ -3938,10 +3789,7 @@
       mapGlobal.map.addInteraction(new BoatAnchoredMouseWheelZoom());
     }
 
-    // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
-    // current viewport. The handler is a no-op when the noaa layer is off.
     mapGlobal.map.on("moveend", () => {
-      maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
       maybeReanchorOnBoat();
       // Only persist when the user is intentionally off-boat; otherwise the
@@ -5551,10 +5399,6 @@
               }
             }
             saveLayerStates();
-            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
-              lastNoaaPrefetchKey = "";
-              maybePrefetchNoaaTiles();
-            }
           }}
           disabled={isParentOff}
         />

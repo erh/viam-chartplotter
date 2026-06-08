@@ -14,11 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
+
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 
 	"github.com/erh/vmodutils"
+
+	"go.mongodb.org/mongo-driver/mongo"
+	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
+	"github.com/erh/viam-chartplotter/render"
+	"github.com/erh/viam-chartplotter/weather"
+	"github.com/erh/viam-chartplotter/weather/store"
 )
 
 //go:embed dist
@@ -29,6 +39,26 @@ func DistFS() (fs.FS, error) {
 }
 
 var Model = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("chartplotter")
+
+// DefaultHostedTileServer is the public map+weather server the frontend falls
+// back to when this instance has no Mongo of its own (mongo_uri unset and no
+// explicit tile_server_base_url). It serves the same /noaa-enc/tile and
+// /noaa-weather endpoints with permissive CORS.
+const DefaultHostedTileServer = "http://nycmaps.checkmatemaps.com/"
+
+// ResolveTileServerBaseURL decides where the frontend fetches tiles+weather:
+// an explicit tile_server_base_url wins; otherwise, when this instance has no
+// Mongo of its own, fall back to the public hosted server so tiles and weather
+// work with zero setup; otherwise "" (same-origin, this instance serves them).
+func ResolveTileServerBaseURL(explicit, mongoURI string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if mongoURI == "" {
+		return DefaultHostedTileServer
+	}
+	return ""
+}
 
 func init() {
 	resource.RegisterComponent(
@@ -53,13 +83,32 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	// Public base URL of the wind-publisher's R2/CDN bucket. Empty
-	// (or unset) falls back to DefaultWindCDNBaseURL inside
-	// SetWindCDNBaseURL so every chartplotter gets fan-out behaviour
-	// out of the box. Override with a different URL to point at a
-	// staging mirror.
-	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL)
+	// Mongo connection for the OSM tile underlay. Config attribute
+	// wins, env var (MONGO_URI) is the dev-friendly fallback so you
+	// don't have to wire it into config every time. Same idea for
+	// db/coll names; both default to "osm"/"features" when neither
+	// config nor env is set.
+	mongoURI := firstNonEmpty(config.Attributes.String("mongo_uri"), os.Getenv("MONGO_URI"))
+	mongoDB := firstNonEmpty(config.Attributes.String("mongo_db"), os.Getenv("MONGO_DB"), "osm")
+	mongoColl := firstNonEmpty(config.Attributes.String("mongo_coll"), os.Getenv("MONGO_COLL"), "features")
+	// Base URL of a SEPARATE map+weather (tile) server the frontend should fetch
+	// tiles/weather from. An explicit tile_server_base_url is for a split
+	// deployment (dedicated cmd/tileserver owns rendering); otherwise, with no
+	// Mongo here, fall back to the hosted server; otherwise same-origin. Exposed
+	// to the frontend via /app-config.
+	tileServerBaseURL := ResolveTileServerBaseURL(config.Attributes.String("tile_server_base_url"), mongoURI)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
+}
+
+// firstNonEmpty returns the first non-empty string in vals, or "".
+// Used for the layered "config → env → default" knob resolution.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveCacheRoot picks the parent directory under which both the WMS proxy cache
@@ -74,6 +123,23 @@ func resolveCacheRoot(configured string) string {
 		base = os.TempDir()
 	}
 	return filepath.Join(base, "viam-chartplotter")
+}
+
+// withCORS adds permissive CORS headers so a chartplotter app served from one
+// origin can fetch tiles/weather from a separate map+weather server. The data
+// is public, read-only GETs; OPTIONS preflights are answered 204 immediately.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withCookiePathRoot wraps an http.Handler so any Set-Cookie headers
@@ -135,7 +201,10 @@ func StartChartplotterServer(
 	cacheMaxBytes int64,
 	draftFt float64,
 	myBoatIconPath string,
-	windCDNBaseURL string,
+	mongoURI string,
+	mongoDB string,
+	mongoColl string,
+	tileServerBaseURL string,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -146,7 +215,7 @@ func StartChartplotterServer(
 		tracerShutdown = func(context.Context) error { return nil }
 	}
 
-	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
+	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"), nil)
 	if err != nil {
 		_ = tracerShutdown(context.Background())
 		return nil, err
@@ -165,6 +234,12 @@ func StartChartplotterServer(
 	// span per request; the slow-log middleware emits a WARN line for
 	// anything over CHARTPLOTTER_SLOW_LOG_MS (default 500 ms).
 	server.Handler = withTracing(logger.Sublogger("slowReq"), server.Handler)
+	// Permissive CORS on the read-only tile/weather/data API so a chartplotter
+	// app on one origin (e.g. :8888) can fetch tiles and weather from a
+	// separate map+weather server on another (e.g. :8989). Tiles/weather are
+	// public GETs, so a blanket allow-origin is fine; preflights are answered
+	// 204. Outermost wrapper so OPTIONS short-circuits before anything else.
+	server.Handler = withCORS(server.Handler)
 
 	root := resolveCacheRoot(cacheRoot)
 
@@ -176,62 +251,86 @@ func StartChartplotterServer(
 	logger.Infof("noaa wms cache: %s (max %d bytes, stale after %s)",
 		wmsCache.cacheDir, wmsCache.maxBytes, wmsCache.staleAfter)
 
+	// Rendering reads ENC features from MongoDB (datasync keeps it populated);
+	// the disk ENC catalog/store + on-demand .000 download pipeline is retired.
+	// encDir is now only the parent of the rendered-tile PNG cache.
 	encDir := filepath.Join(root, "noaa-enc")
-	catalog, err := NewENCCatalog(encDir, logger.Sublogger("encCatalog"))
+	encRenderer := render.NewENCRenderer(logger.Sublogger("encRender"))
+	encTileCache, err := render.NewENCTileCache(filepath.Join(encDir, "tiles"))
 	if err != nil {
 		return nil, err
 	}
-	encStore, err := NewENCStore(encDir, catalog, logger.Sublogger("encStore"))
-	if err != nil {
-		return nil, err
+	// The /compare debug endpoint fetches a NOAA WMS tile via the WMS cache.
+	// render/ doesn't import the WMS cache (would be an import cycle), so we
+	// inject the fetch: build the canonical query here and hit the cache.
+	wmsFetch := func(ctx context.Context, z, x, y int, layers string) ([]byte, error) {
+		canonical := wmsCanonicalForTile(tileXYZ{x: x, y: y, z: z}, layers)
+		b, _, _, err := wmsCache.fetch(ctx, canonical, "image/png")
+		return b, err
 	}
-	encRenderer := NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
-	encTileCache, err := NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
-	if err != nil {
-		return nil, err
-	}
-	encHandlers := NewENCHandlers(catalog, encStore, encRenderer, encTileCache, wmsCache, draftFt)
-	// OSM raster tile cache for the /noaa-enc/osm-tile/ endpoint. We
-	// fetch tile.openstreetmap.org PNGs and mask out water (per the
-	// chart's DEPARE polygons) so OSM's water labels and tones don't
-	// fight with our chart's depth bands. Disk-cached so each (z,x,y)
-	// is fetched at most once per cache lifetime.
-	osmCache, err := NewOSMTileCache(filepath.Join(root, "osm"), "", logger.Sublogger("osmCache"))
-	if err != nil {
-		logger.Warnf("osm cache disabled: %v", err)
+	encHandlers := render.NewENCHandlers(encRenderer, encTileCache, wmsFetch, draftFt)
+	// OSM underlay layer — render by querying a MongoDB collection
+	// populated offline by `osmtools ingest`. The URI is the only
+	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
+	// refuses to render (transparent fallback only) and the frontend
+	// layer is effectively a no-op.
+	// weatherColl is set when Mongo connects below, then wired into the weather
+	// cache so it serves forecasts from Mongo (populated by weathersync) before
+	// falling back to disk/upstream.
+	var weatherColl *mongo.Collection
+	if mongoURI != "" {
+		mctx, mcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer mcancel()
+		mclient, err := mongo.Connect(mctx, mongoopts.Client().ApplyURI(mongoURI))
+		if err != nil {
+			logger.Warnf("osm underlay disabled: mongo connect: %v", err)
+		} else if err := mclient.Ping(mctx, nil); err != nil {
+			logger.Warnf("osm underlay disabled: mongo ping: %v", err)
+		} else {
+			// mongoColl is no longer a single collection — features are
+			// partitioned across per-minZoom-bucket collections (see
+			// osmtiler.OpenOSMCollections). The configured "collection
+			// name" is kept in StartChartplotterServer's signature for
+			// back-compat with existing module configs, but ignored here;
+			// the bucket collections have fixed names within the chosen
+			// database.
+			_ = mongoColl
+			db := mclient.Database(mongoDB)
+			colls := osmtiler.OpenOSMCollections(db)
+			encRenderer.SetOSMCollections(colls)
+			// ENC chart now renders from the noaa feature collection in the
+			// same database (populated by `mapsync noaa-ingest`), instead of
+			// parsing .000 files off disk at request time.
+			encRenderer.SetNOAACollection(noaa.OpenCollection(db))
+			weatherColl = store.OpenCollection(db)
+			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",
+				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, store.CollWeather)
+		}
 	} else {
-		encRenderer.SetOSMCache(osmCache)
-		logger.Infof("osm tile cache: %s", osmCache.cacheDir)
+		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
 	}
 	encHandlers.Register(mux)
-	logger.Infof("noaa enc store: %s (default draft=%.1f ft)", encDir, draftFt)
+	logger.Infof("noaa enc renderer ready (mongo-backed; tile cache %s, default draft=%.1f ft)", filepath.Join(encDir, "tiles"), draftFt)
 
-	// NOAA GFS weather cache. Serves /noaa-weather/gfs/latest.json which
-	// the frontend wind layer (ol-wind) consumes. Disk cache lives under
-	// <root>/noaa-weather/.
+	// NOAA weather serving. The frontend wind layer (ol-wind) consumes
+	// /noaa-weather/data/{model}/latest.json. Serve is Mongo-only: a weathersync
+	// service populates the weather collection; this server just reads it. No
+	// disk prewarm/cleaner here — those belong to the populate side. The disk
+	// dir is still passed for NewWeatherCache's raw-ecmwf staging used by any
+	// co-located populate path.
 	weatherDir := filepath.Join(root, "noaa-weather")
-	weatherCache, err := NewWeatherCache(weatherDir, logger.Sublogger("weather"))
+	weatherCache, err := weather.NewWeatherCache(weatherDir, logger.Sublogger("weather"))
 	if err != nil {
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
-		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
+		if weatherColl != nil {
+			weatherCache.SetWeatherCollection(weatherColl)
+			logger.Infof("weather: serving from Mongo collection %q (Mongo-only)", store.CollWeather)
+		} else {
+			logger.Warnf("weather: no Mongo collection configured — /noaa-weather/data will 503 until a weathersync populates it")
+		}
 		weatherCache.Register(mux)
-		// Background prewarm of every model's forecast hours so the
-		// first user scrub to any hour hits the disk cache instead of
-		// blocking on a ~30-60 s NOMADS fetch. Uses its own context so
-		// resource.Close can cancel it on module unload.
-		weatherCache.Prewarm(context.Background())
-		// Periodic cache cleaner: delete any file under
-		// <root>/noaa-weather/ older than 60 days. Covers stale
-		// per-version JSON (orphaned by weatherCacheVersion bumps),
-		// raw-ecmwf/ raw-GRIB blobs that haven't been touched in
-		// months, and any leftover .gz siblings. Runs once on
-		// startup, then daily. ECMWF data is immutable per (cycle,
-		// fh) so a delete-then-refetch is just one wasted upstream
-		// pull on the next request — at 60 days that's essentially
-		// never on an active install.
-		weatherCache.StartCleaner(60*24*time.Hour, 24*time.Hour)
-		logger.Infof("noaa weather cache: %s (cdn=%q)", weatherDir, windCDNBaseURL)
+		logger.Infof("noaa weather serve ready")
 	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it
@@ -242,6 +341,19 @@ func StartChartplotterServer(
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]string{"instance": instanceID})
 	})
+
+	// /app-config exposes runtime settings the frontend needs but can't know at
+	// build time. tileServerBaseURL tells the app where to fetch map tiles and
+	// weather: empty = same-origin (this server), otherwise a separate
+	// map+weather server (e.g. http://host:8989) set via tile_server_base_url.
+	mux.HandleFunc("/app-config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]string{"tileServerBaseURL": tileServerBaseURL})
+	})
+	if tileServerBaseURL != "" {
+		logger.Infof("tile/weather server base URL: %s (frontend will fetch tiles+weather from here)", tileServerBaseURL)
+	}
 
 	// Optional override for the user's-own-boat marker icon. Resolved once at
 	// startup; if the file is missing or unreadable we log and fall back to the
@@ -285,11 +397,17 @@ type chartplotterResource struct {
 
 	name           resource.Name
 	server         *http.Server
-	weatherCache   *WeatherCache
+	weatherCache   *weather.WeatherCache
 	tracerShutdown func(context.Context) error
 }
 
 func (r *chartplotterResource) Name() resource.Name { return r.name }
+
+// Status satisfies the resource.Resource interface (added in rdk). The
+// chartplotter has no meaningful per-resource status to report.
+func (r *chartplotterResource) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
 
 func (r *chartplotterResource) Close(ctx context.Context) error {
 	// Cancel the prewarm goroutine first so it doesn't keep hammering
