@@ -286,7 +286,7 @@
   // The layer panel renders these (and their children) above a divider as
   // radio buttons; everything else (boat, ais, airstream + their children)
   // renders below as independent checkboxes.
-  const BASE_LAYER_NAMES = ["open street map", "noaa", "noaa-local", "noaa-ecdis"];
+  const BASE_LAYER_NAMES = ["open street map", "noaa", "checkmate", "noaa-ecdis"];
   function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
     return (
       BASE_LAYER_NAMES.includes(l.name) ||
@@ -346,7 +346,7 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
-  // Debug helper: when on, clicking the map prints + copies the noaa-local
+  // Debug helper: when on, clicking the map prints + copies the checkmate
   // tile URL covering that point. Used for diffing our render against NOAA's
   // WMS for a specific tile.
   let tileUrlActive = $state(false);
@@ -748,6 +748,7 @@
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
     fullWidth = false,
+    chartOnly = false,
     navWaypoints,
     onAddWaypoint,
     onMoveWaypoint,
@@ -777,6 +778,9 @@
     depthSensorAvailable?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    /** Chart-extended (kiosk) mode: no boat/robot — hide the map toolbar and
+     *  controls and show only the chart. */
+    chartOnly?: boolean;
     /** Speed-over-ground (knots). When provided, shown in the combined data
      *  panel at the top-right of the map. */
     sog?: number | null;
@@ -2735,7 +2739,7 @@
   }
 
   // showTileUrlForClick computes the XYZ tile that contains the clicked
-  // lon/lat at the current view zoom and prints + copies its noaa-local
+  // lon/lat at the current view zoom and prints + copies its checkmate
   // tile URL (and the /compare URL). Used for diffing our render against
   // NOAA's WMS for a specific tile — toggle "tile URL" in the bottom
   // controls, click the map, paste the URL.
@@ -2783,16 +2787,25 @@
   function api(path: string): string {
     return `${tileBase}${path}`;
   }
+  // Hosted chart server to fall back to when there's no /app-config at all
+  // (e.g. a pure-static deploy with no module). Keeps the chart working instead
+  // of requesting tiles from a blank same-origin host. When /app-config DOES
+  // respond, its tileServerBaseURL wins — including "" which means "this server
+  // serves tiles" (same-origin).
+  const HOSTED_TILE_FALLBACK = "https://nycmaps.checkmatemaps.com";
   async function loadAppConfig(): Promise<void> {
     try {
       const resp = await fetch("/app-config");
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        tileBase = HOSTED_TILE_FALLBACK;
+        return;
+      }
       const cfg = await resp.json();
       if (cfg && typeof cfg.tileServerBaseURL === "string") {
         tileBase = cfg.tileServerBaseURL.replace(/\/$/, "");
       }
     } catch {
-      // No /app-config (older server) or fetch failed → stay same-origin.
+      tileBase = HOSTED_TILE_FALLBACK;
     }
   }
 
@@ -2800,7 +2813,7 @@
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
     // order regardless of toggle/insert sequence. Without this, toggling a
     // layer off and back on can land it on top of layers that should sit
-    // above it (e.g. OSM ending up above noaa-local after a reload).
+    // above it (e.g. OSM ending up above checkmate after a reload).
     // core open street maps
     mapGlobal.layerOptions.push({
       name: "open street map",
@@ -2823,15 +2836,11 @@
     const noaaWmsUrl = noaaCacheReachable()
       ? api("/noaa-wms/proxy")
       : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
-    // Extended mode: when no chart host is reachable (no local module / tile
-    // server and no /app-config base), our self-rendered noaa-local tiles would
-    // hit a dead/blank host. Default to NOAA's WMS directly so the chart still
-    // works standalone; when a host IS reachable this stays off (noaa-local is
-    // the chart) as before.
-    const extendedMode = !noaaCacheReachable();
+    // NOAA's public WMS as a manual reference/fallback layer (off by default).
+    // The Checkmate chart below is always the default.
     mapGlobal.layerOptions.push({
       name: "noaa",
-      on: extendedMode,
+      on: false,
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
@@ -2909,7 +2918,7 @@
         zIndex: 7,
       });
       mapGlobal.navaidLayer = navaidLayer;
-      // noaa-local: tuned to mirror NOAA's WMS look as closely as possible.
+      // checkmate: tuned to mirror NOAA's WMS look as closely as possible.
       // Use this for offline use that should look interchangeable with the
       // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
       // the tile PNG — those render in the noaa-navaids OL vector layer
@@ -2991,12 +3000,13 @@
       const detailParams = new URLSearchParams(midParams);
       detailParams.set("skip", "BRIDGE,CBLOHD,PIPOHD,CONVYR");
 
+      // The Checkmate chart: our merged ENC + OSM + weather raster, served from
+      // the configured tile host (local module, a split tile server, or the
+      // hosted default). Always the default chart layer.
       mapGlobal.layerOptions.push({
-        name: "noaa-local",
-        // Off in extended mode — there's no host to serve our merged tiles, so
-        // requesting them would just 404 against a blank/dead origin. The NOAA
-        // WMS layer above is on instead.
-        on: !extendedMode,
+        name: "checkmate",
+        displayName: "Checkmate",
+        on: true,
         layer: new TileLayer({
           opacity: 1,
           preload: 2,
@@ -3018,15 +3028,15 @@
       });
 
       // OSM detail (streets/buildings/land) is now composited INTO the
-      // noaa-local tile server-side (the merged ENC+OSM tile), so there's no
+      // checkmate tile server-side (the merged ENC+OSM tile), so there's no
       // separate osm-detail layer anymore — that would draw OSM twice. The
       // standalone /noaa-enc/osm-tile endpoint still exists for debugging.
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
-        on: !extendedMode,
+        on: true,
         layer: navaidLayer,
-        parent: "noaa-local",
+        parent: "checkmate",
         // Below z=12 the icons clutter without adding navigational
         // value AND every pan at that scale pulls in a wide bbox of
         // features the user can't read — so we'd be racking up
@@ -3037,9 +3047,9 @@
       mapGlobal.layerOptions.push({
         name: "noaa-structures",
         displayName: "structures",
-        on: !extendedMode,
+        on: true,
         layer: structureLayer,
-        parent: "noaa-local",
+        parent: "checkmate",
         // One zoom level tighter than navaids — bridges/cables are
         // denser in busy harbours and would clutter the overview a
         // step before the navaid icons start to.
@@ -3601,12 +3611,12 @@
     const myBoatPopupForceTrack =
       popupState.visible && popupState.content.isMyBoat;
 
-    // noaa-local already paints OSM detail under its chart (osm-detail child
+    // checkmate already paints OSM detail under its chart (osm-detail child
      // layer) — the global OSM base layer underneath is redundant and bleeds
-     // through where noaa-local has transparent water/land. Suppress it
-     // whenever noaa-local is on.
+     // through where checkmate has transparent water/land. Suppress it
+     // whenever checkmate is on.
     const noaaLocalLayer = mapGlobal.layerOptions.find(
-      (p) => p.name === "noaa-local",
+      (p) => p.name === "checkmate",
     );
     const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
 
@@ -3675,7 +3685,7 @@
 
   async function setupMap() {
     useGeographic();
-    // Probe before setupLayers so the noaa-local / noaa-ecdis / noaa-wms
+    // Probe before setupLayers so the checkmate / noaa-ecdis / noaa-wms
     // layers register with the correct origin assumption regardless of
     // which port the Go module is bound to.
     // Resolve where to fetch tiles/weather (same-origin or a separate map
@@ -4972,6 +4982,7 @@
   class:boats-expanded={boatsExpanded}
   class:map-loaded={mapLoaded}
   class:full-width={fullWidth}
+  class:chart-only={chartOnly}
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
@@ -5371,7 +5382,7 @@
   <div class="layer-controls">
     <!--
       Layers are split into two groups:
-        1. Base maps (open street map / noaa / noaa-local / noaa-ecdis)
+        1. Base maps (open street map / noaa / checkmate / noaa-ecdis)
            and their children — mutually exclusive radio buttons. Picking
            one auto-disables the others so we never paint two raster
            bases on top of each other.
@@ -5647,7 +5658,7 @@
       class="tile-url-toggle"
       class:active={tileUrlActive}
       onclick={() => (tileUrlActive = !tileUrlActive)}
-      data-tip="When on, click the map to copy the noaa-local tile URL for that location"
+      data-tip="When on, click the map to copy the checkmate tile URL for that location"
       aria-label="Tile URL debug mode"
     >
       {"{}"}
@@ -6310,6 +6321,16 @@
      left:5 and run ~75px tall). Children are flex items so conditional
      buttons (add waypoint, clear waypoints, boats) can appear/disappear
      without breaking the layout. */
+  /* Chart-extended (kiosk) mode: no boat/robot. Keep the layers button (the map
+     selector — its panel also holds the weather toggles), but hide the boat/
+     nav/debug controls and the boat data panel. (The add-waypoint and boats
+     buttons aren't rendered in this mode anyway — no nav service / boats panel.) */
+  .chart-only .data-panel,
+  .chart-only .boats-toggle,
+  .chart-only .tile-url-toggle,
+  .chart-only .measure-toggle {
+    display: none;
+  }
   .left-toolbar {
     position: absolute;
     top: 90px;

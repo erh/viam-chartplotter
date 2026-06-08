@@ -97,7 +97,12 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// Mongo here, fall back to the hosted server; otherwise same-origin. Exposed
 	// to the frontend via /app-config.
 	tileServerBaseURL := ResolveTileServerBaseURL(config.Attributes.String("tile_server_base_url"), mongoURI)
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
+	// chart_only puts the frontend in chart-extended (kiosk) mode: no robot/boat
+	// to connect to, so the app skips the Viam connection and shows only the
+	// chart — no boat marker, AIS, navigation, camera, or app panels. Exposed via
+	// /app-config; the frontend also auto-enters it when no host is resolvable.
+	chartOnly := config.Attributes.Bool("chart_only", false)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly)
 }
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
@@ -205,6 +210,7 @@ func StartChartplotterServer(
 	mongoDB string,
 	mongoColl string,
 	tileServerBaseURL string,
+	chartOnly bool,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -353,7 +359,10 @@ func StartChartplotterServer(
 	mux.HandleFunc("/app-config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(map[string]string{"tileServerBaseURL": tileServerBaseURL})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tileServerBaseURL": tileServerBaseURL,
+			"chartOnly":         chartOnly,
+		})
 	})
 	if tileServerBaseURL != "" {
 		logger.Infof("tile/weather server base URL: %s (frontend will fetch tiles+weather from here)", tileServerBaseURL)

@@ -1688,8 +1688,38 @@
     globalLogger.warn("The robot has been reconnected. Work can be continued.");
   }
 
+  // chartOnly: chart-extended (kiosk) mode — no robot/boat to connect to, so
+  // show only the chart. True when the chartplotter config sets chart_only
+  // (surfaced via /app-config) OR when there's no host to connect to at all
+  // (so we never spam blank-host connects). When on we skip the Viam connection
+  // loop entirely and hide the boat data panel + map controls.
+  let chartOnly = $state(false);
+
+  async function resolveChartOnly(): Promise<boolean> {
+    const [host] = getHostAndCredentials();
+    let flag = false;
+    try {
+      const resp = await fetch("/app-config");
+      if (resp.ok) {
+        const cfg = await resp.json();
+        flag = !!(cfg && cfg.chartOnly);
+      }
+    } catch {
+      // no /app-config — fall through to the no-host check
+    }
+    return flag || !host || host === "";
+  }
+
   async function start() {
     try {
+      chartOnly = await resolveChartOnly();
+      if (chartOnly) {
+        // No robot to talk to: skip the connect loop (no blank-host attempts),
+        // hide the data panel, and let the map run as a standalone chart viewer.
+        globalData.hideDataPanel = true;
+        globalData.status = "Chart only";
+        return {};
+      }
       updateAndLoop();
       return {};
     } catch (error) {
@@ -2060,6 +2090,7 @@
       depthSensorAvailable={globalConfig.depthSensorName !== ""}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
+      chartOnly={chartOnly}
       navWaypoints={globalData.navWaypoints}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
