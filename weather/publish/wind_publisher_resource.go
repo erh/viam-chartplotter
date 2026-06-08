@@ -88,25 +88,25 @@ type WindPublisherConfig struct {
 // component's lifecycle calls Validate before Construct; failing here
 // prevents an unconfigured publisher from binding (and starting a
 // cron loop that would just no-op on every wake).
-func (c *WindPublisherConfig) Validate(path string) ([]string, error) {
+func (c *WindPublisherConfig) Validate(path string) ([]string, []string, error) {
 	if len(c.Models) == 0 {
-		return nil, fmt.Errorf("%s: models required (e.g. [\"ecmwf\"])", path)
+		return nil, nil, fmt.Errorf("%s: models required (e.g. [\"ecmwf\"])", path)
 	}
 	for _, m := range c.Models {
 		if m != "ecmwf" {
-			return nil, fmt.Errorf("%s: model %q not yet supported by publisher (only ecmwf)", path, m)
+			return nil, nil, fmt.Errorf("%s: model %q not yet supported by publisher (only ecmwf)", path, m)
 		}
 	}
 	if c.UploadEnabled {
 		switch {
 		case c.R2AccountID == "":
-			return nil, fmt.Errorf("%s: r2_account_id required when upload_enabled", path)
+			return nil, nil, fmt.Errorf("%s: r2_account_id required when upload_enabled", path)
 		case c.R2APIToken == "" && (c.R2AccessKeyID == "" || c.R2SecretAccessKey == ""):
-			return nil, fmt.Errorf("%s: provide r2_api_token alone (id derived via Cloudflare /verify) "+
+			return nil, nil, fmt.Errorf("%s: provide r2_api_token alone (id derived via Cloudflare /verify) "+
 				"or r2_access_key_id + (r2_api_token | r2_secret_access_key)", path)
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // effectiveBucket returns the configured bucket or the project-wide

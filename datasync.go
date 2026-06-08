@@ -58,11 +58,11 @@ type DataSyncConfig struct {
 }
 
 // Validate enforces a usable Mongo URI.
-func (c *DataSyncConfig) Validate(path string) ([]string, error) {
+func (c *DataSyncConfig) Validate(path string) ([]string, []string, error) {
 	if c.MongoURI == "" {
-		return nil, fmt.Errorf("%s: mongo_uri required", path)
+		return nil, nil, fmt.Errorf("%s: mongo_uri required", path)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (c *DataSyncConfig) db() string {

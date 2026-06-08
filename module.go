@@ -212,7 +212,7 @@ func StartChartplotterServer(
 		tracerShutdown = func(context.Context) error { return nil }
 	}
 
-	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"))
+	mux, server, err := vmodutils.PrepInModuleServer(dist, logger.Sublogger("accessLog"), nil)
 	if err != nil {
 		_ = tracerShutdown(context.Background())
 		return nil, err
@@ -400,6 +400,12 @@ type chartplotterResource struct {
 }
 
 func (r *chartplotterResource) Name() resource.Name { return r.name }
+
+// Status satisfies the resource.Resource interface (added in rdk). The
+// chartplotter has no meaningful per-resource status to report.
+func (r *chartplotterResource) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
 
 func (r *chartplotterResource) Close(ctx context.Context) error {
 	// Cancel the prewarm goroutine first so it doesn't keep hammering

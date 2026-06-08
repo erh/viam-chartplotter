@@ -52,11 +52,11 @@ type WeatherSyncConfig struct {
 	IntervalHours int `json:"interval_hours,omitempty"`
 }
 
-func (c *WeatherSyncConfig) Validate(path string) ([]string, error) {
+func (c *WeatherSyncConfig) Validate(path string) ([]string, []string, error) {
 	if c.MongoURI == "" {
-		return nil, fmt.Errorf("%s: mongo_uri required", path)
+		return nil, nil, fmt.Errorf("%s: mongo_uri required", path)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (c *WeatherSyncConfig) db() string {

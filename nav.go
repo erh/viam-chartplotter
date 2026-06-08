@@ -44,12 +44,12 @@ type NavConfig struct {
 
 // Validate ensures all parts of the config are valid and returns the
 // implicit dependencies required by the service.
-func (cfg *NavConfig) Validate(path string) ([]string, error) {
+func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 	var deps []string
 	if cfg.MovementSensor != "" {
 		deps = append(deps, cfg.MovementSensor)
 	}
-	return deps, nil
+	return deps, nil, nil
 }
 
 // arrivalCheckInterval is how often the background poller re-checks
@@ -322,6 +322,11 @@ func (s *navService) checkArrival(ctx context.Context) {
 }
 
 func (s *navService) Name() resource.Name { return s.name }
+
+// Status satisfies the resource.Resource interface (added in rdk).
+func (s *navService) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
 
 func (s *navService) Mode(ctx context.Context, extra map[string]interface{}) (navigation.Mode, error) {
 	return navigation.Mode(s.mode.Load()), nil
