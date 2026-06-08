@@ -9,19 +9,19 @@
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:chartplotter",
       "description": "Chartplotter web UI + NOAA ENC/WMS tile server. Renders S-57 vector charts with draft-keyed depth shading.",
-      "markdown_link": "README.md#viam-chartplotter"
+      "markdown_link": "README.md#chartplotter"
     },
     {
       "api": "rdk:service:navigation",
       "model": "erh:viam-chartplotter:nav",
       "description": "Persistent in-memory navigation service for the chartplotter UI.",
-      "markdown_link": "README.md#navigation-service"
+      "markdown_link": "README.md#navigation"
     },
     {
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:wind-publisher",
       "description": "Fleet-wide ECMWF wind cache populator. Configure on ONE machine; pulls ECMWF Open Data, decodes, crops into a tile grid, and uploads to Cloudflare R2 so every other chartplotter reads from R2 instead of hammering ECMWF.",
-      "markdown_link": "README.md#ecmwf-wind-one-machine-populates-the-cache-for-the-whole-fleet"
+      "markdown_link": "README.md#wind-publisher"
     },
     {
       "api": "rdk:component:generic",
