@@ -1,4 +1,4 @@
-package vc
+package publish
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/erh/viam-chartplotter/weather"
 	"log"
 	"net/http"
 	"os"
@@ -22,7 +23,7 @@ type PublishedCycle struct {
 	Model       string
 	CycleTime   time.Time               // reference time of the run
 	FHs         []int                   // forecast hours in publish order
-	Tiles       []Tile                  // the fixed grid; copied into the manifest
+	Tiles       []weather.Tile          // the fixed grid; copied into the manifest
 	TileBlobs   map[publishKey]TileBlob // (fh, tile) → gzipped JSON + content metadata
 	PublishedAt time.Time
 }
@@ -53,8 +54,8 @@ type LatestPointer struct {
 	PreviousCycles []string       `json:"previousCycles,omitempty"`
 }
 
-// TileManifest is the lightweight view of a Tile we serialise into the
-// latest pointer. The full Tile struct's Col/Row are useful internally
+// TileManifest is the lightweight view of a weather.Tile we serialise into the
+// latest pointer. The full weather.Tile struct's Col/Row are useful internally
 // but redundant on the wire — clients only need (Key, Bbox) to do
 // viewport-to-tile lookup.
 type TileManifest struct {
@@ -78,7 +79,7 @@ type TileManifest struct {
 // Slow path: per cycle, ~49 fhs × (GRIB fetch + decode + 36 crops +
 // 36 gzips). Expect ~5-15 minutes on a small VM for a successful
 // cycle. Run inside a goroutine; cancel via ctx to abort.
-func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) (*PublishedCycle, error) {
+func BuildECMWFCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel) (*PublishedCycle, error) {
 	if m == nil || m.Fetch == nil {
 		return nil, fmt.Errorf("wind-publisher: model nil or has no Fetch")
 	}
@@ -87,9 +88,9 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) 
 	}
 
 	now := time.Now().UTC().Add(-time.Duration(m.PublishLagH) * time.Hour)
-	candidate := mostRecentCycle(now, m.CycleHours)
+	candidate := weather.MostRecentCycle(now, m.CycleHours)
 	var lastErr error
-	// Same 4-back budget walkLatestCycle uses on the on-demand path —
+	// Same 4-back budget weather.WalkLatestCycle uses on the on-demand path —
 	// that's two full days for a 6h-cycle model, more than enough for
 	// any realistic publish-lag scenario.
 	for attempt := 0; attempt < 4; attempt++ {
@@ -103,7 +104,7 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) 
 		log.Printf("publisher: cycle %s incomplete (%v) — trying previous cycle",
 			candidate.Format("20060102T15"), err)
 		lastErr = err
-		candidate = previousCycle(candidate, m.CycleHours)
+		candidate = weather.PreviousCycle(candidate, m.CycleHours)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no fully-published cycle for %s in last %d attempts", m.Name, 4)
@@ -120,21 +121,21 @@ func BuildECMWFCycle(ctx context.Context, client *http.Client, m *WeatherModel) 
 // Uses two cache layers (project-wide rule: every external fetch +
 // every expensive recomputation goes through a disk cache):
 //
-//   - Raw-GRIB cache via cachedFetchECMWFWind10m — skips ECMWF
-//   - Tile-blob cache via readTileBlobCache — skips CCSDS decode +
+//   - Raw-GRIB cache via weather.CachedFetchECMWFWind10m — skips ECMWF
+//   - weather.Tile-blob cache via readTileBlobCache — skips CCSDS decode +
 //     crop + JSON encode + gzip when we already produced this
 //     exact (cycle, fh, tile) tuple in a prior (perhaps interrupted)
 //     run. Saves ~60 s CPU per cycle on full retry.
 //
 // When every tile for an fh is cached, we don't even need to decode
 // the GRIB for that fh — saves the ~150 ms CCSDS decode too. We
-// still call cachedFetchECMWFWind10m to confirm the GRIB is
+// still call weather.CachedFetchECMWFWind10m to confirm the GRIB is
 // retrievable (a hit-from-disk is essentially free), so a future
 // "all-tiles-cached-but-the-raw-cache-was-wiped" scenario still
 // produces a coherent error rather than silently skipping a missing
 // fh.
-func buildOneCycle(ctx context.Context, client *http.Client, m *WeatherModel, cycleT time.Time) (*PublishedCycle, error) {
-	tiles := AllTiles()
+func buildOneCycle(ctx context.Context, client *http.Client, m *weather.WeatherModel, cycleT time.Time) (*PublishedCycle, error) {
+	tiles := weather.AllTiles()
 	cycle := &PublishedCycle{
 		Model:     m.Name,
 		CycleTime: cycleT,
@@ -202,7 +203,7 @@ func buildOneCycle(ctx context.Context, client *http.Client, m *WeatherModel, cy
 }
 
 // fetchAndDecodeForPublish pulls one (cycle, fh) pair through the
-// project-wide raw-bytes disk cache (cachedFetchECMWFWind10m). No
+// project-wide raw-bytes disk cache (weather.CachedFetchECMWFWind10m). No
 // per-fh walkback — the cycle-locked walkback lives in
 // BuildECMWFCycle so a missing fh aborts the whole-cycle attempt
 // cleanly instead of silently mixing runs. Cache means a resumed
@@ -210,24 +211,24 @@ func buildOneCycle(ctx context.Context, client *http.Client, m *WeatherModel, cy
 // weren't yet cached, which matters because ECMWF rate-limits
 // aggressively and a full cycle is ~85 MB of unnecessary traffic on
 // re-fetch.
-func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, cycleT time.Time, fh int) ([]windRecord, error) {
-	grib, err := cachedFetchECMWFWind10m(ctx, client, cycleT, fh)
+func fetchAndDecodeForPublish(ctx context.Context, client *http.Client, cycleT time.Time, fh int) ([]weather.WindRecord, error) {
+	grib, err := weather.CachedFetchECMWFWind10m(ctx, client, cycleT, fh)
 	if err != nil {
 		return nil, err
 	}
-	records, err := parseECMWFWind10m(grib, cycleT, fh)
+	records, err := weather.ParseECMWFWind10m(grib, cycleT, fh)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	return records, nil
 }
 
-// cropPair runs CropWindRecord across a 2-record (10u, 10v) pair so
+// cropPair runs weather.CropWindRecord across a 2-record (10u, 10v) pair so
 // both fields land in the same tile bbox.
-func cropPair(recs []windRecord, bbox [4]float64) []windRecord {
-	out := make([]windRecord, len(recs))
+func cropPair(recs []weather.WindRecord, bbox [4]float64) []weather.WindRecord {
+	out := make([]weather.WindRecord, len(recs))
 	for i, r := range recs {
-		out[i] = CropWindRecord(r, bbox)
+		out[i] = weather.CropWindRecord(r, bbox)
 	}
 	return out
 }
@@ -235,7 +236,7 @@ func cropPair(recs []windRecord, bbox [4]float64) []windRecord {
 // encodeTileBlob serialises one tile's (u, v) record pair as ol-wind
 // JSON and gzips it. Gzipped at maximum compression: the publisher's
 // CPU is cheaper than R2 storage + chartplotter download bytes.
-func encodeTileBlob(recs []windRecord) (TileBlob, error) {
+func encodeTileBlob(recs []weather.WindRecord) (TileBlob, error) {
 	rawJSON, err := json.Marshal(recs)
 	if err != nil {
 		return TileBlob{}, err
@@ -269,8 +270,8 @@ func (pc *PublishedCycle) TileBlobFor(fh int, tileKey string) (TileBlob, bool) {
 // registry so the cmd/wind-publisher CLI can pick a model by name
 // without importing the whole noaa_weather_cache stack. Returns nil
 // for an unknown name.
-func FindWeatherModelForPublish(name string) *WeatherModel {
-	return findModel(name)
+func FindWeatherModelForPublish(name string) *weather.WeatherModel {
+	return weather.FindModel(name)
 }
 
 // WriteManifest serialises a cycle's latest-pointer / per-cycle

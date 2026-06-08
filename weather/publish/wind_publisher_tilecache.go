@@ -1,18 +1,19 @@
-package vc
+package publish
 
 import (
 	"fmt"
+	"github.com/erh/viam-chartplotter/weather"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-// Tile-blob disk cache: the second cache layer behind raw-GRIB.
+// weather.Tile-blob disk cache: the second cache layer behind raw-GRIB.
 // While the raw-GRIB cache prevents re-fetching from ECMWF, this one
 // prevents re-doing the CCSDS decode + crop + JSON encode + gzip
 // when an interrupted publish run is re-attempted.
 //
-// Layout: <ECMWFRawCacheDir>/../tiles/<model>/<cycle>/f<fh>/<tile>.json.gz
+// Layout: <weather.ECMWFRawCacheDir>/../tiles/<model>/<cycle>/f<fh>/<tile>.json.gz
 // Sits next to raw-ecmwf/ so the 60-day cache cleaner in
 // noaa_weather_cache.go's StartCleaner picks it up automatically.
 //
@@ -22,7 +23,7 @@ import (
 // PublishedCycle without ever needing to touch the raw GRIB.
 //
 // All paths route through tileCacheRoot() which derives off
-// ECMWFRawCacheDir; if no raw cache is configured (test / dev
+// weather.ECMWFRawCacheDir; if no raw cache is configured (test / dev
 // only), the tile cache is also disabled and the publisher falls
 // back to recomputing every time. Same "fail open" stance the raw
 // cache uses.
@@ -30,12 +31,12 @@ import (
 // tileCacheRoot returns the directory under which per-(model, cycle,
 // fh, tile) blobs live. Empty string when caching is disabled.
 func tileCacheRoot() string {
-	if ECMWFRawCacheDir == "" {
+	if weather.ECMWFRawCacheDir == "" {
 		return ""
 	}
 	// raw-ecmwf/ and tiles/ are siblings under the noaa-weather
 	// cache root so the cleaner walks both.
-	return filepath.Join(filepath.Dir(ECMWFRawCacheDir), "tiles")
+	return filepath.Join(filepath.Dir(weather.ECMWFRawCacheDir), "tiles")
 }
 
 // tileCachePath builds the deterministic on-disk path for one
@@ -100,7 +101,7 @@ func writeTileBlobCache(model string, cycleT time.Time, fh int, tileKey string, 
 // disk for the rest. Per-tile cache log lines emitted at debug
 // verbosity (one per fh's all-hit case logged at info from the
 // caller) so a full ALL-HIT scan doesn't flood the logs.
-func loadAllTileBlobsForFh(model string, cycleT time.Time, fh int, tiles []Tile) (map[publishKey]TileBlob, bool) {
+func loadAllTileBlobsForFh(model string, cycleT time.Time, fh int, tiles []weather.Tile) (map[publishKey]TileBlob, bool) {
 	out := make(map[publishKey]TileBlob, len(tiles))
 	for _, tile := range tiles {
 		blob, ok := readTileBlobCache(model, cycleT, fh, tile.Key)

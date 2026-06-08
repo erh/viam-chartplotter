@@ -26,8 +26,9 @@ import (
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
-	"github.com/erh/viam-chartplotter/mapdata/weather"
 	"github.com/erh/viam-chartplotter/render"
+	"github.com/erh/viam-chartplotter/weather"
+	"github.com/erh/viam-chartplotter/weather/store"
 )
 
 //go:embed dist
@@ -298,9 +299,9 @@ func StartChartplotterServer(
 			// same database (populated by `mapsync noaa-ingest`), instead of
 			// parsing .000 files off disk at request time.
 			encRenderer.SetNOAACollection(noaa.OpenCollection(db))
-			weatherColl = weather.OpenCollection(db)
+			weatherColl = store.OpenCollection(db)
 			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",
-				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, weather.CollWeather)
+				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, store.CollWeather)
 		}
 	} else {
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
@@ -312,14 +313,14 @@ func StartChartplotterServer(
 	// the frontend wind layer (ol-wind) consumes. Disk cache lives under
 	// <root>/noaa-weather/.
 	weatherDir := filepath.Join(root, "noaa-weather")
-	weatherCache, err := NewWeatherCache(weatherDir, logger.Sublogger("weather"))
+	weatherCache, err := weather.NewWeatherCache(weatherDir, logger.Sublogger("weather"))
 	if err != nil {
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
 		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
 		if weatherColl != nil {
 			weatherCache.SetWeatherCollection(weatherColl)
-			logger.Infof("weather: serving from Mongo collection %q (disk/upstream fallback)", weather.CollWeather)
+			logger.Infof("weather: serving from Mongo collection %q (disk/upstream fallback)", store.CollWeather)
 		}
 		weatherCache.Register(mux)
 		// Background prewarm of every model's forecast hours so the
@@ -404,7 +405,7 @@ type chartplotterResource struct {
 
 	name           resource.Name
 	server         *http.Server
-	weatherCache   *WeatherCache
+	weatherCache   *weather.WeatherCache
 	tracerShutdown func(context.Context) error
 }
 

@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"encoding/json"
@@ -98,7 +98,7 @@ func TestExtremaLatLonGrid(t *testing.T) {
 			data[iy*nx+ix] = base + peak + trough
 		}
 	}
-	rec := &windRecord{
+	rec := &WindRecord{
 		Header: windHeader{Nx: nx, Ny: ny, Lo1: 0, La1: 25, Dx: 1, Dy: 1},
 		Data:   data,
 	}
@@ -143,7 +143,7 @@ func TestContourLatLonGridShape(t *testing.T) {
 			data[iy*nx+ix] = 99000 + frac*2000 // 990..1010 hPa
 		}
 	}
-	rec := &windRecord{
+	rec := &WindRecord{
 		Header: windHeader{
 			Nx:  nx,
 			Ny:  ny,
@@ -202,7 +202,7 @@ func TestContourLatLonGridDateline(t *testing.T) {
 			data[iy*nx+ix] = row
 		}
 	}
-	rec := &windRecord{
+	rec := &WindRecord{
 		Header: windHeader{Nx: nx, Ny: ny, Lo1: lo1, La1: 5, Dx: dx, Dy: 0.25},
 		Data:   data,
 	}
@@ -231,7 +231,7 @@ func TestContourLatLonGridDateline(t *testing.T) {
 // through decodeGFSIsobars (via contourLatLonGrid + json.Marshal) and
 // confirms the resulting JSON parses back as a FeatureCollection.
 func TestGeoJSONMarshalShape(t *testing.T) {
-	rec := &windRecord{
+	rec := &WindRecord{
 		Header: windHeader{Nx: 3, Ny: 3, Lo1: 0, La1: 2, Dx: 1, Dy: 1, RefTime: "2024-01-01T00:00:00.000Z", ForecastTime: 6},
 		Data:   []float64{99000, 99500, 100000, 99500, 100000, 100500, 100000, 100500, 101000},
 	}

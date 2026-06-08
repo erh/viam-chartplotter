@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"context"
@@ -72,7 +72,7 @@ func gfsIsobarsModel() *WeatherModel {
 		PublishLagH: 4,
 	}
 	m.FetchBytes = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]byte, error) {
-		body, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsGFSPRMSLURLTemplate, cc, fh, date, cc)
@@ -124,7 +124,7 @@ func decodeGFSIsobars(grib []byte, runTime time.Time, fh int) ([]byte, error) {
 // differs from the window's opposite extreme by at least
 // extremumMinOffsetPa, so we don't label every micro-perturbation in a
 // flat pressure plateau. Emits one Point feature per extremum.
-func extremaLatLonGrid(rec *windRecord) []geoJSONFeature {
+func extremaLatLonGrid(rec *WindRecord) []geoJSONFeature {
 	h := rec.Header
 	nx, ny := h.Nx, h.Ny
 	if nx < 2*extremumRadius+1 || ny < 2*extremumRadius+1 {
@@ -264,7 +264,7 @@ type isobarMeta struct {
 // Grid layout: data is stored row-major north-to-south (GFS scan mode
 // 0). Index `iy*Nx + ix` gives lat=La1 - iy*Dy, lon=Lo1 + ix*Dx (with
 // Lo1 wrapping at 360°). PRMSL values are in Pa.
-func contourLatLonGrid(rec *windRecord) []geoJSONFeature {
+func contourLatLonGrid(rec *WindRecord) []geoJSONFeature {
 	h := rec.Header
 	nx, ny := h.Nx, h.Ny
 	if nx < 2 || ny < 2 || len(rec.Data) < nx*ny {

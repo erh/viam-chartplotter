@@ -27,7 +27,8 @@ import (
 	"sort"
 	"time"
 
-	vc "github.com/erh/viam-chartplotter"
+	"github.com/erh/viam-chartplotter/weather"
+	"github.com/erh/viam-chartplotter/weather/publish"
 )
 
 func main() {
@@ -74,7 +75,7 @@ func runPublish() {
 			}
 			dir = filepath.Join(base, "viam-chartplotter-wind-publisher", "raw-ecmwf")
 		}
-		if err := vc.SetECMWFRawCacheDir(dir); err != nil {
+		if err := weather.SetECMWFRawCacheDir(dir); err != nil {
 			log.Fatalf("cache dir: %v", err)
 		}
 		log.Printf("raw-grib cache: %s", dir)
@@ -87,7 +88,7 @@ func runPublish() {
 		os.Exit(2)
 	}
 	modelName := args[0]
-	m := vc.FindWeatherModelForPublish(modelName)
+	m := publish.FindWeatherModelForPublish(modelName)
 	if m == nil {
 		fmt.Fprintf(os.Stderr, "unknown weather model: %s\n", modelName)
 		os.Exit(2)
@@ -98,7 +99,7 @@ func runPublish() {
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	t0 := time.Now()
-	cycle, err := vc.BuildECMWFCycle(ctx, client, m)
+	cycle, err := publish.BuildECMWFCycle(ctx, client, m)
 	if err != nil {
 		log.Fatalf("build cycle: %v", err)
 	}
@@ -107,7 +108,7 @@ func runPublish() {
 		len(cycle.FHs), len(cycle.Tiles), len(cycle.FHs)*len(cycle.Tiles))
 
 	if *r2Flag {
-		up, err := vc.NewR2UploaderFromEnv()
+		up, err := publish.NewR2UploaderFromEnv()
 		if err != nil {
 			log.Fatalf("r2: %v", err)
 		}
@@ -128,7 +129,7 @@ func runPublish() {
 // so a dry-run produces the same tree we'd otherwise push to R2 — same
 // keys, same content. Letting the user diff two runs (e.g. "did
 // tweaking the crop bbox change anything?") without standing up R2.
-func writeCycleToDisk(root string, cycle *vc.PublishedCycle) error {
+func writeCycleToDisk(root string, cycle *publish.PublishedCycle) error {
 	cycleStr := cycle.CycleTime.UTC().Format("20060102T15")
 	cycleDir := filepath.Join(root, "wind", cycle.Model, cycleStr)
 	if err := os.MkdirAll(cycleDir, 0o755); err != nil {
@@ -157,11 +158,11 @@ func writeCycleToDisk(root string, cycle *vc.PublishedCycle) error {
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
 		return err
 	}
-	if err := vc.WriteManifest(manifestPath, cycle); err != nil {
+	if err := publish.WriteManifest(manifestPath, cycle); err != nil {
 		return err
 	}
 	latestPath := filepath.Join(root, "wind", cycle.Model, "latest.json")
-	if err := vc.WriteManifest(latestPath, cycle); err != nil {
+	if err := publish.WriteManifest(latestPath, cycle); err != nil {
 		return err
 	}
 	log.Printf("dry-run: wrote %d tile blobs (%.1f MB total gzipped)",
@@ -170,7 +171,7 @@ func writeCycleToDisk(root string, cycle *vc.PublishedCycle) error {
 }
 
 func runTiles() {
-	tiles := vc.AllTiles()
+	tiles := weather.AllTiles()
 	sort.Slice(tiles, func(i, j int) bool {
 		if tiles[i].Row != tiles[j].Row {
 			return tiles[i].Row < tiles[j].Row

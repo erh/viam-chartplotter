@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 
-	"github.com/erh/viam-chartplotter/mapdata/weather"
+	"github.com/erh/viam-chartplotter/weather/store"
 )
 
 // WeatherSync Viam resource: decodes weather forecasts (GRIB → ol-wind JSON /
@@ -119,8 +119,8 @@ func newWeatherSync(ctx context.Context, _ resource.Dependencies, conf resource.
 	if err := client.Ping(connectCtx, nil); err != nil {
 		return nil, fmt.Errorf("weathersync: mongo ping: %w", err)
 	}
-	coll := weather.OpenCollection(client.Database(cfg.db()))
-	if err := weather.EnsureIndexes(ctx, coll); err != nil {
+	coll := store.OpenCollection(client.Database(cfg.db()))
+	if err := store.EnsureIndexes(ctx, coll); err != nil {
 		return nil, fmt.Errorf("weathersync: ensure indexes: %w", err)
 	}
 
@@ -191,7 +191,7 @@ func SyncWeatherOnce(ctx context.Context, cache *WeatherCache, coll *mongo.Colle
 		if m.Disabled || (m.Fetch == nil && m.FetchBytes == nil) || !want(m.Name) {
 			continue // WMS-only / not-yet-decodable / filtered-out models
 		}
-		cycle := mostRecentCycle(now.Add(-time.Duration(m.PublishLagH)*time.Hour), m.CycleHours).Format("20060102T15")
+		cycle := MostRecentCycle(now.Add(-time.Duration(m.PublishLagH)*time.Hour), m.CycleHours).Format("20060102T15")
 		step := m.StepFh
 		if step < 1 {
 			step = 1
@@ -222,7 +222,7 @@ func SyncWeatherOnce(ctx context.Context, cache *WeatherCache, coll *mongo.Colle
 				}
 				continue
 			}
-			if err := weather.Upsert(ctx, coll, weather.Grid{
+			if err := store.Upsert(ctx, coll, store.Grid{
 				Model: m.Name, FH: fh, Kind: m.Kind, Cycle: cycle, UpdatedAt: now.Unix(), Gzip: gz, Payload: body,
 			}); err != nil {
 				if firstErr == nil {

@@ -7,6 +7,8 @@ import (
 	"go.viam.com/rdk/services/navigation"
 
 	"github.com/erh/viam-chartplotter"
+	"github.com/erh/viam-chartplotter/weather"
+	"github.com/erh/viam-chartplotter/weather/publish"
 )
 
 func main() {
@@ -16,13 +18,13 @@ func main() {
 		// One designated machine in the fleet runs this — pulls
 		// ECMWF Open Data, crops into tiles, publishes to R2. Every
 		// other chartplotter reads tiles from R2.
-		resource.APIModel{generic.API, vc.WindPublisherModel},
+		resource.APIModel{generic.API, publish.WindPublisherModel},
 		// datasync keeps the noaa collection current (periodic catalog
 		// refresh + ENC sync→ingest of every cell worldwide); weathersync
 		// populates the weather collection from GRIB. Both write to the
 		// shared Mongo the chartplotter / tileserver read from.
 		resource.APIModel{generic.API, vc.DataSyncModel},
-		resource.APIModel{generic.API, vc.WeatherSyncModel},
+		resource.APIModel{generic.API, weather.WeatherSyncModel},
 	)
 
 }

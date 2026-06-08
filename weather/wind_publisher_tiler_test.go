@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"math"
@@ -118,7 +118,7 @@ func TestTileForBboxResolvesCenter(t *testing.T) {
 	}
 }
 
-// TestCropPreservesValues builds a synthetic global windRecord whose
+// TestCropPreservesValues builds a synthetic global WindRecord whose
 // values encode (row, col) and verifies CropWindRecord pulls back the
 // same cells (i.e. no off-by-one on the row/col mapping). Uses
 // ECMWF-style origin (Lo1=180, La1=90) so the longitude-wrap math
@@ -138,7 +138,7 @@ func TestCropPreservesValues(t *testing.T) {
 			data[j*nx+i] = float64(j*10_000 + i) // unique value per cell
 		}
 	}
-	src := windRecord{
+	src := WindRecord{
 		Header: windHeader{
 			Nx: nx, Ny: ny,
 			Lo1: 180, La1: 90,

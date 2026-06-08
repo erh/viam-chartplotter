@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"bufio"
@@ -31,7 +31,7 @@ import (
 // on the server, and the wind-publisher CLI / Viam resource set it
 // via SetECMWFRawCacheDir. The on-demand model.Fetch and the
 // publisher's fetchAndDecodeForPublish both go through
-// cachedFetchECMWFWind10m, which is cache-first.
+// CachedFetchECMWFWind10m, which is cache-first.
 var ECMWFRawCacheDir string
 
 // SetECMWFRawCacheDir lets non-server callers wire up the raw cache
@@ -61,7 +61,7 @@ func ecmwfRawCachePath(runTime time.Time, fh int) string {
 		fmt.Sprintf("ecmwf-%s-f%03d.grib2", runTime.UTC().Format("20060102T15"), fh))
 }
 
-// cachedFetchECMWFWind10m is the cache-first entry point every caller
+// CachedFetchECMWFWind10m is the cache-first entry point every caller
 // should use. Checks the disk cache, falls back to fetchECMWFWind10m
 // on miss, writes back to the cache on success. Write failures are
 // non-fatal — caching is best-effort, the decoded data is what
@@ -71,7 +71,7 @@ func ecmwfRawCachePath(runTime time.Time, fh int) string {
 // at a glance: a healthy publisher resume after a crash should show
 // HIT for every fh it already processed and MISS only for the new
 // ones.
-func cachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
+func CachedFetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error) {
 	cycleStr := runTime.UTC().Format("20060102T15")
 	path := ecmwfRawCachePath(runTime, fh)
 	if path == "" {
@@ -136,12 +136,12 @@ type WeatherModel struct {
 	// May return ErrUnsupportedPacking — the cache layer logs that
 	// distinctly so a deploy can tell "upstream missing" from "decoder
 	// missing".
-	Fetch func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error)
+	Fetch func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error)
 	// FetchBytes is the alternative path for models whose on-the-wire
 	// shape isn't the ol-wind 2-record JSON — currently isobars (GeoJSON
 	// LineString FeatureCollection) and (eventually) lightning strokes.
 	// When set, the cache writes the returned bytes straight to disk
-	// instead of json-encoding []windRecord. Exactly one of Fetch /
+	// instead of json-encoding []WindRecord. Exactly one of Fetch /
 	// FetchBytes must be set on an enabled model.
 	FetchBytes func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]byte, error)
 }
@@ -182,8 +182,8 @@ var allModels = []*WeatherModel{
 	// one-line append once a working URL is confirmed.
 }
 
-// findModel does an O(n) lookup — registry is fixed small (~10 entries).
-func findModel(name string) *WeatherModel {
+// FindModel does an O(n) lookup — registry is fixed small (~10 entries).
+func FindModel(name string) *WeatherModel {
 	for _, m := range allModels {
 		if m.Name == name {
 			return m
@@ -200,10 +200,10 @@ func listModels() []*WeatherModel { return allModels }
 // Common helpers
 // ----------------------------------------------------------------------
 
-// walkLatestCycle walks back through `m.CycleHours` (every 24h ÷ N
+// WalkLatestCycle walks back through `m.CycleHours` (every 24h ÷ N
 // hours apart) until `fetch` returns a non-error body for that
 // candidate run. Returns the body + the run time we hit.
-func walkLatestCycle(
+func WalkLatestCycle(
 	ctx context.Context,
 	m *WeatherModel,
 	fh int,
@@ -214,22 +214,22 @@ func walkLatestCycle(
 	}
 	now := time.Now().UTC().Add(-time.Duration(m.PublishLagH) * time.Hour)
 	// Start at the most recent cycle that should be published.
-	candidate := mostRecentCycle(now, m.CycleHours)
+	candidate := MostRecentCycle(now, m.CycleHours)
 	var lastErr error
 	for i := 0; i < 4; i++ {
 		start := time.Now()
 		body, err := fetch(ctx, candidate)
 		if err == nil {
-			log.Printf("weather: %s walkLatestCycle hit cycle=%s fh=%d attempt=%d dur=%s bytes=%d",
+			log.Printf("weather: %s WalkLatestCycle hit cycle=%s fh=%d attempt=%d dur=%s bytes=%d",
 				m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), len(body))
 			return body, candidate, nil
 		}
-		log.Printf("weather: %s walkLatestCycle MISS cycle=%s fh=%d attempt=%d dur=%s err=%v",
+		log.Printf("weather: %s WalkLatestCycle MISS cycle=%s fh=%d attempt=%d dur=%s err=%v",
 			m.Name, candidate.Format("20060102T15"), fh, i, time.Since(start), err)
 		lastErr = err
 		// Step back to the prior cycle. CycleHours are sorted; find the
 		// previous slot, jumping a day if we wrap.
-		candidate = previousCycle(candidate, m.CycleHours)
+		candidate = PreviousCycle(candidate, m.CycleHours)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no run available for %s in last 24h", m.Name)
@@ -237,7 +237,7 @@ func walkLatestCycle(
 	return nil, time.Time{}, lastErr
 }
 
-func mostRecentCycle(now time.Time, cycles []int) time.Time {
+func MostRecentCycle(now time.Time, cycles []int) time.Time {
 	h := now.Hour()
 	pick := cycles[0]
 	for _, c := range cycles {
@@ -253,7 +253,7 @@ func mostRecentCycle(now time.Time, cycles []int) time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), pick, 0, 0, 0, time.UTC)
 }
 
-func previousCycle(t time.Time, cycles []int) time.Time {
+func PreviousCycle(t time.Time, cycles []int) time.Time {
 	h := t.Hour()
 	for i := len(cycles) - 1; i >= 0; i-- {
 		if cycles[i] < h {
@@ -266,7 +266,7 @@ func previousCycle(t time.Time, cycles []int) time.Time {
 
 // fetchURL is the standard GET with the cache's HTTP client + context.
 // Returns the body or an error including the HTTP status so the
-// walkLatestCycle backoff prints something useful.
+// WalkLatestCycle backoff prints something useful.
 func fetchURL(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -311,7 +311,7 @@ func fetchURLAnyContent(ctx context.Context, client *http.Client, url string) ([
 }
 
 // decodeRegularLLWind walks every GRIB2 message in `grib` and decodes
-// the first message whose product matches `want` into a windRecord.
+// the first message whose product matches `want` into a WindRecord.
 // Used by every regular_ll model (GFS, ICON-EU, …) — they only differ
 // in which (paramCat, paramNum) they ask for. Returns the first
 // matching record or nil; pass twice with different filters to pull
@@ -321,7 +321,7 @@ func decodeRegularLLMessage(
 	runTime time.Time,
 	fh int,
 	want func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool,
-) (*windRecord, error) {
+) (*WindRecord, error) {
 	for off := 0; off < len(grib); {
 		end, rec, err := parseGRIBMessage(grib[off:], runTime, fh, want)
 		if err != nil {
@@ -354,8 +354,8 @@ func gfsWindModel() *WeatherModel {
 		StepFh:      3,
 		PublishLagH: 4,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
-		body, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsGFSURLTemplate, cc, fh, date, cc)
@@ -406,8 +406,8 @@ func hrrrWindModel() *WeatherModel {
 		StepFh:      1,
 		PublishLagH: 2,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
-		body, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+		body, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("20060102")
 			cc := t.Hour()
 			url := fmt.Sprintf(nomadsHRRRURLTemplate, cc, fh, date)
@@ -424,7 +424,7 @@ func hrrrWindModel() *WeatherModel {
 // decodeHRRRWind walks the HRRR GRIB2, parses UGRD and VGRD on the LC
 // grid, reprojects each onto the regular lat/lon CONUS subgrid, and
 // emits the ol-wind 2-record JSON shape.
-func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]windRecord, error) {
+func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]WindRecord, error) {
 	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
 		return paramCat == gribParamCatMomentum &&
 			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
@@ -520,7 +520,7 @@ func decodeHRRRWind(grib []byte, runTime time.Time, fh int) ([]windRecord, error
 	uHdr := hdr
 	vHdr := hdr
 	vHdr.ParameterNumber = gribParamVGRD
-	return []windRecord{
+	return []WindRecord{
 		{Header: uHdr, Data: uLL},
 		{Header: vHdr, Data: vLL},
 	}, nil
@@ -546,13 +546,13 @@ func iconEUWindModel() *WeatherModel {
 		StepFh:      1,
 		PublishLagH: 4,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
 		// ICON-EU ships U_10M and V_10M as two independent .grib2.bz2
 		// files — we fetch them in series (cycle walk-back uses the
 		// U_10M file as the probe, and assumes V_10M ships at the same
 		// time).
 		var bodyU, bodyV []byte
-		_, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+		_, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
 			date := t.Format("2006010215")
 			cc := t.Hour()
 			urlU := fmt.Sprintf(iconEUURLTemplate, cc, "u_10m", date[:8], cc, fh, "U_10M")
@@ -606,7 +606,7 @@ func iconEUWindModel() *WeatherModel {
 		vRec.Header.ParameterNumber = gribParamVGRD
 		vRec.Header.Surface1Type = gribSurfaceHeightAboveG
 		vRec.Header.Surface1Value = 10
-		return []windRecord{*uRec, *vRec}, nil
+		return []WindRecord{*uRec, *vRec}, nil
 	}
 	return m
 }
@@ -639,7 +639,7 @@ func waveModelFor(name, displayName, domain string, cfg waveDatasetConfig) *Weat
 		StepFh:      1,
 		PublishLagH: 5,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]windRecord, error) {
+	m.Fetch = func(ctx context.Context, client *http.Client, _ time.Time, fh int) ([]WindRecord, error) {
 		now := time.Now().UTC().Truncate(time.Hour)
 		gfsCycle := now.Add(-time.Duration(gfsPublishLagHours) * time.Hour)
 		gfsCycle = time.Date(gfsCycle.Year(), gfsCycle.Month(), gfsCycle.Day(),
@@ -737,21 +737,21 @@ func ecmwfWindModel() *WeatherModel {
 		MaxFh:  144,
 		StepFh: 3,
 		// ECMWF Open Data lands ~7 h after the cycle hour (longer than
-		// NOMADS' GFS); back off accordingly so walkLatestCycle starts
+		// NOMADS' GFS); back off accordingly so WalkLatestCycle starts
 		// at a run that's actually published.
 		PublishLagH: 7,
 	}
-	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]windRecord, error) {
-		// cachedFetchECMWFWind10m handles the raw-bytes disk cache
+	m.Fetch = func(ctx context.Context, client *http.Client, runTime time.Time, fh int) ([]WindRecord, error) {
+		// CachedFetchECMWFWind10m handles the raw-bytes disk cache
 		// (project-wide rule: every upstream fetch goes through a
 		// cache). On a cache hit, ECMWF isn't touched at all.
-		grib, runT, err := walkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
-			return cachedFetchECMWFWind10m(ctx, client, t, fh)
+		grib, runT, err := WalkLatestCycle(ctx, m, fh, func(ctx context.Context, t time.Time) ([]byte, error) {
+			return CachedFetchECMWFWind10m(ctx, client, t, fh)
 		})
 		if err != nil {
 			return nil, err
 		}
-		return parseECMWFWind10m(grib, runT, fh)
+		return ParseECMWFWind10m(grib, runT, fh)
 	}
 	return m
 }
@@ -785,7 +785,7 @@ func fetchECMWFWind10m(ctx context.Context, client *http.Client, runTime time.Ti
 		return nil, fmt.Errorf("ECMWF 10v range: %w", err)
 	}
 
-	// Concatenate so parseECMWFWind10m can walk both messages in a
+	// Concatenate so ParseECMWFWind10m can walk both messages in a
 	// single pass — both start with the GRIB magic so the walker's
 	// position-relative parsing works unchanged.
 	return append(uMsg, vMsg...), nil
@@ -885,19 +885,19 @@ func ecmwfGetRange(ctx context.Context, client *http.Client, url string, offset,
 	return body, nil
 }
 
-// parseECMWFWind10m walks the (10u, 10v) concatenated GRIB2 buffer and
+// ParseECMWFWind10m walks the (10u, 10v) concatenated GRIB2 buffer and
 // emits the ol-wind 2-record JSON shape. ECMWF stamps centre=98 and
 // parameter category=2 / numbers 2 (UGRD) and 3 (VGRD) so we can use
 // the same wantWind filter as GFS, but we re-stamp the headers after
 // decode just in case a future revision renames the params.
-func parseECMWFWind10m(grib []byte, runTime time.Time, fh int) ([]windRecord, error) {
+func ParseECMWFWind10m(grib []byte, runTime time.Time, fh int) ([]WindRecord, error) {
 	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
 		return paramCat == gribParamCatMomentum &&
 			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
 			surfType == gribSurfaceHeightAboveG &&
 			surfValue == 10
 	}
-	var u, v *windRecord
+	var u, v *WindRecord
 	for off := 0; off < len(grib); {
 		end, rec, err := parseGRIBMessage(grib[off:], runTime, fh, wantWind)
 		if err != nil {
@@ -919,7 +919,7 @@ func parseECMWFWind10m(grib []byte, runTime time.Time, fh int) ([]windRecord, er
 	if u == nil || v == nil {
 		return nil, fmt.Errorf("ECMWF: missing 10u/10v (u=%v v=%v)", u != nil, v != nil)
 	}
-	return []windRecord{*u, *v}, nil
+	return []WindRecord{*u, *v}, nil
 }
 
 func iconGlobalWindStub() *WeatherModel {

@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"bytes"
@@ -25,7 +25,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/erh/viam-chartplotter/mapdata/weather"
+	"github.com/erh/viam-chartplotter/weather/store"
 )
 
 // WeatherCache fetches NOAA GFS GRIB2 data from NOMADS, parses out 10 m
@@ -112,6 +112,14 @@ var cdnServedModels = map[string]bool{
 
 func isCDNServedModel(name string) bool { return cdnServedModels[name] }
 
+// DefaultWindCDNBaseURL is the public r2.dev URL the viam-chartplotter-ecmwf
+// bucket is exposed at. Every chartplotter in the fleet defaults to fetching
+// ECMWF wind tiles from here so only the one machine running the wind-publisher
+// hits ECMWF Open Data, not 10K chartplotters. The serve /config handler reports
+// it to the frontend; the publisher (weather/publish) uploads to the matching
+// bucket. Override via the `wind_cdn_base_url` config attribute.
+const DefaultWindCDNBaseURL = "https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev"
+
 // SetWindCDNBaseURL configures the public CDN base for tile-published
 // wind data. Called by the module's Register-time wiring; the cache
 // holds it just so the frontend can read it back via
@@ -172,7 +180,7 @@ func (wc *WeatherCache) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-weather/config", wc.handleConfig)
 	// Legacy alias — pre-multi-model code path. Cheap to keep around.
 	mux.HandleFunc("/noaa-weather/gfs/latest.json", func(w http.ResponseWriter, r *http.Request) {
-		wc.serveModel(w, r, findModel("gfs"))
+		wc.serveModel(w, r, FindModel("gfs"))
 	})
 }
 
@@ -223,7 +231,7 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expected /noaa-weather/data/{model}/latest.json", http.StatusNotFound)
 		return
 	}
-	m := findModel(parts[0])
+	m := FindModel(parts[0])
 	if m == nil {
 		http.Error(w, "unknown weather model: "+parts[0], http.StatusNotFound)
 		return
@@ -333,7 +341,7 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 	// serve the stored payload directly — no disk read, no GRIB fetch. This is
 	// the render/tile-server fast path. Misses fall through to disk/upstream.
 	if wc.mongoColl != nil {
-		if g, ok, err := weather.Get(r.Context(), wc.mongoColl, m.Name, fh); err == nil && ok && len(g.Payload) > 0 {
+		if g, ok, err := store.Get(r.Context(), wc.mongoColl, m.Name, fh); err == nil && ok && len(g.Payload) > 0 {
 			wc.hits.Add(1)
 			w.Header().Set("X-Cache", "MONGO")
 			w.Header().Set("Content-Type", "application/json")
@@ -475,10 +483,10 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int)
 		return nil
 	}
 
-	// Models split into two output shapes: ol-wind windRecord JSON for
+	// Models split into two output shapes: ol-wind WindRecord JSON for
 	// the particle layers (wind / waves), and pre-serialised bytes
 	// (GeoJSON for isobars, …) for the vector overlays. FetchBytes wins
-	// when set so a model can short-circuit the windRecord encoder.
+	// when set so a model can short-circuit the WindRecord encoder.
 	if m.FetchBytes != nil {
 		body, err := wc.spanFetchBytes(ctx, m, fh)
 		if err != nil {
@@ -524,7 +532,7 @@ func (wc *WeatherCache) refreshNow(ctx context.Context, m *WeatherModel, fh int)
 // decode) so the trace shows how much of refreshNow is the upstream
 // fetch vs. local I/O. This is usually the bulk of slow refreshes —
 // NOMADS commonly takes 30-60 s for a single GFS hour.
-func (wc *WeatherCache) spanFetch(ctx context.Context, m *WeatherModel, fh int) ([]windRecord, error) {
+func (wc *WeatherCache) spanFetch(ctx context.Context, m *WeatherModel, fh int) ([]WindRecord, error) {
 	ctx, span := tracer().Start(ctx, "weather.fetch",
 		trace.WithAttributes(
 			attribute.String("weather.model", m.Name),
@@ -543,7 +551,7 @@ func (wc *WeatherCache) spanFetch(ctx context.Context, m *WeatherModel, fh int) 
 // spanEncode wraps the JSON encode + atomic rename. Encoding a single
 // GFS hour is ~35 MB of JSON, dominated by float-to-string conversion
 // — typically 100-300 ms.
-func (wc *WeatherCache) spanEncode(ctx context.Context, m *WeatherModel, fh int, records []windRecord) error {
+func (wc *WeatherCache) spanEncode(ctx context.Context, m *WeatherModel, fh int, records []WindRecord) error {
 	_, span := tracer().Start(ctx, "weather.encode",
 		trace.WithAttributes(
 			attribute.String("weather.model", m.Name),
@@ -581,7 +589,7 @@ func (wc *WeatherCache) spanEncode(ctx context.Context, m *WeatherModel, fh int,
 
 // spanFetchBytes mirrors spanFetch but for the FetchBytes path used by
 // vector overlays (isobars). The model returns already-serialised bytes
-// (GeoJSON) so the cache layer doesn't go through windRecord encoding.
+// (GeoJSON) so the cache layer doesn't go through WindRecord encoding.
 func (wc *WeatherCache) spanFetchBytes(ctx context.Context, m *WeatherModel, fh int) ([]byte, error) {
 	ctx, span := tracer().Start(ctx, "weather.fetch",
 		trace.WithAttributes(
@@ -888,7 +896,7 @@ type windHeader struct {
 	ScanMode                   int     `json:"scanMode"`
 }
 
-type windRecord struct {
+type WindRecord struct {
 	Header windHeader `json:"header"`
 	Data   []float64  `json:"data"`
 }
@@ -919,14 +927,14 @@ const (
 // matching 10 m UGRD/VGRD records, and emits the ol-wind JSON shape.
 // `forecastHour` is stamped onto each record's header so the frontend
 // can show which forecast hour is currently displayed.
-func parseGFSWind10m(grib []byte, runTime time.Time, forecastHour int) ([]windRecord, error) {
+func parseGFSWind10m(grib []byte, runTime time.Time, forecastHour int) ([]WindRecord, error) {
 	wantWind := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
 		return paramCat == gribParamCatMomentum &&
 			(paramNum == gribParamUGRD || paramNum == gribParamVGRD) &&
 			surfType == gribSurfaceHeightAboveG &&
 			surfValue == 10
 	}
-	var ugrd, vgrd *windRecord
+	var ugrd, vgrd *WindRecord
 	for off := 0; off < len(grib); {
 		end, rec, err := parseGRIBMessage(grib[off:], runTime, forecastHour, wantWind)
 		if err != nil {
@@ -954,7 +962,7 @@ func parseGFSWind10m(grib []byte, runTime time.Time, forecastHour int) ([]windRe
 	if ugrd == nil || vgrd == nil {
 		return nil, fmt.Errorf("missing UGRD or VGRD@10m (ugrd=%v vgrd=%v)", ugrd != nil, vgrd != nil)
 	}
-	return []windRecord{*ugrd, *vgrd}, nil
+	return []WindRecord{*ugrd, *vgrd}, nil
 }
 
 // parseGFSWaveSurface walks every message in a GFSWAVE file, picks out
@@ -970,13 +978,13 @@ func parseGFSWind10m(grib []byte, runTime time.Time, forecastHour int) ([]windRe
 // waves are propagating (180° opposite of DIRPW), with magnitude equal
 // to wave height in metres — so wave height drives the colour scale and
 // wave direction drives the particle flow.
-func parseGFSWaveSurface(grib []byte, runTime time.Time, forecastHour int) ([]windRecord, error) {
+func parseGFSWaveSurface(grib []byte, runTime time.Time, forecastHour int) ([]WindRecord, error) {
 	wantWave := func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool {
 		return discipline == gribDisciplineOceanography &&
 			paramCat == gribParamCatWaves &&
 			(paramNum == gribParamHTSGW || paramNum == gribParamDIRPW)
 	}
-	var hRec, dRec *windRecord
+	var hRec, dRec *WindRecord
 	for off := 0; off < len(grib); {
 		end, rec, err := parseGRIBMessage(grib[off:], runTime, forecastHour, wantWave)
 		if err != nil {
@@ -1030,7 +1038,7 @@ func parseGFSWaveSurface(grib []byte, runTime time.Time, forecastHour int) ([]wi
 	uHdr.ParameterUnit = "m" // wave height in metres
 	vHdr := uHdr
 	vHdr.ParameterNumber = gribParamVGRD
-	return []windRecord{
+	return []WindRecord{
 		{Header: uHdr, Data: uData},
 		{Header: vHdr, Data: vData},
 	}, nil
@@ -1045,7 +1053,7 @@ func parseGFSWaveSurface(grib []byte, runTime time.Time, forecastHour int) ([]wi
 // pay the data-unpacking cost. Returns true to keep, false to skip.
 type gribMessageFilter func(discipline, paramCat, paramNum, surfType int, surfValue float64) bool
 
-func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMessageFilter) (int, *windRecord, error) {
+func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMessageFilter) (int, *WindRecord, error) {
 	if len(b) < 16 || string(b[:4]) != "GRIB" {
 		return 0, nil, fmt.Errorf("missing GRIB magic")
 	}
@@ -1250,7 +1258,7 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 		return 0, nil, fmt.Errorf("unpack template %d: %w", dataTemplate, err)
 	}
 
-	rec := &windRecord{
+	rec := &WindRecord{
 		Header: windHeader{
 			Discipline:                 discipline,
 			Center:                     center,

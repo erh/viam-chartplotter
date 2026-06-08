@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"bytes"

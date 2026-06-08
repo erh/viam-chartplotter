@@ -3,7 +3,7 @@
 // (weathersync) decodes GRIB and Upserts the already-serialised payload here;
 // the serve side reads it back with Get, so the payload is opaque to this
 // package and the frontend's data shape is unchanged.
-package weather
+package store
 
 import (
 	"context"

@@ -1,8 +1,9 @@
-package vc
+package publish
 
 import (
 	"context"
 	"fmt"
+	"github.com/erh/viam-chartplotter/weather"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,15 +34,6 @@ var WindPublisherModel = resource.ModelNamespace("erh").WithFamily("viam-chartpl
 // still override via the `r2_bucket` config attribute if they're
 // running a staging fleet or want to sandbox a publisher's output.
 const DefaultECMWFR2Bucket = "viam-chartplotter-ecmwf"
-
-// DefaultWindCDNBaseURL is the public r2.dev URL the
-// viam-chartplotter-ecmwf bucket is exposed at. Every chartplotter
-// in the fleet defaults to fetching ECMWF tiles from here so we
-// only hit ECMWF Open Data from the one machine running the
-// wind-publisher component, not from 10K chartplotters. Override
-// via the `wind_cdn_base_url` chartplotter config attribute when
-// running against a staging bucket or a custom-domain mirror.
-const DefaultWindCDNBaseURL = "https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev"
 
 func init() {
 	resource.RegisterComponent(
@@ -158,13 +150,13 @@ func newWindPublisher(ctx context.Context, deps resource.Dependencies, conf reso
 	// already set it. On a machine that also runs the chartplotter
 	// component, NewWeatherCache will have set this; on a
 	// publisher-only machine this is the only place that does.
-	if ECMWFRawCacheDir == "" {
+	if weather.ECMWFRawCacheDir == "" {
 		base, derr := os.UserCacheDir()
 		if derr != nil {
 			base = os.TempDir()
 		}
 		dir := filepath.Join(base, "viam-chartplotter-wind-publisher", "raw-ecmwf")
-		if serr := SetECMWFRawCacheDir(dir); serr != nil {
+		if serr := weather.SetECMWFRawCacheDir(dir); serr != nil {
 			logger.Warnf("publisher: raw-grib cache disabled: %v", serr)
 		} else {
 			logger.Infof("publisher: raw-grib cache: %s", dir)
@@ -278,11 +270,11 @@ func (p *windPublisher) maybePublishOne(ctx context.Context, cfg *WindPublisherC
 		return
 	}
 
-	// What cycle should be available right now? walkLatestCycle uses
+	// What cycle should be available right now? weather.WalkLatestCycle uses
 	// the same PublishLagH-derived logic; querying it here avoids
 	// hard-coding cycle timestamps in the publisher.
 	now := time.Now().UTC().Add(-time.Duration(m.PublishLagH) * time.Hour)
-	currentCycle := mostRecentCycle(now, m.CycleHours)
+	currentCycle := weather.MostRecentCycle(now, m.CycleHours)
 	currentStr := currentCycle.Format("20060102T15")
 
 	p.mu.Lock()
@@ -304,7 +296,7 @@ func (p *windPublisher) maybePublishOne(ctx context.Context, cfg *WindPublisherC
 	}
 	resolvedStr := cycle.CycleTime.UTC().Format("20060102T15")
 	if resolvedStr != currentStr {
-		// walkLatestCycle fell back to an older cycle (the freshest
+		// weather.WalkLatestCycle fell back to an older cycle (the freshest
 		// one is still publishing). Don't memoise as "current" — try
 		// again next heartbeat.
 		p.logger.Infof("publisher: %s resolved to older cycle=%s (wanted %s); will retry",

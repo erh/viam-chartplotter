@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"fmt"
@@ -179,7 +179,7 @@ func wrapLon(lon float64) float64 {
 	return lon
 }
 
-// CropWindRecord returns a new windRecord whose grid covers `bbox`
+// CropWindRecord returns a new WindRecord whose grid covers `bbox`
 // ([lonW, latS, lonE, latN]) at the source's native resolution. The
 // source is assumed to be a global regular_ll grid in row-major
 // north-to-south scan order (scan mode 0); ECMWF Open Data's
@@ -190,7 +190,7 @@ func wrapLon(lon float64) float64 {
 // the source. Data is dense (no missing cells); cells outside the
 // source grid are not produced (the bbox is clamped to source extent
 // in latitude; longitude wraps modulo 360).
-func CropWindRecord(src windRecord, bbox [4]float64) windRecord {
+func CropWindRecord(src WindRecord, bbox [4]float64) WindRecord {
 	lonW, latS, lonE, latN := bbox[0], bbox[1], bbox[2], bbox[3]
 	dx := src.Header.Dx
 	dy := src.Header.Dy
@@ -266,5 +266,5 @@ func CropWindRecord(src windRecord, bbox [4]float64) windRecord {
 	hdr.La1 = latN
 	hdr.Lo2 = lonW + float64(nx-1)*dx
 	hdr.La2 = latN - float64(ny-1)*dy
-	return windRecord{Header: hdr, Data: out}
+	return WindRecord{Header: hdr, Data: out}
 }

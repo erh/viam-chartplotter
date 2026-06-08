@@ -1,4 +1,4 @@
-package vc
+package publish
 
 import (
 	"bytes"

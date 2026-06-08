@@ -1,4 +1,4 @@
-package vc
+package weather
 
 import (
 	"context"
@@ -202,14 +202,14 @@ func nomadsGFSWaveConfig() waveDatasetConfig {
 
 // fetchPacIOOSWave is a thin alias for the global WW3 dataset — kept
 // for callers that haven't migrated to fetchWaveDataset yet.
-func fetchPacIOOSWave(ctx context.Context, client *http.Client, target time.Time) ([]windRecord, error) {
+func fetchPacIOOSWave(ctx context.Context, client *http.Client, target time.Time) ([]WindRecord, error) {
 	return fetchWaveDataset(ctx, client, pacioosGlobalConfig(), target)
 }
 
 // fetchWaveDataset pulls Hgt + Dir for one (config, target time) and
 // returns 2 windRecords (u + v) ready to JSON-encode for ol-wind.
 // `target` is a hint: we pick the dataset slice closest to it.
-func fetchWaveDataset(ctx context.Context, client *http.Client, cfg waveDatasetConfig, target time.Time) ([]windRecord, error) {
+func fetchWaveDataset(ctx context.Context, client *http.Client, cfg waveDatasetConfig, target time.Time) ([]WindRecord, error) {
 	// Resolve URL — stable for "best" aggregations, per-cycle walkback
 	// for NOMADS-style date-stamped datasets. Mutating cfg.URL keeps
 	// downstream helpers oblivious.
@@ -303,7 +303,7 @@ func fetchWaveDataset(ctx context.Context, client *http.Client, cfg waveDatasetC
 	uHdr := hdr
 	vHdr := hdr
 	vHdr.ParameterNumber = gribParamVGRD
-	return []windRecord{
+	return []WindRecord{
 		{Header: uHdr, Data: uData},
 		{Header: vHdr, Data: vData},
 	}, nil
@@ -320,7 +320,7 @@ func resolveWaveURL(ctx context.Context, client *http.Client, cfg waveDatasetCon
 	if len(cfg.CycleHours) == 0 {
 		return "", fmt.Errorf("URLFor set but no CycleHours configured")
 	}
-	candidate := mostRecentCycle(now.Add(-time.Duration(cfg.PublishLagH)*time.Hour), cfg.CycleHours)
+	candidate := MostRecentCycle(now.Add(-time.Duration(cfg.PublishLagH)*time.Hour), cfg.CycleHours)
 	var lastErr error
 	for i := 0; i < 4; i++ {
 		url := cfg.URLFor(candidate)
@@ -332,7 +332,7 @@ func resolveWaveURL(ctx context.Context, client *http.Client, cfg waveDatasetCon
 		} else {
 			lastErr = err
 		}
-		candidate = previousCycle(candidate, cfg.CycleHours)
+		candidate = PreviousCycle(candidate, cfg.CycleHours)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no cycle returned 200 in the last 24h")
