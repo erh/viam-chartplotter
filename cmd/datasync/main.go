@@ -1,10 +1,9 @@
-// datasync periodically syncs NOAA ENC cells for a lon/lat box into MongoDB
-// (the loop form of `mapsync noaa-ingest`). Run it as a standalone daemon when
-// you're not using the Viam datasync model. Re-runs are cheap — cells already
-// current in Mongo are skipped.
+// datasync periodically syncs the entire NOAA ENC catalog (worldwide) into
+// MongoDB (the loop form of `mapsync noaa-ingest`, over all cells). Run it as a
+// standalone daemon when you're not using the Viam datasync model. Re-runs are
+// cheap — cells already current in Mongo are skipped.
 //
-//	datasync --mongo mongodb://db:27017 --minlon -80.2 --minlat 32.6 \
-//	         --maxlon -79.6 --maxlat 33.0 --interval 24h
+//	datasync --mongo mongodb://db:27017 --interval 24h
 package main
 
 import (
@@ -34,18 +33,14 @@ func run() error {
 	mongoURI := flag.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI (required)")
 	dbName := flag.String("db", envOr("MONGO_DB", "osm"), "MongoDB database")
 	encDir := flag.String("enc-dir", "./noaa-enc", "ENC cell download directory")
-	minLon := flag.Float64("minlon", 0, "bbox min longitude")
-	minLat := flag.Float64("minlat", 0, "bbox min latitude")
-	maxLon := flag.Float64("maxlon", 0, "bbox max longitude")
-	maxLat := flag.Float64("maxlat", 0, "bbox max latitude")
 	minScale := flag.Int("minscale", 0, "min cell scale (0=no bound)")
 	maxScale := flag.Int("maxscale", 0, "max cell scale (0=no bound)")
 	parallel := flag.Int("parallel", 4, "concurrent cell downloads")
 	interval := flag.Duration("interval", 24*time.Hour, "sync interval; 0 = run once and exit")
 	flag.Parse()
 
-	if *mongoURI == "" || *maxLon <= *minLon || *maxLat <= *minLat {
-		return fmt.Errorf("--mongo and a valid bbox (--minlon --minlat --maxlon --maxlat) are required")
+	if *mongoURI == "" {
+		return fmt.Errorf("--mongo (or MONGO_URI) is required")
 	}
 
 	logger := logging.NewLogger("datasync")
@@ -80,7 +75,7 @@ func run() error {
 
 	logf := func(format string, a ...any) { logger.Infof(format, a...) }
 	once := func() {
-		stats, err := noaa.IngestBBox(ctx, coll, store, *minLon, *minLat, *maxLon, *maxLat, *minScale, *maxScale, *parallel, logf)
+		stats, err := noaa.IngestAll(ctx, coll, store, *minScale, *maxScale, *parallel, logf)
 		if err != nil {
 			logger.Warnf("sync: %v", err)
 			return

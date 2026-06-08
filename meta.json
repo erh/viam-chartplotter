@@ -22,6 +22,18 @@
       "model": "erh:viam-chartplotter:wind-publisher",
       "description": "Fleet-wide ECMWF wind cache populator. Configure on ONE machine; pulls ECMWF Open Data, decodes, crops into a tile grid, and uploads to Cloudflare R2 so every other chartplotter reads from R2 instead of hammering ECMWF.",
       "markdown_link": "README.md#ecmwf-wind-one-machine-populates-the-cache-for-the-whole-fleet"
+    },
+    {
+      "api": "rdk:component:generic",
+      "model": "erh:viam-chartplotter:datasync",
+      "description": "Keeps the shared MongoDB 'noaa' collection current by periodically refreshing the NOAA ENC catalog and ingesting every published cell worldwide. Run on one machine; the chartplotter/tileserver read charts from Mongo.",
+      "markdown_link": "README.md#datasync"
+    },
+    {
+      "api": "rdk:component:generic",
+      "model": "erh:viam-chartplotter:weathersync",
+      "description": "Decodes weather forecast GRIB into the shared MongoDB 'weather' collection on an interval, so render/tile servers serve weather from Mongo instead of every instance re-fetching GRIB.",
+      "markdown_link": "README.md#weathersync"
     }
   ],
   "first_run": "",

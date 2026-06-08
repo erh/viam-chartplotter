@@ -41,6 +41,23 @@ func IngestCellFile(ctx context.Context, coll *mongo.Collection, cellName, path 
 	}, nil
 }
 
+// IngestAll runs the full NOAA pipeline for the ENTIRE published catalog — every
+// active ENC cell, worldwide — refreshing the catalog (so newly-published cells
+// and editions are picked up) and ingesting each. It's IngestBBox over a global
+// box; since the catalog overlap test returns every cell for world bounds, this
+// is exactly "all files." Cells already at the current edition+update in Mongo
+// are skipped, so periodic re-runs are cheap. minScale/maxScale still apply
+// (pass 0 for no bound) for the rare case of restricting by chart scale.
+func IngestAll(
+	ctx context.Context,
+	coll *mongo.Collection,
+	store *Store,
+	minScale, maxScale, parallel int,
+	logf func(string, ...any),
+) (IngestStats, error) {
+	return IngestBBox(ctx, coll, store, -180, -90, 180, 90, minScale, maxScale, parallel, logf)
+}
+
 // IngestBBox is the full NOAA pipeline for a lon/lat box: it ensures every ENC
 // cell overlapping the box is on disk at NOAA's latest edition (Store.SyncBBox),
 // then parses and upserts each overlapping cell into the noaa collection. A

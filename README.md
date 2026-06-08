@@ -99,11 +99,12 @@ coastal/detail/skip` (OSM), `noaa` (parsed S-57 ENC features), and `weather`
   state extracts.
 - **Scheduled (Viam)** — two cron-style models you add to one machine in the
   fleet, writing to the shared DB:
-  - `erh:viam-chartplotter:datasync` — periodically syncs NOAA ENC cells for a
-    configured bbox into `noaa` (NOAA publishes new editions weekly). Config:
-    `mongo_uri`, `mongo_db`, `min_lon`/`min_lat`/`max_lon`/`max_lat`,
-    `interval_hours` (default 24).
-  - `erh:viam-chartplotter:weathersync` — decodes GRIB (GFS wind/wave,
+  - <a name="datasync"></a>`erh:viam-chartplotter:datasync` — periodically
+    refreshes the NOAA ENC catalog and syncs **every published cell worldwide**
+    into `noaa` (NOAA publishes new editions weekly; cells already current are
+    skipped). Config: `mongo_uri`, `mongo_db`, `enc_dir`, `min_scale`/`max_scale`
+    (optional scale bounds), `parallel`, `interval_hours` (default 24).
+  - <a name="weathersync"></a>`erh:viam-chartplotter:weathersync` — decodes GRIB (GFS wind/wave,
     isobars) and writes the served JSON to `weather` so tile servers serve
     weather from Mongo instead of each re-fetching GRIB. Config: `mongo_uri`,
     `mongo_db`, `models` (optional filter), `max_fh`, `interval_hours`

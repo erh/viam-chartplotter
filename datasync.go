@@ -18,11 +18,13 @@ import (
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
 )
 
-// DataSync Viam resource: keeps the `noaa` MongoDB collection current for a
-// configured lon/lat box by periodically syncing NOAA ENC cells to disk and
-// parsing them into Mongo (the same pipeline as `mapsync noaa-ingest`). NOAA
-// publishes new cell editions weekly; this runs on an interval so a deployed
-// fleet's chart data stays fresh without anyone running the CLI.
+// DataSync Viam resource: keeps the `noaa` MongoDB collection current for the
+// ENTIRE NOAA ENC catalog (worldwide) by periodically refreshing the catalog
+// and syncing+parsing every active cell into Mongo (the same pipeline as
+// `mapsync noaa-ingest`, but over all cells). NOAA publishes new cell editions
+// weekly; this runs on an interval so a deployed fleet's chart data stays fresh
+// without anyone running the CLI. Re-runs are cheap — a cell already at the
+// current edition+update in Mongo is skipped without re-downloading or parsing.
 //
 // OSM data changes slowly and its state-sized extracts are big one-off batches,
 // so OSM ingest stays a manual `make ingest-osm-*` step rather than living here.
@@ -39,19 +41,14 @@ func init() {
 		})
 }
 
-// DataSyncConfig configures one datasync instance.
+// DataSyncConfig configures one datasync instance. The whole NOAA catalog is
+// always synced — there is no bbox; coverage is the entire published ENC set.
 type DataSyncConfig struct {
 	MongoURI string `json:"mongo_uri"`
 	MongoDB  string `json:"mongo_db,omitempty"` // default "osm"
 	ENCDir   string `json:"enc_dir,omitempty"`  // cell download dir; default OS cache
 
-	// Bounding box of ENC coverage to keep populated.
-	MinLon float64 `json:"min_lon"`
-	MinLat float64 `json:"min_lat"`
-	MaxLon float64 `json:"max_lon"`
-	MaxLat float64 `json:"max_lat"`
-
-	MinScale int `json:"min_scale,omitempty"` // 0 = no bound
+	MinScale int `json:"min_scale,omitempty"` // 0 = no bound (restrict by chart scale)
 	MaxScale int `json:"max_scale,omitempty"` // 0 = no bound
 	Parallel int `json:"parallel,omitempty"`  // concurrent cell downloads (default 4)
 
@@ -60,13 +57,10 @@ type DataSyncConfig struct {
 	IntervalHours int `json:"interval_hours,omitempty"`
 }
 
-// Validate enforces a usable Mongo URI and a non-degenerate bbox.
+// Validate enforces a usable Mongo URI.
 func (c *DataSyncConfig) Validate(path string) ([]string, error) {
 	if c.MongoURI == "" {
 		return nil, fmt.Errorf("%s: mongo_uri required", path)
-	}
-	if c.MaxLon <= c.MinLon || c.MaxLat <= c.MinLat {
-		return nil, fmt.Errorf("%s: a valid bbox is required (min_lon<max_lon, min_lat<max_lat)", path)
 	}
 	return nil, nil
 }
@@ -174,10 +168,8 @@ func (d *dataSync) runLoop(ctx context.Context) {
 }
 
 func (d *dataSync) runOnce(ctx context.Context) {
-	d.logger.Infof("datasync: syncing NOAA ENC for bbox=[%.4f,%.4f,%.4f,%.4f]",
-		d.cfg.MinLon, d.cfg.MinLat, d.cfg.MaxLon, d.cfg.MaxLat)
-	stats, err := noaa.IngestBBox(ctx, d.coll, d.store,
-		d.cfg.MinLon, d.cfg.MinLat, d.cfg.MaxLon, d.cfg.MaxLat,
+	d.logger.Infof("datasync: syncing entire NOAA ENC catalog (worldwide)")
+	stats, err := noaa.IngestAll(ctx, d.coll, d.store,
 		d.cfg.MinScale, d.cfg.MaxScale, d.cfg.Parallel,
 		func(format string, a ...any) { d.logger.Infof(format, a...) })
 	d.mu.Lock()
