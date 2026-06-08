@@ -114,4 +114,3 @@ func loadAllTileBlobsForFh(model string, cycleT time.Time, fh int, tiles []Tile)
 	}
 	return out, true
 }
-

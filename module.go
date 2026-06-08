@@ -26,6 +26,7 @@ import (
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/weather"
 	"github.com/erh/viam-chartplotter/render"
 )
 
@@ -117,6 +118,23 @@ func resolveCacheRoot(configured string) string {
 		base = os.TempDir()
 	}
 	return filepath.Join(base, "viam-chartplotter")
+}
+
+// withCORS adds permissive CORS headers so a chartplotter app served from one
+// origin can fetch tiles/weather from a separate map+weather server. The data
+// is public, read-only GETs; OPTIONS preflights are answered 204 immediately.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withCookiePathRoot wraps an http.Handler so any Set-Cookie headers
@@ -212,6 +230,12 @@ func StartChartplotterServer(
 	// span per request; the slow-log middleware emits a WARN line for
 	// anything over CHARTPLOTTER_SLOW_LOG_MS (default 500 ms).
 	server.Handler = withTracing(logger.Sublogger("slowReq"), server.Handler)
+	// Permissive CORS on the read-only tile/weather/data API so a chartplotter
+	// app on one origin (e.g. :8888) can fetch tiles and weather from a
+	// separate map+weather server on another (e.g. :8989). Tiles/weather are
+	// public GETs, so a blanket allow-origin is fine; preflights are answered
+	// 204. Outermost wrapper so OPTIONS short-circuits before anything else.
+	server.Handler = withCORS(server.Handler)
 
 	root := resolveCacheRoot(cacheRoot)
 
@@ -232,7 +256,7 @@ func StartChartplotterServer(
 	if err != nil {
 		return nil, err
 	}
-	encRenderer := render.NewENCRenderer(catalog, encStore, logger.Sublogger("encRender"))
+	encRenderer := render.NewENCRenderer(logger.Sublogger("encRender"))
 	encTileCache, err := render.NewENCTileCache(filepath.Join(encStore.RootDir(), "tiles"))
 	if err != nil {
 		return nil, err
@@ -251,6 +275,10 @@ func StartChartplotterServer(
 	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
 	// refuses to render (transparent fallback only) and the frontend
 	// layer is effectively a no-op.
+	// weatherColl is set when Mongo connects below, then wired into the weather
+	// cache so it serves forecasts from Mongo (populated by weathersync) before
+	// falling back to disk/upstream.
+	var weatherColl *mongo.Collection
 	if mongoURI != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer mcancel()
@@ -275,8 +303,9 @@ func StartChartplotterServer(
 			// same database (populated by `mapsync noaa-ingest`), instead of
 			// parsing .000 files off disk at request time.
 			encRenderer.SetNOAACollection(noaa.OpenCollection(db))
-			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s",
-				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA)
+			weatherColl = weather.OpenCollection(db)
+			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",
+				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, weather.CollWeather)
 		}
 	} else {
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
@@ -293,6 +322,10 @@ func StartChartplotterServer(
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
 		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
+		if weatherColl != nil {
+			weatherCache.SetWeatherCollection(weatherColl)
+			logger.Infof("weather: serving from Mongo collection %q (disk/upstream fallback)", weather.CollWeather)
+		}
 		weatherCache.Register(mux)
 		// Background prewarm of every model's forecast hours so the
 		// first user scrub to any hour hits the disk cache instead of

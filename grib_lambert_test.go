@@ -17,27 +17,27 @@ func buildSyntheticLambertSection3() []byte {
 	// We pin the synthetic section length at 81 octets — the smallest
 	// valid template-3.30 body — and fill from the top.
 	s := make([]byte, 81)
-	binary.BigEndian.PutUint32(s[0:4], 81)                                // 1-4:   section length
-	s[4] = 3                                                              // 5:     section number
-	s[5] = 0                                                              // 6:     source of grid def
-	binary.BigEndian.PutUint32(s[6:10], 1799*1059)                         // 7-10:  N data points
-	s[10] = 0                                                             // 11:    octets for optional list
-	s[11] = 0                                                             // 12:    interpretation
-	binary.BigEndian.PutUint16(s[12:14], 30)                              // 13-14: template number = 30
-	s[14] = 6                                                             // 15:    shape of earth = 6 (sphere)
-	binary.BigEndian.PutUint32(s[30:34], 1799)                            // 31-34: Nx
-	binary.BigEndian.PutUint32(s[34:38], 1059)                            // 35-38: Ny
-	binary.BigEndian.PutUint32(s[38:42], 21138000)                        // 39-42: La1 (×1e6 deg) = 21.138°
-	binary.BigEndian.PutUint32(s[42:46], 237280000)                       // 43-46: Lo1 = 237.28° (= -122.72°, stored 0-360)
-	s[46] = 0                                                             // 47:    res + component flags
-	binary.BigEndian.PutUint32(s[47:51], 38500000)                        // 48-51: LaD = 38.5°
-	binary.BigEndian.PutUint32(s[51:55], 262500000)                       // 52-55: LoV = 262.5° (= -97.5°)
-	binary.BigEndian.PutUint32(s[55:59], 3000000)                         // 56-59: Dx (×10⁻³ m) = 3 km
-	binary.BigEndian.PutUint32(s[59:63], 3000000)                         // 60-63: Dy (×10⁻³ m) = 3 km
-	s[63] = 0                                                             // 64:    projection centre flag
-	s[64] = 64                                                            // 65:    scanning mode = 64 (+i, +j)
-	binary.BigEndian.PutUint32(s[65:69], 38500000)                        // 66-69: Latin1 = 38.5°
-	binary.BigEndian.PutUint32(s[69:73], 38500000)                        // 70-73: Latin2 = 38.5°
+	binary.BigEndian.PutUint32(s[0:4], 81)          // 1-4:   section length
+	s[4] = 3                                        // 5:     section number
+	s[5] = 0                                        // 6:     source of grid def
+	binary.BigEndian.PutUint32(s[6:10], 1799*1059)  // 7-10:  N data points
+	s[10] = 0                                       // 11:    octets for optional list
+	s[11] = 0                                       // 12:    interpretation
+	binary.BigEndian.PutUint16(s[12:14], 30)        // 13-14: template number = 30
+	s[14] = 6                                       // 15:    shape of earth = 6 (sphere)
+	binary.BigEndian.PutUint32(s[30:34], 1799)      // 31-34: Nx
+	binary.BigEndian.PutUint32(s[34:38], 1059)      // 35-38: Ny
+	binary.BigEndian.PutUint32(s[38:42], 21138000)  // 39-42: La1 (×1e6 deg) = 21.138°
+	binary.BigEndian.PutUint32(s[42:46], 237280000) // 43-46: Lo1 = 237.28° (= -122.72°, stored 0-360)
+	s[46] = 0                                       // 47:    res + component flags
+	binary.BigEndian.PutUint32(s[47:51], 38500000)  // 48-51: LaD = 38.5°
+	binary.BigEndian.PutUint32(s[51:55], 262500000) // 52-55: LoV = 262.5° (= -97.5°)
+	binary.BigEndian.PutUint32(s[55:59], 3000000)   // 56-59: Dx (×10⁻³ m) = 3 km
+	binary.BigEndian.PutUint32(s[59:63], 3000000)   // 60-63: Dy (×10⁻³ m) = 3 km
+	s[63] = 0                                       // 64:    projection centre flag
+	s[64] = 64                                      // 65:    scanning mode = 64 (+i, +j)
+	binary.BigEndian.PutUint32(s[65:69], 38500000)  // 66-69: Latin1 = 38.5°
+	binary.BigEndian.PutUint32(s[69:73], 38500000)  // 70-73: Latin2 = 38.5°
 	return s
 }
 
@@ -83,16 +83,16 @@ func TestParseLambertGridOffsets(t *testing.T) {
 // the constants live in one place.
 func hrrrLikeGrid() *lambertGrid {
 	return &lambertGrid{
-		Nx:          1799,
-		Ny:          1059,
-		Dx:          3000,
-		Dy:          3000,
-		La1:         21.138,
-		Lo1:         -122.720,
-		LaD:         38.5,
-		LoV:         -97.5,
-		Latin1:      38.5,
-		Latin2:      38.5,
+		Nx:     1799,
+		Ny:     1059,
+		Dx:     3000,
+		Dy:     3000,
+		La1:    21.138,
+		Lo1:    -122.720,
+		LaD:    38.5,
+		LoV:    -97.5,
+		Latin1: 38.5,
+		Latin2: 38.5,
 		// Real HRRR ships scanMode 64: +i (W→E) and +j (S→N), i.e.
 		// row 0 sits at the southern edge (La1 = 21.138°N). Storing
 		// 0 here would put row 0 at the *northern* edge, which would

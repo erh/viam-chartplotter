@@ -173,4 +173,3 @@ func dumpStats(w io.Writer, values []float64) {
 		}
 	}
 }
-

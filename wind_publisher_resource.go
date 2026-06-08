@@ -350,9 +350,9 @@ func (p *windPublisher) DoCommand(ctx context.Context, cmd map[string]interface{
 		}
 		p.mu.Unlock()
 		return map[string]interface{}{
-			"models":         models,
-			"uploadEnabled":  uploadEnabled,
-			"lastPublished":  last,
+			"models":        models,
+			"uploadEnabled": uploadEnabled,
+			"lastPublished": last,
 		}, nil
 	case "publish_now":
 		modelFilter, _ := cmd["model"].(string)

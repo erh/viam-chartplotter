@@ -73,7 +73,7 @@ func run() error {
 	defer func() { _ = client.Disconnect(context.Background()) }()
 	db := client.Database(*dbName)
 
-	r := render.NewENCRenderer(nil, nil, logging.NewLogger("render-cmd"))
+	r := render.NewENCRenderer(logging.NewLogger("render-cmd"))
 	r.SetNOAACollection(noaa.OpenCollection(db))
 	r.SetOSMCollections(osmtiler.OpenOSMCollections(db))
 

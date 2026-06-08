@@ -122,7 +122,7 @@ func TestCompareWithWMS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	renderer := render.NewENCRenderer(catalog, store, logger)
+	renderer := render.NewENCRenderer(logger)
 	wmsCache, err := NewNoaaCache(wmsCacheDir, 0, logger)
 	if err != nil {
 		t.Fatalf("wms cache: %v", err)

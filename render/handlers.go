@@ -643,11 +643,11 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Five panels: ENC | OSM | MERGED | WMS | diff. MERGED is the exact tile
-	// the app shows (ENC over the OSM underlay), so you can see what the user
-	// actually gets — and the diff panel compares THAT against NOAA's WMS.
+	// Four panels: ENC | OSM | MERGED | WMS. MERGED is the exact tile the app
+	// shows (ENC over the OSM underlay), so you can see what the user gets next
+	// to NOAA's WMS.
 	const panelW = 256
-	const numPanels = 5
+	const numPanels = 4
 	out := image.NewRGBA(image.Rect(0, 0, panelW*numPanels, 256))
 	// White background so transparent areas of any tile are visible.
 	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
@@ -656,7 +656,6 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		colOSM
 		colMerged
 		colWMS
-		colDiff
 	)
 	draw.Draw(out, image.Rect(colENC*panelW, 0, (colENC+1)*panelW, 256), ourImg, image.Point{}, draw.Over)
 	draw.Draw(out, image.Rect(colWMS*panelW, 0, (colWMS+1)*panelW, 256), wmsImg, image.Point{}, draw.Over)
@@ -678,26 +677,12 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Diff panel: per-pixel RGB distance between the MERGED app view and WMS.
-	for py := range 256 {
-		for px := range 256 {
-			o := color.RGBAModel.Convert(out.At(colMerged*panelW+px, py)).(color.RGBA)
-			n := color.RGBAModel.Convert(out.At(colWMS*panelW+px, py)).(color.RGBA)
-			d := absInt(int(o.R)-int(n.R)) + absInt(int(o.G)-int(n.G)) + absInt(int(o.B)-int(n.B))
-			if d > 255 {
-				d = 255
-			}
-			out.SetRGBA(colDiff*panelW+px, py, color.RGBA{R: uint8(d), G: uint8(d), B: uint8(d), A: 255})
-		}
-	}
-
 	// Panel labels so anyone looking at /tmp/foo.png or the network response
 	// knows which is which without checking the handler source.
 	annotatePanel(out, colENC*panelW+4, 0, "ENC")
 	annotatePanel(out, colOSM*panelW+4, 0, "OSM")
-	annotatePanel(out, colMerged*panelW+4, 0, "MERGED (app)")
+	annotatePanel(out, colMerged*panelW+4, 0, fmt.Sprintf("MERGED z=%d/%d/%d", z, x, y))
 	annotatePanel(out, colWMS*panelW+4, 0, "WMS")
-	annotatePanel(out, colDiff*panelW+4, 0, fmt.Sprintf("diff z=%d/%d/%d", z, x, y))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, out); err != nil {
@@ -729,13 +714,6 @@ func annotatePanel(img *image.RGBA, x, y int, label string) {
 	dc.ScaleAbout(scale, scale, tx, ty)
 	dc.DrawStringAnchored(label, tx, ty, 0, 0)
 	dc.Pop()
-}
-
-func absInt(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 // parseSkipClasses turns a comma-separated S-57 class list ("COALNE,LIGHTS")

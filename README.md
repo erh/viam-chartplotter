@@ -87,6 +87,34 @@ server, and any deployment overrides that with the `tile_server_base_url`
 attribute. Populate the database with the `make ingest-*` targets (see
 [Building](#building)).
 
+### Keeping MongoDB populated
+
+The chartplotter / tile server render everything from MongoDB: `osm_overview/
+coastal/detail/skip` (OSM), `noaa` (parsed S-57 ENC features), and `weather`
+(decoded forecasts) — all in one database. Three ways to fill it:
+
+- **One-off / batch** — the `mapsync` CLI and `make` targets:
+  `make ingest-noaa`, `make ingest-osm-eastcoast`, `make ingest-osm-all`,
+  `make ingest-all` (override `MONGO=…`). Best for the big, infrequent OSM
+  state extracts.
+- **Scheduled (Viam)** — two cron-style models you add to one machine in the
+  fleet, writing to the shared DB:
+  - `erh:viam-chartplotter:datasync` — periodically syncs NOAA ENC cells for a
+    configured bbox into `noaa` (NOAA publishes new editions weekly). Config:
+    `mongo_uri`, `mongo_db`, `min_lon`/`min_lat`/`max_lon`/`max_lat`,
+    `interval_hours` (default 24).
+  - `erh:viam-chartplotter:weathersync` — decodes GRIB (GFS wind/wave,
+    isobars) and writes the served JSON to `weather` so tile servers serve
+    weather from Mongo instead of each re-fetching GRIB. Config: `mongo_uri`,
+    `mongo_db`, `models` (optional filter), `max_fh`, `interval_hours`
+    (default 6).
+- **Scheduled (standalone)** — the same loops as plain daemons for non-Viam
+  hosts: `datasync` and `weathersync` (build with `make datasync` /
+  `make weathersync`).
+
+A headless map+weather server (no UI) is `make tileserver` →
+`MONGO_URI=… ./tileserver --port 8989`.
+
 ### Depth shading bands
 
 Both bands key off the polygon's midpoint depth (`(DRVAL1 + DRVAL2) / 2`).

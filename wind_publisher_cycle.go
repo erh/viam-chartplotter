@@ -20,9 +20,9 @@ import (
 // latest.json to point here.
 type PublishedCycle struct {
 	Model       string
-	CycleTime   time.Time          // reference time of the run
-	FHs         []int              // forecast hours in publish order
-	Tiles       []Tile             // the fixed grid; copied into the manifest
+	CycleTime   time.Time               // reference time of the run
+	FHs         []int                   // forecast hours in publish order
+	Tiles       []Tile                  // the fixed grid; copied into the manifest
 	TileBlobs   map[publishKey]TileBlob // (fh, tile) → gzipped JSON + content metadata
 	PublishedAt time.Time
 }
@@ -45,12 +45,12 @@ type TileBlob struct {
 // Clients fetch this (short max-age) to discover the current cycle and
 // the tile grid, then derive per-(fh, tile) URLs deterministically.
 type LatestPointer struct {
-	Model           string         `json:"model"`
-	Cycle           string         `json:"cycle"` // "20060102T15" UTC
-	PublishedAt     time.Time      `json:"publishedAt"`
-	FHs             []int          `json:"fhs"`
-	Tiles           []TileManifest `json:"tiles"`
-	PreviousCycles  []string       `json:"previousCycles,omitempty"`
+	Model          string         `json:"model"`
+	Cycle          string         `json:"cycle"` // "20060102T15" UTC
+	PublishedAt    time.Time      `json:"publishedAt"`
+	FHs            []int          `json:"fhs"`
+	Tiles          []TileManifest `json:"tiles"`
+	PreviousCycles []string       `json:"previousCycles,omitempty"`
 }
 
 // TileManifest is the lightweight view of a Tile we serialise into the

@@ -106,11 +106,11 @@ func (w *aecBitWriter) bytes() []byte {
 
 func TestAECBitReaderRoundTrip(t *testing.T) {
 	w := &aecBitWriter{}
-	w.writeBits(0xA, 4)    // 1010
-	w.writeBits(0x5, 4)    // 0101
-	w.writeBits(0xFF, 8)   // 11111111
-	w.writeBits(0x3, 3)    // 011
-	w.writeBits(0x0, 1)    // 0
+	w.writeBits(0xA, 4)  // 1010
+	w.writeBits(0x5, 4)  // 0101
+	w.writeBits(0xFF, 8) // 11111111
+	w.writeBits(0x3, 3)  // 011
+	w.writeBits(0x0, 1)  // 0
 	w.writeBits(0xDEAD, 16)
 	r := newAECBitReader(w.bytes())
 	cases := []struct {
@@ -159,8 +159,8 @@ func TestAECDecodeNoCompression(t *testing.T) {
 	const bps = 8
 	const blockSize = 8
 	const rsi = 2
-	idBits := idSizeBits(bps)        // 3 under libaec bracketing
-	idNC := (1 << uint(idBits)) - 1  // 7
+	idBits := idSizeBits(bps)       // 3 under libaec bracketing
+	idNC := (1 << uint(idBits)) - 1 // 7
 
 	samples := []uint64{
 		0, 1, 2, 3, 4, 5, 6, 7,

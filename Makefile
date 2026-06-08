@@ -88,6 +88,16 @@ mapsync:
 render-cmd:
 	go build -o render-cmd ./cmd/render
 
+# Standalone service binaries (non-Viam): map+weather server, and the two
+# populate daemons that keep Mongo current.
+.PHONY: tileserver datasync weathersync
+tileserver:
+	go build -o tileserver ./cmd/tileserver
+datasync:
+	go build -o datasync ./cmd/datasync
+weathersync:
+	go build -o weathersync ./cmd/weathersync
+
 # Parse every downloaded ENC cell (.000) into the `noaa` collection. Upserts in
 # place, so it's safe to re-run after a parser change (find|xargs handles the
 # thousands-of-cells arg list).

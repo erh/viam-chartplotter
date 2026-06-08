@@ -214,22 +214,22 @@ func extremaLatLonGrid(rec *windRecord) []geoJSONFeature {
 // --- GeoJSON shape --------------------------------------------------------
 
 type geoJSONFeatureCollection struct {
-	Type     string             `json:"type"`
-	Features []geoJSONFeature   `json:"features"`
-	Meta     *isobarMeta        `json:"meta,omitempty"`
+	Type     string           `json:"type"`
+	Features []geoJSONFeature `json:"features"`
+	Meta     *isobarMeta      `json:"meta,omitempty"`
 }
 
 type geoJSONFeature struct {
-	Type       string             `json:"type"`
-	Geometry   any                `json:"geometry"`
-	Properties isobarProperties   `json:"properties"`
+	Type       string           `json:"type"`
+	Geometry   any              `json:"geometry"`
+	Properties isobarProperties `json:"properties"`
 }
 
 // geoJSONLineString is the LineString shape used for isobar contour
 // segments. Coordinates are an array of [lon, lat] pairs.
 type geoJSONLineString struct {
-	Type        string        `json:"type"`
-	Coordinates [][2]float64  `json:"coordinates"`
+	Type        string       `json:"type"`
+	Coordinates [][2]float64 `json:"coordinates"`
 }
 
 // geoJSONPoint is the Point shape used for H/L extremum markers. A

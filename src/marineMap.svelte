@@ -2756,7 +2756,7 @@
     const y = Math.floor(
       ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
     );
-    const origin = window.location.origin;
+    const origin = tileBase || window.location.origin;
     const tileUrl = `${origin}/noaa-enc/tile/${z}/${x}/${y}.png`;
     const compareUrl = `${origin}/noaa-enc/compare/${z}/${x}/${y}.png`;
     const compareAllUrl = `${origin}/noaa-enc/compare/test?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
@@ -2778,6 +2778,27 @@
     }
   }
 
+
+  // tileBase is the origin of the map+weather server the app fetches tiles and
+  // weather from. Empty = same-origin (this server). Set from /app-config at
+  // startup (loadAppConfig), so an app on :8888 can pull tiles/weather from a
+  // separate map server on :8989. api() prefixes every backend URL with it.
+  let tileBase = "";
+  function api(path: string): string {
+    return `${tileBase}${path}`;
+  }
+  async function loadAppConfig(): Promise<void> {
+    try {
+      const resp = await fetch("/app-config");
+      if (!resp.ok) return;
+      const cfg = await resp.json();
+      if (cfg && typeof cfg.tileServerBaseURL === "string") {
+        tileBase = cfg.tileServerBaseURL.replace(/\/$/, "");
+      }
+    } catch {
+      // No /app-config (older server) or fetch failed → stay same-origin.
+    }
+  }
 
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
@@ -2804,7 +2825,7 @@
     // proxied by Vite), we route through `/noaa-wms/proxy` so the disk cache
     // absorbs repeat tile fetches; otherwise we hit NOAA directly.
     const noaaWmsUrl = noaaCacheReachable()
-      ? "/noaa-wms/proxy"
+      ? api("/noaa-wms/proxy")
       : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
     mapGlobal.layerOptions.push({
       name: "noaa",
@@ -2861,7 +2882,7 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/navaids?` +
+            api(`/noaa-enc/navaids?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
@@ -2902,7 +2923,7 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/structures?` +
+            api(`/noaa-enc/structures?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
@@ -2984,59 +3005,17 @@
                   : z >= VECTOR_TILE_NAVAID_MIN_Z
                     ? midParams
                     : overviewParams;
-              return `/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`;
+              return api(`/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`);
             },
             transition: 300,
           }),
         }),
       });
 
-      // OSM vector underlay as its own tile layer, served from
-      // /noaa-enc/osm-tile/. Renders highways + buildings only; depth
-      // and chart features come from noaa-local on top. Defaults on,
-      // toggleable independently from noaa-local — Overpass cold fetches
-      // can be slow, so isolating it lets the chart keep painting at
-      // full speed and lets the user disable OSM if the latency hurts.
-      // OSM tile URL cache-busting:
-      //   v        — git hash / dev timestamp, busts when frontend bundle changes
-      //   osmv     — OSMRenderRulesVersion (server-side, see enc_render.go).
-      //              Keep in sync with the Go const so a Go-only edit + restart
-      //              busts browser caches without a frontend rebuild.
-      //   ?osmv=…  — page-load override (anything different from the default
-      //              forces a one-off bust without bumping either constant).
-      const OSM_RENDER_VERSION = "14";
-      const osmRenderVersion = (() => {
-        if (typeof window === "undefined") return OSM_RENDER_VERSION;
-        try {
-          const v = new URLSearchParams(window.location.search).get("osmv");
-          return v && v !== "" ? v : OSM_RENDER_VERSION;
-        } catch {
-          return OSM_RENDER_VERSION;
-        }
-      })();
-      const osmTileParams = new URLSearchParams();
-      osmTileParams.set("v", tileGenVersion);
-      osmTileParams.set("osmv", osmRenderVersion);
-      const osmTileSource = new XYZ({
-        url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
-        transition: 300,
-      });
-      mapGlobal.layerOptions.push({
-        name: "osm-detail",
-        displayName: "streets",
-        on: true,
-        parent: "noaa-local",
-        layer: new TileLayer({
-          opacity: 1,
-          preload: 2,
-          zIndex: 4,
-          source: osmTileSource,
-        }),
-      });
-      // OSM data is now ingested into MongoDB ahead of time, so there's
-      // no "still loading" window to poll for — the tile either renders
-      // or the server has no data. The osmv URL param + osm-render
-      // version bump handles cache-busting across deploys.
+      // OSM detail (streets/buildings/land) is now composited INTO the
+      // noaa-local tile server-side (the merged ENC+OSM tile), so there's no
+      // separate osm-detail layer anymore — that would draw OSM twice. The
+      // standalone /noaa-enc/osm-tile endpoint still exists for debugging.
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
@@ -3075,7 +3054,7 @@
           preload: 2,
           zIndex: 6,
           source: new XYZ({
-            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`,
+            url: api(`/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`),
             transition: 300,
           }),
         }),
@@ -3216,10 +3195,10 @@
         displayName: "wind",
         parent: "weather",
         initialModel: windModel,
-        dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
+        dataUrlFor: (model, fh) => api(`/noaa-weather/data/${model}/latest.json`),
         fetchData: async (model, fh) => {
           const fetchLocal = async () => {
-            const resp = await fetch(`/noaa-weather/data/${model}/latest.json?fh=${fh}`);
+            const resp = await fetch(api(`/noaa-weather/data/${model}/latest.json?fh=${fh}`));
             if (!resp.ok) {
               const body = await resp.text().catch(() => "");
               return { error: body.trim() || `HTTP ${resp.status}` };
@@ -3339,7 +3318,7 @@
         displayName: "waves",
         parent: "weather",
         initialModel: waveModel,
-        dataUrlFor: (model) => `/noaa-weather/data/${model}/latest.json`,
+        dataUrlFor: (model) => api(`/noaa-weather/data/${model}/latest.json`),
         colorScale: WAVE_COLOR_SCALE,
         minVelocity: 0,
         maxVelocity: 3,
@@ -3399,7 +3378,7 @@
       // Populate the model picker. Failures are non-fatal — the picker
       // just stays at the bundled defaults (GFS + PacIOOS) if the
       // registry endpoint isn't reachable for some reason.
-      fetch("/noaa-weather/models")
+      fetch(api("/noaa-weather/models"))
         .then((r) => (r.ok ? r.json() : []))
         .then((list: WeatherModelMeta[]) => {
           weatherModels = Array.isArray(list) ? list : [];
@@ -3648,7 +3627,7 @@
 
   async function probeNoaaCache() {
     try {
-      const resp = await fetch("/noaa-enc/stats", { method: "GET" });
+      const resp = await fetch(api("/noaa-enc/stats"), { method: "GET" });
       noaaCacheProbeResult = resp.ok;
     } catch {
       noaaCacheProbeResult = false;
@@ -3731,7 +3710,7 @@
     if (key === lastNoaaPrefetchKey) return;
     lastNoaaPrefetchKey = key;
 
-    fetch("/noaa-enc/prefetch", {
+    fetch(api("/noaa-enc/prefetch"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
@@ -3844,6 +3823,9 @@
     // Probe before setupLayers so the noaa-local / noaa-ecdis / noaa-wms
     // layers register with the correct origin assumption regardless of
     // which port the Go module is bound to.
+    // Resolve where to fetch tiles/weather (same-origin or a separate map
+    // server) first, so the cache probe and every layer URL use the right base.
+    await loadAppConfig();
     await probeNoaaCache();
     setupLayers();
 

@@ -1,6 +1,7 @@
 package vc
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/binary"
@@ -17,11 +18,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.viam.com/rdk/logging"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/erh/viam-chartplotter/mapdata/weather"
 )
 
 // WeatherCache fetches NOAA GFS GRIB2 data from NOMADS, parses out 10 m
@@ -59,10 +63,20 @@ type WeatherCache struct {
 	// (see StartCleaner). nil when no cleaner is running.
 	cleanerCancel context.CancelFunc
 
-	hits    atomic.Uint64
+	// mongoColl, when set, is the weather collection a weathersync service
+	// populates. serveModel reads from it first so a render/tile server can
+	// serve forecasts straight from Mongo without re-fetching GRIB; on a miss
+	// it falls back to the on-disk cache + upstream fetch.
+	mongoColl *mongo.Collection
+
+	hits      atomic.Uint64
 	refreshes atomic.Uint64
-	errs    atomic.Uint64
+	errs      atomic.Uint64
 }
+
+// SetWeatherCollection wires the Mongo weather collection serveModel reads from
+// first. Nil (the default) keeps the disk/upstream-only behaviour.
+func (wc *WeatherCache) SetWeatherCollection(c *mongo.Collection) { wc.mongoColl = c }
 
 const (
 	weatherStaleAfter = 90 * time.Minute
@@ -184,9 +198,9 @@ func (wc *WeatherCache) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// ever change tileGridCols / tileGridRows / tileOverlapDeg
 		// the frontend follows automatically.
 		"tileGrid": map[string]interface{}{
-			"cols":       tileGridCols,
-			"rows":       tileGridRows,
-			"overlapDeg": tileOverlapDeg,
+			"cols":        tileGridCols,
+			"rows":        tileGridRows,
+			"overlapDeg":  tileOverlapDeg,
 			"nominalLonW": tileNominalLonW,
 			"nominalLatS": tileNominalLatS,
 		},
@@ -225,17 +239,22 @@ func (wc *WeatherCache) handleData(w http.ResponseWriter, r *http.Request) {
 // from haunting the deployment until the soft TTL expires.
 //
 // v2: sign+magnitude decode for signed GRIB2 integer fields (binary /
-//     decimal scale factors, surface + earth-radius scales).
+//
+//	decimal scale factors, surface + earth-radius scales).
+//
 // v3: ECMWF CCSDS/AEC decoder — partial libaec fidelity through the
-//     ID-before-ref, k=id-1, zero-block, FLUSH-postprocess, and
-//     xMax clamp fixes. Bumped so the production server stops serving
-//     the impossible-1000-m/s-wind JSON some earlier ECMWF runs
-//     produced.
+//
+//	ID-before-ref, k=id-1, zero-block, FLUSH-postprocess, and
+//	xMax clamp fixes. Bumped so the production server stops serving
+//	the impossible-1000-m/s-wind JSON some earlier ECMWF runs
+//	produced.
+//
 // v4: gfs-isobars now emits 2 hPa contour spacing (was 4 hPa) plus
-//     Point features for local H/L pressure extrema. Old v3 GeoJSON
-//     files don't carry the kind="H"/"L" properties the frontend now
-//     expects, so they'd render the existing 4 hPa lines without
-//     any extremum labels.
+//
+//	Point features for local H/L pressure extrema. Old v3 GeoJSON
+//	files don't carry the kind="H"/"L" properties the frontend now
+//	expects, so they'd render the existing 4 hPa lines without
+//	any extremum labels.
 const weatherCacheVersion = "v4"
 
 // cachePath returns the on-disk cache location for one (model, fh)
@@ -309,6 +328,34 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 		return
 	}
 	fh := parseForecastHour(r, m)
+
+	// Mongo-first: if a weathersync service populated the weather collection,
+	// serve the stored payload directly — no disk read, no GRIB fetch. This is
+	// the render/tile-server fast path. Misses fall through to disk/upstream.
+	if wc.mongoColl != nil {
+		if g, ok, err := weather.Get(r.Context(), wc.mongoColl, m.Name, fh); err == nil && ok && len(g.Payload) > 0 {
+			wc.hits.Add(1)
+			w.Header().Set("X-Cache", "MONGO")
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "public, max-age=300")
+			w.Header().Add("Vary", "Accept-Encoding")
+			switch {
+			case !g.Gzip:
+				_, _ = w.Write(g.Payload)
+			case clientAcceptsGzip(r):
+				w.Header().Set("Content-Encoding", "gzip")
+				_, _ = w.Write(g.Payload)
+			default:
+				// Stored gzipped but the client can't take it — inflate.
+				if gz, gerr := gzip.NewReader(bytes.NewReader(g.Payload)); gerr == nil {
+					_, _ = io.Copy(w, gz)
+					_ = gz.Close()
+				}
+			}
+			return
+		}
+	}
+
 	path := wc.cachePath(m.Name, fh)
 	info, statErr := os.Stat(path)
 	fresh := statErr == nil && time.Since(info.ModTime()) <= wc.refresh
@@ -820,25 +867,25 @@ func (wc *WeatherCache) StartCleaner(maxAge, interval time.Duration) {
 // windHeader matches the GRIB-as-JSON header that grib2json (and hence
 // ol-wind) consumes. Field names are camelCase per the schema.
 type windHeader struct {
-	Discipline        int     `json:"discipline"`
-	Center            int     `json:"center"`
-	RefTime           string  `json:"refTime"`
-	ForecastTime      int     `json:"forecastTime"`
-	ParameterCategory int     `json:"parameterCategory"`
-	ParameterNumber   int     `json:"parameterNumber"`
-	ParameterUnit     string  `json:"parameterUnit"`
-	Surface1Type      int     `json:"surface1Type"`
-	Surface1Value     float64 `json:"surface1Value"`
-	GridDefinitionTemplateName string `json:"gridDefinitionTemplateName"`
-	Nx                int     `json:"nx"`
-	Ny                int     `json:"ny"`
-	Lo1               float64 `json:"lo1"`
-	La1               float64 `json:"la1"`
-	Lo2               float64 `json:"lo2"`
-	La2               float64 `json:"la2"`
-	Dx                float64 `json:"dx"`
-	Dy                float64 `json:"dy"`
-	ScanMode          int     `json:"scanMode"`
+	Discipline                 int     `json:"discipline"`
+	Center                     int     `json:"center"`
+	RefTime                    string  `json:"refTime"`
+	ForecastTime               int     `json:"forecastTime"`
+	ParameterCategory          int     `json:"parameterCategory"`
+	ParameterNumber            int     `json:"parameterNumber"`
+	ParameterUnit              string  `json:"parameterUnit"`
+	Surface1Type               int     `json:"surface1Type"`
+	Surface1Value              float64 `json:"surface1Value"`
+	GridDefinitionTemplateName string  `json:"gridDefinitionTemplateName"`
+	Nx                         int     `json:"nx"`
+	Ny                         int     `json:"ny"`
+	Lo1                        float64 `json:"lo1"`
+	La1                        float64 `json:"la1"`
+	Lo2                        float64 `json:"lo2"`
+	La2                        float64 `json:"la2"`
+	Dx                         float64 `json:"dx"`
+	Dy                         float64 `json:"dy"`
+	ScanMode                   int     `json:"scanMode"`
 }
 
 type windRecord struct {
@@ -1034,15 +1081,15 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 		haveBitmap                bool
 		// Template 5.3 (complex packing + spatial differencing) extras.
 		// These are zero/unused for template 5.0.
-		numGroups               int
-		groupWidthRef           int
-		groupWidthBits          int
-		groupLengthRef          int
-		groupLengthIncrement    int
-		groupLengthLast         int
-		groupLengthBits         int
-		spatialDiffOrder        int
-		spatialDiffExtraOctets  int
+		numGroups              int
+		groupWidthRef          int
+		groupWidthBits         int
+		groupLengthRef         int
+		groupLengthIncrement   int
+		groupLengthLast        int
+		groupLengthBits        int
+		spatialDiffOrder       int
+		spatialDiffExtraOctets int
 		// Template 5.42 (CCSDS) extras.
 		ccsdsFlags     byte
 		ccsdsBlockSize int
@@ -1205,25 +1252,25 @@ func parseGRIBMessage(b []byte, runTime time.Time, forecastHour int, want gribMe
 
 	rec := &windRecord{
 		Header: windHeader{
-			Discipline:        discipline,
-			Center:            center,
-			RefTime:           runTime.Format("2006-01-02T15:04:05.000Z"),
-			ForecastTime:      forecastHour,
-			ParameterCategory: paramCat,
-			ParameterNumber:   paramNum,
-			ParameterUnit:     "m s**-1",
-			Surface1Type:      surfType,
-			Surface1Value:     surfValue,
+			Discipline:                 discipline,
+			Center:                     center,
+			RefTime:                    runTime.Format("2006-01-02T15:04:05.000Z"),
+			ForecastTime:               forecastHour,
+			ParameterCategory:          paramCat,
+			ParameterNumber:            paramNum,
+			ParameterUnit:              "m s**-1",
+			Surface1Type:               surfType,
+			Surface1Value:              surfValue,
 			GridDefinitionTemplateName: "regular_ll",
-			Nx:                nx,
-			Ny:                ny,
-			Lo1:               lo1,
-			La1:               la1,
-			Lo2:               lo2,
-			La2:               la2,
-			Dx:                dx,
-			Dy:                dy,
-			ScanMode:          scanMode,
+			Nx:                         nx,
+			Ny:                         ny,
+			Lo1:                        lo1,
+			La1:                        la1,
+			Lo2:                        lo2,
+			La2:                        la2,
+			Dx:                         dx,
+			Dy:                         dy,
+			ScanMode:                   scanMode,
 		},
 		Data: values,
 	}
@@ -1244,17 +1291,17 @@ func signedUint32(u uint32) float64 {
 // This is what NOMADS publishes GFS in. The corresponding data section
 // (template 7.2 / 7.3) layout:
 //
-//	1. For template 3 only: spatial-diff descriptors — `spatialOrder`
-//	   first values plus an overall minimum, each `extraOctets * 8` bits
-//	   wide, stored as sign+magnitude.
-//	2. NG group reference values, each `bitsPerValue` bits, byte-aligned
-//	   after the previous block.
-//	3. NG group widths, each `groupWidthBits` bits.
-//	4. NG group lengths, each `groupLengthBits` bits — actual length is
-//	   `groupLengthRef + length * groupLengthIncrement` (last group is
-//	   pinned to `groupLengthLast`).
-//	5. The packed values themselves — for each group i with width Wi and
-//	   length Li, Li values each (`bitsPerValue + Wi`) bits.
+//  1. For template 3 only: spatial-diff descriptors — `spatialOrder`
+//     first values plus an overall minimum, each `extraOctets * 8` bits
+//     wide, stored as sign+magnitude.
+//  2. NG group reference values, each `bitsPerValue` bits, byte-aligned
+//     after the previous block.
+//  3. NG group widths, each `groupWidthBits` bits.
+//  4. NG group lengths, each `groupLengthBits` bits — actual length is
+//     `groupLengthRef + length * groupLengthIncrement` (last group is
+//     pinned to `groupLengthLast`).
+//  5. The packed values themselves — for each group i with width Wi and
+//     length Li, Li values each (`bitsPerValue + Wi`) bits.
 //
 // Reconstruction:
 //

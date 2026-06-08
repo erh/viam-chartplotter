@@ -1,8 +1,8 @@
 package vc
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"compress/bzip2"
 	"context"
 	"encoding/json"
@@ -734,8 +734,8 @@ func ecmwfWindModel() *WeatherModel {
 		// ECMWF Open Data publishes 0-144 at 3h steps, 150-240 at 6h.
 		// Cap at 144 so the slider's step alignment stays uniform and
 		// fh values in the always-3h zone all resolve to a real message.
-		MaxFh:       144,
-		StepFh:      3,
+		MaxFh:  144,
+		StepFh: 3,
 		// ECMWF Open Data lands ~7 h after the cycle hour (longer than
 		// NOMADS' GFS); back off accordingly so walkLatestCycle starts
 		// at a run that's actually published.

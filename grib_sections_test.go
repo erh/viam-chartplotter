@@ -20,8 +20,8 @@ func TestSignedInt16SignMagnitude(t *testing.T) {
 		{0x0000, 0},
 		{0x0001, 1},
 		{0x7FFF, 32767},
-		{0x8000, 0},      // -0, treated as 0
-		{0x8001, -1},     // the HRRR-bug case
+		{0x8000, 0},  // -0, treated as 0
+		{0x8001, -1}, // the HRRR-bug case
 		{0x8002, -2},
 		{0xFFFF, -32767}, // sign + max-magnitude
 	}

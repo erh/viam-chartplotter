@@ -12,15 +12,15 @@ import (
 // reconstruct that origin from La1/Lo1 by forward-projecting the first
 // point.
 type lambertGrid struct {
-	Nx, Ny       int
-	Dx, Dy       float64 // metres
-	La1, Lo1     float64 // degrees, first grid point
-	LaD          float64 // degrees, "true scale" reference latitude
-	LoV          float64 // degrees, central meridian (parallel to y-axis)
-	Latin1       float64 // degrees, first standard parallel
-	Latin2       float64 // degrees, second standard parallel
-	ScanMode     int
-	EarthRadius  float64 // metres
+	Nx, Ny      int
+	Dx, Dy      float64 // metres
+	La1, Lo1    float64 // degrees, first grid point
+	LaD         float64 // degrees, "true scale" reference latitude
+	LoV         float64 // degrees, central meridian (parallel to y-axis)
+	Latin1      float64 // degrees, first standard parallel
+	Latin2      float64 // degrees, second standard parallel
+	ScanMode    int
+	EarthRadius float64 // metres
 }
 
 // lambertParams are the precomputed projection constants — derived

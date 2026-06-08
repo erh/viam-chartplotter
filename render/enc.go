@@ -9,10 +9,8 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
-	"os"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,12 +34,9 @@ import (
 // This is a deliberately minimal style — no S-52 — but readable enough to plot a
 // course: water/land fills, coastline, depth contours, soundings, navaids.
 type ENCRenderer struct {
-	catalog *noaa.Catalog
-	store   *noaa.Store
-	// noaaColl is the MongoDB collection of parsed ENC features that
-	// RenderTile reads from. Nil renders no ENC content (transparent).
-	// The catalog/store above are retained only for the prefetch/stats
-	// admin endpoints and the not-yet-ported Navaids/Structures/DebugBBox.
+	// noaaColl is the MongoDB collection of parsed ENC features that the
+	// renderer reads from. Nil renders no ENC content (transparent). The
+	// renderer is fully Mongo-backed — it never touches the disk ENC store.
 	noaaColl *mongo.Collection
 	// osm is the set of per-minZoom-bucket MongoDB collections the
 	// /noaa-enc/osm-tile/ underlay queries. Nil disables the layer
@@ -49,19 +44,10 @@ type ENCRenderer struct {
 	osm    *osmtiler.OSMCollections
 	logger logging.Logger
 
-	mu     sync.Mutex
-	charts map[string]*chartEntry
-
 	// noMongoBlankCount counts blank OSM tiles served because no
 	// MongoDB collection is attached. Used to sample a warning at
 	// 1/20 so misconfigured deployments get noticed without spamming.
 	noMongoBlankCount atomic.Uint64
-}
-
-type chartEntry struct {
-	chart *s57.Chart
-	mtime int64
-	path  string
 }
 
 // drawPass orders the rendering of features so fills are below lines are below
@@ -74,18 +60,10 @@ const (
 	passPoints
 )
 
-// debugNoPolyGuards disables the polygon-fill drop guards (degenerate /
-// oversized / cell-boundary-clip) when ENC_NO_POLY_GUARDS is set, for
-// diagnosing missing land/water fills.
-var debugNoPolyGuards = os.Getenv("ENC_NO_POLY_GUARDS") != ""
-
-func NewENCRenderer(catalog *noaa.Catalog, store *noaa.Store, logger logging.Logger) *ENCRenderer {
-	return &ENCRenderer{
-		catalog: catalog,
-		store:   store,
-		logger:  logger,
-		charts:  map[string]*chartEntry{},
-	}
+// NewENCRenderer builds a Mongo-backed renderer. Attach data sources with
+// SetNOAACollection (ENC features) and SetOSMCollections (OSM underlay).
+func NewENCRenderer(logger logging.Logger) *ENCRenderer {
+	return &ENCRenderer{logger: logger}
 }
 
 // SetOSMCollections attaches the per-bucket MongoDB collections that
@@ -104,6 +82,25 @@ func (r *ENCRenderer) SetNOAACollection(c *mongo.Collection) { r.noaaColl = c }
 // log per-request timing breakdowns through the same sublogger.
 func (r *ENCRenderer) Logger() logging.Logger { return r.logger }
 
+// slowQueryThreshold: any MongoDB query slower than this is logged.
+const slowQueryThreshold = 100 * time.Millisecond
+
+// osmMergeMinZoom is the lowest zoom at which the merged tile pulls in the OSM
+// underlay. Below it the OSM detail is invisible and the low-zoom OSM query is
+// huge (z7 ≈ 90k features) and slow, so the merged tile is ENC-only there.
+const osmMergeMinZoom = 12
+
+// logSlowQuery logs a MongoDB query that exceeded slowQueryThreshold, with the
+// collection, bbox, zoom, duration and row count, so slow DB queries are
+// visible without profiling.
+func (r *ENCRenderer) logSlowQuery(coll string, dur time.Duration, n, z int, minLon, minLat, maxLon, maxLat float64) {
+	if r.logger == nil || dur < slowQueryThreshold {
+		return
+	}
+	r.logger.Infof("slow mongo query: coll=%s z=%d bbox=[%.4f,%.4f,%.4f,%.4f] dur=%dms rows=%d",
+		coll, z, minLon, minLat, maxLon, maxLat, dur.Milliseconds(), n)
+}
+
 // queryTileFeatures pulls every ENC feature whose geometry intersects the tile
 // bbox and that renders at zoom z (minZoom <= z) from MongoDB, decoded into
 // draw-ready features. Returns nil when no collection is attached.
@@ -113,7 +110,9 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	qStart := time.Now()
 	docs, err := noaa.QueryBBox(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, "")
+	r.logSlowQuery("noaa", time.Since(qStart), len(docs), z, minLon, minLat, maxLon, maxLat)
 	if err != nil {
 		return nil, err
 	}
@@ -126,41 +125,28 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	return out, nil
 }
 
-// chartFor returns the parsed chart for a cell, parsing once and reusing the
-// result until the on-disk .000 file's mtime changes.
-func (r *ENCRenderer) chartFor(name string) (*s57.Chart, error) {
-	path := r.store.S57Path(name)
-	if path == "" {
+// queryFeaturesAll pulls every ENC feature intersecting the bbox from MongoDB
+// regardless of zoom (no minZoom filter), decoded to draw-ready features. Used
+// by the navaid/structure/debug endpoints, which do their own class filtering.
+func (r *ENCRenderer) queryFeaturesAll(minLon, minLat, maxLon, maxLat float64) ([]*mongoFeature, error) {
+	if r.noaaColl == nil {
 		return nil, nil
 	}
-	info, err := os.Stat(path)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	qStart := time.Now()
+	docs, err := noaa.QueryBBox(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, -1, "")
+	r.logSlowQuery("noaa", time.Since(qStart), len(docs), -1, minLon, minLat, maxLon, maxLat)
 	if err != nil {
 		return nil, err
 	}
-	mtime := info.ModTime().UnixNano()
-
-	r.mu.Lock()
-	entry, ok := r.charts[name]
-	r.mu.Unlock()
-	if ok && entry.path == path && entry.mtime == mtime {
-		return entry.chart, nil
+	out := make([]*mongoFeature, 0, len(docs))
+	for _, d := range docs {
+		if mf, ok := featureFromDoc(d); ok {
+			out = append(out, mf)
+		}
 	}
-
-	parseStart := time.Now()
-	parser := s57.NewParser()
-	chart, err := parser.Parse(path)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", name, err)
-	}
-	if r.logger != nil {
-		r.logger.Infof("enc parse: cell=%s size=%d bytes feats=%d in %s",
-			name, info.Size(), len(chart.Features()), time.Since(parseStart).Round(time.Millisecond))
-	}
-
-	r.mu.Lock()
-	r.charts[name] = &chartEntry{chart: chart, mtime: mtime, path: path}
-	r.mu.Unlock()
-	return chart, nil
+	return out, nil
 }
 
 // DebugCellReport is the per-cell payload returned by DebugBBox.
@@ -200,31 +186,42 @@ type DebugFeature struct {
 // either side) per-feature details for features whose own bbox intersects the
 // query are also included, so a suspect rendering artifact can be identified.
 func (r *ENCRenderer) DebugBBox(minLon, minLat, maxLon, maxLat float64) ([]DebugCellReport, error) {
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
+	feats, err := r.queryFeaturesAll(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		return nil, err
+	}
 	wantFeatures := (maxLon-minLon) < 0.05 && (maxLat-minLat) < 0.05
 
-	reports := make([]DebugCellReport, 0, len(cells))
-	for _, cell := range cells {
-		rep := DebugCellReport{
-			Name:           cell.Name,
-			CScale:         cell.CScale,
-			BBox:           [4]float64{cell.MinLon, cell.MinLat, cell.MaxLon, cell.MaxLat},
-			ByGeometryType: map[string]int{},
-			ByClass:        map[string]int{},
-			ClassesByGeom:  map[string]map[string]int{},
-		}
-		chart, err := r.chartFor(cell.Name)
-		if err != nil {
-			rep.ParseError = err.Error()
-			reports = append(reports, rep)
-			continue
-		}
-		if chart == nil {
-			rep.ParseError = "cell not on disk"
-			reports = append(reports, rep)
-			continue
-		}
-		for _, f := range chart.Features() {
+	// Group the Mongo features by cell so the report still reads per-cell.
+	byCell := map[string]*DebugCellReport{}
+	var order []string
+	{
+		for _, f := range feats {
+			rep := byCell[f.cell]
+			if rep == nil {
+				rep = &DebugCellReport{
+					Name:           f.cell,
+					CScale:         f.scale,
+					BBox:           [4]float64{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)},
+					ByGeometryType: map[string]int{},
+					ByClass:        map[string]int{},
+					ClassesByGeom:  map[string]map[string]int{},
+				}
+				byCell[f.cell] = rep
+				order = append(order, f.cell)
+			}
+			if f.bbox[0] < rep.BBox[0] {
+				rep.BBox[0] = f.bbox[0]
+			}
+			if f.bbox[1] < rep.BBox[1] {
+				rep.BBox[1] = f.bbox[1]
+			}
+			if f.bbox[2] > rep.BBox[2] {
+				rep.BBox[2] = f.bbox[2]
+			}
+			if f.bbox[3] > rep.BBox[3] {
+				rep.BBox[3] = f.bbox[3]
+			}
 			class := f.ObjectClass()
 			geomType := f.Geometry().Type.String()
 			rep.FeatureCount++
@@ -291,7 +288,10 @@ func (r *ENCRenderer) DebugBBox(minLon, minLat, maxLon, maxLat float64) ([]Debug
 			}
 			rep.Features = append(rep.Features, df)
 		}
-		reports = append(reports, rep)
+	}
+	reports := make([]DebugCellReport, 0, len(order))
+	for _, name := range order {
+		reports = append(reports, *byCell[name])
 	}
 	return reports, nil
 }
@@ -394,8 +394,10 @@ type StructureGeom struct {
 // those coalesce to a single feature. The richest attribute bag wins
 // ties.
 func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Structure, error) {
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
-	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+	feats, err := r.queryFeaturesAll(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		return nil, err
+	}
 
 	// dedup grid: ~10 m at mid-latitudes — wider than typical
 	// segmentation drift across overlapping cells but tighter than two
@@ -409,12 +411,8 @@ func (r *ENCRenderer) Structures(minLon, minLat, maxLon, maxLat float64) ([]Stru
 	}
 	seen := make(map[key]Structure)
 
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
+	{
+		for _, f := range feats {
 			class := f.ObjectClass()
 			if !IsStructureClass(class) {
 				continue
@@ -739,8 +737,10 @@ var NavaidAttributeKeys = []string{
 // flag, and the LIGHTS feature is dropped from the output. Lights with no
 // nearby structure (sector lights, lighthouses) are returned standalone.
 func (r *ENCRenderer) Navaids(minLon, minLat, maxLon, maxLat float64) ([]Navaid, error) {
-	cells := r.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, 0, 0)
-	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+	feats, err := r.queryFeaturesAll(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		return nil, err
+	}
 
 	type key struct {
 		class string
@@ -753,12 +753,8 @@ func (r *ENCRenderer) Navaids(minLon, minLat, maxLon, maxLat float64) ([]Navaid,
 	seen := make(map[key]Navaid)
 	var lights []Navaid
 
-	for _, cell := range cells {
-		chart, err := r.chartFor(cell.Name)
-		if err != nil || chart == nil {
-			continue
-		}
-		for _, f := range chart.FeaturesInBounds(bbox) {
+	{
+		for _, f := range feats {
 			class := f.ObjectClass()
 			if !IsNavaidClass(class) {
 				continue
@@ -878,7 +874,13 @@ const (
 // v5: Mongo-backed render (per-feature scale window + coverage mask, land-
 // before-water area ordering); invalidates v4 tiles rendered during the
 // initial cutover that showed land fills over water.
-const ENCRenderRulesVersion = 5
+// v6: dropped the cell-boundary-clip guard that was wrongly suppressing
+// coastal/approach-cell LNDARE, leaving land white at z<=11.
+// v7: merged tile uses the ENC tan-land base with OSM drawn on top, so land
+// is never white where OSM lacks low-zoom data.
+// v8: single coarse→fine area pass (finest cell wins) so fine barrier-
+// island LNDARE paints over coarse shallow DEPARE (tan island, not blue).
+const ENCRenderRulesVersion = 8
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -1103,11 +1105,10 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 
 	// Coverage handling: rely on the coarse->fine sort (finer cells paint
 	// last and win), land-before-water ordering (water always covers land),
-	// and the per-polygon oversized/degenerate guards. The old cell-extent
-	// coverage mask is intentionally NOT applied here — approximating a cell's
-	// extent from its feature bounding boxes produced rectangular tan patches
-	// and half-filled land (cells whose grid square the mask wrongly dropped).
-	baseFillOK := func(f *mongoFeature) bool { return true }
+	// and the per-polygon oversized/degenerate guards in drawFeature. The old
+	// cell-extent coverage mask is intentionally NOT applied — approximating a
+	// cell's extent from feature bboxes produced rectangular tan patches and
+	// half-filled land.
 
 	skip := func(class string) bool {
 		if skipNavaids && IsNavaidClass(class) {
@@ -1119,43 +1120,32 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 		return false
 	}
 
-	// --- area pass, ordered land -> water -> other so water always paints
-	// over land (open water never reads as a yellow land fill). ---
-	// Land fills.
-	if !transparentLand {
-		for _, f := range features {
-			if !isLandClass(f.class) || skip(f.class) {
+	// --- area pass: a single coarsest→finest pass (features are sorted that
+	// way) so the finest cell's polygon wins per pixel. This is what makes a
+	// fine-cell barrier-island LNDARE paint over a coarse-cell shallow DEPARE
+	// (tan island, not blue) AND a fine-cell DEPARE paint over a coarse-cell
+	// LNDARE (blue water, not tan). Drawing all land then all water instead
+	// would let coarse water blue-out fine islands.
+	for _, f := range features {
+		class := f.class
+		if skip(class) {
+			continue
+		}
+		if isLandClass(class) {
+			if transparentLand {
 				continue
 			}
-			if z >= 10 && !baseFillOK(f) {
-				continue
-			}
+			// coarse-zoom seam guard: only continent-scale land fills at z<10.
 			if z < 10 && f.scale > 0 && f.scale < 800_000 {
-				continue // coarse-zoom: continent-scale land only (no seams)
+				continue
 			}
-			drawFeature(dc, f, passAreas, project, scale, safeDepthM, bbox, z, style)
-		}
-	}
-	// Water fills.
-	for _, f := range features {
-		if !isWaterBaseClass(f.class) || skip(f.class) {
-			continue
-		}
-		if z >= 10 && !baseFillOK(f) {
-			continue
-		}
-		drawFeature(dc, f, passAreas, project, scale, safeDepthM, bbox, z, style)
-	}
-	// Other area fills (RESARE, anchorages, etc.), scale-windowed.
-	for _, f := range features {
-		if isLandClass(f.class) || isWaterBaseClass(f.class) || skip(f.class) {
-			continue
-		}
-		if transparentLand && isLandClass(f.class) {
-			continue
-		}
-		if !windowOK(f) {
-			continue
+		} else if !isWaterBaseClass(class) {
+			// "Other" area fills (RESARE, anchorages, …) are scale-windowed;
+			// the land/water base classes always paint (finest-wins handles
+			// any overlap).
+			if !windowOK(f) {
+				continue
+			}
 		}
 		drawFeature(dc, f, passAreas, project, scale, safeDepthM, bbox, z, style)
 	}
@@ -1334,105 +1324,6 @@ func isChannelClass(class string) bool {
 	return false
 }
 
-// allowedCells reproduces the old finest-first 32x32 coverage mask using
-// per-cell feature-bbox extents instead of catalog cell extents. A coarser
-// cell's area fills are suppressed where finer cells already cover the tile
-// region (so a coarse Approach cell's imprecise LNDARE doesn't paint over the
-// water a finer Harbour cell authoritatively covers). Returns a set of cell
-// names whose fills should be drawn. Only meaningful at z>=10; callers gate on
-// zoom themselves.
-func allowedCells(features []*mongoFeature, z int, minLon, minLat, maxLon, maxLat float64) map[string]bool {
-	allowed := map[string]bool{}
-	if z < 10 {
-		return allowed
-	}
-	type ext struct {
-		minLon, minLat, maxLon, maxLat float64
-		scale                          int
-	}
-	exts := map[string]*ext{}
-	var order []string
-	for _, f := range features {
-		if f.cell == "" {
-			continue
-		}
-		e := exts[f.cell]
-		if e == nil {
-			e = &ext{minLon: math.Inf(1), minLat: math.Inf(1), maxLon: math.Inf(-1), maxLat: math.Inf(-1), scale: f.scale}
-			exts[f.cell] = e
-			order = append(order, f.cell)
-		}
-		if f.bbox[0] < e.minLon {
-			e.minLon = f.bbox[0]
-		}
-		if f.bbox[1] < e.minLat {
-			e.minLat = f.bbox[1]
-		}
-		if f.bbox[2] > e.maxLon {
-			e.maxLon = f.bbox[2]
-		}
-		if f.bbox[3] > e.maxLat {
-			e.maxLat = f.bbox[3]
-		}
-		if f.scale > 0 {
-			e.scale = f.scale
-		}
-	}
-	// Finest cell first (smallest compilation-scale denominator).
-	sort.SliceStable(order, func(i, j int) bool { return exts[order[i]].scale < exts[order[j]].scale })
-
-	const mw = 32
-	var mask [mw * mw]bool
-	fx := func(lon float64) int {
-		if lon <= minLon {
-			return 0
-		}
-		if lon >= maxLon {
-			return mw
-		}
-		return int((lon - minLon) / (maxLon - minLon) * mw)
-	}
-	fy := func(lat float64) int {
-		if lat <= minLat {
-			return mw
-		}
-		if lat >= maxLat {
-			return 0
-		}
-		return int((maxLat - lat) / (maxLat - minLat) * mw)
-	}
-	for _, c := range order {
-		e := exts[c]
-		xmin, ymin := fx(e.minLon), fy(e.maxLat)
-		xmax, ymax := fx(e.maxLon), fy(e.minLat)
-		if xmin >= xmax || ymin >= ymax {
-			allowed[c] = true // sub-cell sliver; let it draw
-			continue
-		}
-		allClaimed := true
-		for yy := ymin; yy < ymax && allClaimed; yy++ {
-			for xx := xmin; xx < xmax; xx++ {
-				if !mask[yy*mw+xx] {
-					allClaimed = false
-					break
-				}
-			}
-		}
-		if allClaimed {
-			allowed[c] = false
-			continue
-		}
-		allowed[c] = true
-		for yy := ymin; yy < ymax; yy++ {
-			for xx := xmin; xx < xmax; xx++ {
-				mask[yy*mw+xx] = true
-			}
-		}
-	}
-	return allowed
-}
-
-// encodePNG encodes the rendered context to PNG bytes.
 func encodePNG(dc *gg.Context) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, dc.Image()); err != nil {
@@ -1468,11 +1359,16 @@ func (r *ENCRenderer) renderOSMTile(z, x, y int, transparentBase bool) ([]byte, 
 	if r.osm != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		qStart := time.Now()
 		features, _, err := osmtiler.FetchTileFeaturesMulti(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
 			IncludeMinZoom: true,
 			ZoomOverride:   -1,
 			PadBuffer:      true,
 		})
+		if d := time.Since(qStart); d >= slowQueryThreshold && r.logger != nil {
+			r.logger.Infof("slow mongo query: coll=osm_* z=%d x=%d y=%d dur=%dms rows=%d",
+				z, x, y, d.Milliseconds(), len(features))
+		}
 		if err != nil {
 			if r.logger != nil {
 				r.logger.Warnf("osm-tile query z=%d x=%d y=%d: %v", z, x, y, err)
@@ -1512,26 +1408,38 @@ type mergeTiming struct {
 	CompositeMS float64
 }
 
-// RenderMergedTile composites the OSM underlay (streets/land, water carved out)
-// beneath the ENC chart (depth shading, coastline, navaids) into a single PNG.
-// This replaces merging the two as separate layers in the browser: the server
-// owns the stack order and can make smarter cross-layer decisions. The bool
-// reports whether the OSM underlay was feature-backed (vs the transparent
-// fallback); the timing is for slow-tile attribution.
+// RenderMergedTile composites the ENC chart and the OSM detail into one PNG.
+// The ENC chart is the BASE with land fill ON (tan land, depth-shaded water,
+// coastline, navaids) so land is never white where OSM lacks data; the OSM
+// layer (streets/buildings/landuse, water omitted) is drawn OVER it so street
+// context shows on land while ENC owns land/water colour. The bool reports
+// whether the OSM layer was feature-backed; the timing is for attribution.
 func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte, bool, mergeTiming, error) {
 	var mt mergeTiming
-	osmStart := time.Now()
-	// Transparent base so the OSM land colour never shows through the ENC
-	// chart's transparent deep-water (the "yellow water" bug).
-	osmPNG, osmRendered, _ := r.renderOSMTile(z, x, y, true)
-	mt.OSMMS = msSince(osmStart)
-	encPNG, enc, err := r.RenderTile(z, x, y, opts)
+	// ENC base: force land fill on regardless of the caller's TransparentLand —
+	// in the merge the ENC tan land is the authoritative land base (OSM draws
+	// on top of it), so "landfill=0" must not leave land white.
+	encOpts := opts
+	encOpts.TransparentLand = false
+	encPNG, enc, err := r.RenderTile(z, x, y, encOpts)
 	mt.ENC = enc
 	if err != nil {
-		return nil, osmRendered, mt, err
+		return nil, false, mt, err
 	}
+	// Below osmMergeMinZoom, skip OSM entirely: street/building detail is
+	// invisible at overview scale, and the low-zoom OSM query is enormous
+	// (z7 ≈ 90k features, z8 ≈ 75k) — it dominates the render and times out.
+	// The chart (ENC) alone is the right overview tile, and it's fast.
+	if z < osmMergeMinZoom {
+		return encPNG, false, mt, nil
+	}
+	osmStart := time.Now()
+	// Transparent base so OSM contributes only its land ink (roads, buildings,
+	// landuse); it draws no water, so ENC's water shows through underneath.
+	osmPNG, osmRendered, _ := r.renderOSMTile(z, x, y, true)
+	mt.OSMMS = msSince(osmStart)
 	cStart := time.Now()
-	merged, err := compositeOver(osmPNG, encPNG)
+	merged, err := compositeOver(encPNG, osmPNG)
 	mt.CompositeMS = msSince(cStart)
 	if err != nil {
 		return nil, osmRendered, mt, err
@@ -2201,27 +2109,15 @@ func drawFeature(dc *gg.Context, f encFeature, pass drawPass, project func(lon, 
 					return
 				}
 			}
-			// Overview-cell rings get their outer boundary clipped to the
-			// ENC cell's bounding box, threading the polygon along a
-			// constant lat or lon for kilometres. Painting these at chart
-			// zoom leaves triangular fill wedges where the boundary
-			// segments intersect — and finer cells iterated later will
-			// supply the actual coastline detail anyway. Detect the clip
-			// directly via consecutive vertices that share an exact lon
-			// or lat over a multi-km span; that's a fingerprint no real
-			// coastline produces.
-			// Only drop cell-boundary-clipped rings when the polygon is also
-			// large relative to the tile (>3x). That targets the coarse
-			// overview/approach-cell rings this guard was written for — whose
-			// cell-boundary clip threads a wedge across the tile — while
-			// sparing fine harbour-cell LNDARE, which is legitimately clipped
-			// to its (small) cell rectangle and must still fill the land.
-			// Without the size gate this dropped normal land, leaving it white.
-			if !debugNoPolyGuards &&
-				isOversizedPolygon(geom.Coordinates, tileBbox, 3) &&
-				hasCellBoundaryClipEdge(geom.Coordinates, overviewClipEdgeM) {
-				return
-			}
+			// NOTE: the old cell-boundary-clip guard (drop polygons whose
+			// boundary runs along the ENC cell rectangle) is intentionally
+			// gone. It was written for the disk renderer's per-cell painting
+			// and, in the Mongo pipeline, wrongly dropped legitimate coastal/
+			// approach-cell LNDARE — leaving land white at z<=11. Continent-
+			// scale overview rings (the real wedge culprits) are still caught
+			// by isOversizedPolygon(…, 200) above; the coarse→fine paint order
+			// and per-feature minZoom handle the rest. Verified wedge-free at
+			// z=7..16 against NOAA WMS.
 			tracePolygonPath(dc, geom.Coordinates, project)
 			dc.Push()
 			dc.SetFillRuleEvenOdd()
