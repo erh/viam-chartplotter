@@ -90,6 +90,17 @@ const slowQueryThreshold = 100 * time.Millisecond
 // huge (z7 ≈ 90k features) and slow, so the merged tile is ENC-only there.
 const osmMergeMinZoom = 12
 
+// lowZoomBandCeilingZoom: at or below this zoom, queryTileFeatures restricts the
+// NOAA query to coarse usage bands (<= lowZoomMaxUsageBand) so an overview tile
+// fetches only the coastal/general/overview cells it actually paints (z7 ≈ 30k
+// docs → ~760), instead of pulling every fine harbour cell and dropping it in
+// memory. lowZoomMaxUsageBand = 3 keeps band 3 (coastal), which carries the
+// overview DEPARE depth shading; band 2 alone leaves z7/z8 with no depth.
+const (
+	lowZoomBandCeilingZoom = 9
+	lowZoomMaxUsageBand    = 3
+)
+
 // logSlowQuery logs a MongoDB query that exceeded slowQueryThreshold, with the
 // collection, bbox, zoom, duration and row count, so slow DB queries are
 // visible without profiling.
@@ -110,8 +121,33 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// At overview zooms (z <= lowZoomBandCeilingZoom) a tile spans many fine
+	// harbour cells (usage bands 4–6) whose detail is invisible at this scale
+	// and is dropped by the in-memory cell-scale window anyway. Restrict the
+	// query to the coarse bands (1=overview, 2=general, 3=coastal) so those tens
+	// of thousands of fine-cell docs are never fetched. Band 3 (coastal) is kept
+	// deliberately: it's where the overview DEPARE depth shading lives — gating
+	// at band 2 leaves z7/z8 with almost no depth. Higher zooms keep the full
+	// in-memory logic, where land/water base classes paint regardless of window.
+	maxBand := 0
+	var alwaysClasses []string
+	if z <= lowZoomBandCeilingZoom {
+		maxBand = lowZoomMaxUsageBand
+		// Surface the coarse depth contours at overview zoom. They're stored at
+		// minZoom≈11 (so the zoom filter drops them), but NOAA shows the major
+		// fathom contours from z7 and the band ceiling keeps only coarse-cell
+		// ones — without them the deep (white) water reads as "no depth data".
+		alwaysClasses = []string{"DEPCNT"}
+	}
+
 	qStart := time.Now()
-	docs, err := noaa.QueryBBox(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, "")
+	docs, err := noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, maxBand, alwaysClasses, "")
+	if err == nil && len(docs) == 0 && maxBand > 0 {
+		// Sparse coverage at this band ceiling — retry unrestricted so the tile
+		// still shows the best available (finer-than-expected) data, not blank.
+		docs, err = noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, 0, alwaysClasses, "")
+	}
 	r.logSlowQuery("noaa", time.Since(qStart), len(docs), z, minLon, minLat, maxLon, maxLat)
 	if err != nil {
 		return nil, err
@@ -926,6 +962,14 @@ type RenderOptions struct {
 	SkipNavaids     bool
 	TransparentLand bool
 	SkipClasses     map[string]bool
+
+	// Merge-phase gates (internal): the merged tile renders ENC in two passes
+	// from one query so OSM can be sandwiched between them — area fills below
+	// the OSM ink, then lines/points/labels on top of it, so OSM landuse never
+	// covers ENC chart labels. Exactly one is set per drawENCTile call during a
+	// merge; both false renders a complete ENC tile (the standalone path).
+	areasOnly   bool // paint only area fills
+	overlayOnly bool // paint only lines, points and labels
 }
 
 // Zoom thresholds the frontend uses to switch ENC tile params (mirrors
@@ -1028,31 +1072,13 @@ type tileTiming struct {
 
 func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileTiming, error) {
 	var timing tileTiming
-	safeDepthM := opts.SafeDepthM
-	style := opts.Style
-	skipNavaids := opts.SkipNavaids
-	transparentLand := opts.TransparentLand
-	skipAll := opts.SkipClasses != nil && opts.SkipClasses["*"]
 
 	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
 
-	dc := gg.NewContext(256, 256)
-	// Transparent background so the OSM/seachart base layers below show through
-	// where we have no chart coverage.
-
-	project := func(lon, lat float64) (float64, float64) {
-		mx, my := lonLatToMerc(lon, lat)
-		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
-		py := (tileYmax - my) / (tileYmax - tileYmin) * 256
-		return px, py
-	}
-	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
-	scale := zoomSymbolScale(z)
-
-	if skipAll {
-		b, e := encodePNG(dc)
+	if opts.SkipClasses != nil && opts.SkipClasses["*"] {
+		b, e := encodePNG(gg.NewContext(256, 256))
 		return b, timing, e
 	}
 
@@ -1071,6 +1097,43 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 	}
 	// Coarsest first so finer-cell polygons paint last and win.
 	sort.SliceStable(features, func(i, j int) bool { return features[i].scale > features[j].scale })
+
+	b, drawMS, err := r.drawENCTile(features, z, x, y, opts)
+	timing.DrawMS = drawMS
+	if r.logger != nil && (timing.QueryMS+timing.DrawMS) > 200 {
+		r.logger.Infof("slow enc tile z=%d x=%d y=%d db=%.0fms draw=%.0fms feats=%d",
+			z, x, y, timing.QueryMS, timing.DrawMS, timing.Features)
+	}
+	return b, timing, err
+}
+
+// drawENCTile paints already-queried, already-sorted (coarsest-first) ENC
+// features onto a 256×256 tile and returns the PNG plus draw-milliseconds. The
+// query lives in RenderTile; splitting the draw out lets the merged tile paint
+// ENC in two phases (areas, then overlay) around the OSM layer from one query.
+// opts.areasOnly / opts.overlayOnly gate which passes run (both false = full).
+func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts RenderOptions) ([]byte, float64, error) {
+	safeDepthM := opts.SafeDepthM
+	style := opts.Style
+	skipNavaids := opts.SkipNavaids
+	transparentLand := opts.TransparentLand
+
+	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+
+	dc := gg.NewContext(256, 256)
+	// Transparent background so the OSM/seachart base layers below show through
+	// where we have no chart coverage.
+
+	project := func(lon, lat float64) (float64, float64) {
+		mx, my := lonLatToMerc(lon, lat)
+		px := (mx - tileXmin) / (tileXmax - tileXmin) * 256
+		py := (tileYmax - my) / (tileYmax - tileYmin) * 256
+		return px, py
+	}
+	bbox := s57.Bounds{MinLon: minLon, MinLat: minLat, MaxLon: maxLon, MaxLat: maxLat}
+	scale := zoomSymbolScale(z)
 
 	drawStart := time.Now()
 
@@ -1126,33 +1189,44 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 	// (tan island, not blue) AND a fine-cell DEPARE paint over a coarse-cell
 	// LNDARE (blue water, not tan). Drawing all land then all water instead
 	// would let coarse water blue-out fine islands.
-	for _, f := range features {
-		class := f.class
-		if skip(class) {
-			continue
+	if !opts.overlayOnly {
+		for _, f := range features {
+			class := f.class
+			if skip(class) {
+				continue
+			}
+			if isLandClass(class) {
+				if transparentLand {
+					continue
+				}
+				// coarse-zoom seam guard: only continent-scale land fills at z<10.
+				if z < 10 && f.scale > 0 && f.scale < 800_000 {
+					continue
+				}
+			} else if !isWaterBaseClass(class) {
+				// "Other" area fills (RESARE, anchorages, …) are scale-windowed;
+				// the land/water base classes always paint (finest-wins handles
+				// any overlap).
+				if !windowOK(f) {
+					continue
+				}
+			}
+			drawFeature(dc, f, passAreas, project, scale, safeDepthM, bbox, z, style)
 		}
-		if isLandClass(class) {
-			if transparentLand {
-				continue
-			}
-			// coarse-zoom seam guard: only continent-scale land fills at z<10.
-			if z < 10 && f.scale > 0 && f.scale < 800_000 {
-				continue
-			}
-		} else if !isWaterBaseClass(class) {
-			// "Other" area fills (RESARE, anchorages, …) are scale-windowed;
-			// the land/water base classes always paint (finest-wins handles
-			// any overlap).
-			if !windowOK(f) {
-				continue
-			}
-		}
-		drawFeature(dc, f, passAreas, project, scale, safeDepthM, bbox, z, style)
+	}
+
+	if opts.areasOnly {
+		timing := msSince(drawStart)
+		b, e := encodePNG(dc)
+		return b, timing, e
 	}
 
 	// --- line pass --- (scale-windowed, but channel/fairway lines always
 	// show from z>=9 regardless of window — they're the most navigationally
 	// important linework and live on fine harbour cells the window excludes).
+	// Depth contours (DEPCNT) also bypass the window: they're the depth signal
+	// at overview zoom and the coarse-cell ones the window would drop are
+	// exactly the ones we want to keep (see queryTileFeatures alwaysClasses).
 	for _, f := range features {
 		if skip(f.class) {
 			continue
@@ -1160,7 +1234,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 		if transparentLand && isLandClass(f.class) {
 			continue
 		}
-		if !windowOK(f) && !(z >= 9 && isChannelClass(f.class)) {
+		if !windowOK(f) && !(z >= 9 && isChannelClass(f.class)) && f.class != "DEPCNT" {
 			continue
 		}
 		drawFeature(dc, f, passLines, project, scale, safeDepthM, bbox, z, style)
@@ -1179,7 +1253,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 		}
 		drawFeature(dc, f, passPoints, project, scale, safeDepthM, bbox, z, style)
 	}
-	timing.DrawMS = msSince(drawStart)
+	drawMS := msSince(drawStart)
 
 	// Place-name labels at overview zooms (z >= 10). Bigger features get
 	// priority: we collect all viable candidates, dedupe by name keeping
@@ -1293,11 +1367,7 @@ func (r *ENCRenderer) RenderTile(z, x, y int, opts RenderOptions) ([]byte, tileT
 	}
 
 	b, e := encodePNG(dc)
-	if r.logger != nil && (timing.QueryMS+timing.DrawMS) > 200 {
-		r.logger.Infof("slow enc tile z=%d x=%d y=%d db=%.0fms draw=%.0fms feats=%d",
-			z, x, y, timing.QueryMS, timing.DrawMS, timing.Features)
-	}
-	return b, timing, e
+	return b, drawMS, e
 }
 
 // msSince returns elapsed milliseconds since t as a float (for timing logs).
@@ -1416,30 +1486,68 @@ type mergeTiming struct {
 // whether the OSM layer was feature-backed; the timing is for attribution.
 func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte, bool, mergeTiming, error) {
 	var mt mergeTiming
+
+	tileXmin, tileYmin, tileXmax, tileYmax := tileBBoxMercator(tileXYZ{x: x, y: y, z: z})
+	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
+	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
+
+	// One ENC query feeds both ENC phases below (fills, then overlay).
+	qStart := time.Now()
+	features, err := r.queryTileFeatures(minLon, minLat, maxLon, maxLat, z)
+	mt.ENC.QueryMS = msSince(qStart)
+	mt.ENC.Features = len(features)
+	if err != nil {
+		return nil, false, mt, err
+	}
+	sort.SliceStable(features, func(i, j int) bool { return features[i].scale > features[j].scale })
+
 	// ENC base: force land fill on regardless of the caller's TransparentLand —
 	// in the merge the ENC tan land is the authoritative land base (OSM draws
 	// on top of it), so "landfill=0" must not leave land white.
 	encOpts := opts
 	encOpts.TransparentLand = false
-	encPNG, enc, err := r.RenderTile(z, x, y, encOpts)
-	mt.ENC = enc
-	if err != nil {
-		return nil, false, mt, err
-	}
+
 	// Below osmMergeMinZoom, skip OSM entirely: street/building detail is
 	// invisible at overview scale, and the low-zoom OSM query is enormous
 	// (z7 ≈ 90k features, z8 ≈ 75k) — it dominates the render and times out.
-	// The chart (ENC) alone is the right overview tile, and it's fast.
+	// The chart (ENC) alone is the right overview tile, and it's fast — render
+	// it complete (areas + overlay) in one pass, no compositing.
 	if z < osmMergeMinZoom {
-		return encPNG, false, mt, nil
+		encPNG, drawMS, derr := r.drawENCTile(features, z, x, y, encOpts)
+		mt.ENC.DrawMS = drawMS
+		return encPNG, false, mt, derr
 	}
+
+	// Three-layer composite so OSM landuse never paints over ENC labels:
+	//   1. ENC area fills (land tan base + water/depth shading), OSM-less
+	//   2. OSM ink (roads, buildings, landuse) — transparent base, no water
+	//   3. ENC lines + points + labels, on top of OSM
+	fillsOpts := encOpts
+	fillsOpts.areasOnly = true
+	fillsPNG, fillsMS, err := r.drawENCTile(features, z, x, y, fillsOpts)
+	if err != nil {
+		return nil, false, mt, err
+	}
+	overlayOpts := encOpts
+	overlayOpts.overlayOnly = true
+	overlayPNG, overlayMS, err := r.drawENCTile(features, z, x, y, overlayOpts)
+	if err != nil {
+		return nil, false, mt, err
+	}
+	mt.ENC.DrawMS = fillsMS + overlayMS
+
 	osmStart := time.Now()
 	// Transparent base so OSM contributes only its land ink (roads, buildings,
 	// landuse); it draws no water, so ENC's water shows through underneath.
 	osmPNG, osmRendered, _ := r.renderOSMTile(z, x, y, true)
 	mt.OSMMS = msSince(osmStart)
+
 	cStart := time.Now()
-	merged, err := compositeOver(encPNG, osmPNG)
+	base, err := compositeOver(fillsPNG, osmPNG) // OSM over ENC fills
+	if err != nil {
+		return nil, osmRendered, mt, err
+	}
+	merged, err := compositeOver(base, overlayPNG) // ENC lines/labels on top
 	mt.CompositeMS = msSince(cStart)
 	if err != nil {
 		return nil, osmRendered, mt, err

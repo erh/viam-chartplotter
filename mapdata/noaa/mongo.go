@@ -137,6 +137,26 @@ func WriteMeta(ctx context.Context, coll *mongo.Collection, m CellMeta) error {
 // class (pass "" for all). It is the read counterpart to UpsertDocs, intended
 // for a future Mongo-backed ENC renderer and for inspection tooling.
 func QueryBBox(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom int, objectClass string) ([]FeatureDoc, error) {
+	return QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, maxZoom, 0, nil, objectClass)
+}
+
+// QueryBBoxBanded is QueryBBox with an additional S-57 usage-band ceiling:
+// features from cells finer than maxUsageBand (1=overview … 6=berthing) are
+// excluded. At overview zooms a tile spans many fine harbour cells whose detail
+// is invisible and never painted; restricting to the coarse bands (1=overview,
+// 2=general, 3=coastal — the coastal band is where overview DEPARE depth lives)
+// keeps the chart readable and cheap. maxUsageBand<=0 disables the ceiling
+// (identical to QueryBBox). usageBand is the right lever here, not compilation
+// scale: scale varies cell-to-cell, but band is the discrete navigational-
+// purpose tier the renderer actually wants to gate on.
+//
+// alwaysClasses lists object classes that bypass the maxZoom filter — fetched
+// whenever their geometry intersects, regardless of their stored minZoom. This
+// surfaces the coarse depth contours (DEPCNT) at overview zoom: they're stored
+// at minZoom≈11 but NOAA shows the major fathom contours from z7, and the band
+// ceiling already keeps only the coarse-cell ones. The band ceiling still
+// applies to them.
+func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom, maxUsageBand int, alwaysClasses []string, objectClass string) ([]FeatureDoc, error) {
 	if coll == nil {
 		return nil, fmt.Errorf("noaa: nil collection")
 	}
@@ -154,7 +174,18 @@ func QueryBBox(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxL
 		"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
 	}
 	if maxZoom >= 0 {
-		filter["minZoom"] = bson.M{"$lte": maxZoom}
+		if len(alwaysClasses) > 0 {
+			// minZoom<=z OR class in alwaysClasses (surface coarse contours etc.)
+			filter["$or"] = []bson.M{
+				{"minZoom": bson.M{"$lte": maxZoom}},
+				{"objectClass": bson.M{"$in": alwaysClasses}},
+			}
+		} else {
+			filter["minZoom"] = bson.M{"$lte": maxZoom}
+		}
+	}
+	if maxUsageBand > 0 {
+		filter["usageBand"] = bson.M{"$lte": maxUsageBand}
 	}
 	if objectClass != "" {
 		filter["objectClass"] = objectClass

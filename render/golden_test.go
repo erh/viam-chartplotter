@@ -134,8 +134,8 @@ func pixelDiff(a, b image.Image) (image.Image, int) {
 	out := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(out, out.Bounds(), image.White, image.Point{}, draw.Src)
 	n := 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			ar, ag, ab, aa := safeAt(a, x, y)
 			br, bg, bb, ba := safeAt(b, x, y)
 			if ar != br || ag != bg || ab != bb || aa != ba {

@@ -541,13 +541,13 @@ func (h *ENCHandlers) handleCompareTest(w http.ResponseWriter, r *http.Request) 
  lat <input name="lat" value="%.4f" size="10">
  lon <input name="lon" value="%.4f" size="10">
  <button>go</button>
- <span style="color:#888;margin-left:1em">panels: ours | WMS | diff | OSM</span>
+ <span style="color:#888;margin-left:1em">panels: ENC | MERGED | WMS</span>
 </form>
 `, lat, lon, lat, lon)
 	for z := 7; z <= 16; z++ {
 		x, y := lonLatToTile(lon, lat, z)
-		fmt.Fprintf(&buf, `<div class="row"><h2>z=%d  x=%d y=%d &middot; <a href="/noaa-enc/osm-tile/%d/%d/%d.png%s" style="color:#7af">osm</a></h2><img src="/noaa-enc/compare/%d/%d/%d.png%s"></div>`+"\n",
-			z, x, y, z, x, y, suffix, z, x, y, suffix)
+		fmt.Fprintf(&buf, `<div class="row"><h2>z=%d  x=%d y=%d</h2><img src="/noaa-enc/compare/%d/%d/%d.png%s"></div>`+"\n",
+			z, x, y, z, x, y, suffix)
 	}
 	buf.WriteString("</body></html>\n")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -643,33 +643,27 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Four panels: ENC | OSM | MERGED | WMS. MERGED is the exact tile the app
-	// shows (ENC over the OSM underlay), so you can see what the user gets next
-	// to NOAA's WMS.
+	// Three panels: ENC | MERGED | WMS. MERGED is the exact tile the app shows
+	// (OSM ink sandwiched in the ENC chart), so you can see what the user gets
+	// next to NOAA's WMS. The standalone OSM panel was dropped: it rendered OSM
+	// at every zoom, and the low-zoom OSM query (z7 ≈ 90k features) timed out
+	// and hung the whole compare page. MERGED already skips OSM below z12.
 	const panelW = 256
-	const numPanels = 4
+	const numPanels = 3
 	out := image.NewRGBA(image.Rect(0, 0, panelW*numPanels, 256))
 	// White background so transparent areas of any tile are visible.
 	draw.Draw(out, out.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
 	const (
 		colENC = iota
-		colOSM
 		colMerged
 		colWMS
 	)
 	draw.Draw(out, image.Rect(colENC*panelW, 0, (colENC+1)*panelW, 256), ourImg, image.Point{}, draw.Over)
 	draw.Draw(out, image.Rect(colWMS*panelW, 0, (colWMS+1)*panelW, 256), wmsImg, image.Point{}, draw.Over)
 
-	// OSM underlay from our self-hosted renderer. Failures are non-fatal.
-	if osmPNG, _, oerr := h.renderer.RenderOSMTile(z, x, y); oerr == nil {
-		if osmImg, derr := png.Decode(bytes.NewReader(osmPNG)); derr == nil {
-			draw.Draw(out, image.Rect(colOSM*panelW, 0, (colOSM+1)*panelW, 256), osmImg, image.Point{}, draw.Over)
-		}
-	}
-
-	// MERGED: exactly what the app composites — OSM under ENC, using the
-	// frontend's per-zoom params (BrowserMergedOptions: land transparent so OSM
-	// streets show, navaids/structures dropped where vector layers take over).
+	// MERGED: exactly what the app composites — OSM ink in the ENC chart, using
+	// the frontend's per-zoom params (BrowserMergedOptions: land transparent so
+	// OSM streets show, navaids/structures dropped where vector layers take over).
 	mergedOpts := BrowserMergedOptions(z, safeDepthM)
 	if mergedPNG, _, _, merr := h.renderer.RenderMergedTile(z, x, y, mergedOpts); merr == nil {
 		if mergedImg, derr := png.Decode(bytes.NewReader(mergedPNG)); derr == nil {
@@ -680,7 +674,6 @@ func (h *ENCHandlers) handleCompare(w http.ResponseWriter, r *http.Request) {
 	// Panel labels so anyone looking at /tmp/foo.png or the network response
 	// knows which is which without checking the handler source.
 	annotatePanel(out, colENC*panelW+4, 0, "ENC")
-	annotatePanel(out, colOSM*panelW+4, 0, "OSM")
 	annotatePanel(out, colMerged*panelW+4, 0, fmt.Sprintf("MERGED z=%d/%d/%d", z, x, y))
 	annotatePanel(out, colWMS*panelW+4, 0, "WMS")
 
