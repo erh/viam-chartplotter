@@ -20,19 +20,21 @@ point chartplotter instances at the same Mongo.
 ## chartplotter
 
 `erh:viam-chartplotter:chartplotter` — serves the web UI and renders chart +
-weather tiles from MongoDB. Mongo is required; the server reads `osm_*`, `noaa`,
-and `weather` collections and renders on demand (no local chart files).
+weather tiles from MongoDB. With `mongo_uri` set, the server reads `osm_*`,
+`noaa`, and `weather` collections and renders on demand (no local chart files).
+**Without `mongo_uri`** it still serves the UI but points the frontend at the
+public hosted map+weather server, so tiles and weather work with zero setup.
 
 | attribute | type | default | description |
 |-----------|------|---------|-------------|
-| `mongo_uri` | string | **required** (env `MONGO_URI`) | MongoDB URI holding the ingested chart + weather data |
+| `mongo_uri` | string | — (env `MONGO_URI`) | MongoDB URI holding the ingested chart + weather data. Unset → frontend uses the hosted tile/weather server. |
 | `mongo_db` | string | `osm` (env `MONGO_DB`) | database name |
 | `port` | int | `8888` | HTTP listen port |
 | `draft` | float | `6` | boat draft (ft); drives depth-shading bands (legacy: `safe_depth_ft`) |
 | `noaa_cache_dir` | string | OS cache dir | disk cache root for rendered tiles / WMS / weather staging |
 | `noaa_cache_max_bytes` | int | `0` (unbounded) | cap on the WMS proxy cache |
 | `myboat_icon_path` | string | — | path to a custom boat icon |
-| `tile_server_base_url` | string | "" (same-origin) | for a split deployment: base URL of a separate tile server the frontend fetches from. Empty = this instance serves its own tiles. |
+| `tile_server_base_url` | string | "" (same-origin; hosted server if `mongo_uri` unset) | base URL of a separate map+weather server the frontend fetches tiles+weather from. Empty = this instance serves its own. |
 
 ```json
 {

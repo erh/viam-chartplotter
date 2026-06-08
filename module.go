@@ -40,6 +40,12 @@ func DistFS() (fs.FS, error) {
 
 var Model = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("chartplotter")
 
+// DefaultHostedTileServer is the public map+weather server the frontend falls
+// back to when this instance has no Mongo of its own (mongo_uri unset and no
+// explicit tile_server_base_url). It serves the same /noaa-enc/tile and
+// /noaa-weather endpoints with permissive CORS.
+const DefaultHostedTileServer = "http://nycmaps.checkmatemaps.com/"
+
 func init() {
 	resource.RegisterComponent(
 		generic.API,
@@ -71,17 +77,19 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	mongoURI := firstNonEmpty(config.Attributes.String("mongo_uri"), os.Getenv("MONGO_URI"))
 	mongoDB := firstNonEmpty(config.Attributes.String("mongo_db"), os.Getenv("MONGO_DB"), "osm")
 	mongoColl := firstNonEmpty(config.Attributes.String("mongo_coll"), os.Getenv("MONGO_COLL"), "features")
-	// Mongo is required: charts (osm_*/noaa) and weather are read from it, so
-	// without it the server has nothing to render or serve.
-	if mongoURI == "" {
-		return nil, fmt.Errorf("chartplotter: mongo_uri is required (config attribute or MONGO_URI env)")
-	}
 	// Base URL of a SEPARATE map+weather (tile) server the frontend should fetch
 	// tiles/weather from. Empty (the default) means same-origin — this instance
 	// serves its own tiles. Only set this for a split deployment where a
 	// dedicated tile server (cmd/tileserver) owns rendering. Exposed to the
 	// frontend via /app-config.
 	tileServerBaseURL := config.Attributes.String("tile_server_base_url")
+	// Without Mongo this instance has no charts/weather of its own to render, so
+	// point the frontend at the public hosted map+weather server — tiles and
+	// weather still work out of the box. An explicit tile_server_base_url wins.
+	if tileServerBaseURL == "" && mongoURI == "" {
+		tileServerBaseURL = DefaultHostedTileServer
+		logger.Infof("mongo_uri unset — frontend will use hosted tiles+weather at %s", DefaultHostedTileServer)
+	}
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
 }
 
