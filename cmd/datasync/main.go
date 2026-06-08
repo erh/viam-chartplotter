@@ -1,17 +1,28 @@
 // datasync periodically syncs the entire NOAA ENC catalog (worldwide) into
-// MongoDB (the loop form of `mapsync noaa-ingest`, over all cells). Run it as a
+// MongoDB (the loop form of the NOAA ingest, over all cells). Run it as a
 // standalone daemon when you're not using the Viam datasync model. Re-runs are
 // cheap — cells already current in Mongo are skipped.
 //
 //	datasync --mongo mongodb://db:27017 --interval 24h
+//
+// Targeted re-ingest: pass .000 cell files (or directories of them) as
+// positional args to re-parse exactly those cells in place — no catalog
+// refresh, no downloads, and NO edition dedup (so it picks up a parser change
+// like a new stored geometry field even though the NOAA edition is unchanged):
+//
+//	datasync --mongo mongodb://db:27017 ./noaa-enc/cells/US5NYC*  # one region
+//	find ./noaa-enc -name '*.000' -print0 | xargs -0 datasync --mongo … # all on disk
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,6 +75,14 @@ func run() error {
 	if err := noaa.EnsureIndexes(ctx, coll); err != nil {
 		return err
 	}
+
+	// Targeted re-ingest mode: positional args are cell files / dirs to re-parse
+	// in place. Skips the catalog/store machinery entirely (no downloads, no
+	// dedup) and exits when done.
+	if paths := flag.Args(); len(paths) > 0 {
+		return reingestPaths(ctx, coll, paths, logger)
+	}
+
 	catalog, err := noaa.NewCatalog(*encDir, logger.Sublogger("catalog"))
 	if err != nil {
 		return err
@@ -98,6 +117,55 @@ func run() error {
 			once()
 		}
 	}
+}
+
+// reingestPaths re-parses the given .000 cell files (directories are walked for
+// *.000) and upserts their features unconditionally — no edition dedup — so a
+// parser change is reflected for exactly the cells you already have on disk.
+func reingestPaths(ctx context.Context, coll *mongo.Collection, paths []string, logger logging.Logger) error {
+	var files []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			logger.Warnf("skip %s: %v", p, err)
+			continue
+		}
+		if !info.IsDir() {
+			files = append(files, p)
+			continue
+		}
+		_ = filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".000") {
+				files = append(files, path)
+			}
+			return nil
+		})
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no .000 cell files found in %v", paths)
+	}
+	logger.Infof("reingest: %d cell file(s)", len(files))
+
+	var total noaa.IngestStats
+	for i, f := range files {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		st, err := noaa.IngestCellFile(ctx, coll, "", f)
+		if err != nil {
+			logger.Warnf("reingest %s: %v", filepath.Base(f), err)
+			continue
+		}
+		total.Cells += st.Cells
+		total.Docs += st.Docs
+		total.WriteErrors += st.WriteErrors
+		total.GeomSkipped += st.GeomSkipped
+		logger.Infof("reingest %d/%d %s: %d features (%d geom-skipped, %d write-errs)",
+			i+1, len(files), noaa.CellNameFromPath(f), st.Docs, st.GeomSkipped, st.WriteErrors)
+	}
+	logger.Infof("reingest done: %d cells, %d features, %d write-errors, %d geom-skipped",
+		total.Cells, total.Docs, total.WriteErrors, total.GeomSkipped)
+	return nil
 }
 
 func envOr(k, def string) string {

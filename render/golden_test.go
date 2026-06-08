@@ -22,12 +22,28 @@ import (
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
-// TestGoldenTiles renders the ENC and MERGED tiles for the default compare
-// location at every zoom, stacks them into ONE tall image (a labeled
-// "z | ENC | MERGED" row per zoom), and pixel-compares it to a single golden
-// PNG on disk. It's a change-detector: any render change makes it fail and
-// writes golden/actual/diff full images to /tmp/golden-fail/ so the change can
-// be eyeballed before being accepted. Re-seed after an intended change with:
+// goldenLocation is one place the golden test renders a full zoom stack for.
+// Add an entry (and seed it with UPDATE_GOLDEN=1) to widen chart coverage.
+type goldenLocation struct {
+	name     string // golden file stem under testdata/golden/ AND subtest name
+	lat, lon float64
+}
+
+// goldenLocations are the places TestGoldenTiles covers. Each gets its own
+// golden PNG (testdata/golden/<name>.png) and its own subtest, so a failure
+// names the location and locations can be re-seeded independently.
+var goldenLocations = []goldenLocation{
+	{"charleston", 32.79, -79.86},      // render-cmd default (Charleston, SC)
+	{"long-island", 40.6871, -73.3017}, // Long Island south shore / Great South Bay, NY
+}
+
+// TestGoldenTiles renders the MERGED app tile for each goldenLocation at every
+// zoom, stacks them into ONE tall image (a labeled "z | MERGED" row per zoom),
+// and pixel-compares it to that location's golden PNG on disk. It's a
+// change-detector: any render change makes the location's subtest fail and
+// writes golden/actual/diff full images to /tmp/golden-fail/<name>/ so the
+// change can be eyeballed before being accepted. Re-seed after an intended
+// change with (all locations, or one via -run TestGoldenTiles/<name>):
 //
 //	UPDATE_GOLDEN=1 MONGO_URI=mongodb://erh-23big.local:27017 \
 //	  go test ./render -run TestGoldenTiles -count=1
@@ -38,12 +54,10 @@ func TestGoldenTiles(t *testing.T) {
 		t.Skip("golden render test skipped in short mode")
 	}
 	const (
-		lat, lon = 32.79, -79.86 // render-cmd default (Charleston, SC)
-		minZoom  = 7
-		maxZoom  = 16
+		minZoom = 7
+		maxZoom = 16
 	)
 	update := os.Getenv("UPDATE_GOLDEN") != ""
-	goldenPath := filepath.Join("testdata", "golden", "compare.png")
 
 	mongoURI := envOrDefault("MONGO_URI", "mongodb://erh-23big.local:27017")
 	mongoDB := envOrDefault("MONGO_DB", "osm")
@@ -63,46 +77,53 @@ func TestGoldenTiles(t *testing.T) {
 	r.SetNOAACollection(noaa.OpenCollection(db))
 	r.SetOSMCollections(osmtiler.OpenOSMCollections(db))
 
-	var rows []image.Image
-	for z := minZoom; z <= maxZoom; z++ {
-		x, y := lonLatToTile(lon, lat, z)
-		// The MERGED app tile — exactly what the frontend composites. WMS and the
-		// standalone OSM panel are excluded (external / nondeterministic / times
-		// out at low zoom).
-		mergedPNG, _, _, err := r.RenderMergedTile(z, x, y, BrowserMergedOptions(z, 6/feetPerMetre))
-		if err != nil {
-			t.Fatalf("z=%d render merged: %v", z, err)
-		}
-		rows = append(rows, goldenRow(z, mustDecode(t, mergedPNG)))
-	}
-	got := vstack(rows...)
+	for _, loc := range goldenLocations {
+		loc := loc
+		t.Run(loc.name, func(t *testing.T) {
+			goldenPath := filepath.Join("testdata", "golden", loc.name+".png")
 
-	if update {
-		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := writePNGFile(goldenPath, got); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		t.Logf("seeded golden: %s (z%d..z%d, panel: MERGED)", goldenPath, minZoom, maxZoom)
-		return
-	}
+			var rows []image.Image
+			for z := minZoom; z <= maxZoom; z++ {
+				x, y := lonLatToTile(loc.lon, loc.lat, z)
+				// The MERGED app tile — exactly what the frontend composites. WMS and
+				// the standalone OSM panel are excluded (external / nondeterministic /
+				// times out at low zoom).
+				mergedPNG, _, _, err := r.RenderMergedTile(z, x, y, BrowserMergedOptions(z, 6/feetPerMetre))
+				if err != nil {
+					t.Fatalf("%s z=%d render merged: %v", loc.name, z, err)
+				}
+				rows = append(rows, goldenRow(z, mustDecode(t, mergedPNG)))
+			}
+			got := vstack(rows...)
 
-	goldenBytes, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("no golden (%v); run with UPDATE_GOLDEN=1 to seed", err)
-	}
-	golden := mustDecode(t, goldenBytes)
-	if diff, ndiff := pixelDiff(golden, got); ndiff > 0 {
-		outDir := "/tmp/golden-fail"
-		_ = os.MkdirAll(outDir, 0o755)
-		_ = writePNGFile(filepath.Join(outDir, "golden.png"), golden)
-		_ = writePNGFile(filepath.Join(outDir, "actual.png"), got)
-		_ = writePNGFile(filepath.Join(outDir, "diff.png"), diff)
-		t.Errorf("%d pixels differ from golden — see %s/{golden,actual,diff}.png (rows z%d..z%d, panel: MERGED)",
-			ndiff, outDir, minZoom, maxZoom)
-	} else {
-		t.Logf("golden matches (z%d..z%d)", minZoom, maxZoom)
+			if update {
+				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := writePNGFile(goldenPath, got); err != nil {
+					t.Fatalf("write golden: %v", err)
+				}
+				t.Logf("seeded golden: %s (z%d..z%d, panel: MERGED)", goldenPath, minZoom, maxZoom)
+				return
+			}
+
+			goldenBytes, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatalf("no golden (%v); run with UPDATE_GOLDEN=1 to seed", err)
+			}
+			golden := mustDecode(t, goldenBytes)
+			if diff, ndiff := pixelDiff(golden, got); ndiff > 0 {
+				outDir := filepath.Join("/tmp/golden-fail", loc.name)
+				_ = os.MkdirAll(outDir, 0o755)
+				_ = writePNGFile(filepath.Join(outDir, "golden.png"), golden)
+				_ = writePNGFile(filepath.Join(outDir, "actual.png"), got)
+				_ = writePNGFile(filepath.Join(outDir, "diff.png"), diff)
+				t.Errorf("%s: %d pixels differ from golden — see %s/{golden,actual,diff}.png (rows z%d..z%d, panel: MERGED)",
+					loc.name, ndiff, outDir, minZoom, maxZoom)
+			} else {
+				t.Logf("golden matches %s (z%d..z%d)", loc.name, minZoom, maxZoom)
+			}
+		})
 	}
 }
 

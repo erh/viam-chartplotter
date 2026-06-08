@@ -151,12 +151,17 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 		alwaysClasses = []string{"DEPCNT"}
 	}
 
+	// At overview/mid zooms (z <= LowGeomMaxZoom) draw from the pre-simplified
+	// geomLow tier: the giant full-resolution coastlines/contours carry vertices
+	// finer than a pixel here, so transferring them whole is the dominant cost.
+	useLowGeom := z >= 0 && z <= noaa.LowGeomMaxZoom
+
 	qStart := time.Now()
-	docs, err := noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, maxBand, alwaysClasses, "")
+	docs, err := noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, maxBand, alwaysClasses, "", useLowGeom)
 	if err == nil && len(docs) == 0 && maxBand > 0 {
 		// Sparse coverage at this band ceiling — retry unrestricted so the tile
 		// still shows the best available (finer-than-expected) data, not blank.
-		docs, err = noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, 0, alwaysClasses, "")
+		docs, err = noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, 0, alwaysClasses, "", useLowGeom)
 	}
 	r.logSlowQuery("noaa", time.Since(qStart), len(docs), z, minLon, minLat, maxLon, maxLat)
 	if err != nil {

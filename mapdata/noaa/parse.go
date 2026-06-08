@@ -28,7 +28,16 @@ type FeatureDoc struct {
 	MinZoom     int            `bson:"minZoom"`        // lowest XYZ zoom this feature renders at
 	BBox        [4]float64     `bson:"bbox"`           // [minLon, minLat, maxLon, maxLat]
 	Geometry    any            `bson:"geometry"`       // GeoJSON Point/MultiPoint/LineString/Polygon
-	Attributes  map[string]any `bson:"attributes,omitempty"`
+	// GeomLow is the geometry pre-simplified (Douglas–Peucker) to ~1px at
+	// LowGeomMaxZoom, for line/polygon features whose simplification actually
+	// removes vertices. The tile-query path serves it at overview/mid zooms so
+	// the giant full-resolution coastlines/contours don't cross the wire when
+	// their sub-pixel detail is invisible. Absent (nil) for points and for any
+	// feature already coarse enough that simplification wouldn't help — callers
+	// coalesce to Geometry in that case. Never indexed, so it needn't satisfy
+	// the 2dsphere right-hand rule.
+	GeomLow    any            `bson:"geomLow,omitempty"`
+	Attributes map[string]any `bson:"attributes,omitempty"`
 }
 
 // CellMeta is the metadata stored in the noaa collection under
@@ -109,6 +118,7 @@ func ParseCell(cellName, path string) (ParseResult, error) {
 			MinZoom:     MinZoomForFeature(f.ObjectClass(), f.Attributes()),
 			BBox:        bbox,
 			Geometry:    geom,
+			GeomLow:     simplifyGeometry(geom, lowGeomTolerance),
 			Attributes:  f.Attributes(),
 		}
 		res.Docs = append(res.Docs, doc)
@@ -305,4 +315,126 @@ func orientCCW(r [][]float64) {
 			r[i], r[j] = r[j], r[i]
 		}
 	}
+}
+
+// lowGeomTolerance is the Douglas–Peucker perpendicular-distance tolerance (in
+// degrees) used to build FeatureDoc.GeomLow. It's ~1 web-mercator pixel of
+// longitude at LowGeomMaxZoom: 360° spans 256·2^z pixels, so one pixel is
+// 360/(256·2^z) degrees. Vertices closer than this to the line they sit on are
+// invisible at that zoom and below, so dropping them is lossless on screen.
+// (A fixed longitude-degree tolerance is conservative — never over-simplifies —
+// in the latitude direction at higher latitudes, where mercator stretches.)
+const lowGeomTolerance = 360.0 / float64(256*(1<<LowGeomMaxZoom))
+
+// simplifyGeometry returns a GeoJSON geometry with line/polygon vertices thinned
+// by Douglas–Peucker at tol (degrees), or nil when simplification wouldn't help:
+// points (no vertices to drop) and already-coarse features whose vertex count is
+// unchanged. Returning nil keeps the stored doc small — the query path coalesces
+// a missing GeomLow back to the full Geometry.
+func simplifyGeometry(geom any, tol float64) any {
+	m, ok := geom.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch m["type"] {
+	case "LineString":
+		coords, _ := m["coordinates"].([][]float64)
+		s := simplifyLine(coords, tol)
+		if len(s) < 2 || len(s) >= len(coords) {
+			return nil
+		}
+		return map[string]any{"type": "LineString", "coordinates": s}
+	case "Polygon":
+		rings, _ := m["coordinates"].([][][]float64)
+		out, reduced := simplifyRingSet(rings, tol)
+		if !reduced {
+			return nil
+		}
+		return map[string]any{"type": "Polygon", "coordinates": out}
+	case "MultiPolygon":
+		polys, _ := m["coordinates"].([][][][]float64)
+		out := make([][][][]float64, 0, len(polys))
+		reduced := false
+		for _, poly := range polys {
+			rs, r := simplifyRingSet(poly, tol)
+			out = append(out, rs)
+			reduced = reduced || r
+		}
+		if !reduced {
+			return nil
+		}
+		return map[string]any{"type": "MultiPolygon", "coordinates": out}
+	}
+	return nil
+}
+
+// simplifyRingSet simplifies each ring in a polygon, reporting whether any ring
+// actually lost vertices. A ring that would collapse below a valid quad
+// (< 4 points incl. closure) is kept at full resolution rather than degenerated.
+func simplifyRingSet(rings [][][]float64, tol float64) ([][][]float64, bool) {
+	out := make([][][]float64, 0, len(rings))
+	reduced := false
+	for _, r := range rings {
+		s := simplifyLine(r, tol)
+		if len(s) < 4 {
+			s = r // don't degenerate a ring below a closed triangle
+		}
+		if len(s) < len(r) {
+			reduced = true
+		}
+		out = append(out, s)
+	}
+	return out, reduced
+}
+
+// simplifyLine runs Douglas–Peucker on a polyline (lon/lat degrees), keeping both
+// endpoints, and returns the kept points. It's iterative (explicit stack) rather
+// than recursive so the 100k+-vertex rings overview cells produce can't blow the
+// goroutine stack.
+func simplifyLine(pts [][]float64, tol float64) [][]float64 {
+	n := len(pts)
+	if n < 3 || tol <= 0 {
+		return pts
+	}
+	keep := make([]bool, n)
+	keep[0], keep[n-1] = true, true
+	type seg struct{ lo, hi int }
+	stack := []seg{{0, n - 1}}
+	for len(stack) > 0 {
+		s := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if s.hi <= s.lo+1 {
+			continue
+		}
+		ax, ay := pts[s.lo][0], pts[s.lo][1]
+		bx, by := pts[s.hi][0], pts[s.hi][1]
+		maxD, idx := -1.0, -1
+		for i := s.lo + 1; i < s.hi; i++ {
+			if d := perpDist(pts[i][0], pts[i][1], ax, ay, bx, by); d > maxD {
+				maxD, idx = d, i
+			}
+		}
+		if maxD > tol && idx > 0 {
+			keep[idx] = true
+			stack = append(stack, seg{s.lo, idx}, seg{idx, s.hi})
+		}
+	}
+	out := make([][]float64, 0, n)
+	for i := 0; i < n; i++ {
+		if keep[i] {
+			out = append(out, pts[i])
+		}
+	}
+	return out
+}
+
+// perpDist is the perpendicular distance from point P to the line through A,B
+// (or |PA| when A==B), in the same planar units as the inputs.
+func perpDist(px, py, ax, ay, bx, by float64) float64 {
+	dx, dy := bx-ax, by-ay
+	if dx == 0 && dy == 0 {
+		return math.Hypot(px-ax, py-ay)
+	}
+	cross := math.Abs(dx*(ay-py) - dy*(ax-px))
+	return cross / math.Hypot(dx, dy)
 }

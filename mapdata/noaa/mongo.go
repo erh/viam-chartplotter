@@ -14,6 +14,15 @@ import (
 // five collections.
 const CollNOAA = "noaa"
 
+// LowGeomMaxZoom is the highest XYZ zoom served from the pre-simplified
+// FeatureDoc.GeomLow geometry (built at ~1px resolution for this zoom; see
+// lowGeomTolerance). At or below it the tile-query path coalesces to geomLow so
+// the giant full-resolution coastlines/contours never cross the wire when their
+// sub-pixel detail is invisible. Above it the full Geometry is used so high-zoom
+// tiles stay crisp — those tiles cover little ground and carry few features, so
+// transferring full geometry there is cheap.
+const LowGeomMaxZoom = 12
+
 // OpenCollection returns the noaa feature collection from a database handle.
 func OpenCollection(db *mongo.Database) *mongo.Collection {
 	if db == nil {
@@ -151,7 +160,7 @@ func WriteMeta(ctx context.Context, coll *mongo.Collection, m CellMeta) error {
 // class (pass "" for all). It is the read counterpart to UpsertDocs, intended
 // for a future Mongo-backed ENC renderer and for inspection tooling.
 func QueryBBox(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom int, objectClass string) ([]FeatureDoc, error) {
-	return QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, maxZoom, 0, nil, objectClass)
+	return QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, maxZoom, 0, nil, objectClass, false)
 }
 
 // QueryBBoxBanded is QueryBBox with an additional S-57 usage-band ceiling:
@@ -170,7 +179,11 @@ func QueryBBox(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxL
 // at minZoom≈11 but NOAA shows the major fathom contours from z7, and the band
 // ceiling already keeps only the coarse-cell ones. The band ceiling still
 // applies to them.
-func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom, maxUsageBand int, alwaysClasses []string, objectClass string) ([]FeatureDoc, error) {
+// useLowGeom selects the pre-simplified geometry tier (see LowGeomMaxZoom):
+// when true, the query coalesces geomLow→geometry server-side so only the
+// thinned geometry is transferred, and the result's Geometry field carries it;
+// when false the full Geometry is returned (and the geomLow duplicate excluded).
+func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom, maxUsageBand int, alwaysClasses []string, objectClass string, useLowGeom bool) ([]FeatureDoc, error) {
 	if coll == nil {
 		return nil, fmt.Errorf("noaa: nil collection")
 	}
@@ -204,11 +217,37 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 	if objectClass != "" {
 		filter["objectClass"] = objectClass
 	}
-	cur, err := coll.Find(ctx, filter)
+
+	if useLowGeom {
+		// Aggregate so the geomLow→geometry coalesce happens server-side: only
+		// the thinned geometry crosses the wire, and docs ingested before
+		// geomLow existed transparently fall back to their full geometry. The
+		// $match-first $geoIntersects still uses the 2dsphere / band_geo index.
+		pipeline := mongo.Pipeline{
+			bson.D{{Key: "$match", Value: filter}},
+			bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
+			bson.D{{Key: "$unset", Value: "geomLow"}},
+		}
+		cur, err := coll.Aggregate(ctx, pipeline)
+		if err != nil {
+			return nil, fmt.Errorf("noaa: aggregate: %w", err)
+		}
+		defer cur.Close(ctx)
+		return decodeFeatureDocs(ctx, cur)
+	}
+
+	// Full-geometry path: exclude geomLow so its duplicate never transfers.
+	cur, err := coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"geomLow": 0}))
 	if err != nil {
 		return nil, fmt.Errorf("noaa: find: %w", err)
 	}
 	defer cur.Close(ctx)
+	return decodeFeatureDocs(ctx, cur)
+}
+
+// decodeFeatureDocs drains a cursor into FeatureDocs, skipping any single
+// document that fails to decode rather than aborting the whole tile.
+func decodeFeatureDocs(ctx context.Context, cur *mongo.Cursor) ([]FeatureDoc, error) {
 	out := make([]FeatureDoc, 0, 64)
 	for cur.Next(ctx) {
 		var d FeatureDoc

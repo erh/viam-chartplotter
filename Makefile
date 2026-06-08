@@ -76,8 +76,17 @@ osm10024test: $(OSM_NYC_PBF)
 #   make ingest-noaa MONGO=mongodb://localhost:27017
 MONGO     ?= mongodb://erh-23big.local:27017
 MONGO_DB  ?= osm
-OSM_CACHE ?= $(HOME)/Library/Caches/viam-chartplotter/osm
-ENC_CACHE ?= $(HOME)/Library/Caches/viam-chartplotter/noaa-enc/cells
+
+# Base OS cache dir, matching Go's os.UserCacheDir() so these targets point at
+# the same place the running module/services read & write:
+#   macOS: ~/Library/Caches   Linux: $XDG_CACHE_HOME or ~/.cache
+ifeq ($(shell uname -s),Darwin)
+CACHE_DIR ?= $(HOME)/Library/Caches
+else
+CACHE_DIR ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)
+endif
+OSM_CACHE ?= $(CACHE_DIR)/viam-chartplotter/osm
+ENC_CACHE ?= $(CACHE_DIR)/viam-chartplotter/noaa-enc/cells
 
 # Atlantic-seaboard states, Geofabrik us-<state> naming. $(wildcard ...) keeps
 # only the extracts actually downloaded (grab more with `mapsync downloadpbfs`).
@@ -111,8 +120,8 @@ weathersync:
 # Parse every downloaded ENC cell (.000) into the `noaa` collection. Upserts in
 # place, so it's safe to re-run after a parser change (find|xargs handles the
 # thousands-of-cells arg list).
-ingest-noaa: mapsync
-	find $(ENC_CACHE) -name '*.000' -print0 | xargs -0 ./mapsync noaa-ingest --mongo $(MONGO) --db $(MONGO_DB)
+ingest-noaa: datasync
+	find $(ENC_CACHE) -name '*.000' -print0 | xargs -0 ./datasync --mongo $(MONGO) --db $(MONGO_DB)
 
 # Ingest the downloaded Atlantic-coast state extracts into the osm_* collections.
 ingest-osm-eastcoast: mapsync
