@@ -1213,10 +1213,15 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 				if transparentLand {
 					continue
 				}
-				// coarse-zoom seam guard: only continent-scale land fills at z<10.
-				if z < 10 && f.scale > 0 && f.scale < 800_000 {
-					continue
-				}
+				// Land paints from every queried band, finest last (coarse→fine
+				// sort), so the precise coastal-cell coastline wins. An earlier
+				// z<10 "continent-scale only" guard dropped the fine coastal
+				// LNDARE here while DEPARE (water) always paints — leaving water
+				// painted on the land side of the coastline. With the overview
+				// band ceiling (z≤9 → bands≤3) there are no fine harbour cells
+				// to cause seams, so land and water now come from the same bands
+				// and align. Oversized continent rings are still caught by
+				// isOversizedPolygon in drawFeature.
 			} else if !isWaterBaseClass(class) {
 				// "Other" area fills (RESARE, anchorages, …) are scale-windowed;
 				// the land/water base classes always paint (finest-wins handles
