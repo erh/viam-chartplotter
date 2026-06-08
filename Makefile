@@ -4,6 +4,16 @@ ifneq (,$(wildcard test.make))
     export $(shell sed 's/=.*//' test.make)
 endif
 
+# Go sources the module binary depends on: every non-test .go in the library
+# packages (root, weather/, render/, mapdata/, …) plus cmd/module — but NOT the
+# other cmd/ CLIs (datasync, tileserver, ecmwf-probe, mapsync, …), which are
+# separate binaries the module doesn't import. (Previously the prereqs were
+# `*.go cmd/module/*.go` — root-only — so moving code into subpackages silently
+# stopped triggering rebuilds.)
+GO_SRC := $(shell find . -name '*.go' -not -name '*_test.go' \
+            -not -path './cmd/*' -not -path './mapdata/cmd/*') \
+          $(shell find ./cmd/module -name '*.go' -not -name '*_test.go')
+
 module: bin/viamchartplottermodule dist/index.html
 	tar czf module.tar.gz bin/viamchartplottermodule meta.json dist
 
@@ -22,7 +32,7 @@ lint: node_modules
 	npm run lint-fix
 	npx svelte-check --tsconfig ./tsconfig.json
 
-bin/viamchartplottermodule: bin *.go cmd/module/*.go *.mod Makefile dist/index.html
+bin/viamchartplottermodule: bin $(GO_SRC) go.mod go.sum Makefile dist/index.html
 	go build -o bin/viamchartplottermodule cmd/module/cmd.go
 
 updaterdk:
