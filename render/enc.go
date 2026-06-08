@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1498,6 +1499,91 @@ func (r *ENCRenderer) renderOSMTile(z, x, y int, transparentBase bool) ([]byte, 
 	return buf.Bytes(), false, nil
 }
 
+// overviewMarkerClasses are the only OSM classes pulled at overview zoom: admin
+// boundaries (state/country/county borders) and place labels (states, cities,
+// towns). Restricting the query to these skips the ~200k water/landuse/road
+// features a full low-zoom OSM query would return.
+var overviewMarkerClasses = []string{"admin", "place"}
+
+// renderOverviewMarkers renders a transparent overlay of admin borders + place
+// labels for an overview tile (z < osmMergeMinZoom), where the full OSM layer is
+// skipped but the chart still wants geographic context. Returns ok=false (no
+// overlay) when OSM isn't configured, the query fails, or nothing matches. The
+// osmtiler renderer's per-feature minZoom/minLabelZoom gates decide which
+// markers actually paint at this zoom, so z7 shows only the most important ones.
+func (r *ENCRenderer) renderOverviewMarkers(z, x, y int) ([]byte, bool) {
+	if r.osm == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	qStart := time.Now()
+	feats, _, err := osmtiler.FetchTileFeaturesMulti(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
+		IncludeMinZoom: true,
+		ZoomOverride:   -1,
+		PadBuffer:      true,
+		Classes:        overviewMarkerClasses,
+	})
+	if d := time.Since(qStart); d >= slowQueryThreshold && r.logger != nil {
+		r.logger.Infof("slow mongo query: coll=osm_* (markers) z=%d x=%d y=%d dur=%dms rows=%d",
+			z, x, y, d.Milliseconds(), len(feats))
+	}
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warnf("overview-markers query z=%d x=%d y=%d: %v", z, x, y, err)
+		}
+		return nil, false
+	}
+	feats = filterOverviewMarkers(feats, z)
+	if len(feats) == 0 {
+		return nil, false
+	}
+	data, err := osmtiler.RenderTileFromFeaturesTransparent(feats, z, x, y)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warnf("overview-markers render z=%d x=%d y=%d: %v", z, x, y, err)
+		}
+		return nil, false
+	}
+	return data, true
+}
+
+// overviewPlaceTypes is the set of place=* values shown on overview tiles:
+// regions and real settlements only. Everything else — especially place=island
+// (the marsh islands that swarm a coastal tile at z9–11), plus hamlet / suburb /
+// neighbourhood / locality / islet — is dropped; those return with the full OSM
+// layer at z >= osmMergeMinZoom.
+var overviewPlaceTypes = map[string]bool{
+	"country": true, "state": true, "region": true, "province": true,
+	"city": true, "town": true,
+}
+
+// filterOverviewMarkers keeps the overview chart context legible: only state/
+// country borders (admin_level ≤ 4 — county and city limits are noise at this
+// scale and return with full OSM at z >= osmMergeMinZoom) and settlement/region
+// labels (overviewPlaceTypes). ClassAdmin minZoom is a flat 4 regardless of
+// admin_level (the ingest doesn't carry level into minZoom), so we gate on the
+// admin_level tag here; place labels are further gated by minLabelZoom in the
+// renderer. z7/z8 are unaffected — they never reached the finer levels/types.
+func filterOverviewMarkers(feats []osmtiler.Feature, z int) []osmtiler.Feature {
+	out := make([]osmtiler.Feature, 0, len(feats))
+	for _, f := range feats {
+		switch f.Class {
+		case osmtiler.ClassAdmin:
+			lvl, err := strconv.Atoi(strings.TrimSpace(f.Tags["admin_level"]))
+			if err != nil || lvl > 4 {
+				continue
+			}
+		case osmtiler.ClassPlace:
+			if !overviewPlaceTypes[f.Tags["place"]] {
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // mergeTiming breaks down a merged-tile render: the OSM underlay, the ENC
 // chart (with its own query/draw split), and the PNG composite.
 type mergeTiming struct {
@@ -1535,15 +1621,33 @@ func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte,
 	encOpts := opts
 	encOpts.TransparentLand = false
 
-	// Below osmMergeMinZoom, skip OSM entirely: street/building detail is
-	// invisible at overview scale, and the low-zoom OSM query is enormous
+	// Below osmMergeMinZoom, skip the full OSM ink: street/building detail is
+	// invisible at overview scale, and the full low-zoom OSM query is enormous
 	// (z7 ≈ 90k features, z8 ≈ 75k) — it dominates the render and times out.
-	// The chart (ENC) alone is the right overview tile, and it's fast — render
-	// it complete (areas + overlay) in one pass, no compositing.
+	// But we DO want geographic context the chart lacks at overview: state/
+	// country borders and major place names. Render the ENC chart, then overlay
+	// a cheap admin+place-only OSM layer (class-filtered, so it skips the ~200k
+	// water/landuse features). The per-feature minZoom gate means only the
+	// most important markers draw — state borders + biggest cities at z7,
+	// progressively more toward z11.
 	if z < osmMergeMinZoom {
 		encPNG, drawMS, derr := r.drawENCTile(features, z, x, y, encOpts)
 		mt.ENC.DrawMS = drawMS
-		return encPNG, false, mt, derr
+		if derr != nil {
+			return encPNG, false, mt, derr
+		}
+		mStart := time.Now()
+		markers, ok := r.renderOverviewMarkers(z, x, y)
+		mt.OSMMS = msSince(mStart)
+		if ok {
+			cStart := time.Now()
+			merged, cerr := compositeOver(encPNG, markers)
+			mt.CompositeMS = msSince(cStart)
+			if cerr == nil {
+				return merged, true, mt, nil
+			}
+		}
+		return encPNG, false, mt, nil
 	}
 
 	// Three-layer composite so OSM landuse never paints over ENC labels:

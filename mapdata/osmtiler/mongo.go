@@ -205,6 +205,12 @@ type QueryOptions struct {
 	// Use for class-specific render paths or debugging.
 	Class string
 
+	// Classes, if non-empty, restricts to docs whose class is in the set
+	// ($in). Takes precedence over Class. Used by the overview-marker path
+	// to pull only admin boundaries + place labels cheaply, skipping the
+	// ~200k water/landuse features that make a full low-zoom query huge.
+	Classes []string
+
 	// PadBuffer, when true, expands the bbox by LabelBuffer pixels'
 	// worth of degrees on each side so the renderer's cross-tile
 	// label overdraw has the features it needs. Leave false for
@@ -247,7 +253,9 @@ func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
 	if opts.Region != "" {
 		filter["region"] = opts.Region
 	}
-	if opts.Class != "" {
+	if len(opts.Classes) > 0 {
+		filter["class"] = bson.M{"$in": opts.Classes}
+	} else if opts.Class != "" {
 		filter["class"] = opts.Class
 	}
 	return filter
