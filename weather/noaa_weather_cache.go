@@ -39,15 +39,6 @@ type WeatherCache struct {
 	client   *http.Client
 	logger   logging.Logger
 
-	// windCDNBaseURL, when non-empty, is the public base URL the
-	// frontend should prefer for tile-published wind data (currently
-	// ECMWF only). e.g. "https://chartwx.example.com". The chartplotter
-	// frontend reads this via /noaa-weather/config and, if set, fetches
-	// `<base>/wind/ecmwf/...` tile blobs instead of hammering this
-	// module for global JSON. Empty means "no CDN; serve everything
-	// locally" (single-instance dev mode, the default).
-	windCDNBaseURL string
-
 	// refresh is the soft TTL — past this, a request triggers a
 	// background refresh (the cached copy is still served immediately).
 	refresh time.Duration
@@ -97,44 +88,6 @@ const (
 
 // NewWeatherCache wires a WeatherCache pointing at cacheDir. The
 // directory is created if it doesn't exist.
-// cdnServedModels lists every model whose data the chartplotter
-// fleet should fetch from the wind-publisher's R2 bucket rather than
-// from upstream directly. Centralised so a future "add GFS to the
-// publisher" change is a one-line edit here plus a publisher tweak —
-// no scattered string comparisons.
-var cdnServedModels = map[string]bool{
-	"ecmwf": true,
-}
-
-func isCDNServedModel(name string) bool { return cdnServedModels[name] }
-
-// DefaultWindCDNBaseURL is the public r2.dev URL the viam-chartplotter-ecmwf
-// bucket is exposed at. Every chartplotter in the fleet defaults to fetching
-// ECMWF wind tiles from here so only the one machine running the wind-publisher
-// hits ECMWF Open Data, not 10K chartplotters. The serve /config handler reports
-// it to the frontend; the publisher (weather/publish) uploads to the matching
-// bucket. Override via the `wind_cdn_base_url` config attribute.
-const DefaultWindCDNBaseURL = "https://pub-6ae2d2a870f74799a963dbc892ea400b.r2.dev"
-
-// SetWindCDNBaseURL configures the public CDN base for tile-published
-// wind data. Called by the module's Register-time wiring; the cache
-// holds it just so the frontend can read it back via
-// /noaa-weather/config (the cache itself doesn't use the CDN — it
-// remains the on-demand fallback).
-//
-// Empty input maps to DefaultWindCDNBaseURL so a `make run` /
-// minimal-config deployment still gets fan-out behaviour out of the
-// box. There's no first-class "disable the CDN" mode any more — the
-// only practical reason to bypass it is local dev against a module
-// with no publisher running, and even then the local fallback still
-// kicks in when latest.json is unreachable.
-func (wc *WeatherCache) SetWindCDNBaseURL(u string) {
-	if u == "" {
-		u = DefaultWindCDNBaseURL
-	}
-	wc.windCDNBaseURL = strings.TrimRight(u, "/")
-}
-
 func NewWeatherCache(cacheDir string, logger logging.Logger) (*WeatherCache, error) {
 	if cacheDir == "" {
 		return nil, fmt.Errorf("weather cache: cacheDir required")
@@ -173,7 +126,6 @@ func (wc *WeatherCache) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-weather/models", wc.handleModels)
 	mux.HandleFunc("/noaa-weather/data/", wc.handleData)
 	mux.HandleFunc("/noaa-weather/stats", wc.handleStats)
-	mux.HandleFunc("/noaa-weather/config", wc.handleConfig)
 	// Legacy alias — pre-multi-model code path. Cheap to keep around.
 	mux.HandleFunc("/noaa-weather/gfs/latest.json", func(w http.ResponseWriter, r *http.Request) {
 		wc.serveModel(w, r, FindModel("gfs"))
@@ -186,31 +138,6 @@ func (wc *WeatherCache) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(modelMetaList())
 }
 
-// handleConfig exposes the small bits of server config the frontend
-// needs at runtime — currently just the wind CDN base URL the tile
-// fetcher should use. Lives next to /noaa-weather/models so the
-// frontend's existing config fetch can be extended with one more
-// request without inventing a new namespace.
-func (wc *WeatherCache) handleConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=60")
-	body := map[string]interface{}{
-		"windCDNBaseURL": wc.windCDNBaseURL,
-		// Tile grid params — must match the publisher's constants
-		// (wind_publisher_tiler.go). Surfacing them lets a frontend
-		// recompute tile keys without hard-coding the grid; if we
-		// ever change tileGridCols / tileGridRows / tileOverlapDeg
-		// the frontend follows automatically.
-		"tileGrid": map[string]interface{}{
-			"cols":        tileGridCols,
-			"rows":        tileGridRows,
-			"overlapDeg":  tileOverlapDeg,
-			"nominalLonW": tileNominalLonW,
-			"nominalLatS": tileNominalLatS,
-		},
-	}
-	_ = json.NewEncoder(w).Encode(body)
-}
 
 // handleData parses /noaa-weather/data/{model}/latest.json and dispatches
 // to serveModel. Anything that doesn't match returns 404 with a helpful

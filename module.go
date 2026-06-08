@@ -63,12 +63,6 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
-	// Public base URL of the wind-publisher's R2/CDN bucket. Empty
-	// (or unset) falls back to DefaultWindCDNBaseURL inside
-	// SetWindCDNBaseURL so every chartplotter gets fan-out behaviour
-	// out of the box. Override with a different URL to point at a
-	// staging mirror.
-	windCDNBaseURL := config.Attributes.String("wind_cdn_base_url")
 	// Mongo connection for the OSM tile underlay. Config attribute
 	// wins, env var (MONGO_URI) is the dev-friendly fallback so you
 	// don't have to wire it into config every time. Same idea for
@@ -88,7 +82,7 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// dedicated tile server (cmd/tileserver) owns rendering. Exposed to the
 	// frontend via /app-config.
 	tileServerBaseURL := config.Attributes.String("tile_server_base_url")
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, windCDNBaseURL, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL)
 }
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
@@ -192,7 +186,6 @@ func StartChartplotterServer(
 	cacheMaxBytes int64,
 	draftFt float64,
 	myBoatIconPath string,
-	windCDNBaseURL string,
 	mongoURI string,
 	mongoDB string,
 	mongoColl string,
@@ -315,7 +308,6 @@ func StartChartplotterServer(
 	if err != nil {
 		logger.Warnf("weather cache disabled: %v", err)
 	} else {
-		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
 		if weatherColl != nil {
 			weatherCache.SetWeatherCollection(weatherColl)
 			logger.Infof("weather: serving from Mongo collection %q (Mongo-only)", store.CollWeather)
@@ -323,7 +315,7 @@ func StartChartplotterServer(
 			logger.Warnf("weather: no Mongo collection configured — /noaa-weather/data will 503 until a weathersync populates it")
 		}
 		weatherCache.Register(mux)
-		logger.Infof("noaa weather serve ready (cdn=%q)", windCDNBaseURL)
+		logger.Infof("noaa weather serve ready")
 	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it

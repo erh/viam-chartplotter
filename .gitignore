@@ -33,7 +33,6 @@ vite.config.ts.timestamp-*
 /osm-ingest
 /run
 /tileserver
-/wind-publisher
 /weathersync
 /render-cmd
 /mapsync

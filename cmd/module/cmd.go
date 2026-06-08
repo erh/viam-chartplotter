@@ -8,17 +8,12 @@ import (
 
 	"github.com/erh/viam-chartplotter"
 	"github.com/erh/viam-chartplotter/weather"
-	"github.com/erh/viam-chartplotter/weather/publish"
 )
 
 func main() {
 	module.ModularMain(
 		resource.APIModel{generic.API, vc.Model},
 		resource.APIModel{navigation.API, vc.NavModel},
-		// One designated machine in the fleet runs this — pulls
-		// ECMWF Open Data, crops into tiles, publishes to R2. Every
-		// other chartplotter reads tiles from R2.
-		resource.APIModel{generic.API, publish.WindPublisherModel},
 		// datasync keeps the noaa collection current (periodic catalog
 		// refresh + ENC sync→ingest of every cell worldwide); weathersync
 		// populates the weather collection from GRIB. Both write to the

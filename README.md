@@ -10,7 +10,6 @@ several models — one serves the app, the others keep MongoDB populated.
 | [`nav`](#navigation) | navigation | persistent waypoint/route navigation service for the UI |
 | [`datasync`](#datasync) | generic | keeps the `noaa` collection current (whole NOAA ENC catalog) |
 | [`weathersync`](#weathersync) | generic | decodes weather forecasts into the `weather` collection |
-| [`wind-publisher`](#wind-publisher) | generic | (optional, one per fleet) publishes ECMWF wind tiles to a CDN |
 
 All models share one MongoDB database (default `osm`). Populate it with
 `datasync` + `weathersync` (and `make ingest-osm-*` for the OSM underlay), then
@@ -33,7 +32,6 @@ and `weather` collections and renders on demand (no local chart files).
 | `noaa_cache_dir` | string | OS cache dir | disk cache root for rendered tiles / WMS / weather staging |
 | `noaa_cache_max_bytes` | int | `0` (unbounded) | cap on the WMS proxy cache |
 | `myboat_icon_path` | string | — | path to a custom boat icon |
-| `wind_cdn_base_url` | string | project R2 bucket | base URL for ECMWF wind tiles (see [wind-publisher](#wind-publisher)) |
 | `tile_server_base_url` | string | "" (same-origin) | for a split deployment: base URL of a separate tile server the frontend fetches from. Empty = this instance serves its own tiles. |
 
 ```json
@@ -130,27 +128,6 @@ from Mongo instead of each re-fetching GRIB.
   "attributes": { "mongo_uri": "mongodb://localhost:27017", "interval_hours": 6 }
 }
 ```
-
----
-
-## wind-publisher
-
-`erh:viam-chartplotter:wind-publisher` — optional. Configure on **one** machine
-in a fleet: it pulls ECMWF Open Data, crops it into a tile grid, and uploads to a
-Cloudflare R2 bucket. Every chartplotter then reads ECMWF wind from that CDN
-(`wind_cdn_base_url`) instead of hammering ECMWF. Set `upload_enabled: false`
-first to dry-run.
-
-| attribute | type | default | description |
-|-----------|------|---------|-------------|
-| `models` | []string | **required** | models to publish (currently only `["ecmwf"]`) |
-| `upload_enabled` | bool | `false` | actually upload to R2 (false = build only) |
-| `r2_account_id` | string | — | Cloudflare account id (required when uploading) |
-| `r2_access_key_id` | string | — | R2 token id (or derived from `r2_api_token`) |
-| `r2_api_token` | string | — | R2 API token value (SHA-256'd into the SigV4 secret) |
-| `r2_secret_access_key` | string | — | precomputed secret (alternative to `r2_api_token`) |
-| `r2_bucket` | string | `viam-chartplotter-ecmwf` | target bucket |
-| `publish_offset_minutes` | int | `30` | delay after each cycle before publishing |
 
 ---
 
