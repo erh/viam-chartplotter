@@ -309,9 +309,12 @@ func StartChartplotterServer(
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc renderer ready (mongo-backed; tile cache %s, default draft=%.1f ft)", filepath.Join(encDir, "tiles"), draftFt)
 
-	// NOAA GFS weather cache. Serves /noaa-weather/gfs/latest.json which
-	// the frontend wind layer (ol-wind) consumes. Disk cache lives under
-	// <root>/noaa-weather/.
+	// NOAA weather serving. The frontend wind layer (ol-wind) consumes
+	// /noaa-weather/data/{model}/latest.json. Serve is Mongo-only: a weathersync
+	// service populates the weather collection; this server just reads it. No
+	// disk prewarm/cleaner here — those belong to the populate side. The disk
+	// dir is still passed for NewWeatherCache's raw-ecmwf staging used by any
+	// co-located populate path.
 	weatherDir := filepath.Join(root, "noaa-weather")
 	weatherCache, err := weather.NewWeatherCache(weatherDir, logger.Sublogger("weather"))
 	if err != nil {
@@ -320,25 +323,12 @@ func StartChartplotterServer(
 		weatherCache.SetWindCDNBaseURL(windCDNBaseURL)
 		if weatherColl != nil {
 			weatherCache.SetWeatherCollection(weatherColl)
-			logger.Infof("weather: serving from Mongo collection %q (disk/upstream fallback)", store.CollWeather)
+			logger.Infof("weather: serving from Mongo collection %q (Mongo-only)", store.CollWeather)
+		} else {
+			logger.Warnf("weather: no Mongo collection configured — /noaa-weather/data will 503 until a weathersync populates it")
 		}
 		weatherCache.Register(mux)
-		// Background prewarm of every model's forecast hours so the
-		// first user scrub to any hour hits the disk cache instead of
-		// blocking on a ~30-60 s NOMADS fetch. Uses its own context so
-		// resource.Close can cancel it on module unload.
-		weatherCache.Prewarm(context.Background())
-		// Periodic cache cleaner: delete any file under
-		// <root>/noaa-weather/ older than 60 days. Covers stale
-		// per-version JSON (orphaned by weatherCacheVersion bumps),
-		// raw-ecmwf/ raw-GRIB blobs that haven't been touched in
-		// months, and any leftover .gz siblings. Runs once on
-		// startup, then daily. ECMWF data is immutable per (cycle,
-		// fh) so a delete-then-refetch is just one wasted upstream
-		// pull on the next request — at 60 days that's essentially
-		// never on an active install.
-		weatherCache.StartCleaner(60*24*time.Hour, 24*time.Hour)
-		logger.Infof("noaa weather cache: %s (cdn=%q)", weatherDir, windCDNBaseURL)
+		logger.Infof("noaa weather serve ready (cdn=%q)", windCDNBaseURL)
 	}
 
 	// Per-process instance ID. The frontend polls /version and reloads when it

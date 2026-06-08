@@ -28,11 +28,12 @@ import (
 	"github.com/erh/viam-chartplotter/weather/store"
 )
 
-// WeatherCache fetches NOAA GFS GRIB2 data from NOMADS, parses out 10 m
-// UGRD/VGRD into a 2-record JSON document shaped for the ol-wind
-// frontend layer, and serves the cached result at
-// /noaa-weather/gfs/latest.json. Same disk-cache shape as NoaaCache: a
-// single file on disk, atomically replaced, with stale-while-revalidate.
+// WeatherCache spans both weather concerns. POPULATE side (used by weathersync):
+// fetch GRIB/GRIB-like data from upstream, decode into ol-wind JSON / isobar
+// GeoJSON, stage on disk (refreshNow) for upsert into Mongo. SERVE side (used by
+// the chartplotter/tileserver HTTP mux): serveModel reads the decoded payload
+// straight from the Mongo weather collection — Mongo-only, no disk read or
+// upstream fetch in the request path.
 type WeatherCache struct {
 	cacheDir string
 	client   *http.Client
@@ -54,19 +55,13 @@ type WeatherCache struct {
 	// fetchMu de-dupes concurrent refreshes; second caller just waits.
 	fetchMu sync.Mutex
 
-	// prewarmCancel stops the startup prewarm goroutine when the
-	// resource is closed, so an in-flight module reload doesn't leak
-	// goroutines that keep hitting NOMADS after the server is gone.
-	prewarmCancel context.CancelFunc
-
 	// cleanerCancel stops the periodic disk-cache cleaner goroutine
 	// (see StartCleaner). nil when no cleaner is running.
 	cleanerCancel context.CancelFunc
 
-	// mongoColl, when set, is the weather collection a weathersync service
-	// populates. serveModel reads from it first so a render/tile server can
-	// serve forecasts straight from Mongo without re-fetching GRIB; on a miss
-	// it falls back to the on-disk cache + upstream fetch.
+	// mongoColl is the weather collection a weathersync service populates.
+	// serveModel reads ONLY from it — a render/tile server serves forecasts
+	// straight from Mongo. Nil means serving is unconfigured (503).
 	mongoColl *mongo.Collection
 
 	hits      atomic.Uint64
@@ -74,8 +69,9 @@ type WeatherCache struct {
 	errs      atomic.Uint64
 }
 
-// SetWeatherCollection wires the Mongo weather collection serveModel reads from
-// first. Nil (the default) keeps the disk/upstream-only behaviour.
+// SetWeatherCollection wires the Mongo weather collection serveModel reads from.
+// Required for serving — when nil, /noaa-weather/data returns 503 (serve is
+// Mongo-only; a weathersync service must populate the collection).
 func (wc *WeatherCache) SetWeatherCollection(c *mongo.Collection) { wc.mongoColl = c }
 
 const (
@@ -320,8 +316,13 @@ func parseForecastHour(r *http.Request, m *WeatherModel) int {
 	return m.snapFh(n)
 }
 
-// serveModel is the per-model HIT/STALE/MISS handler. Used by both
-// /noaa-weather/data/{model}/latest.json and the legacy GFS alias.
+// serveModel serves a model's forecast for the requested hour straight from the
+// Mongo weather collection. Serve is Mongo-ONLY: there is no on-demand GRIB
+// fetch or disk read in the request path — the serve side is a clean reader. A
+// weathersync service owns download→decode→store (see SyncWeatherOnce); if a
+// forecast isn't in the store yet that's a 404, not a synchronous upstream
+// fetch. Used by both /noaa-weather/data/{model}/latest.json and the legacy
+// GFS alias.
 func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *WeatherModel) {
 	if m.Disabled {
 		// Surface the registered Reason verbatim — the picker reads it
@@ -335,95 +336,39 @@ func (wc *WeatherCache) serveModel(w http.ResponseWriter, r *http.Request, m *We
 		http.Error(w, "model is frontend-rendered, no data endpoint", http.StatusNotImplemented)
 		return
 	}
+	if wc.mongoColl == nil {
+		http.Error(w, "weather store not configured (no weathersync populating Mongo)", http.StatusServiceUnavailable)
+		return
+	}
 	fh := parseForecastHour(r, m)
-
-	// Mongo-first: if a weathersync service populated the weather collection,
-	// serve the stored payload directly — no disk read, no GRIB fetch. This is
-	// the render/tile-server fast path. Misses fall through to disk/upstream.
-	if wc.mongoColl != nil {
-		if g, ok, err := store.Get(r.Context(), wc.mongoColl, m.Name, fh); err == nil && ok && len(g.Payload) > 0 {
-			wc.hits.Add(1)
-			w.Header().Set("X-Cache", "MONGO")
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Cache-Control", "public, max-age=300")
-			w.Header().Add("Vary", "Accept-Encoding")
-			switch {
-			case !g.Gzip:
-				_, _ = w.Write(g.Payload)
-			case clientAcceptsGzip(r):
-				w.Header().Set("Content-Encoding", "gzip")
-				_, _ = w.Write(g.Payload)
-			default:
-				// Stored gzipped but the client can't take it — inflate.
-				if gz, gerr := gzip.NewReader(bytes.NewReader(g.Payload)); gerr == nil {
-					_, _ = io.Copy(w, gz)
-					_ = gz.Close()
-				}
-			}
-			return
-		}
+	g, ok, err := store.Get(r.Context(), wc.mongoColl, m.Name, fh)
+	if err != nil {
+		wc.errs.Add(1)
+		http.Error(w, "weather store: "+err.Error(), http.StatusBadGateway)
+		return
 	}
-
-	path := wc.cachePath(m.Name, fh)
-	info, statErr := os.Stat(path)
-	fresh := statErr == nil && time.Since(info.ModTime()) <= wc.refresh
-
-	switch {
-	case statErr == nil && fresh:
-		wc.hits.Add(1)
-		w.Header().Set("X-Cache", "HIT")
-	case statErr == nil && !fresh:
-		// Serve stale immediately, refresh in the background so the next
-		// caller gets fresh data without paying NOMADS' 30-60 s latency.
-		wc.hits.Add(1)
-		w.Header().Set("X-Cache", "STALE")
-		go func() {
-			if err := wc.refreshNow(context.Background(), m, fh); err != nil {
-				wc.logger.Warnf("weather: background refresh %s fh=%d: %v", m.Name, fh, err)
-			}
-		}()
-	default:
-		// No cache yet — block on the first fetch.
-		start := time.Now()
-		if err := wc.refreshNow(r.Context(), m, fh); err != nil {
-			wc.logger.Warnf("weather: %s fh=%d MISS refresh failed dur=%s err=%v",
-				m.Name, fh, time.Since(start), err)
-			http.Error(w, "weather fetch: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		wc.logger.Infof("weather: %s fh=%d MISS refresh ok dur=%s", m.Name, fh, time.Since(start))
-		w.Header().Set("X-Cache", "MISS")
+	if !ok || len(g.Payload) == 0 {
+		http.Error(w, fmt.Sprintf("forecast not in store yet (model=%s fh=%d)", m.Name, fh), http.StatusNotFound)
+		return
 	}
-
+	wc.hits.Add(1)
+	w.Header().Set("X-Cache", "MONGO")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	// Prefer the precompressed sibling when the client supports it —
-	// ~7-10× smaller wire payload for the same 35 MB JSON. Vary so
-	// shared caches keep gzipped and identity responses separate.
 	w.Header().Add("Vary", "Accept-Encoding")
-	if clientAcceptsGzip(r) {
-		gzPath := wc.cacheGzPath(m.Name, fh)
-		if _, gzErr := os.Stat(gzPath); gzErr == nil {
-			w.Header().Set("Content-Encoding", "gzip")
-			http.ServeFile(w, r, gzPath)
-			return
+	switch {
+	case !g.Gzip:
+		_, _ = w.Write(g.Payload)
+	case clientAcceptsGzip(r):
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(g.Payload)
+	default:
+		// Stored gzipped but the client can't take it — inflate on the way out.
+		if gz, gerr := gzip.NewReader(bytes.NewReader(g.Payload)); gerr == nil {
+			_, _ = io.Copy(w, gz)
+			_ = gz.Close()
 		}
-		// Missing .gz next to an existing .json (e.g. a cache file from
-		// before gzip support shipped). Build it asynchronously so the
-		// next request gets the compressed version; serve uncompressed
-		// for this one rather than blocking ~200 ms on compression.
-		go func() {
-			wc.fetchMu.Lock()
-			defer wc.fetchMu.Unlock()
-			if _, err := os.Stat(gzPath); err == nil {
-				return
-			}
-			if err := wc.writeGzip(m.Name, fh); err != nil {
-				wc.logger.Warnf("weather: backfill gzip %s fh=%d: %v", m.Name, fh, err)
-			}
-		}()
 	}
-	http.ServeFile(w, r, path)
 }
 
 func (wc *WeatherCache) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -690,105 +635,9 @@ func (wc *WeatherCache) writeGzip(modelName string, fh int) error {
 	return os.Rename(tmp, dst)
 }
 
-// prewarmStepHours is the forecast-hour step the prewarmer walks. The
-// frontend slider also steps in 3 h increments, so this matches the
-// hours users actually request — wave models advertise StepFh=1 but
-// only ~3 h apart slices are ever scrubbed to.
-const prewarmStepHours = 3
-
-// Prewarm walks each enabled, non-stub weather model and fetches every
-// forecast hour up to MaxFh into the disk cache (incl. the .gz
-// sibling) so the first user scrub to any hour is a HIT instead of a
-// MISS that blocks ~30-60 s on NOMADS. Skips files that are already
-// fresh. Sequential — fetchMu serializes refreshes anyway, and
-// hammering NOMADS in parallel is impolite.
-//
-// Cancellable via Close(); the in-flight HTTP request may run for up
-// to wc.client.Timeout (120 s) after cancel before returning.
-func (wc *WeatherCache) Prewarm(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	wc.prewarmCancel = cancel
-	go wc.runPrewarm(ctx)
-}
-
-func (wc *WeatherCache) runPrewarm(ctx context.Context) {
-	ctx, span := tracer().Start(ctx, "weather.prewarm")
-	defer span.End()
-	started := time.Now()
-	var fetched, skipped int
-	defer func() {
-		span.SetAttributes(
-			attribute.Int("weather.fetched", fetched),
-			attribute.Int("weather.skipped", skipped),
-		)
-	}()
-	for _, m := range listModels() {
-		if m.Disabled || (m.Fetch == nil && m.FetchBytes == nil) {
-			continue
-		}
-		// Skip models that the wind-publisher CDN is serving: the
-		// fleet should read those from R2, not pre-fetch them on
-		// every chartplotter (the whole point of the publisher is
-		// to make ECMWF a one-machine-per-fleet upstream pull).
-		// The on-demand fallback path still works if the CDN
-		// breaks; we just don't pre-warm it.
-		if wc.windCDNBaseURL != "" && isCDNServedModel(m.Name) {
-			wc.logger.Infof("weather: prewarm skipping %s (served by CDN %s)",
-				m.Name, wc.windCDNBaseURL)
-			continue
-		}
-		step := m.StepFh
-		if step < prewarmStepHours {
-			step = prewarmStepHours
-		}
-		// Snap MinFh up to the step grid so the iterator hits valid hours.
-		startFh := m.MinFh
-		if startFh%step != 0 {
-			startFh += step - (startFh % step)
-		}
-		for fh := startFh; fh <= m.MaxFh; fh += step {
-			if ctx.Err() != nil {
-				wc.logger.Infof("weather: prewarm cancelled after %d fetched, %d skipped (%s)",
-					fetched, skipped, time.Since(started).Round(time.Second))
-				return
-			}
-			// Skip cheaply if both .json and .gz are present and fresh.
-			info, err := os.Stat(wc.cachePath(m.Name, fh))
-			if err == nil && time.Since(info.ModTime()) <= wc.refresh {
-				// .json is fresh — make sure the .gz exists so gzip
-				// clients don't pay the on-demand compression on first hit.
-				if _, gzErr := os.Stat(wc.cacheGzPath(m.Name, fh)); gzErr != nil {
-					wc.fetchMu.Lock()
-					if err := wc.writeGzip(m.Name, fh); err != nil {
-						wc.logger.Warnf("weather: prewarm gzip %s fh=%d: %v", m.Name, fh, err)
-					}
-					wc.fetchMu.Unlock()
-				}
-				skipped++
-				continue
-			}
-			if err := wc.refreshNow(ctx, m, fh); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				wc.logger.Warnf("weather: prewarm %s fh=%d: %v", m.Name, fh, err)
-				continue
-			}
-			fetched++
-		}
-	}
-	wc.logger.Infof("weather: prewarm done, %d fetched, %d skipped (%s)",
-		fetched, skipped, time.Since(started).Round(time.Second))
-}
-
-// Close stops the prewarm goroutine. The in-flight HTTP request (if
-// any) is cancelled via ctx, though it may take up to the client
-// timeout to actually return. Also cancels any active cache
-// cleaner goroutine if one was started.
+// Close cancels the periodic disk-cache cleaner goroutine if one was started
+// (see StartCleaner). The serve path holds no goroutines.
 func (wc *WeatherCache) Close() {
-	if wc.prewarmCancel != nil {
-		wc.prewarmCancel()
-	}
 	if wc.cleanerCancel != nil {
 		wc.cleanerCancel()
 	}

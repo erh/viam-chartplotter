@@ -132,6 +132,11 @@ func newWeatherSync(ctx context.Context, _ resource.Dependencies, conf resource.
 		coll:   coll,
 		cache:  cache,
 	}
+	// The populate path stages each decoded forecast on disk (refreshNow) before
+	// upserting to Mongo; without a cleaner that disk grows unbounded. Cleaning
+	// lives here on the populate side (the serve side is Mongo-only and touches
+	// no disk). Files immutable per (cycle,fh), so a 60-day sweep is safe.
+	cache.StartCleaner(60*24*time.Hour, 24*time.Hour)
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	w.cancel = loopCancel
 	go w.runLoop(loopCtx)
@@ -258,6 +263,9 @@ func (w *weatherSync) Close(_ context.Context) error {
 		w.cancel = nil
 	}
 	w.mu.Unlock()
+	if w.cache != nil {
+		w.cache.Close() // stop the disk-cache cleaner goroutine
+	}
 	if w.client != nil {
 		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer dcancel()
