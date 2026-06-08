@@ -57,6 +57,42 @@ func safeDepthBucket(safeDepthFt float64) int {
 	return b
 }
 
+// tileMaxAge is how long browsers/proxies may serve a chart or OSM tile without
+// revalidating. A day balances cheap repeat pans against picking up a fresh
+// render after the cells behind a tile are updated.
+const tileMaxAge = 86400
+
+// tileETag builds a strong validator for a tile from its cache identity: the
+// render-rules cache key (which embeds ENCRenderRulesVersion / OSMRenderRulesVersion
+// + style + option flags) plus the depth bucket and z/x/y. It therefore changes
+// exactly when the rendered pixels would, so a client can revalidate with
+// If-None-Match and get a 304 — and a version bump invalidates every cached tile
+// automatically.
+func tileETag(cacheKey string, bucket, z, x, y int) string {
+	return fmt.Sprintf(`"%s-%d-%d-%d-%d"`, cacheKey, bucket, z, x, y)
+}
+
+// setTileCacheHeaders writes the standard cacheable-tile headers (Content-Type,
+// Cache-Control, ETag) shared by the chart- and OSM-tile responses.
+func setTileCacheHeaders(w http.ResponseWriter, etag string) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", tileMaxAge))
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+	}
+}
+
+// notModified reports whether the request's If-None-Match matches etag, and if
+// so writes a 304 with the cache headers (no body). Callers return early on true.
+func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
+	if etag == "" || r.Header.Get("If-None-Match") != etag {
+		return false
+	}
+	setTileCacheHeaders(w, etag)
+	w.WriteHeader(http.StatusNotModified)
+	return true
+}
+
 func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
 	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
@@ -100,10 +136,13 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 	// whenever the OSM rasteriser logic changes so stale PNGs from a
 	// prior implementation get auto-superseded.
 	cacheKey := "osm-raster-v" + strconv.Itoa(OSMRenderRulesVersion)
+	etag := tileETag(cacheKey, 0, z, x, y)
+	if notModified(w, r, etag) {
+		return
+	}
 	if h.tileCache != nil {
 		if cached, ok := h.tileCache.Get(cacheKey, 0, z, x, y); ok {
-			w.Header().Set("Content-Type", "image/png")
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			setTileCacheHeaders(w, etag)
 			_, _ = w.Write(cached)
 			return
 		}
@@ -114,16 +153,16 @@ func (h *ENCHandlers) handleOSMTile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
 	if rendered {
 		// Real feature-backed render — disk-cache and tell the
-		// browser to hold onto it for a day.
+		// browser to hold onto it for a day (with an ETag for revalidation).
 		const minCacheableTileBytes = 1024
 		if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
 			_ = h.tileCache.Put(cacheKey, 0, z, x, y, pngBytes)
 		}
-		w.Header().Set("Cache-Control", "public, max-age=86400")
+		setTileCacheHeaders(w, etag)
 	} else {
+		w.Header().Set("Content-Type", "image/png")
 		// Fallback transparent PNG (region still loading, or no
 		// covering extract). Cache neither side — the next request
 		// after the region finishes parsing should produce a real
@@ -397,10 +436,14 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 		cacheKey += "-skip:" + skipKey(skipClasses)
 	}
 
+	etag := tileETag(cacheKey, bucket, z, x, y)
+	if notModified(w, r, etag) {
+		return
+	}
+
 	if h.tileCache != nil {
 		if cached, ok := h.tileCache.Get(cacheKey, bucket, z, x, y); ok {
-			w.Header().Set("Content-Type", "image/png")
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			setTileCacheHeaders(w, etag)
 			_, _ = w.Write(cached)
 			return
 		}
@@ -437,8 +480,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 			_ = err
 		}
 	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	setTileCacheHeaders(w, etag)
 	_, _ = w.Write(pngBytes)
 }
 

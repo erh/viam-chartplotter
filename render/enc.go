@@ -1435,6 +1435,18 @@ func isChannelClass(class string) bool {
 	return false
 }
 
+// isMagentaLimitClass reports the S-52 area-limit lines that NOAA draws as a
+// thin dashed magenta line (LC dashed limit), not a solid stroke. The renderer
+// applies a dash pattern to these so they read as limits rather than dominant
+// solid boundaries.
+func isMagentaLimitClass(class string) bool {
+	switch class {
+	case "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
+		return true
+	}
+	return false
+}
+
 func encodePNG(dc *gg.Context) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, dc.Image()); err != nil {
@@ -2396,7 +2408,11 @@ func drawFeature(dc *gg.Context, f encFeature, pass drawPass, project func(lon, 
 			tracePolygonPath(dc, geom.Coordinates, project)
 			dc.SetColor(stroke)
 			dc.SetLineWidth(width * scale)
+			if isMagentaLimitClass(class) {
+				dc.SetDash(4*scale, 3*scale)
+			}
 			dc.Stroke()
+			dc.SetDash() // clear so later strokes are solid
 		default:
 			return
 		}
@@ -2445,7 +2461,11 @@ func drawFeature(dc *gg.Context, f encFeature, pass drawPass, project func(lon, 
 		}
 		dc.SetColor(stroke)
 		dc.SetLineWidth(width * scale)
+		if isMagentaLimitClass(class) {
+			dc.SetDash(4*scale, 3*scale)
+		}
 		dc.Stroke()
+		dc.SetDash() // clear so later strokes are solid
 
 	case s57.GeometryTypePoint:
 		if pass != passPoints {
@@ -2845,18 +2865,20 @@ func lineStroke(class string, f encFeature, safeDepthM float64, style RenderStyl
 		return s52CHBLK, w
 	case "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
 		// Fairway / anchorage / deep-water route / traffic route / restricted
-		// area — magenta boundary line. At overview zoom these are the most
-		// navigationally meaningful features on screen (NOAA WMS makes them
-		// dominant); bump weight so they don't disappear when zoomSymbolScale
-		// is still 1.0.
-		w := 0.8
+		// area — magenta boundary line, drawn DASHED (see isMagentaLimitClass)
+		// and thin to match NOAA's S-52 limit symbology. Previously these were
+		// heavy solid lines that dominated the chart and, where several
+		// overlapping cells carry the same limit (e.g. RESARE around a canal
+		// community), read as a doubled magenta tangle. Thin + dashed keeps them
+		// legible as area limits without overpowering the soundings/coastline.
+		w := 0.6
 		switch {
 		case z <= 10:
-			w = 1.6
-		case z == 11:
-			w = 1.3
-		case z == 12:
 			w = 1.0
+		case z == 11:
+			w = 0.9
+		case z == 12:
+			w = 0.7
 		}
 		return s52CHMGD, w
 	case "RIVERS":
