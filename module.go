@@ -102,7 +102,11 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// chart — no boat marker, AIS, navigation, camera, or app panels. Exposed via
 	// /app-config; the frontend also auto-enters it when no host is resolvable.
 	chartOnly := config.Attributes.Bool("chart_only", false)
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly)
+	// prewarm_max_zoom: render+cache all tiles from z7 up to this zoom in the
+	// background on start (default z7; set < 7 to disable). Each higher zoom is
+	// ~4x the tiles, so extend only after seeing how long z7 takes in the logs.
+	prewarmMaxZoom := config.Attributes.Int("prewarm_max_zoom", 7)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly, prewarmMaxZoom)
 }
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
@@ -211,6 +215,7 @@ func StartChartplotterServer(
 	mongoColl string,
 	tileServerBaseURL string,
 	chartOnly bool,
+	prewarmMaxZoom int,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -397,11 +402,22 @@ func StartChartplotterServer(
 		}
 	}()
 
+	// Background tile prewarm (z7 by default). Only meaningful with Mongo data to
+	// render from; renders+caches in the background so overview tiles serve
+	// instantly. Logs per-zoom timing so we can decide whether to extend.
+	prewarmStop := func() {}
+	if mongoURI != "" && prewarmMaxZoom >= 7 {
+		logger.Infof("tile prewarm enabled: z7..z%d", prewarmMaxZoom)
+		prewarmStop = encHandlers.StartPrewarm(prewarmMaxZoom, 4,
+			func(f string, a ...any) { logger.Sublogger("prewarm").Infof(f, a...) })
+	}
+
 	return &chartplotterResource{
 		name:           name,
 		server:         server,
 		weatherCache:   weatherCache,
 		tileCache:      encTileCache,
+		prewarmStop:    prewarmStop,
 		tracerShutdown: tracerShutdown,
 	}, nil
 }
@@ -413,6 +429,7 @@ type chartplotterResource struct {
 	server         *http.Server
 	weatherCache   *weather.WeatherCache
 	tileCache      *render.ENCTileCache
+	prewarmStop    func()
 	tracerShutdown func(context.Context) error
 }
 
@@ -432,6 +449,9 @@ func (r *chartplotterResource) Close(ctx context.Context) error {
 	}
 	if r.tileCache != nil {
 		r.tileCache.StopCleaner()
+	}
+	if r.prewarmStop != nil {
+		r.prewarmStop()
 	}
 	err := r.server.Close()
 	// Flush buffered spans last — the slow-log middleware emits one on

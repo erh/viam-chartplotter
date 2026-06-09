@@ -36,6 +36,7 @@ public hosted map+weather server, so tiles and weather work with zero setup.
 | `myboat_icon_path` | string | — | path to a custom boat icon |
 | `tile_server_base_url` | string | "" (same-origin; hosted server if `mongo_uri` unset) | base URL of a separate map+weather server the frontend fetches tiles+weather from. Empty = this instance serves its own. |
 | `chart_only` | bool | `false` | chart-extended (kiosk) mode: no boat/robot to connect to — the frontend skips the Viam connection and shows only the chart (no boat marker, AIS, nav, camera, or panels). Also auto-enabled when no host is resolvable. |
+| `prewarm_max_zoom` | int | `7` | background-render + cache all tiles from z7 up to this zoom on start (needs `mongo_uri`). Each higher zoom is ~4× the tiles; per-zoom timing is logged. Set `< 7` to disable. |
 
 ```json
 {

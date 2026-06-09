@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fogleman/gg"
@@ -424,17 +426,7 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	// OSM underlay beneath the ENC chart server-side (replacing the browser's
 	// two-layer stack). The marker keeps these tiles in their own cache shard,
 	// distinct from any legacy ENC-only tiles.
-	cacheKey := "v" + strconv.Itoa(ENCRenderRulesVersion) +
-		"-merged" + strconv.Itoa(OSMRenderRulesVersion) + "-" + style.String()
-	if skipNavaids {
-		cacheKey += "-nonavaids"
-	}
-	if transparentLand {
-		cacheKey += "-noland"
-	}
-	if len(skipClasses) > 0 {
-		cacheKey += "-skip:" + skipKey(skipClasses)
-	}
+	cacheKey := tileCacheKey(style, skipNavaids, transparentLand, skipClasses)
 
 	etag := tileETag(cacheKey, bucket, z, x, y)
 	if notModified(w, r, etag) {
@@ -482,6 +474,118 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	}
 	setTileCacheHeaders(w, etag)
 	_, _ = w.Write(pngBytes)
+}
+
+// tileCacheKey builds the cache-shard key for a merged tile from its render
+// options + the rules versions. Shared by handleTile and the prewarmer so warmed
+// tiles are cache HITs for the same option set the frontend requests.
+func tileCacheKey(style RenderStyle, skipNavaids, transparentLand bool, skipClasses map[string]bool) string {
+	k := "v" + strconv.Itoa(ENCRenderRulesVersion) +
+		"-merged" + strconv.Itoa(OSMRenderRulesVersion) + "-" + style.String()
+	if skipNavaids {
+		k += "-nonavaids"
+	}
+	if transparentLand {
+		k += "-noland"
+	}
+	if len(skipClasses) > 0 {
+		k += "-skip:" + skipKey(skipClasses)
+	}
+	return k
+}
+
+// prewarmTileOpts returns the render options, depth bucket, and cache key the
+// frontend uses for a given zoom — mirroring marineMap.svelte's overview / mid /
+// detail params — so prewarmed tiles match real requests exactly.
+func (h *ENCHandlers) prewarmTileOpts(z int) (RenderOptions, int, string) {
+	bucket := safeDepthBucket(h.defaultSafeDepth)
+	opts := RenderOptions{SafeDepthM: float64(bucket) / feetPerMetre, TransparentLand: true}
+	switch {
+	case z < 12: // overviewParams: style=ecdis, landfill=0
+		opts.Style = ParseRenderStyle("ecdis")
+	case z < 14: // midParams: style=wms, navaids=0, landfill=0
+		opts.Style = ParseRenderStyle("wms")
+		opts.SkipNavaids = true
+	default: // detailParams: + skip overhead structures
+		opts.Style = ParseRenderStyle("wms")
+		opts.SkipNavaids = true
+		opts.SkipClasses = parseSkipClasses("BRIDGE,CBLOHD,PIPOHD,CONVYR")
+	}
+	return opts, bucket, tileCacheKey(opts.Style, opts.SkipNavaids, opts.TransparentLand, opts.SkipClasses)
+}
+
+// StartPrewarm renders+caches every tile from z7 up to maxZoom in a background
+// goroutine, so those tiles serve from cache. Tiles already cached are skipped
+// (a re-run after a warm cache is cheap). Logs per-zoom timing so we can decide
+// whether to extend past z7. No-op if maxZoom < 7 or the renderer/cache aren't
+// set. Returns a stop func.
+func (h *ENCHandlers) StartPrewarm(maxZoom, concurrency int, logf func(string, ...any)) func() {
+	if maxZoom < 7 || h.renderer == nil || h.tileCache == nil {
+		return func() {}
+	}
+	if concurrency < 1 {
+		concurrency = 4
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Let startup settle before hammering Mongo with a full-zoom render sweep.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+		for z := 7; z <= maxZoom; z++ {
+			if ctx.Err() != nil {
+				return
+			}
+			h.prewarmZoom(ctx, z, concurrency, logf)
+		}
+	}()
+	return cancel
+}
+
+// prewarmZoom renders+caches every tile at zoom z (cache hits skipped).
+func (h *ENCHandlers) prewarmZoom(ctx context.Context, z, concurrency int, logf func(string, ...any)) {
+	opts, bucket, cacheKey := h.prewarmTileOpts(z)
+	n := 1 << z
+	total := n * n
+	start := time.Now()
+	var done, cached int64
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	const minCacheableTileBytes = 1024
+	for x := 0; x < n; x++ {
+		for y := 0; y < n; y++ {
+			if ctx.Err() != nil {
+				wg.Wait()
+				return
+			}
+			if _, ok := h.tileCache.Get(cacheKey, bucket, z, x, y); ok {
+				atomic.AddInt64(&done, 1)
+				continue
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(x, y int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				png, _, _, err := h.renderer.RenderMergedTile(z, x, y, opts)
+				if err == nil && len(png) >= minCacheableTileBytes {
+					_ = h.tileCache.Put(cacheKey, bucket, z, x, y, png)
+					atomic.AddInt64(&cached, 1)
+				}
+				if d := atomic.AddInt64(&done, 1); logf != nil && d%2000 == 0 {
+					logf("tile prewarm z=%d: %d/%d done, %d cached, %s elapsed",
+						z, d, total, atomic.LoadInt64(&cached), time.Since(start).Round(time.Second))
+				}
+			}(x, y)
+		}
+	}
+	wg.Wait()
+	if logf != nil {
+		logf("tile prewarm z=%d DONE: %d tiles, %d cached (rest empty), %s",
+			z, total, atomic.LoadInt64(&cached), time.Since(start).Round(time.Second))
+	}
 }
 
 // handleCompareTest serves an HTML page that stacks /compare panels for the
