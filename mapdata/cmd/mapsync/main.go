@@ -67,6 +67,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "gentile: %v\n", err)
 			os.Exit(1)
 		}
+	case "backfill-geomlow":
+		if err := runBackfillGeomLow(args); err != nil {
+			fmt.Fprintf(os.Stderr, "backfill-geomlow: %v\n", err)
+			os.Exit(1)
+		}
+	case "backfill-lowzoom":
+		if err := runBackfillLowZoom(args); err != nil {
+			fmt.Fprintf(os.Stderr, "backfill-lowzoom: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		topUsage()
 	default:
@@ -84,6 +94,8 @@ func topUsage() {
 	fmt.Fprintln(os.Stderr, "    ingest        Read a .osm.pbf and upsert kept features into MongoDB")
 	fmt.Fprintln(os.Stderr, "    query         Show + count the features a given tile would query for")
 	fmt.Fprintln(os.Stderr, "    gentile       Render a tile PNG by querying the MongoDB collection")
+	fmt.Fprintln(os.Stderr, "    backfill-geomlow  Add simplified geomLow to existing osm_overview/osm_coastal docs (no re-ingest)")
+	fmt.Fprintln(os.Stderr, "    backfill-lowzoom  Build the curated osm_lowzoom collection (z7/z8 band) from existing docs")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "NOAA ENC ingest lives in the datasync binary (see `make ingest-noaa`).")
 	fmt.Fprintln(os.Stderr)
@@ -183,6 +195,17 @@ func runIngest(args []string) error {
 		if err := ensureFeatureIndexes(ctx, colls.For(b), b); err != nil {
 			return fmt.Errorf("ensure indexes %s: %w", b.CollectionName(), err)
 		}
+	}
+	// The curated low-zoom collection (z7/z8 band) gets the same render index.
+	if _, err := colls.LowZoom.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "geometry", Value: "2dsphere"},
+			{Key: "minZoom", Value: 1},
+			{Key: "class", Value: 1},
+		},
+		Options: options.Index().SetName("geo_minZoom_class"),
+	}); err != nil {
+		return fmt.Errorf("ensure indexes %s: %w", osmtiler.CollLowZoom, err)
 	}
 
 	// Per-file ingest opts. Derive a region key from each filename
@@ -338,7 +361,35 @@ type featureDoc struct {
 	MinLabelZoom int               `bson:"minLabelZoom"`
 	BBox         [4]float64        `bson:"bbox"` // [minLon, minLat, maxLon, maxLat]
 	Geometry     interface{}       `bson:"geometry"`
-	Tags         map[string]string `bson:"tags,omitempty"`
+	// GeomLow is the geometry pre-simplified (Douglas–Peucker) to ~1px at
+	// osmtiler.LowGeomMaxZoom, set only for line/polygon features whose
+	// simplification actually drops vertices. The overview-band query path
+	// coalesces it into "geometry" so z7..z11 land-cover renders don't choke on
+	// full-resolution forest polygons. nil (omitted) → query falls back to
+	// the full Geometry.
+	GeomLow interface{}       `bson:"geomLow,omitempty"`
+	Tags    map[string]string `bson:"tags,omitempty"`
+}
+
+// lowGeomFor returns the simplified low-zoom geometry for a line/polygon's
+// coords, or nil when simplification wouldn't help (point geometry, or no
+// vertices dropped, or the result would degenerate below a valid line/ring).
+func lowGeomFor(kind string, coords []osmtiler.LonLat) interface{} {
+	if kind != "line" && kind != "polygon" {
+		return nil
+	}
+	low, reduced := osmtiler.SimplifyLonLat(coords, osmtiler.LowGeomTolerance)
+	if !reduced {
+		return nil
+	}
+	minPts := 2
+	if kind == "polygon" {
+		minPts = 4
+	}
+	if len(low) < minPts {
+		return nil
+	}
+	return geometryForRing(kind, low)
 }
 
 // ingest processes a single PBF into the four bucket collections.
@@ -864,6 +915,7 @@ func wayDoc(region string, w *osm.Way, class osmtiler.Class, coords []osmtiler.L
 		doc.RoadKind = roadKindName(osmtiler.RoadKindFor(w.Tags.Find("highway")))
 	}
 	doc.Geometry = geometryForRing(kind, coords)
+	doc.GeomLow = lowGeomFor(kind, coords)
 	doc.Tags = tagsAsMap(w.Tags)
 	return doc
 }
@@ -966,6 +1018,7 @@ func relRingDoc(region string, rd relDesc, ringIdx int, coords []osmtiler.LonLat
 		MinLabelZoom: int(osmtiler.LabelMinZoom(rd.Class, rd.Tags)),
 		BBox:         bboxOf(coords),
 		Geometry:     geometryForRing(kind, coords),
+		GeomLow:      lowGeomFor(kind, coords),
 		Tags:         tagsAsMap(rd.Tags),
 	}
 }
@@ -1106,7 +1159,12 @@ func (u *upserter) flush(ctx context.Context) error {
 // four interleaved ones.
 type bucketRouter struct {
 	overview, coastal, detail, skip *upserter
-	out                             io.Writer
+	// lowzoom is the curated z7/z8 collection — a CROSS-CUTTING copy, not a
+	// minZoom bucket: qualifying band features are written here (with simplified
+	// geometry) IN ADDITION to their normal bucket. Kept out of all() so the
+	// emitted/upserted counters don't double-count the copies.
+	lowzoom *upserter
+	out     io.Writer
 
 	lastLog time.Time
 }
@@ -1120,6 +1178,7 @@ func newBucketRouter(colls *osmtiler.OSMCollections, batchSize int, out io.Write
 		coastal:  newUpserter(colls.Coastal, batchSize, out),
 		detail:   newUpserter(colls.Detail, batchSize, out),
 		skip:     newUpserter(colls.Skip, batchSize, out),
+		lowzoom:  newUpserter(colls.LowZoom, batchSize, out),
 		out:      out,
 	}
 }
@@ -1149,6 +1208,13 @@ func (r *bucketRouter) upsert(ctx context.Context, doc featureDoc) error {
 	if err := u.upsert(ctx, doc); err != nil {
 		return err
 	}
+	// Also copy qualifying band features into the curated low-zoom collection,
+	// with the pre-simplified geometry, so the z7/z8 query stays tiny+fast.
+	if lz, ok := lowZoomVariant(doc); ok {
+		if err := r.lowzoom.upsert(ctx, lz); err != nil {
+			return err
+		}
+	}
 	if time.Since(r.lastLog) > 5*time.Second {
 		msg := fmt.Sprintf("  ... %d emitted (%d upserted) [overview=%d coastal=%d detail=%d skip=%d]",
 			r.emitted(), r.upserted(),
@@ -1165,7 +1231,25 @@ func (r *bucketRouter) flush(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return r.lowzoom.flush(ctx)
+}
+
+// lowZoomVariant returns the curated-collection copy of a doc when it qualifies
+// for the z7/z8 band (band class; point label or big enough to be visible),
+// substituting the pre-simplified geomLow geometry. ok=false → don't copy it.
+func lowZoomVariant(doc featureDoc) (featureDoc, bool) {
+	span := doc.BBox[2] - doc.BBox[0]
+	if sy := doc.BBox[3] - doc.BBox[1]; sy > span {
+		span = sy
+	}
+	if !osmtiler.QualifiesForLowZoom(osmtiler.ClassFromString(doc.Class), doc.Kind == "point", span) {
+		return featureDoc{}, false
+	}
+	// Copy verbatim: the indexed geometry stays the valid original; the render
+	// path uses geomLow via UseLowGeom (a DP-simplified ring can self-intersect,
+	// which a 2dsphere index would reject, so geomLow must not be the indexed
+	// geometry).
+	return doc, true
 }
 
 func (r *bucketRouter) emitted() int {
@@ -1554,4 +1638,259 @@ func roadKindName(k osmtiler.RoadKind) string {
 		return "path"
 	}
 	return ""
+}
+
+// ----- backfill-lowzoom ----------------------------------------------------
+
+// runBackfillLowZoom (re)builds the curated osm_lowzoom collection from the
+// existing osm_overview / osm_coastal docs, without re-ingesting any PBF. It
+// copies in only the features that QualifyForLowZoom (band classes; point
+// labels or big enough to be visible at z8), storing the pre-simplified geomLow
+// geometry so the z7/z8 query touches a small, fast collection instead of the
+// 41M-doc overview bucket. Idempotent: upserts by _id, so re-runs refresh.
+func runBackfillLowZoom(args []string) error {
+	fs := flag.NewFlagSet("backfill-lowzoom", flag.ContinueOnError)
+	mongoURI := fs.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI")
+	dbName := fs.String("db", "osm", "MongoDB database")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if v := os.Getenv("MONGO_DB"); v != "" && !flagSet(fs, "db") {
+		*dbName = v
+	}
+	if *mongoURI == "" {
+		fs.Usage()
+		return fmt.Errorf("--mongo (or $MONGO_URI) required")
+	}
+
+	ctx := context.Background()
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(*mongoURI))
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		_ = client.Disconnect(dctx)
+	}()
+	if err := client.Ping(connectCtx, nil); err != nil {
+		return fmt.Errorf("mongo ping: %w", err)
+	}
+	db := client.Database(*dbName)
+	low := db.Collection(osmtiler.CollLowZoom)
+
+	// Merge into the (unindexed) collection first — building the 2dsphere index
+	// per-insert during $merge is far slower than a single bulk index build at
+	// the end. Start clean so the build can't trip over stale partial data.
+	if err := low.Drop(ctx); err != nil {
+		return fmt.Errorf("drop %s: %w", osmtiler.CollLowZoom, err)
+	}
+	for _, src := range []string{osmtiler.CollOverview, osmtiler.CollCoastal} {
+		if err := backfillLowZoomFrom(ctx, db.Collection(src), src); err != nil {
+			return fmt.Errorf("%s: %w", src, err)
+		}
+	}
+
+	// 2dsphere render index so the z7/z8 $geoIntersects query is fast. Built once
+	// over the finished collection (the copied geometry is the valid original).
+	fmt.Printf("building %s index ...\n", osmtiler.CollLowZoom)
+	if _, err := low.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "geometry", Value: "2dsphere"},
+			{Key: "minZoom", Value: 1},
+			{Key: "class", Value: 1},
+		},
+		Options: options.Index().SetName("geo_minZoom_class"),
+	}); err != nil {
+		return fmt.Errorf("lowzoom index: %w", err)
+	}
+	fmt.Printf("%s ready: %d docs\n", osmtiler.CollLowZoom, func() int64 {
+		n, _ := low.EstimatedDocumentCount(ctx)
+		return n
+	}())
+	return nil
+}
+
+// backfillLowZoomFrom copies the qualifying docs from one source bucket into
+// osm_lowzoom using a server-side aggregation $merge — no 51M-doc round-trip to
+// the client. The $match replicates osmtiler.QualifiesForLowZoom (band class;
+// point, or bbox longer side >= lowZoomMinSpanDeg); docs are copied VERBATIM
+// (valid original geometry stays indexed, geomLow kept for the render's
+// UseLowGeom path). whenMatched=replace makes re-runs idempotent.
+func backfillLowZoomFrom(ctx context.Context, src *mongo.Collection, name string) error {
+	band := bson.A{"natural", "landuse", "leisure", "road", "railway", "aeroway", "admin", "place"}
+	span := bson.M{"$max": bson.A{
+		bson.M{"$subtract": bson.A{
+			bson.M{"$arrayElemAt": bson.A{"$bbox", 2}},
+			bson.M{"$arrayElemAt": bson.A{"$bbox", 0}},
+		}},
+		bson.M{"$subtract": bson.A{
+			bson.M{"$arrayElemAt": bson.A{"$bbox", 3}},
+			bson.M{"$arrayElemAt": bson.A{"$bbox", 1}},
+		}},
+	}}
+	match := bson.M{
+		"class": bson.M{"$in": band},
+		"$or": bson.A{
+			bson.M{"kind": "point"},
+			bson.M{"$expr": bson.M{"$gte": bson.A{span, osmtiler.LowZoomMinSpanDeg}}},
+		},
+	}
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$match", Value: match}},
+		bson.D{{Key: "$merge", Value: bson.M{
+			"into":           osmtiler.CollLowZoom,
+			"on":             "_id",
+			"whenMatched":    "replace",
+			"whenNotMatched": "insert",
+		}}},
+	}
+	start := time.Now()
+	fmt.Printf("  %-16s merging qualifying docs into %s ...\n", name, osmtiler.CollLowZoom)
+	cur, err := src.Aggregate(ctx, pipeline, options.Aggregate().SetAllowDiskUse(true))
+	if err != nil {
+		return fmt.Errorf("aggregate $merge: %w", err)
+	}
+	// $merge yields no documents; just drain + close.
+	_ = cur.All(ctx, &[]bson.M{})
+	fmt.Printf("%-16s done in %s\n", name, time.Since(start).Round(time.Second))
+	return nil
+}
+
+// ----- backfill-geomlow ----------------------------------------------------
+
+// runBackfillGeomLow adds the pre-simplified geomLow geometry to existing
+// osm_overview / osm_coastal documents (the buckets the z7..z11 land-cover band
+// queries), without re-downloading or re-ingesting any PBF. It reads each
+// line/polygon doc, Douglas–Peucker-simplifies the geometry at
+// osmtiler.LowGeomTolerance, and $sets geomLow when simplification actually
+// drops vertices. Idempotent: docs that already have geomLow are skipped, and
+// docs that don't reduce are simply left as-is (the query path falls back to
+// their full geometry).
+func runBackfillGeomLow(args []string) error {
+	fs := flag.NewFlagSet("backfill-geomlow", flag.ContinueOnError)
+	mongoURI := fs.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI")
+	dbName := fs.String("db", "osm", "MongoDB database")
+	batchSize := fs.Int("batch", 2000, "bulk-update batch size")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if v := os.Getenv("MONGO_DB"); v != "" && !flagSet(fs, "db") {
+		*dbName = v
+	}
+	if *mongoURI == "" {
+		fs.Usage()
+		return fmt.Errorf("--mongo (or $MONGO_URI) required")
+	}
+
+	ctx := context.Background()
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(*mongoURI))
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		_ = client.Disconnect(dctx)
+	}()
+	if err := client.Ping(connectCtx, nil); err != nil {
+		return fmt.Errorf("mongo ping: %w", err)
+	}
+	colls := osmtiler.OpenOSMCollections(client.Database(*dbName))
+
+	// Only the overview + coastal buckets are queried at the overview band
+	// (z7..z11); the detail bucket (z12+) always renders full geometry.
+	for _, b := range []osmtiler.MinZoomBucket{osmtiler.BucketOverview, osmtiler.BucketCoastal} {
+		coll := colls.For(b)
+		if err := backfillGeomLowColl(ctx, coll, b.CollectionName(), *batchSize); err != nil {
+			return fmt.Errorf("%s: %w", b.CollectionName(), err)
+		}
+	}
+	return nil
+}
+
+// flagSet reports whether a flag was explicitly set on the command line.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func backfillGeomLowColl(ctx context.Context, coll *mongo.Collection, name string, batchSize int) error {
+	// Only line/polygon features can simplify, and only those missing geomLow
+	// need processing — so re-runs after a partial pass are cheap.
+	filter := bson.M{
+		"kind":    bson.M{"$in": bson.A{"line", "polygon"}},
+		"geomLow": bson.M{"$exists": false},
+	}
+	// Pull just what we need to rebuild geomLow: id, kind, and geometry.
+	proj := bson.M{"_id": 1, "kind": 1, "geometry": 1}
+	cur, err := coll.Find(ctx, filter, options.Find().SetProjection(proj).SetNoCursorTimeout(true))
+	if err != nil {
+		return fmt.Errorf("find: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var scanned, updated int64
+	var models []mongo.WriteModel
+	flush := func() error {
+		if len(models) == 0 {
+			return nil
+		}
+		res, err := coll.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+		if err != nil {
+			return fmt.Errorf("bulk write: %w", err)
+		}
+		updated += res.ModifiedCount
+		models = models[:0]
+		return nil
+	}
+
+	start := time.Now()
+	for cur.Next(ctx) {
+		scanned++
+		feat, derr := osmtiler.DecodeFeature(cur.Current)
+		if derr != nil {
+			continue // skip undecodable docs; the renderer skips them too
+		}
+		var idDoc struct {
+			ID string `bson:"_id"`
+		}
+		if err := bson.Unmarshal(cur.Current, &idDoc); err != nil || idDoc.ID == "" {
+			continue
+		}
+		kindStr := "line"
+		if feat.Kind == osmtiler.GeomPolygon {
+			kindStr = "polygon"
+		}
+		gl := lowGeomFor(kindStr, feat.Coords)
+		if gl == nil {
+			continue // simplification wouldn't reduce — leave it to full-geom fallback
+		}
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": idDoc.ID}).
+			SetUpdate(bson.M{"$set": bson.M{"geomLow": gl}}))
+		if len(models) >= batchSize {
+			if err := flush(); err != nil {
+				return err
+			}
+			fmt.Printf("  %-16s scanned=%d updated=%d (%s)\n", name, scanned, updated, time.Since(start).Round(time.Second))
+		}
+	}
+	if err := cur.Err(); err != nil {
+		return fmt.Errorf("cursor: %w", err)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	fmt.Printf("%-16s done: scanned=%d updated=%d in %s\n", name, scanned, updated, time.Since(start).Round(time.Second))
+	return nil
 }

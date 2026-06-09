@@ -8,6 +8,8 @@ import (
 	"image/png"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/fogleman/gg"
 )
@@ -243,6 +245,13 @@ const minSameNameLineDist = 150.0
 func drawLabelsInto(dc *gg.Context, features []Feature, z, x, y int, tMinLon, tMinLat, tMaxLon, tMaxLat float64, placed []labelRect) ([]labelRect, error) {
 	zu8 := uint8(z)
 	var placedLineNames []namedAnchor
+	// Same-name dedup for point + area labels. OSM commonly carries a place as
+	// both a label node and an area polygon (e.g. place=island "Green Island"
+	// as a node AND a way) — both reach the label pass and the bbox collision
+	// check misses them when their anchors are far apart, so the name draws
+	// twice. Within a single tile a repeated name is virtually always the same
+	// feature, so the first one to land claims it and later ones are skipped.
+	seenNames := map[string]bool{}
 
 	// gg caches the active font face; we set per size as we encounter
 	// new classes. Most tiles only have one or two class types in their
@@ -269,11 +278,21 @@ func drawLabelsInto(dc *gg.Context, features []Feature, z, x, y int, tMinLon, tM
 
 		switch f.Kind {
 		case GeomPoint:
-			drawPointLabel(dc, f, z, x, y, size, &placed)
+			if seenNames[f.Name] {
+				continue
+			}
+			if drawPointLabel(dc, f, z, x, y, size, &placed) {
+				seenNames[f.Name] = true
+			}
 		case GeomLine:
 			drawLineLabel(dc, f, z, x, y, size, &placed, &placedLineNames)
 		case GeomPolygon:
-			drawAreaLabel(dc, f, z, x, y, size, &placed)
+			if seenNames[f.Name] {
+				continue
+			}
+			if drawAreaLabel(dc, f, z, x, y, size, &placed) {
+				seenNames[f.Name] = true
+			}
 		}
 	}
 	return placed, nil
@@ -289,7 +308,7 @@ func drawLabelsInto(dc *gg.Context, features []Feature, z, x, y int, tMinLon, tM
 // centroid. For long thin polygons (Riverside Park) the result is
 // roughly in the middle of the spread, which is acceptable; the
 // proper "label point" (pole of inaccessibility) is a v0.4 polish item.
-func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) bool {
 	var sumLon, sumLat float64
 	for _, c := range f.Coords {
 		sumLon += c.Lon
@@ -301,7 +320,7 @@ func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 	px, py := LonLatToTilePx(cLon, cLat, z, x, y)
 	if px < -LabelBuffer || px > TileSize+LabelBuffer ||
 		py < -LabelBuffer || py > TileSize+LabelBuffer {
-		return
+		return false
 	}
 
 	w, _ := dc.MeasureString(f.Name)
@@ -320,7 +339,7 @@ func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 		maxExtent = heightPx
 	}
 	if maxExtent < w {
-		return
+		return false
 	}
 
 	const pad = 2.0
@@ -330,18 +349,19 @@ func drawAreaLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed
 	}
 	for _, p := range *placed {
 		if box.overlaps(p) {
-			return
+			return false
 		}
 	}
 	*placed = append(*placed, box)
 	drawLabelWithHalo(dc, px, py, f.Name)
+	return true
 }
 
-func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) {
+func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, placed *[]labelRect) bool {
 	px, py := LonLatToTilePx(f.Coords[0].Lon, f.Coords[0].Lat, z, x, y)
 	if px < -LabelBuffer || px > TileSize+LabelBuffer ||
 		py < -LabelBuffer || py > TileSize+LabelBuffer {
-		return
+		return false
 	}
 	w, _ := dc.MeasureString(f.Name)
 	const pad = 2.0
@@ -352,11 +372,12 @@ func drawPointLabel(dc *gg.Context, f *Feature, z, x, y int, size float64, place
 	}
 	for _, p := range *placed {
 		if box.overlaps(p) {
-			return
+			return false
 		}
 	}
 	*placed = append(*placed, box)
 	drawLabelWithHalo(dc, cx, cy, f.Name)
+	return true
 }
 
 // drawLineLabel lays a road's name along its polyline. It picks the
@@ -518,6 +539,14 @@ func drawOrder(c Class) int {
 }
 
 func drawFeature(dc *gg.Context, f *Feature, z, x, y int) {
+	// Town/village boundaries (admin_level >= 7) extend offshore (a town's
+	// limit includes the bay), so they render as stray lines crossing open
+	// water on the chart. Keep only state (4) and county (6) and coarser; drop
+	// the rest. The z7..z11 band already filters these (filterOverviewBand);
+	// this also covers the z12+ full path, which otherwise drew them.
+	if f.Class == ClassAdmin && adminLevelTooLocal(f.Tags) {
+		return
+	}
 	switch f.Kind {
 	case GeomPoint:
 		drawPoint(dc, f, z, x, y)
@@ -526,6 +555,14 @@ func drawFeature(dc *gg.Context, f *Feature, z, x, y int) {
 	case GeomPolygon:
 		drawPolygon(dc, f, z, x, y)
 	}
+}
+
+// adminLevelTooLocal reports whether an admin boundary is town/village level or
+// finer (admin_level >= 7) — too local for the chart and prone to crossing
+// water. Unparseable/absent levels are kept (rare; better to show than hide).
+func adminLevelTooLocal(tags map[string]string) bool {
+	lvl, err := strconv.Atoi(strings.TrimSpace(tags["admin_level"]))
+	return err == nil && lvl >= 7
 }
 
 func drawPoint(dc *gg.Context, f *Feature, z, x, y int) {
@@ -573,6 +610,15 @@ func drawPolygon(dc *gg.Context, f *Feature, z, x, y int) {
 	// it paints the tile near-black. Skip the area fill; the label still draws
 	// from the centroid via drawLabelsInto.
 	if f.Class == ClassPlace {
+		return
+	}
+	// Protected-area overlays (national parks/seashores/reserves) are boundary
+	// polygons, not land cover — and they routinely include water (a National
+	// Seashore covers the bay and submerged lands). Filling them paints big
+	// green floods over the chart's water (e.g. Fire Island National Seashore
+	// over Great South Bay). Skip them; real green comes from the natural=wood /
+	// landuse=forest features inside.
+	if isProtectedAreaOverlay(f.Tags) {
 		return
 	}
 	style := classStyle(f.Class, z)
@@ -673,4 +719,16 @@ func classStyle(c Class, z int) styleSpec {
 
 func rgba(r, g, b, a uint8) color.Color {
 	return color.NRGBA{R: r, G: g, B: b, A: a}
+}
+
+// isProtectedAreaOverlay reports whether a feature is a protected-area boundary
+// overlay (national park / seashore / reserve) rather than actual land cover.
+// Such polygons routinely include large water bodies, so they must not be
+// filled as land — the green would flood the chart's water.
+func isProtectedAreaOverlay(tags map[string]string) bool {
+	switch tags["boundary"] {
+	case "protected_area", "national_park":
+		return true
+	}
+	return false
 }

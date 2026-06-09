@@ -3091,6 +3091,11 @@
           preload: 2,
           zIndex: 5,
           source: new XYZ({
+            // Don't request (or preload) tiles below z7: the chart isn't shown
+            // there (public OSM is), and a z5/z6 request triggers a ~10s NOAA
+            // overview render server-side for a tile nobody sees. Without this,
+            // preload:2 fetches z5/z6 backdrops while panning at z7.
+            minZoom: 7,
             tileUrlFunction: (tileCoord) => {
               const [z, x, y] = tileCoord;
               const params =
@@ -3149,6 +3154,9 @@
           preload: 2,
           zIndex: 6,
           source: new XYZ({
+            // See checkmate: no tile requests below z7 (the chart isn't shown
+            // there and a z5/z6 render is a wasted ~10s NOAA overview query).
+            minZoom: 7,
             url: api(`/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`),
             transition: 300,
           }),

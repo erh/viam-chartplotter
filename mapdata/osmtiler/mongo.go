@@ -39,7 +39,54 @@ const (
 	CollCoastal  = "osm_coastal"
 	CollDetail   = "osm_detail"
 	CollSkip     = "osm_skip"
+	// CollLowZoom is a curated, cross-cutting collection holding ONLY the
+	// features visible at the z7..z8 overview band: land-cover/road/admin/place
+	// classes (no water/buildings/POIs), kept only when a point label or large
+	// enough to be visible (see QualifiesForLowZoom), with pre-simplified
+	// geometry. It exists because the overview bucket is huge and dense (41M
+	// docs, water + millions of sub-pixel features), so a z7 query over its
+	// 280km bbox examined ~368k index entries and fetched ~137k docs (~14s).
+	// This collection is small, so the same query is ~1-2s. z9+ still use the
+	// overview/coastal buckets (their bbox is small enough to be fast).
+	CollLowZoom = "osm_lowzoom"
 )
+
+// LowZoomBandMaxZoom is the highest zoom served from CollLowZoom. The overview
+// band spans osmtiler-consumer-defined z7..z11; at z<=LowZoomBandMaxZoom the
+// curated low-zoom collection is queried (huge bbox, needs the small set), and
+// above it the normal overview+coastal buckets are fast enough.
+const LowZoomBandMaxZoom = 8
+
+// lowZoomBandMinZoom is the COARSEST zoom served from CollLowZoom. The size
+// threshold below is keyed to it (not the max), because at the coarsest zoom a
+// huge bbox returns the most features — that's the case that has to stay fast,
+// and anything sub-pixel there is invisible anyway.
+const lowZoomBandMinZoom = 7
+
+// LowZoomMinSpanDeg is the minimum bbox span (longer side, degrees) for a
+// non-point feature to be included in CollLowZoom: ~2 web-mercator pixels at
+// lowZoomBandMinZoom (z7). Keyed to the coarsest band zoom so a dense-metro z7
+// tile returns a few thousand visible features (~1-2s) instead of tens of
+// thousands of sub-pixel ones (~8s+). Smaller features return with the full
+// overview/coastal buckets at z9+. Points (place labels) are kept regardless.
+const LowZoomMinSpanDeg = 2 * 360.0 / float64(256*(1<<lowZoomBandMinZoom))
+
+// QualifiesForLowZoom reports whether a feature belongs in CollLowZoom: a
+// band class (land cover / network / admin / place), and either a point (label)
+// or big enough to be visible at the coarsest band zoom (spanDeg = longer bbox
+// side in degrees).
+func QualifiesForLowZoom(class Class, isPoint bool, spanDeg float64) bool {
+	switch class {
+	case ClassNatural, ClassLanduse, ClassLeisure, ClassRoad,
+		ClassRailway, ClassAeroway, ClassAdmin, ClassPlace:
+	default:
+		return false
+	}
+	if isPoint {
+		return true
+	}
+	return spanDeg >= LowZoomMinSpanDeg
+}
 
 // BucketForMinZoom routes a feature to its bucket. The boundaries are:
 // overview (0..7) for low-zoom-only features (country/state labels,
@@ -98,6 +145,7 @@ type OSMCollections struct {
 	Coastal  *mongo.Collection
 	Detail   *mongo.Collection
 	Skip     *mongo.Collection
+	LowZoom  *mongo.Collection
 }
 
 // OpenOSMCollections grabs the four bucket collections from a database
@@ -112,6 +160,7 @@ func OpenOSMCollections(db *mongo.Database) *OSMCollections {
 		Coastal:  db.Collection(CollCoastal),
 		Detail:   db.Collection(CollDetail),
 		Skip:     db.Collection(CollSkip),
+		LowZoom:  db.Collection(CollLowZoom),
 	}
 }
 
@@ -145,6 +194,11 @@ var tileQueryProjection = bson.M{
 	"osmType":   0,
 	"osmID":     0,
 	"ringIndex": 0,
+	// geomLow is the pre-simplified low-zoom geometry; the full-geometry path
+	// never needs it and it can be large, so exclude it from transfer. The
+	// low-geom path (UseLowGeom) coalesces it into "geometry" via aggregation
+	// and uses a different projection.
+	"geomLow": 0,
 }
 
 // RenderZoomOffset is how many zoom levels we "back off" the minZoom
@@ -216,6 +270,13 @@ type QueryOptions struct {
 	// label overdraw has the features it needs. Leave false for
 	// plain counting / inspection queries.
 	PadBuffer bool
+
+	// UseLowGeom, when true, coalesces the pre-simplified geomLow into
+	// "geometry" server-side (via aggregation), falling back to the full
+	// geometry for features that have no geomLow. Set at the overview band
+	// (z<=LowGeomMaxZoom), where full-resolution polygons make the huge-bbox
+	// query too slow. Has no effect on features that were never simplified.
+	UseLowGeom bool
 }
 
 // BuildTileFilter constructs the bson.M filter for the standard
@@ -279,7 +340,22 @@ func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int,
 		return nil, FetchStats{}, fmt.Errorf("osmtiler: nil mongo collection")
 	}
 	filter := BuildTileFilter(z, x, y, opts)
-	cur, err := coll.Find(ctx, filter, options.Find().SetProjection(tileQueryProjection))
+	var cur *mongo.Cursor
+	var err error
+	if opts.UseLowGeom {
+		// Aggregate so the geomLow→geometry coalesce happens server-side: only
+		// the (smaller) chosen geometry transfers, and features without geomLow
+		// fall back to their full geometry transparently. Mirrors mapdata/noaa's
+		// low-geom query path.
+		pipeline := mongo.Pipeline{
+			bson.D{{Key: "$match", Value: filter}},
+			bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
+			bson.D{{Key: "$unset", Value: bson.A{"geomLow", "_id", "region", "osmType", "osmID", "ringIndex"}}},
+		}
+		cur, err = coll.Aggregate(ctx, pipeline)
+	} else {
+		cur, err = coll.Find(ctx, filter, options.Find().SetProjection(tileQueryProjection))
+	}
 	if err != nil {
 		return nil, FetchStats{}, fmt.Errorf("find: %w", err)
 	}

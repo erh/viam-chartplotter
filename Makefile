@@ -104,7 +104,7 @@ EASTCOAST_STATES = maine new-hampshire massachusetts rhode-island connecticut \
 EASTCOAST_PBFS = $(wildcard $(foreach s,$(EASTCOAST_STATES),$(OSM_CACHE)/us-$(s).osm.pbf))
 ALL_OSM_PBFS   = $(wildcard $(OSM_CACHE)/*.osm.pbf)
 
-.PHONY: mapsync render-cmd ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all
+.PHONY: mapsync render-cmd ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all backfill-geomlow backfill-lowzoom
 
 # Always rebuild the CLI so an ingest never runs against a stale binary.
 mapsync:
@@ -141,3 +141,16 @@ ingest-osm-all: mapsync
 
 # Everything: all OSM extracts then all ENC cells.
 ingest-all: ingest-osm-all ingest-noaa
+
+# One-time migration: add simplified geomLow to existing osm_overview/osm_coastal
+# docs so the z7..z11 land-cover band renders fast (no PBF re-ingest needed).
+# New ingests write geomLow automatically; this backfills what's already there.
+backfill-geomlow: mapsync
+	./mapsync backfill-geomlow --mongo $(MONGO) --db $(MONGO_DB)
+
+# One-time migration: build the curated osm_lowzoom collection (the z7/z8 band's
+# small, pre-simplified feature set) from existing osm_overview/osm_coastal docs.
+# New ingests populate it automatically; this backfills what's already there.
+# Run AFTER backfill-geomlow so it copies the simplified geometry.
+backfill-lowzoom: mapsync
+	./mapsync backfill-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
