@@ -32,6 +32,10 @@ func realMain() error {
 	cacheDir := flag.String("cache-dir", os.Getenv("NOAA_CACHE_DIR"), "cache root (WMS/weather); default OS cache dir")
 	mongoURI := flag.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI (tiles read from here)")
 	mongoDB := flag.String("db", envOr("MONGO_DB", "osm"), "MongoDB database")
+	// A standalone tile server has no boat/robot to connect to, so the frontend
+	// it serves defaults to chart-extended (chart-only) mode. Pass --chart-only=false
+	// to serve the full boat UI (e.g. when fronting a machine some other way).
+	chartOnly := flag.Bool("chart-only", true, "serve the frontend in chart-only (no-boat) mode")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -44,7 +48,7 @@ func realMain() error {
 	// tile_server_base_url is empty: this process IS the tile server, it serves
 	// its own tiles same-origin.
 	ws, err := vc.StartChartplotterServer(generic.Named("tileserver"), dist, logger,
-		*port, *cacheDir, 0, 6, "", *mongoURI, *mongoDB, "features", "", false)
+		*port, *cacheDir, 0, 6, "", *mongoURI, *mongoDB, "features", "", *chartOnly)
 	if err != nil {
 		return err
 	}

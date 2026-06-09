@@ -2809,6 +2809,79 @@
     }
   }
 
+  // --- Satellite (GOES-East GeoColor) time scrubbing ------------------------
+  // GIBS publishes GeoColor every ~10 min but with gaps, and TIME=default is the
+  // latest valid frame. To let the user scroll back ~2 h we probe backward from
+  // now to find the valid frames, then drive the layer's TIME from a slider.
+  const SAT_TMS = "GoogleMapsCompatible_Level7";
+  const SAT_BASE =
+    "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GOES-East_ABI_GeoColor/default";
+  const satTileUrl = (time: string) =>
+    `${SAT_BASE}/${time}/${SAT_TMS}/{z}/{y}/{x}.png`;
+  const satProbeUrl = (time: string) =>
+    `${SAT_BASE}/${time}/${SAT_TMS}/0/0/0.png`;
+  const satIso = (d: Date) => d.toISOString().replace(/\.\d+Z$/, "Z");
+
+  let satFrames = $state<string[]>([]); // valid ISO times, oldest → newest
+  let satFrameIdx = $state(0); // index into satFrames; defaults to newest
+  let satProbed = false;
+
+  function fmtSatTime(t: string | undefined): string {
+    if (!t) return "";
+    return new Date(t).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  // Probe 10-min steps back from now; keep the valid frames until we've spanned
+  // ~2 h from the newest valid one. Runs once, when the satellite layer is first
+  // enabled (see the $effect below).
+  async function discoverSatelliteFrames() {
+    const stepMs = 10 * 60 * 1000;
+    const base = Math.floor(Date.now() / stepMs) * stepMs;
+    const valid: string[] = [];
+    let newestTs = 0;
+    for (let k = 0; k <= 24; k++) {
+      const t = satIso(new Date(base - k * stepMs));
+      try {
+        const r = await fetch(satProbeUrl(t), { cache: "no-store" });
+        if (r.ok) {
+          if (!newestTs) newestTs = new Date(t).getTime();
+          valid.push(t);
+          if (newestTs - new Date(t).getTime() >= 2 * 3600 * 1000) break;
+        }
+      } catch {
+        // network hiccup — skip this candidate
+      }
+    }
+    if (valid.length > 0) {
+      satFrames = valid.slice().reverse(); // oldest → newest
+      satFrameIdx = satFrames.length - 1;
+      applySatelliteFrame();
+    }
+  }
+
+  function applySatelliteFrame() {
+    const entry = mapGlobal.layerOptions.find((l) => l.name === "satellite");
+    const src = (entry?.layer as TileLayer<XYZ> | undefined)?.getSource?.();
+    const t = satFrames[satFrameIdx];
+    if (src && t) {
+      src.setUrl(satTileUrl(t));
+      src.refresh();
+    }
+  }
+
+  // Lazily discover frames the first time the satellite layer is turned on, so
+  // we don't probe GIBS on every load.
+  $effect(() => {
+    const on = mapGlobal.layerOptions.find((l) => l.name === "satellite")?.on;
+    if (on && !satProbed) {
+      satProbed = true;
+      discoverSatelliteFrames();
+    }
+  });
+
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
     // order regardless of toggle/insert sequence. Without this, toggling a
@@ -3129,6 +3202,16 @@
         on: false,
         maxZoom: weatherMaxZoom,
       });
+      // Satellite (infrared cloud) imagery overlay. Placeholder row so it sits
+      // under the weather header; setupSatelliteLayer fills the .layer ref once
+      // the RainViewer frame list resolves.
+      mapGlobal.layerOptions.push({
+        name: "satellite",
+        displayName: "satellite",
+        parent: "weather",
+        on: false,
+        maxZoom: weatherMaxZoom,
+      });
       const ensureRendered = () => {
         if (mapGlobal.map) {
           mapGlobal.map.render();
@@ -3140,6 +3223,29 @@
       // All wind models (incl. ECMWF) are served from Mongo by weathersync
       // via /noaa-weather/data/{model}/latest.json. No CDN/tile path.
       setupWindLayer();
+      setupSatelliteLayer();
+
+      // GOES-East GeoColor (visible/IR cloud composite) satellite imagery from
+      // NASA GIBS — free, no API key. TIME=default serves the latest near-real-
+      // time frame. Native to z7 (GoogleMapsCompatible_Level7); OL overzooms
+      // above that. Covers the Americas/Atlantic (the GOES-East footprint),
+      // ideal for US coastal waters. Semi-transparent so the chart shows through.
+      function setupSatelliteLayer() {
+        const layer = new TileLayer({
+          opacity: 0.6,
+          zIndex: 6,
+          source: new XYZ({
+            url: satTileUrl("default"),
+            crossOrigin: "anonymous",
+            transition: 300,
+            maxZoom: 7,
+          }),
+        });
+        const existing = mapGlobal.layerOptions.find(
+          (l) => l.name === "satellite",
+        );
+        if (existing) existing.layer = layer;
+      }
 
       function setupWindLayer() {
         setupWeatherLayer(mapGlobal, {
@@ -4986,6 +5092,30 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
+  <!-- Satellite time scrubber: shown when the satellite layer is on and we've
+       discovered more than one frame. Slide left to step back up to ~2 h. -->
+  {#if mapGlobal.layerOptions.find((l) => l.name === "satellite")?.on && satFrames.length > 1}
+    <div class="sat-time">
+      <input
+        class="sat-time-range"
+        type="range"
+        min="0"
+        max={satFrames.length - 1}
+        value={satFrameIdx}
+        oninput={(e) => {
+          satFrameIdx = +e.currentTarget.value;
+          applySatelliteFrame();
+        }}
+        aria-label="Satellite time"
+      />
+      <span class="sat-time-label">
+        {fmtSatTime(satFrames[satFrameIdx])}{satFrameIdx === satFrames.length - 1
+          ? " (latest)"
+          : ""}
+      </span>
+    </div>
+  {/if}
+
   {#if (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
     <!-- Stacked weather legends. Wind on top, waves below — both are
          pure-CSS horizontal gradients matched to the colour scales
@@ -6330,6 +6460,30 @@
   .chart-only .tile-url-toggle,
   .chart-only .measure-toggle {
     display: none;
+  }
+  /* Satellite time scrubber, bottom-centre of the map. */
+  .sat-time {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: 6px;
+    color: #fff;
+    font-size: 12px;
+  }
+  .sat-time-range {
+    width: 180px;
+  }
+  .sat-time-label {
+    min-width: 84px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .left-toolbar {
     position: absolute;
