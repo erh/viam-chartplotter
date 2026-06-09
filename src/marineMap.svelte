@@ -2914,6 +2914,7 @@
     mapGlobal.layerOptions.push({
       name: "noaa",
       on: false,
+      minZoom: 7,
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
@@ -3080,6 +3081,11 @@
         name: "checkmate",
         displayName: "Checkmate",
         on: true,
+        // Below z7 the Checkmate/NOAA charts have no useful detail and the
+        // overview tiles are expensive to render; at that scale we show only
+        // the public cloud OSM base layer (see the open-street-map suppression
+        // in updateOnLayers, which is gated to z>=7 to match).
+        minZoom: 7,
         layer: new TileLayer({
           opacity: 1,
           preload: 2,
@@ -3137,6 +3143,7 @@
       mapGlobal.layerOptions.push({
         name: "noaa-ecdis",
         on: false,
+        minZoom: 7,
         layer: new TileLayer({
           opacity: 0.7,
           preload: 2,
@@ -3726,6 +3733,18 @@
     );
     const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
 
+    // The chart bases (checkmate / noaa / noaa-ecdis) are radio-exclusive base
+    // layers gated to z>=7 (minZoom:7) — they have no useful detail below that
+    // and we don't even request their tiles there. When one of them is the
+    // selected base, fall back to the public cloud OSM base at z<7 so the map
+    // isn't blank (OSM is the radio-"off" sibling, so we force it on here).
+    const CHART_BASE_NAMES = ["checkmate", "noaa", "noaa-ecdis"];
+    const chartBaseSelected = CHART_BASE_NAMES.some((n) => {
+      const o = mapGlobal.layerOptions.find((p) => p.name === n);
+      return !!o && o.on;
+    });
+    const osmLowZoomFallback = chartBaseSelected && currentZoom < 7;
+
     for (var l of mapGlobal.layerOptions) {
       // Virtual layers (no `layer` field, e.g. ais-projection) are
       // gated by the parent's style function and never added to the
@@ -3743,12 +3762,19 @@
         (l.name === "ais-track" && aisPopupForceTrack) ||
         (l.name === "track" && myBoatPopupForceTrack);
 
+      // Only suppress the public OSM base where checkmate actually paints
+      // (z>=7). Below z7 checkmate is hidden by applyZoomGates (minZoom:7),
+      // so OSM must stay visible to be the sole base layer.
       const suppressedByNoaaLocal =
-        l.name === "open street map" && noaaLocalOn;
+        l.name === "open street map" && noaaLocalOn && currentZoom >= 7;
+
+      // At z<7 with a chart base selected, force the (radio-"off") OSM base on
+      // as the low-zoom fallback.
+      const osmForcesOn = l.name === "open street map" && osmLowZoomFallback;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
       const shouldBeVisible =
-        (l.on || popupForcesOn) && !isParentOff && !suppressedByNoaaLocal;
+        (l.on || popupForcesOn || osmForcesOn) && !isParentOff && !suppressedByNoaaLocal;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -3835,6 +3861,7 @@
         l.layer.setVisible(minOK && maxOK);
       }
     };
+    let lastOverview = (mapGlobal.view.getZoom() ?? 0) < 7;
     mapGlobal.view.on("change:resolution", () => {
       const z = mapGlobal.view?.getZoom();
       if (typeof z === "number" && Number.isFinite(z)) {
@@ -3842,6 +3869,14 @@
         currentZoom = z;
       }
       applyZoomGates();
+      // Crossing the z7 boundary flips whether the OSM base is suppressed by
+      // checkmate (updateOnLayers only re-runs on toggles, not on zoom), so
+      // re-run it on a crossing to add/remove the OSM base layer accordingly.
+      const overview = (z ?? 0) < 7;
+      if (overview !== lastOverview) {
+        lastOverview = overview;
+        updateOnLayers();
+      }
     });
     const z0 = mapGlobal.view.getZoom();
     if (typeof z0 === "number" && Number.isFinite(z0)) currentZoom = z0;
@@ -6452,12 +6487,13 @@
      buttons (add waypoint, clear waypoints, boats) can appear/disappear
      without breaking the layout. */
   /* Chart-extended (kiosk) mode: no boat/robot. Keep the layers button (the map
-     selector — its panel also holds the weather toggles), but hide the boat/
-     nav/debug controls and the boat data panel. (The add-waypoint and boats
-     buttons aren't rendered in this mode anyway — no nav service / boats panel.) */
+     selector — its panel also holds the weather toggles) and the tile-url debug
+     box (the {} toggle, useful for grabbing tile URLs in kiosk deployments), but
+     hide the boat/nav controls and the boat data panel. (The add-waypoint and
+     boats buttons aren't rendered in this mode anyway — no nav service / boats
+     panel.) */
   .chart-only .data-panel,
   .chart-only .boats-toggle,
-  .chart-only .tile-url-toggle,
   .chart-only .measure-toggle {
     display: none;
   }
