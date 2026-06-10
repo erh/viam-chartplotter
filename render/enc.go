@@ -992,7 +992,14 @@ const (
 // v15: ENC LNDARE island/land-area name labels suppressed at z>=osmMergeMinZoom
 // — OSM place=island/place owns those names there, so ENC was drawing a second
 // "Sexton Island" in a different font. SEAARE/LNDRGN/ADMARE names kept.
-const ENCRenderRulesVersion = 15
+// v16: DEPARE shade keyed off DRVAL1 (S-52 SEABED01) instead of the DRVAL
+// midpoint. Adjacent cells charting the same water with DRVAL2 1.8 vs 2.0 m
+// straddled the shallow contour under midpoint keying, painting a knife-edge
+// DEPVS/DEPMS seam along the cell boundary (Great South Bay). DRVAL1 is a
+// charted contour value neighbours agree on. Shallow water now paints the
+// lighter DEPMS everywhere (the saturated DEPVS band is retired — it
+// blanketed whole bays once DRVAL1 keying landed them all in one band).
+const ENCRenderRulesVersion = 16
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -3057,22 +3064,23 @@ func areaFill(class string, f encFeature, safeDepthM float64, z int) color.Color
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
 		}
-		// Key on the polygon's midpoint depth so a "6.6–16.4 ft" channel
-		// polygon (DRVAL1=2 m, DRVAL2=5 m, mid=3.5 m) lands in the band
-		// that matches a 10 ft depth — DEPMD for default draft — instead
-		// of being collapsed to DEPDW by a DRVAL2-only key. Midpoint also
-		// reads sensibly for wide-range overview polygons (0–18 m mid=9 m
-		// → DEPDW, correctly painting open ocean white).
-		var key float64
-		switch {
-		case !math.IsNaN(min) && !math.IsNaN(max):
-			key = (min + max) / 2
-		case !math.IsNaN(max):
+		// Key the shade off DRVAL1 — the area's shoalest charted depth —
+		// exactly like S-52 SEABED01 (a deeper band requires DRVAL1 to
+		// clear each contour). We used to key the DRVAL midpoint, but
+		// adjacent cells chart the same water with slightly different
+		// DRVAL2 (0–1.8 m vs 0–2.0 m in Great South Bay: midpoints 0.9 vs
+		// 1.0 straddle the shallow contour) which painted a knife-edge
+		// DEPVS/DEPMS seam along the cell boundary. DRVAL1 values are
+		// charted contour depths that neighbouring cells agree on, and
+		// NOAA's WMS implements SEABED01, so this matches the reference
+		// by construction. A "6.6–16.4 ft" channel (DRVAL1=2 m) still
+		// lands in DEPMD for the default draft, same as midpoint keying.
+		key := min
+		if math.IsNaN(key) {
+			if math.IsNaN(max) {
+				return s52DEPDW
+			}
 			key = max
-		case !math.IsNaN(min):
-			key = min
-		default:
-			return s52DEPDW
 		}
 		return depthFill(key, safeDepthM, z)
 	case "DRGARE":
@@ -3090,7 +3098,7 @@ func areaFill(class string, f encFeature, safeDepthM float64, z int) color.Color
 		// LANDA so harbour structures stand out.
 		return color.RGBA{0xEF, 0xD8, 0xA3, 0xFF}
 	case "LOKBSN":
-		return s52DEPVS
+		return s52DEPMS
 	case "UNSARE":
 		// Unsurveyed area: pale grey, mostly transparent. Use NRGBA
 		// (non-premultiplied) because color.RGBA is alpha-premultiplied
@@ -3102,30 +3110,24 @@ func areaFill(class string, f encFeature, safeDepthM float64, z int) color.Color
 	return nil
 }
 
-// s52ShallowContourM is the DEPVS/DEPMS boundary at z≥12. At 1 m, a
-// "0–6 ft" NOAA harbour-cell polygon (DRVAL2 ≈ 1.83 m) lands in DEPMS
-// (lighter blue) instead of DEPVS (saturated). DEPVS is reserved for
-// drying-edge polygons and the z≤11 shallow-edge override.
-//
-// Everything else is keyed off the boat's `draft` (in metres):
-//
-//	z≥12  DEPVS   < 1 m
-//	      DEPMS   1 m … draft
-//	      DEPMD   draft … 2×draft
-//	      DEPDW   ≥ 2×draft   (safe water, white)
-//	z≤11  DEPVS   < 2×draft
-//	      DEPDW   ≥ 2×draft
+// s52ShallowContourM keeps the draft clamp sane: a configured draft under
+// 1 m would make the DEPMS band degenerate, so it's floored here.
 const s52ShallowContourM = 1.0
 
-// depthFill returns the water fill for a DEPARE polygon, keyed off the
-// boat's draft (metres).
+// depthFill returns the water fill for a DEPARE polygon given its DRVAL1
+// (shoalest charted depth, metres — see areaFill for why DRVAL1 and not the
+// range midpoint), banded off the boat's draft (metres):
 //
-//	z≥12  DEPVS   0   … 1 m         (saturated; very shallow / drying-ish)
-//	      DEPMS   1 m … draft       (below the boat's draft — warning)
-//	      DEPMD   draft … 2×draft   (just above draft — caution)
+//	z≥12  DEPMS   0 … draft         (can shoal below the boat's draft — warning)
+//	      DEPMD   draft … 2×draft   (shoal limit just above draft — caution)
 //	      DEPDW   ≥ 2×draft         (safe water, white)
-//	z≤11  DEPVS   0   … 2×draft     (anything you can't safely cross)
+//	z≤11  DEPMS   0 … 2×draft       (anything that can shoal under 2×draft)
 //	      DEPDW   ≥ 2×draft         (safe water, white)
+//
+// Shallow water uses the lighter DEPMS rather than S-52's saturated DEPVS —
+// the saturated shade blanketed whole bays (Great South Bay is one giant
+// 0–2 m DEPARE) and read heavier than we want. Drying areas (DEPIT) keep
+// their tan-green so true hazards still stand out.
 //
 // The z≤11 collapse keeps the coarse-zoom palette readable when polygons
 // shrink to a handful of pixels.
@@ -3133,8 +3135,6 @@ func depthFill(depthM, draftM float64, z int) color.Color {
 	if draftM <= 0 {
 		draftM = 6.0 / feetPerMetre // default 6 ft
 	}
-	// Don't let draft underflow our DEPVS band — clamp so DEPMS stays
-	// non-empty at z≥12.
 	if draftM < s52ShallowContourM {
 		draftM = s52ShallowContourM
 	}
@@ -3144,12 +3144,9 @@ func depthFill(depthM, draftM float64, z int) color.Color {
 	}
 	if z <= 11 {
 		if depthM < deep {
-			return s52DEPVS
+			return s52DEPMS
 		}
 		return s52DEPDW
-	}
-	if depthM < s52ShallowContourM {
-		return s52DEPVS
 	}
 	if depthM < draftM {
 		return s52DEPMS
