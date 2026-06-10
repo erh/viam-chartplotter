@@ -201,6 +201,16 @@ var tileQueryProjection = bson.M{
 	"geomLow": 0,
 }
 
+// tileQueryProjectionWithID is tileQueryProjection minus the _id exclusion —
+// used by the quad fan-out (IncludeID), which dedups on _id.
+var tileQueryProjectionWithID = bson.M{
+	"region":    0,
+	"osmType":   0,
+	"osmID":     0,
+	"ringIndex": 0,
+	"geomLow":   0,
+}
+
 // RenderZoomOffset is how many zoom levels we "back off" the minZoom
 // filter at chart-detail zooms — at z > 10 we render the feature set
 // that would normally appear at z-RenderZoomOffset, which thins out
@@ -277,13 +287,19 @@ type QueryOptions struct {
 	// (z<=LowGeomMaxZoom), where full-resolution polygons make the huge-bbox
 	// query too slow. Has no effect on features that were never simplified.
 	UseLowGeom bool
+
+	// IncludeID, when true, keeps the document _id in the result (decoded
+	// into Feature.ID) so the quad fan-out can dedup features straddling
+	// sub-box boundaries. Off by default — _id is dead weight for a plain
+	// single-bbox query.
+	IncludeID bool
 }
 
-// BuildTileFilter constructs the bson.M filter for the standard
-// $geoIntersects-by-tile-bbox query, with the optional scalar
-// predicates from QueryOptions applied on top.
-func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
-	minLon, minLat, maxLon, maxLat := TileBoundsLonLat(z, x, y)
+// tilePaddedBounds returns the tile's lon/lat bbox, expanded by the label
+// buffer when opts.PadBuffer is set. This is THE query bbox — the quad
+// fan-out splits exactly this box so its union matches the single query.
+func tilePaddedBounds(z, x, y int, opts QueryOptions) (minLon, minLat, maxLon, maxLat float64) {
+	minLon, minLat, maxLon, maxLat = TileBoundsLonLat(z, x, y)
 	if opts.PadBuffer {
 		bufDeg := float64(LabelBuffer) / float64(TileSize) * 360.0 / math.Exp2(float64(z))
 		minLon -= bufDeg
@@ -291,6 +307,14 @@ func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
 		minLat -= bufDeg
 		maxLat += bufDeg
 	}
+	return minLon, minLat, maxLon, maxLat
+}
+
+// buildBBoxFilter constructs the bson.M filter for a $geoIntersects query over
+// an explicit lon/lat box, with the optional scalar predicates from
+// QueryOptions applied on top. z feeds the effectiveQueryZoom/ZoomOverride
+// resolution for the minZoom predicate.
+func buildBBoxFilter(minLon, minLat, maxLon, maxLat float64, z int, opts QueryOptions) bson.M {
 	polygon := bson.M{
 		"type": "Polygon",
 		"coordinates": [][][]float64{{
@@ -322,6 +346,14 @@ func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
 	return filter
 }
 
+// BuildTileFilter constructs the bson.M filter for the standard
+// $geoIntersects-by-tile-bbox query, with the optional scalar
+// predicates from QueryOptions applied on top.
+func BuildTileFilter(z, x, y int, opts QueryOptions) bson.M {
+	minLon, minLat, maxLon, maxLat := tilePaddedBounds(z, x, y, opts)
+	return buildBBoxFilter(minLon, minLat, maxLon, maxLat, z, opts)
+}
+
 // FetchStats is per-query bookkeeping returned alongside the decoded
 // features. Useful for log lines / dev tooling that want to surface
 // "this tile pulled N bytes off the wire."
@@ -336,10 +368,16 @@ type FetchStats struct {
 // the multi-bucket fan-out (FetchTileFeaturesMulti) and the inspection
 // subcommands in cmd/osmtools.
 func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int, opts QueryOptions) ([]Feature, FetchStats, error) {
+	return fetchFiltered(ctx, coll, BuildTileFilter(z, x, y, opts), opts)
+}
+
+// fetchFiltered runs one prepared filter against one collection and decodes
+// every matching document — the shared core of the tile, quad and inspection
+// fetch paths.
+func fetchFiltered(ctx context.Context, coll *mongo.Collection, filter bson.M, opts QueryOptions) ([]Feature, FetchStats, error) {
 	if coll == nil {
 		return nil, FetchStats{}, fmt.Errorf("osmtiler: nil mongo collection")
 	}
-	filter := BuildTileFilter(z, x, y, opts)
 	var cur *mongo.Cursor
 	var err error
 	if opts.UseLowGeom {
@@ -347,14 +385,22 @@ func FetchTileFeatures(ctx context.Context, coll *mongo.Collection, z, x, y int,
 		// the (smaller) chosen geometry transfers, and features without geomLow
 		// fall back to their full geometry transparently. Mirrors mapdata/noaa's
 		// low-geom query path.
+		unset := bson.A{"geomLow", "region", "osmType", "osmID", "ringIndex"}
+		if !opts.IncludeID {
+			unset = append(unset, "_id")
+		}
 		pipeline := mongo.Pipeline{
 			bson.D{{Key: "$match", Value: filter}},
 			bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
-			bson.D{{Key: "$unset", Value: bson.A{"geomLow", "_id", "region", "osmType", "osmID", "ringIndex"}}},
+			bson.D{{Key: "$unset", Value: unset}},
 		}
 		cur, err = coll.Aggregate(ctx, pipeline)
 	} else {
-		cur, err = coll.Find(ctx, filter, options.Find().SetProjection(tileQueryProjection))
+		proj := tileQueryProjection
+		if opts.IncludeID {
+			proj = tileQueryProjectionWithID
+		}
+		cur, err = coll.Find(ctx, filter, options.Find().SetProjection(proj))
 	}
 	if err != nil {
 		return nil, FetchStats{}, fmt.Errorf("find: %w", err)
@@ -444,12 +490,147 @@ func FetchTileFeaturesMulti(ctx context.Context, colls *OSMCollections, z, x, y 
 	return merged, total, firstErr
 }
 
+// quadBoxes splits a lon/lat box into its 2×2 equal sub-boxes. The sub-boxes
+// tile the parent exactly, so the union of their $geoIntersects result sets
+// equals the parent's (features straddling the midlines appear in more than
+// one — hence the _id dedup in the quad fetchers).
+func quadBoxes(minLon, minLat, maxLon, maxLat float64) [4][4]float64 {
+	midLon := (minLon + maxLon) / 2
+	midLat := (minLat + maxLat) / 2
+	return [4][4]float64{
+		{minLon, minLat, midLon, midLat},
+		{midLon, minLat, maxLon, midLat},
+		{minLon, midLat, midLon, maxLat},
+		{midLon, midLat, maxLon, maxLat},
+	}
+}
+
+// dedupFeaturesByID drops duplicate features (same non-empty ID), keeping the
+// first occurrence. Quad sub-box results are concatenated in fixed quadrant
+// order before this runs, so the surviving copy is deterministic.
+func dedupFeaturesByID(feats []Feature) []Feature {
+	seen := make(map[string]struct{}, len(feats))
+	out := feats[:0]
+	for _, f := range feats {
+		if f.ID != "" {
+			if _, dup := seen[f.ID]; dup {
+				continue
+			}
+			seen[f.ID] = struct{}{}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// FetchTileFeaturesQuad is FetchTileFeatures with the tile's padded bbox split
+// into 2×2 sub-boxes queried concurrently. Mongo executes each $geoIntersects
+// scan on one thread, so a huge overview bbox is wall-clock-bound by a single
+// core; four quarter-scans run in parallel for the same total work (z7
+// overview tile: ~2.6s → ~1.4s). Results are merged in fixed quadrant order
+// and deduped by _id, so the feature SET matches the single query exactly.
+func FetchTileFeaturesQuad(ctx context.Context, coll *mongo.Collection, z, x, y int, opts QueryOptions) ([]Feature, FetchStats, error) {
+	minLon, minLat, maxLon, maxLat := tilePaddedBounds(z, x, y, opts)
+	boxes := quadBoxes(minLon, minLat, maxLon, maxLat)
+	opts.IncludeID = true
+
+	type result struct {
+		feats []Feature
+		stats FetchStats
+		err   error
+	}
+	results := make([]result, len(boxes))
+	var wg sync.WaitGroup
+	for i, b := range boxes {
+		wg.Add(1)
+		go func(i int, b [4]float64) {
+			defer wg.Done()
+			feats, stats, err := fetchFiltered(ctx, coll, buildBBoxFilter(b[0], b[1], b[2], b[3], z, opts), opts)
+			results[i] = result{feats: feats, stats: stats, err: err}
+		}(i, b)
+	}
+	wg.Wait()
+
+	var firstErr error
+	var total FetchStats
+	merged := make([]Feature, 0, 64)
+	for _, r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		total.Docs += r.stats.Docs
+		total.BytesRead += r.stats.BytesRead
+		total.DecodeFail += r.stats.DecodeFail
+		merged = append(merged, r.feats...)
+	}
+	return dedupFeaturesByID(merged), total, firstErr
+}
+
+// FetchTileFeaturesMultiQuad is FetchTileFeaturesMulti with the quad split of
+// FetchTileFeaturesQuad layered on: every (bucket × quadrant) pair queries
+// concurrently, results merge in fixed bucket-major order and dedup by _id.
+// Use for the big overview-band scans; at chart-detail zoom the plain Multi
+// is already fast and the split is pointless overhead.
+func FetchTileFeaturesMultiQuad(ctx context.Context, colls *OSMCollections, z, x, y int, opts QueryOptions) ([]Feature, FetchStats, error) {
+	if colls == nil {
+		return nil, FetchStats{}, fmt.Errorf("osmtiler: nil OSMCollections")
+	}
+	zoom := effectiveQueryZoom(z)
+	if opts.ZoomOverride >= 0 {
+		zoom = opts.ZoomOverride
+	}
+	buckets := bucketsForQueryZoom(zoom)
+	minLon, minLat, maxLon, maxLat := tilePaddedBounds(z, x, y, opts)
+	boxes := quadBoxes(minLon, minLat, maxLon, maxLat)
+	opts.IncludeID = true
+
+	type result struct {
+		feats []Feature
+		stats FetchStats
+		err   error
+	}
+	results := make([]result, len(buckets)*len(boxes))
+	var wg sync.WaitGroup
+	for bi, b := range buckets {
+		coll := colls.For(b)
+		if coll == nil {
+			continue
+		}
+		for qi, box := range boxes {
+			wg.Add(1)
+			go func(slot int, coll *mongo.Collection, box [4]float64) {
+				defer wg.Done()
+				feats, stats, err := fetchFiltered(ctx, coll, buildBBoxFilter(box[0], box[1], box[2], box[3], z, opts), opts)
+				results[slot] = result{feats: feats, stats: stats, err: err}
+			}(bi*len(boxes)+qi, coll, box)
+		}
+	}
+	wg.Wait()
+
+	// Same partial-result convention as FetchTileFeaturesMulti: record the
+	// first error but keep what the other scans returned.
+	var firstErr error
+	var total FetchStats
+	merged := make([]Feature, 0, 64)
+	for slot, r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", buckets[slot/len(boxes)].CollectionName(), r.err)
+		}
+		total.Docs += r.stats.Docs
+		total.BytesRead += r.stats.BytesRead
+		total.DecodeFail += r.stats.DecodeFail
+		merged = append(merged, r.feats...)
+	}
+	return dedupFeaturesByID(merged), total, firstErr
+}
+
 // DecodeFeature turns a raw BSON feature document (the shape written
 // by cmd/osmtools ingest) into the in-memory Feature the renderer
 // expects. Exported so cmd/osmtools gentile and the runtime renderer
 // can share the same conversion path.
 func DecodeFeature(raw bson.Raw) (Feature, error) {
 	var d struct {
+		ID           string            `bson:"_id"`
 		Class        string            `bson:"class"`
 		Kind         string            `bson:"kind"`
 		Name         string            `bson:"name"`
@@ -472,6 +653,7 @@ func DecodeFeature(raw bson.Raw) (Feature, error) {
 		return Feature{}, err
 	}
 	feat := Feature{
+		ID:           d.ID,
 		Class:        ClassFromString(d.Class),
 		Kind:         GeomKindFromString(d.Kind),
 		Coords:       coords,

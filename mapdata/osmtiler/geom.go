@@ -25,6 +25,11 @@ type LonLat struct{ Lon, Lat float64 }
 // every coordinate. Without this, drawing a single high-zoom tile from
 // a city-sized feature set would iterate ~all of them.
 type Feature struct {
+	// ID is the document _id (e.g. "us-new-york:way:123"). Populated only by
+	// the IncludeID query paths (the quad fan-out, which dedups on it);
+	// empty on the plain fetch paths, which project _id out.
+	ID string
+
 	Class  Class
 	Kind   GeomKind
 	Coords []LonLat

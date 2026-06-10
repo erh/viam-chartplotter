@@ -3,6 +3,7 @@ package noaa
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -276,63 +277,164 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 	if coll == nil {
 		return nil, fmt.Errorf("noaa: nil collection")
 	}
-	polygon := bson.M{
-		"type": "Polygon",
-		"coordinates": [][][]float64{{
-			{minLon, minLat},
-			{maxLon, minLat},
-			{maxLon, maxLat},
-			{minLon, maxLat},
-			{minLon, minLat},
-		}},
-	}
-	filter := bson.M{
-		"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
-	}
-	if maxZoom >= 0 {
-		if len(alwaysClasses) > 0 {
-			// minZoom<=z OR class in alwaysClasses (surface coarse contours etc.)
-			filter["$or"] = []bson.M{
-				{"minZoom": bson.M{"$lte": maxZoom}},
-				{"objectClass": bson.M{"$in": alwaysClasses}},
-			}
-		} else {
-			filter["minZoom"] = bson.M{"$lte": maxZoom}
+	// Overview tiles span degrees; Mongo executes one $geoIntersects scan per
+	// thread, so a single huge-bbox scan is wall-clock-bound by one core.
+	// Split wide boxes into 2×2 quarter-scans run concurrently (same total
+	// work, ~half the wall) and dedup by _id — a feature straddling a midline
+	// comes back from more than one quarter. Small (detail-zoom) boxes stay a
+	// single query; the split would be pure overhead.
+	boxes := [][4]float64{{minLon, minLat, maxLon, maxLat}}
+	if maxLon-minLon >= quadSplitMinSpanDeg {
+		midLon := (minLon + maxLon) / 2
+		midLat := (minLat + maxLat) / 2
+		boxes = [][4]float64{
+			{minLon, minLat, midLon, midLat},
+			{midLon, minLat, maxLon, midLat},
+			{minLon, midLat, midLon, maxLat},
+			{midLon, midLat, maxLon, maxLat},
 		}
-	}
-	if maxUsageBand > 0 {
-		filter["usageBand"] = bson.M{"$lte": maxUsageBand}
-	}
-	if objectClass != "" {
-		filter["objectClass"] = objectClass
 	}
 
-	if useLowGeom {
-		// Aggregate so the geomLow→geometry coalesce happens server-side: only
-		// the thinned geometry crosses the wire, and docs ingested before
-		// geomLow existed transparently fall back to their full geometry. The
-		// $match-first $geoIntersects still uses the 2dsphere / band_geo index.
-		pipeline := mongo.Pipeline{
-			bson.D{{Key: "$match", Value: filter}},
-			bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
-			bson.D{{Key: "$unset", Value: "geomLow"}},
+	baseFilter := func(b [4]float64) bson.M {
+		polygon := bson.M{
+			"type": "Polygon",
+			"coordinates": [][][]float64{{
+				{b[0], b[1]},
+				{b[2], b[1]},
+				{b[2], b[3]},
+				{b[0], b[3]},
+				{b[0], b[1]},
+			}},
 		}
-		cur, err := coll.Aggregate(ctx, pipeline)
+		f := bson.M{
+			"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
+		}
+		if maxUsageBand > 0 {
+			f["usageBand"] = bson.M{"$lte": maxUsageBand}
+		}
+		if objectClass != "" {
+			f["objectClass"] = objectClass
+		}
+		return f
+	}
+
+	run := func(filter bson.M) ([]FeatureDoc, error) {
+		if useLowGeom {
+			// Aggregate so the geomLow→geometry coalesce happens server-side: only
+			// the thinned geometry crosses the wire, and docs ingested before
+			// geomLow existed transparently fall back to their full geometry. The
+			// $match-first $geoIntersects still uses the 2dsphere / band_geo index.
+			pipeline := mongo.Pipeline{
+				bson.D{{Key: "$match", Value: filter}},
+				bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
+				bson.D{{Key: "$unset", Value: "geomLow"}},
+			}
+			cur, err := coll.Aggregate(ctx, pipeline)
+			if err != nil {
+				return nil, fmt.Errorf("noaa: aggregate: %w", err)
+			}
+			defer cur.Close(ctx)
+			return decodeFeatureDocs(ctx, cur)
+		}
+		// Full-geometry path: exclude geomLow so its duplicate never transfers.
+		cur, err := coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"geomLow": 0}))
 		if err != nil {
-			return nil, fmt.Errorf("noaa: aggregate: %w", err)
+			return nil, fmt.Errorf("noaa: find: %w", err)
 		}
 		defer cur.Close(ctx)
 		return decodeFeatureDocs(ctx, cur)
 	}
 
-	// Full-geometry path: exclude geomLow so its duplicate never transfers.
-	cur, err := coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"geomLow": 0}))
-	if err != nil {
-		return nil, fmt.Errorf("noaa: find: %w", err)
+	// runBoxes runs one query per box concurrently (extend mutates each box's
+	// fresh base filter with the leg's scalar predicates), merging results in
+	// fixed quadrant order and dedup'ing by _id so the union exactly matches
+	// the single-box query.
+	runBoxes := func(extend func(bson.M)) ([]FeatureDoc, error) {
+		if len(boxes) == 1 {
+			f := baseFilter(boxes[0])
+			extend(f)
+			return run(f)
+		}
+		type result struct {
+			docs []FeatureDoc
+			err  error
+		}
+		results := make([]result, len(boxes))
+		var wg sync.WaitGroup
+		for i, b := range boxes {
+			wg.Add(1)
+			go func(i int, b [4]float64) {
+				defer wg.Done()
+				f := baseFilter(b)
+				extend(f)
+				docs, err := run(f)
+				results[i] = result{docs, err}
+			}(i, b)
+		}
+		wg.Wait()
+		seen := make(map[string]struct{}, 256)
+		out := make([]FeatureDoc, 0, 256)
+		for _, r := range results {
+			if r.err != nil {
+				return nil, r.err
+			}
+			for _, d := range r.docs {
+				if _, dup := seen[d.ID]; dup {
+					continue
+				}
+				seen[d.ID] = struct{}{}
+				out = append(out, d)
+			}
+		}
+		return out, nil
 	}
-	defer cur.Close(ctx)
-	return decodeFeatureDocs(ctx, cur)
+
+	if maxZoom < 0 {
+		return runBoxes(func(bson.M) {})
+	}
+
+	withMain := func(f bson.M) { f["minZoom"] = bson.M{"$lte": maxZoom} }
+	if len(alwaysClasses) == 0 || objectClass != "" {
+		return runBoxes(withMain)
+	}
+
+	// alwaysClasses bypass the minZoom filter. The obvious encoding —
+	// {$or: [{minZoom: {$lte: z}}, {objectClass: {$in: always}}]} — defeats
+	// the planner's suffix bounds on the (geometry, minZoom, objectClass)
+	// 2dsphere index and measures ~4x slower than the plain minZoom filter
+	// (z15 harbour tile: 649ms vs 163ms for identical results). Instead run
+	// two disjoint queries concurrently — the main minZoom<=z query and a
+	// small "class in always AND minZoom>z" remainder — and concatenate.
+	// minZoom<=z / minZoom>z makes the union exact with no cross-leg dedup
+	// needed; wall time is one geo scan instead of four.
+	type remainder struct {
+		docs []FeatureDoc
+		err  error
+	}
+	withExtra := func(f bson.M) {
+		f["objectClass"] = bson.M{"$in": alwaysClasses}
+		f["minZoom"] = bson.M{"$gt": maxZoom}
+	}
+	ch := make(chan remainder, 1)
+	go func() {
+		docs, err := runBoxes(withExtra)
+		ch <- remainder{docs, err}
+	}()
+	docs, err := runBoxes(withMain)
+	rem := <-ch
+	if err != nil {
+		return nil, err
+	}
+	if rem.err != nil {
+		return nil, rem.err
+	}
+	return append(docs, rem.docs...), nil
 }
+
+// quadSplitMinSpanDeg is the bbox width at which QueryBBoxBanded splits the
+// box into 2×2 concurrent quarter-scans: ~z9 tiles (0.70°) and wider. Detail
+// tiles below the threshold are already fast as one scan.
+const quadSplitMinSpanDeg = 0.5
 
 // decodeFeatureDocs drains a cursor into FeatureDocs, skipping any single
 // document that fails to decode rather than aborting the whole tile.

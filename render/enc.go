@@ -1034,7 +1034,11 @@ const ENCRenderRulesVersion = 16
 // Island National Seashore over Great South Bay).
 // v23: town/village admin boundaries (admin_level >= 7) are dropped — they
 // extend offshore and drew stray lines across open water at chart zoom.
-const OSMRenderRulesVersion = 23
+// v24: overview-band queries fetch via the 2x2 quad fan-out (concurrent
+// quarter-bbox scans, merged + deduped by _id) — ~2x faster wall. The feature
+// SET is unchanged but merge order differs, so label-collision arbitration
+// can pick a different (equally valid) winner; cached tiles regenerate.
+const OSMRenderRulesVersion = 24
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -1849,13 +1853,17 @@ func (r *ENCRenderer) renderOverviewOSM(z, x, y int) ([]byte, bool) {
 	qStart := time.Now()
 	var feats []osmtiler.Feature
 	var err error
+	// Both branches use the quad fan-out: the overview-band geo scan is
+	// wall-clock-bound by Mongo executing one $geoIntersects scan per thread,
+	// so splitting the bbox into 2×2 concurrent quarter-scans roughly halves
+	// z7 (2.6s→1.4s) and z9 (2.0s→0.8s) for the same total server work.
 	if z <= osmtiler.LowZoomBandMaxZoom && r.osm.LowZoom != nil {
 		// z7..z8: the curated low-zoom collection — small (only visible band
 		// features), so the huge-bbox query is fast (the overview bucket would
 		// examine ~368k entries and fetch ~137k docs). It's pre-filtered to band
 		// classes, and UseLowGeom coalesces the simplified geomLow for cheap
 		// transfer (the indexed geometry stays the valid original).
-		feats, _, err = osmtiler.FetchTileFeatures(ctx, r.osm.LowZoom, z, x, y, osmtiler.QueryOptions{
+		feats, _, err = osmtiler.FetchTileFeaturesQuad(ctx, r.osm.LowZoom, z, x, y, osmtiler.QueryOptions{
 			IncludeMinZoom: true,
 			ZoomOverride:   z,
 			PadBuffer:      true,
@@ -1864,7 +1872,7 @@ func (r *ENCRenderer) renderOverviewOSM(z, x, y int) ([]byte, bool) {
 	} else {
 		// z9..z11: the overview+coastal buckets — bbox is small enough that the
 		// full feature set is fast, and gives more detail than the curated set.
-		feats, _, err = osmtiler.FetchTileFeaturesMulti(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
+		feats, _, err = osmtiler.FetchTileFeaturesMultiQuad(ctx, r.osm, z, x, y, osmtiler.QueryOptions{
 			IncludeMinZoom: true,
 			ZoomOverride:   z,
 			PadBuffer:      true,
