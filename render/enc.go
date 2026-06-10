@@ -985,7 +985,11 @@ const (
 // v13: navaid text labels (light characters, buoy names) suppressed below z12 —
 // at overview a harbour cluster stacked them into an unreadable magenta blob;
 // symbols still draw, and labels return via the frontend vector layer at z>=12.
-const ENCRenderRulesVersion = 13
+// v14: overview zooms (z7..z10) read the curated noaa_lowzoom collection when
+// built; at z10 that caps usage band at 4, dropping the band-5 harbour depth-
+// contour mesh — so cached z10 tiles must regenerate. (Output is unchanged where
+// noaa_lowzoom isn't built, but the bump is harmless there.)
+const ENCRenderRulesVersion = 14
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
