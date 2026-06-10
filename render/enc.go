@@ -989,7 +989,10 @@ const (
 // built; at z10 that caps usage band at 4, dropping the band-5 harbour depth-
 // contour mesh — so cached z10 tiles must regenerate. (Output is unchanged where
 // noaa_lowzoom isn't built, but the bump is harmless there.)
-const ENCRenderRulesVersion = 14
+// v15: ENC LNDARE island/land-area name labels suppressed at z>=osmMergeMinZoom
+// — OSM place=island/place owns those names there, so ENC was drawing a second
+// "Sexton Island" in a different font. SEAARE/LNDRGN/ADMARE names kept.
+const ENCRenderRulesVersion = 15
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -1428,7 +1431,17 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 			// duplicated them (e.g. two "Babylon" in different fonts). Keep the
 			// nautical/geographic names ENC has and OSM lacks (SEAARE bays,
 			// LNDRGN capes/points, ADMARE).
-			case "LNDARE", "LNDRGN", "SEAARE", "ADMARE":
+			case "LNDARE":
+				// LNDARE is where ENC names islands/land areas. At detail zoom
+				// (z >= osmMergeMinZoom) the full OSM layer is active and labels
+				// place=island/place, duplicating the ENC name (two "Sexton Island"
+				// in different fonts). OSM owns place names there. Below that,
+				// overview OSM place labels are gated to towns/cities
+				// (overviewPlaceTypes), so ENC still names islands at overview.
+				if z >= osmMergeMinZoom {
+					continue
+				}
+			case "LNDRGN", "SEAARE", "ADMARE":
 			default:
 				continue
 			}
