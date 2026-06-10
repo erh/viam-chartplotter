@@ -1778,9 +1778,9 @@ var overviewOSMClasses = []string{
 	"natural", "landuse", "leisure", "road", "railway", "aeroway", "admin", "place",
 }
 
-// overviewQueryTimeout bounds the band's single OSM scan. It's generous (the z7
-// bbox scan alone is ~8s) so a cold z7/z8 render completes and caches rather
-// than timing out to a land-less tile; warm/prewarmed tiles serve from cache.
+// overviewQueryTimeout bounds the band's single OSM scan. z7/z8 read from the
+// small curated osm_lowzoom collection (~1-3s) and z9-z11 are sub-second, so
+// this is a generous safety margin, not a normal-case budget.
 const overviewQueryTimeout = 25 * time.Second
 
 // renderOverviewOSM renders the transparent OSM layer for a z7..z11 merged tile
