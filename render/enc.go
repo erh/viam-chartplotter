@@ -960,7 +960,10 @@ const (
 // v12: area-limit outlines (magenta limits/caution areas) skip cell-extent clip
 // edges (M_COVR), so a feature spanning a cell boundary no longer draws a stray
 // straight magenta line along the seam.
-const ENCRenderRulesVersion = 12
+// v13: navaid text labels (light characters, buoy names) suppressed below z12 —
+// at overview a harbour cluster stacked them into an unreadable magenta blob;
+// symbols still draw, and labels return via the frontend vector layer at z>=12.
+const ENCRenderRulesVersion = 13
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -3236,21 +3239,35 @@ func drawPoint(dc *gg.Context, class string, f encFeature, project func(lon, lat
 	const navaidSizeBoost = 1.4
 	navaidScale := scale * navaidSizeBoost
 
+	// Navaid text labels (light characters, buoy names, heights) are detail-zoom
+	// info. At overview (z < navaidLabelMinZoom) a harbour-entrance cluster of
+	// buoys/lights stacks its labels into an unreadable magenta blob, so draw
+	// only the symbols there; the labels return with the frontend's vector navaid
+	// layer at z >= VECTOR_TILE_NAVAID_MIN_Z (where the raster skips navaids).
+	const navaidLabelMinZoom = 12
+	labelOK := z >= navaidLabelMinZoom
+
 	switch class {
 	case "BOYLAT", "BOYCAR", "BOYISD", "BOYSAW", "BOYSPP", "BOYINB":
 		first(func(px, py float64) {
 			drawBuoy(dc, f, px, py, navaidScale)
-			drawNavaidLabel(dc, f, px, py, navaidScale)
+			if labelOK {
+				drawNavaidLabel(dc, f, px, py, navaidScale)
+			}
 		})
 	case "BCNLAT", "BCNCAR", "BCNISD", "BCNSAW", "BCNSPP":
 		first(func(px, py float64) {
 			drawBeacon(dc, f, px, py, navaidScale)
-			drawNavaidLabel(dc, f, px, py, navaidScale)
+			if labelOK {
+				drawNavaidLabel(dc, f, px, py, navaidScale)
+			}
 		})
 	case "LIGHTS":
 		first(func(px, py float64) {
 			drawLight(dc, f, px, py, navaidScale)
-			drawLightLabel(dc, f, px, py, navaidScale)
+			if labelOK {
+				drawLightLabel(dc, f, px, py, navaidScale)
+			}
 		})
 	case "WRECKS", "OBSTRN":
 		// Wrecks / obstructions: red-magenta cross with sounding-style hash
