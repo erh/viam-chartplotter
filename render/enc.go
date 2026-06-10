@@ -157,7 +157,13 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	// this z10 shows zero contours and the deep (white) water reads as blank.
 	var alwaysClasses []string
 	if z <= contourSurfaceMaxZoom {
-		alwaysClasses = []string{"DEPCNT"}
+		alwaysClasses = append(alwaysClasses, "DEPCNT")
+	}
+	// M_COVR cell-coverage polygons carry a high stored minZoom (~14) but the
+	// detail-zoom area-limit clip-edge suppression needs them; fetch them
+	// regardless of minZoom where those limits draw (z >= harborLimitMinZoom).
+	if z >= harborLimitMinZoom {
+		alwaysClasses = append(alwaysClasses, "M_COVR")
 	}
 
 	// At overview/mid zooms (z <= LowGeomMaxZoom) draw from the pre-simplified
@@ -951,7 +957,10 @@ const (
 // v11: coastline suppression extended to z9 (declutters barrier-island shoreline
 // + stops it overdrawing OSM place labels); BUAARE/BUISGL built-up-area names no
 // longer ENC-labelled — OSM owns town/city labels (kills the duplicate "Babylon").
-const ENCRenderRulesVersion = 11
+// v12: area-limit outlines (magenta limits/caution areas) skip cell-extent clip
+// edges (M_COVR), so a feature spanning a cell boundary no longer draws a stray
+// straight magenta line along the seam.
+const ENCRenderRulesVersion = 12
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -1237,6 +1246,14 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 	}
 	windowOK := func(f *mongoFeature) bool { return !useWindow || inWindow(f) }
 
+	// M_COVR coverage rings (the union of ENC cell boundaries), used by the line
+	// pass to drop area-limit clip edges that lie on a cell boundary. Only needed
+	// where those limits draw (z >= harborLimitMinZoom), so skip it at overview.
+	var coverage [][][]float64
+	if z >= harborLimitMinZoom {
+		coverage = buildCoverageRings(features)
+	}
+
 	// Coverage handling: rely on the coarse->fine sort (finer cells paint
 	// last and win), land-before-water ordering (water always covers land),
 	// and the per-polygon oversized/degenerate guards in drawFeature. The old
@@ -1331,6 +1348,15 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 			continue
 		}
 		if !windowOK(f) && !(z >= 9 && isChannelClass(f.class)) && f.class != "DEPCNT" {
+			continue
+		}
+		// Area-limit outlines (magenta limits, caution areas) at detail zoom:
+		// stroke them skipping the cell-extent clip edge, so a feature that spans
+		// an ENC cell boundary doesn't draw a stray straight line along the seam
+		// (where two cells meet). Falls back to the normal full-ring stroke when
+		// the cell has no coverage polygon to test against.
+		if z >= harborLimitMinZoom && isClipSensitiveLimitClass(f.class) && len(coverage) > 0 {
+			strokeAreaLimitClipped(dc, f, project, scale, safeDepthM, z, style, coverage)
 			continue
 		}
 		drawFeature(dc, f, passLines, project, scale, safeDepthM, bbox, z, style)
@@ -1537,6 +1563,131 @@ func isMagentaLimitClass(class string) bool {
 		return true
 	}
 	return false
+}
+
+// isClipSensitiveLimitClass reports area-limit polygon outlines (the magenta
+// limits + caution areas) whose ring picks up a straight edge along the ENC
+// cell boundary when the feature is clipped to its cell's extent. We stroke
+// those outlines skipping the cell-boundary edge (strokeAreaLimitClipped) so the
+// clip edge doesn't draw as a stray line where two cells meet.
+func isClipSensitiveLimitClass(class string) bool {
+	return isMagentaLimitClass(class) || class == "CTNARE"
+}
+
+// buildCoverageRings collects the M_COVR (CATCOV=1, "coverage available") rings
+// from the tile's features into one list — the union of ENC cell boundaries (a
+// graticule). An area-limit outline edge lying on any of these is a cell-extent
+// clip edge, not a real limit. We use the union rather than the feature's own
+// cell because the finest cells (the ones whose limits we draw) often have no
+// M_COVR of their own, but their boundary coincides with a coarser cell's
+// M_COVR edge at the same graticule line. M_COVR features arrive in the same
+// tile query (they carry no draw style, so they're otherwise inert).
+func buildCoverageRings(features []*mongoFeature) [][][]float64 {
+	var rings [][][]float64
+	for _, f := range features {
+		if f.class != "M_COVR" {
+			continue
+		}
+		if v, ok := f.attrs["CATCOV"]; ok && int(numAttr(v)) != 1 {
+			continue
+		}
+		for _, ring := range splitRings(f.geom.Coordinates) {
+			if len(ring) >= 2 {
+				rings = append(rings, ring)
+			}
+		}
+	}
+	return rings
+}
+
+// strokeAreaLimitClipped strokes an area-limit polygon outline as open polylines,
+// breaking wherever a ring edge lies on the feature's ENC cell boundary — that
+// edge is an artifact of clipping the feature to the cell extent, not a real
+// limit (NOAA, which stitches cells, never draws it).
+func strokeAreaLimitClipped(dc *gg.Context, f *mongoFeature, project func(lon, lat float64) (float64, float64), scale, safeDepthM float64, z int, style RenderStyle, coverRings [][][]float64) {
+	stroke, width := lineStroke(f.class, f, safeDepthM, style, z)
+	if stroke == nil {
+		return
+	}
+	dc.SetColor(stroke)
+	dc.SetLineWidth(width * scale)
+	if isMagentaLimitClass(f.class) {
+		dc.SetDash(4*scale, 3*scale)
+	}
+	for _, ring := range splitRings(f.geom.Coordinates) {
+		strokeRingSkippingClipEdges(dc, ring, project, coverRings)
+	}
+	dc.SetDash() // clear so later strokes are solid
+}
+
+// strokeRingSkippingClipEdges strokes a closed ring as a sequence of open
+// polylines, omitting any edge whose span lies on the cell coverage boundary.
+func strokeRingSkippingClipEdges(dc *gg.Context, ring [][]float64, project func(lon, lat float64) (float64, float64), coverRings [][][]float64) {
+	n := len(ring)
+	if n < 2 {
+		return
+	}
+	open := false
+	for i := 0; i < n; i++ {
+		a, b := ring[i], ring[(i+1)%n]
+		if len(a) < 2 || len(b) < 2 || edgeOnCoverBoundary(a, b, coverRings) {
+			if open {
+				dc.Stroke()
+				open = false
+			}
+			continue
+		}
+		if !open {
+			px, py := project(a[0], a[1])
+			dc.MoveTo(px, py)
+			open = true
+		}
+		px, py := project(b[0], b[1])
+		dc.LineTo(px, py)
+	}
+	if open {
+		dc.Stroke()
+	}
+}
+
+// edgeOnCoverBoundary reports whether an edge (both endpoints and its midpoint)
+// lies on a cell coverage ring — i.e. it's a cell-extent clip edge, not a real
+// boundary. Requiring the midpoint too rejects a chord that merely touches the
+// boundary at its ends.
+func edgeOnCoverBoundary(a, b []float64, coverRings [][][]float64) bool {
+	const eps = 2e-5 // ~2 m; clip vertices sit exactly on the M_COVR boundary
+	mx, my := (a[0]+b[0])/2, (a[1]+b[1])/2
+	return pointNearCoverBoundary(a[0], a[1], coverRings, eps) &&
+		pointNearCoverBoundary(b[0], b[1], coverRings, eps) &&
+		pointNearCoverBoundary(mx, my, coverRings, eps)
+}
+
+func pointNearCoverBoundary(px, py float64, coverRings [][][]float64, eps float64) bool {
+	for _, ring := range coverRings {
+		for i := 0; i+1 < len(ring); i++ {
+			if len(ring[i]) < 2 || len(ring[i+1]) < 2 {
+				continue
+			}
+			if pointSegDistDeg(px, py, ring[i][0], ring[i][1], ring[i+1][0], ring[i+1][1]) <= eps {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pointSegDistDeg(px, py, ax, ay, bx, by float64) float64 {
+	dx, dy := bx-ax, by-ay
+	if dx == 0 && dy == 0 {
+		return math.Hypot(px-ax, py-ay)
+	}
+	t := ((px-ax)*dx + (py-ay)*dy) / (dx*dx + dy*dy)
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	return math.Hypot(px-(ax+t*dx), py-(ay+t*dy))
 }
 
 func encodePNG(dc *gg.Context) ([]byte, error) {
