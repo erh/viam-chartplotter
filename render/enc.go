@@ -1934,7 +1934,38 @@ func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte,
 	minLon, maxLat := mercToLonLat(tileXmin, tileYmax)
 	maxLon, minLat := mercToLonLat(tileXmax, tileYmin)
 
-	// One ENC query feeds both ENC phases below (fills, then overlay).
+	// Kick the OSM raster off concurrently with the ENC query + draw below. The
+	// two are independent geo scans — renderOverviewOSM / renderOSMTile run their
+	// own Mongo query and draw and touch none of the ENC `features` — and at
+	// overview zoom each is ~1-3s, so overlapping them turns the cold-tile cost
+	// from their sum into their max. Measured z7: enc-query 2.1s THEN osm 2.8s =
+	// 5.0s sequential; concurrent ≈ 2.8s. The channel is buffered so the
+	// goroutine never blocks even on an ENC error path (it lands in the buffer
+	// and is GC'd — no leak, no wait).
+	tileStart := time.Now()
+	type osmResult struct {
+		png []byte
+		ok  bool
+		ms  float64
+	}
+	osmCh := make(chan osmResult, 1)
+	go func() {
+		s := time.Now()
+		if z < osmMergeMinZoom {
+			// z7..z11: OSM land cover (forests, farmland, parks, major roads) plus
+			// admin/place markers, transparent base (no water/buildings).
+			png, ok := r.renderOverviewOSM(z, x, y)
+			osmCh <- osmResult{png, ok, msSince(s)}
+			return
+		}
+		// z12+: OSM ink (roads, buildings, landuse) on a transparent base so it
+		// draws no water and ENC's water shows through underneath.
+		png, ok, _ := r.renderOSMTile(z, x, y, true)
+		osmCh <- osmResult{png, ok, msSince(s)}
+	}()
+
+	// ENC layer: one geo query feeds both draw phases. Runs concurrently with
+	// the OSM goroutine above.
 	qStart := time.Now()
 	features, err := r.queryTileFeatures(minLon, minLat, maxLon, maxLat, z)
 	mt.ENC.QueryMS = msSince(qStart)
@@ -1944,94 +1975,52 @@ func (r *ENCRenderer) RenderMergedTile(z, x, y int, opts RenderOptions) ([]byte,
 	}
 	sortFeaturesForPaint(features)
 
-	// ENC base: force land fill on regardless of the caller's TransparentLand —
-	// in the merge the ENC tan land is the authoritative land base (OSM draws
-	// on top of it), so "landfill=0" must not leave land white.
+	// Force land fill on regardless of the caller's TransparentLand — in the
+	// merge the ENC tan land is the authoritative base that OSM draws on top of,
+	// so "landfill=0" must not leave land white.
 	encOpts := opts
 	encOpts.TransparentLand = false
 
-	if z < osmMergeMinZoom {
-		// z7..z11: bring in OSM land cover (forests, farmland, parks, major
-		// roads) plus admin/place markers so land isn't a flat tan and cities
-		// get context — in ONE geo scan (the huge-bbox scan is the dominant
-		// cost; two scans tripped the timeout at z7). Three-layer composite:
-		//   1. ENC area fills (land tan base + water/depth shading)
-		//   2. OSM land cover + admin/place (transparent base, no water/buildings)
-		//   3. ENC lines + points + labels, on top
-		fillsOpts := encOpts
-		fillsOpts.areasOnly = true
-		fillsPNG, fillsMS, ferr := r.drawENCTile(features, z, x, y, fillsOpts)
-		if ferr != nil {
-			return nil, false, mt, ferr
-		}
-		overlayOpts := encOpts
-		overlayOpts.overlayOnly = true
-		overlayPNG, overlayMS, oerr := r.drawENCTile(features, z, x, y, overlayOpts)
-		if oerr != nil {
-			return nil, false, mt, oerr
-		}
-		mt.ENC.DrawMS = fillsMS + overlayMS
-
-		osmStart := time.Now()
-		osmPNG, osmOK := r.renderOverviewOSM(z, x, y)
-		mt.OSMMS = msSince(osmStart)
-
-		cStart := time.Now()
-		base := fillsPNG
-		if osmOK {
-			if b, cerr := compositeOver(base, osmPNG); cerr == nil {
-				base = b
-			}
-		}
-		if b, cerr := compositeOver(base, overlayPNG); cerr == nil {
-			base = b
-		}
-		mt.CompositeMS = msSince(cStart)
-		return base, osmOK, mt, nil
-	}
-
 	// Three-layer composite so OSM landuse never paints over ENC labels:
-	//   1. ENC area fills (land tan base + water/depth shading), OSM-less
-	//   2. OSM ink (roads, buildings, landuse) — transparent base, no water
-	//   3. ENC lines + points + labels, on top of OSM
+	//   1. ENC area fills (land tan base + water/depth shading)
+	//   2. OSM ink (transparent base, no water)
+	//   3. ENC lines + points + labels, on top
 	fillsOpts := encOpts
 	fillsOpts.areasOnly = true
-	fillsPNG, fillsMS, err := r.drawENCTile(features, z, x, y, fillsOpts)
-	if err != nil {
-		return nil, false, mt, err
+	fillsPNG, fillsMS, ferr := r.drawENCTile(features, z, x, y, fillsOpts)
+	if ferr != nil {
+		return nil, false, mt, ferr
 	}
 	overlayOpts := encOpts
 	overlayOpts.overlayOnly = true
-	overlayPNG, overlayMS, err := r.drawENCTile(features, z, x, y, overlayOpts)
-	if err != nil {
-		return nil, false, mt, err
+	overlayPNG, overlayMS, oerr := r.drawENCTile(features, z, x, y, overlayOpts)
+	if oerr != nil {
+		return nil, false, mt, oerr
 	}
 	mt.ENC.DrawMS = fillsMS + overlayMS
 
-	osmStart := time.Now()
-	// Transparent base so OSM contributes only its land ink (roads, buildings,
-	// landuse); it draws no water, so ENC's water shows through underneath.
-	osmPNG, osmRendered, _ := r.renderOSMTile(z, x, y, true)
-	mt.OSMMS = msSince(osmStart)
+	osm := <-osmCh
+	mt.OSMMS = osm.ms
 
 	cStart := time.Now()
-	base, err := compositeOver(fillsPNG, osmPNG) // OSM over ENC fills
-	if err != nil {
-		return nil, osmRendered, mt, err
+	base := fillsPNG
+	if osm.ok {
+		if b, cerr := compositeOver(base, osm.png); cerr == nil { // OSM over ENC fills
+			base = b
+		}
 	}
-	merged, err := compositeOver(base, overlayPNG) // ENC lines/labels on top
+	if b, cerr := compositeOver(base, overlayPNG); cerr == nil { // ENC lines/labels on top
+		base = b
+	}
 	mt.CompositeMS = msSince(cStart)
-	if err != nil {
-		return nil, osmRendered, mt, err
-	}
+
 	if r.logger != nil {
-		total := mt.OSMMS + mt.ENC.QueryMS + mt.ENC.DrawMS + mt.CompositeMS
-		if total > 300 {
+		if total := msSince(tileStart); total > 300 {
 			r.logger.Infof("slow merged tile z=%d x=%d y=%d total=%.0fms (enc-db=%.0f enc-draw=%.0f osm=%.0f composite=%.0f feats=%d)",
 				z, x, y, total, mt.ENC.QueryMS, mt.ENC.DrawMS, mt.OSMMS, mt.CompositeMS, mt.ENC.Features)
 		}
 	}
-	return merged, osmRendered, mt, nil
+	return base, osm.ok, mt, nil
 }
 
 // compositeOver draws the `over` PNG on top of the `under` PNG (both 256x256,
