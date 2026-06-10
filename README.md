@@ -142,5 +142,19 @@ from Mongo instead of each re-fetching GRIB.
   populate MongoDB directly (alternative to the sync models for one-off loads).
 - `make updaterdk` — bump the Viam RDK dependency.
 
+### Overview-tile speed (optional backfills)
+
+Low-zoom tiles cover a huge area, so their `$geoIntersects` walks a large
+2dsphere index over full-resolution coastlines/depth areas. Curated low-zoom
+collections with pre-simplified geometry make them fast; build them once (re-run
+after a sync to refresh):
+
+- `make backfill-noaa-lowzoom` — builds `noaa_lowzoom` (the z7..z10 overview
+  band, valid-simplified geometry). Cuts the overview NOAA query ~3-4×. The
+  renderer falls back to the full `noaa` collection when it's absent, so this is
+  purely a speed-up.
+- `make backfill-geomlow` / `make backfill-lowzoom` — the OSM equivalents for the
+  `osm_lowzoom` band.
+
 Tests: `go test ./...`. The renderer has a golden-image regression test
 (`go test ./render -run TestGoldenTiles`, requires a populated Mongo).

@@ -14,6 +14,26 @@ import (
 // five collections.
 const CollNOAA = "noaa"
 
+// CollLowZoom is the curated overview-band collection: a copy of the coarse
+// NOAA features (usage band <= LowZoomMaxBand, rendered by LowZoomMaxZoom) whose
+// stored geometry is the *valid-simplified* one. Querying it makes the huge
+// overview-tile $geoIntersects fast: full-resolution coastlines/contours blow
+// up the 2dsphere multikey index (a z7/z10 box walks 30-150k index keys to
+// return ~2k features), but their simplified geometry occupies far fewer S2
+// cells. Built by `mapsync backfill-noaa-lowzoom`; the renderer reads it at
+// z <= LowZoomMaxZoom and falls back to CollNOAA when it's absent.
+const CollLowZoom = "noaa_lowzoom"
+
+// LowZoomMaxBand is the usage-band ceiling for membership in CollLowZoom. Band 4
+// (approach) is the finest the overview band (z7..z10) ever paints; bands 5-6
+// (harbour/berthing) only appear at detail zoom, which reads CollNOAA.
+const LowZoomMaxBand = 4
+
+// LowZoomMaxZoom is the highest XYZ zoom served from CollLowZoom. Above it the
+// tile box is small and the per-cell feature count low, so CollNOAA's full
+// geometry is cheap and crisper.
+const LowZoomMaxZoom = 10
+
 // LowGeomMaxZoom is the highest XYZ zoom served from the pre-simplified
 // FeatureDoc.GeomLow geometry (built at ~1px resolution for this zoom; see
 // lowGeomTolerance). At or below it the tile-query path coalesces to geomLow so
@@ -29,6 +49,75 @@ func OpenCollection(db *mongo.Database) *mongo.Collection {
 		return nil
 	}
 	return db.Collection(CollNOAA)
+}
+
+// OpenLowZoomCollection returns the curated overview-band collection (CollLowZoom)
+// from a database handle. The renderer attaches it alongside the main collection
+// and queries it at z <= LowZoomMaxZoom; nil means "not built — use CollNOAA".
+func OpenLowZoomCollection(db *mongo.Database) *mongo.Collection {
+	if db == nil {
+		return nil
+	}
+	return db.Collection(CollLowZoom)
+}
+
+// OpenLowZoomCollectionIfBuilt returns CollLowZoom only when it actually holds
+// documents, and nil otherwise. The renderer must NOT attach an empty/absent
+// low-zoom collection: it would route overview tiles to it and draw blank.
+// Wiring through this means a deployment that hasn't run `backfill-noaa-lowzoom`
+// yet transparently keeps rendering from the full collection.
+func OpenLowZoomCollectionIfBuilt(ctx context.Context, db *mongo.Database) *mongo.Collection {
+	if db == nil {
+		return nil
+	}
+	coll := db.Collection(CollLowZoom)
+	if n, err := coll.EstimatedDocumentCount(ctx); err != nil || n == 0 {
+		return nil
+	}
+	return coll
+}
+
+// EnsureLowZoomIndex builds the two 2dsphere indexes the CollLowZoom tile query
+// needs — the renderer's overview zooms split into two query shapes:
+//
+//   - z7..z9 add a usageBand ceiling (<= lowZoomMaxUsageBand). band_geo
+//     (usageBand FIRST, then 2dsphere) lets that predicate bound the geo scan,
+//     so the huge z7 box doesn't walk the band-4 geometry it discards. Without
+//     it z7 scans every in-bbox geometry then filters band — slower than the
+//     main collection, defeating the point.
+//   - z10 has no band ceiling. geo_minZoom_class (geometry FIRST) drives that
+//     query straight off the 2dsphere; here the simplified geometry's smaller
+//     S2 footprint is the whole win (z10 ~2.6s -> ~0.2s).
+//
+// The planner picks per query: band_geo when a usageBand predicate is present,
+// geo_minZoom_class otherwise. Build these on the EMPTY collection before
+// inserting so the backfill's per-document 2dsphere validation runs on insert
+// (invalid simplified geometries are rejected one-by-one, not en masse).
+func EnsureLowZoomIndex(ctx context.Context, coll *mongo.Collection) error {
+	if coll == nil {
+		return fmt.Errorf("noaa: nil low-zoom collection")
+	}
+	_, err := coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "geometry", Value: "2dsphere"},
+				{Key: "minZoom", Value: 1},
+				{Key: "objectClass", Value: 1},
+			},
+			Options: options.Index().SetName("geo_minZoom_class"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "usageBand", Value: 1},
+				{Key: "geometry", Value: "2dsphere"},
+			},
+			Options: options.Index().SetName("band_geo"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("noaa: low-zoom index: %w", err)
+	}
+	return nil
 }
 
 // EnsureIndexes creates the indexes the tile-query path needs: a 2dsphere on

@@ -154,3 +154,11 @@ backfill-geomlow: mapsync
 # Run AFTER backfill-geomlow so it copies the simplified geometry.
 backfill-lowzoom: mapsync
 	./mapsync backfill-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
+
+# Build the curated noaa_lowzoom collection (the z7..z10 overview band, stored
+# with valid-simplified geometry) from the existing noaa docs — no ENC re-ingest.
+# Makes the overview-tile NOAA query fast (z7/z10 ~2.6s -> ~0.7s). Re-run after a
+# NOAA sync to refresh it; the renderer falls back to the full noaa collection
+# when it's absent.
+backfill-noaa-lowzoom: mapsync
+	./mapsync backfill-noaa-lowzoom --mongo $(MONGO) --db $(MONGO_DB)

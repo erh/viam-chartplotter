@@ -42,6 +42,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
@@ -77,6 +78,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "backfill-lowzoom: %v\n", err)
 			os.Exit(1)
 		}
+	case "backfill-noaa-lowzoom":
+		if err := runBackfillNoaaLowZoom(args); err != nil {
+			fmt.Fprintf(os.Stderr, "backfill-noaa-lowzoom: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		topUsage()
 	default:
@@ -96,6 +102,9 @@ func topUsage() {
 	fmt.Fprintln(os.Stderr, "    gentile       Render a tile PNG by querying the MongoDB collection")
 	fmt.Fprintln(os.Stderr, "    backfill-geomlow  Add simplified geomLow to existing osm_overview/osm_coastal docs (no re-ingest)")
 	fmt.Fprintln(os.Stderr, "    backfill-lowzoom  Build the curated osm_lowzoom collection (z7/z8 band) from existing docs")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  NOAA (noaa collection):")
+	fmt.Fprintln(os.Stderr, "    backfill-noaa-lowzoom  Build the curated noaa_lowzoom collection (z7..z10 band, valid-simplified geometry)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "NOAA ENC ingest lives in the datasync binary (see `make ingest-noaa`).")
 	fmt.Fprintln(os.Stderr)
@@ -1757,6 +1766,191 @@ func backfillLowZoomFrom(ctx context.Context, src *mongo.Collection, name string
 	_ = cur.All(ctx, &[]bson.M{})
 	fmt.Printf("%-16s done in %s\n", name, time.Since(start).Round(time.Second))
 	return nil
+}
+
+// ----- backfill-noaa-lowzoom -----------------------------------------------
+
+// noaaLowZoomBatch is how many docs we bulk-insert per round when building
+// noaa_lowzoom. Big enough to amortise round-trips, small enough to bound memory
+// (we hold each batch's source docs to re-insert any per-doc 2dsphere rejects).
+const noaaLowZoomBatch = 2000
+
+// runBackfillNoaaLowZoom (re)builds the curated noaa_lowzoom collection from the
+// existing noaa documents — no ENC re-ingest. Membership is the overview band:
+// usage band <= noaa.LowZoomMaxBand AND (renders by noaa.LowZoomMaxZoom, or is a
+// coarse depth contour). Each kept doc is stored with its geometry SWAPPED to the
+// pre-simplified geomLow (when present) so the collection's 2dsphere index is
+// small and the z7..z10 $geoIntersects is fast.
+//
+// The catch: a Douglas–Peucker-simplified ring can self-intersect (and stray
+// degenerate source geometries collapse to <2 points), which the 2dsphere index
+// rejects. So we build the index on the EMPTY collection first and insert
+// unordered: Mongo validates each doc and rejects the bad ones individually,
+// and we re-insert exactly those with their ORIGINAL (valid) geometry. The
+// original always indexes — it's what the main `noaa` 2dsphere holds. Result:
+// 100% coverage, mostly-simplified, always-valid. Idempotent: drops + rebuilds.
+func runBackfillNoaaLowZoom(args []string) error {
+	fs := flag.NewFlagSet("backfill-noaa-lowzoom", flag.ContinueOnError)
+	mongoURI := fs.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI")
+	dbName := fs.String("db", "osm", "MongoDB database")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if v := os.Getenv("MONGO_DB"); v != "" && !flagSet(fs, "db") {
+		*dbName = v
+	}
+	if *mongoURI == "" {
+		fs.Usage()
+		return fmt.Errorf("--mongo (or $MONGO_URI) required")
+	}
+
+	ctx := context.Background()
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI(*mongoURI))
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		_ = client.Disconnect(dctx)
+	}()
+	if err := client.Ping(connectCtx, nil); err != nil {
+		return fmt.Errorf("mongo ping: %w", err)
+	}
+	db := client.Database(*dbName)
+	src := db.Collection(noaa.CollNOAA)
+	low := db.Collection(noaa.CollLowZoom)
+
+	// Start clean, then build the index on the EMPTY collection so every insert
+	// is 2dsphere-validated (that's what surfaces the per-doc rejects).
+	if err := low.Drop(ctx); err != nil {
+		return fmt.Errorf("drop %s: %w", noaa.CollLowZoom, err)
+	}
+	if err := noaa.EnsureLowZoomIndex(ctx, low); err != nil {
+		return err
+	}
+
+	// Overview-band membership — mirrors render's queryTileFeatures gating so the
+	// curated set is exactly what z7..z10 paints: coarse bands, plus the coarse
+	// depth contours that surface regardless of their stored minZoom.
+	match := bson.M{
+		"usageBand": bson.M{"$lte": noaa.LowZoomMaxBand},
+		"$or": bson.A{
+			bson.M{"minZoom": bson.M{"$lte": noaa.LowZoomMaxZoom}},
+			bson.M{"objectClass": "DEPCNT"},
+		},
+	}
+	cur, err := src.Find(ctx, match)
+	if err != nil {
+		return fmt.Errorf("find source: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	start := time.Now()
+	var batch []bson.M
+	var inserted, simplifiedRejects, unfixable int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		ins, rej, bad, err := noaaLowZoomFlush(ctx, low, batch)
+		inserted += ins
+		simplifiedRejects += rej
+		unfixable += bad
+		batch = batch[:0]
+		return err
+	}
+	fmt.Printf("building %s from %s ...\n", noaa.CollLowZoom, noaa.CollNOAA)
+	for cur.Next(ctx) {
+		var d bson.M
+		if err := cur.Decode(&d); err != nil {
+			continue
+		}
+		batch = append(batch, d)
+		if len(batch) >= noaaLowZoomBatch {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := cur.Err(); err != nil {
+		return fmt.Errorf("source cursor: %w", err)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+
+	n, _ := low.EstimatedDocumentCount(ctx)
+	fmt.Printf("%s ready: %d docs in %s (simplified-geometry rejects fell back to full: %d; unfixable dropped: %d)\n",
+		noaa.CollLowZoom, n, time.Since(start).Round(time.Second), simplifiedRejects, unfixable)
+	if unfixable > 0 {
+		fmt.Printf("  note: %d docs failed 2dsphere validation even at full resolution and were skipped\n", unfixable)
+	}
+	return nil
+}
+
+// noaaLowZoomFlush inserts one batch into noaa_lowzoom with geometry swapped to
+// the simplified geomLow, unordered so the 2dsphere validator rejects bad docs
+// individually. Those rejects are re-inserted with their ORIGINAL geometry (the
+// one the main `noaa` index already holds). Returns (inserted, simplifiedRejects,
+// stillBad). A doc that fails even at full resolution is dropped (counted in
+// stillBad) rather than aborting the build.
+func noaaLowZoomFlush(ctx context.Context, low *mongo.Collection, batch []bson.M) (int64, int64, int64, error) {
+	models := make([]mongo.WriteModel, 0, len(batch))
+	for _, d := range batch {
+		models = append(models, mongo.NewInsertOneModel().SetDocument(noaaLowZoomDoc(d, true)))
+	}
+	res, err := low.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	var inserted int64
+	if res != nil {
+		inserted = res.InsertedCount
+	}
+	bwe, ok := err.(mongo.BulkWriteException)
+	if err != nil && !ok {
+		return inserted, 0, 0, fmt.Errorf("bulk insert: %w", err)
+	}
+	if !ok || len(bwe.WriteErrors) == 0 {
+		return inserted, 0, 0, nil
+	}
+
+	// Pass 2: re-insert the simplified-geometry rejects using full geometry.
+	fix := make([]mongo.WriteModel, 0, len(bwe.WriteErrors))
+	for _, we := range bwe.WriteErrors {
+		fix = append(fix, mongo.NewInsertOneModel().SetDocument(noaaLowZoomDoc(batch[we.Index], false)))
+	}
+	res2, err2 := low.BulkWrite(ctx, fix, options.BulkWrite().SetOrdered(false))
+	if res2 != nil {
+		inserted += res2.InsertedCount
+	}
+	var stillBad int64
+	if bwe2, ok := err2.(mongo.BulkWriteException); ok {
+		stillBad = int64(len(bwe2.WriteErrors))
+	} else if err2 != nil {
+		return inserted, int64(len(bwe.WriteErrors)), 0, fmt.Errorf("bulk insert (fallback): %w", err2)
+	}
+	return inserted, int64(len(bwe.WriteErrors)) - stillBad, stillBad, nil
+}
+
+// noaaLowZoomDoc copies a source noaa doc for insertion into noaa_lowzoom. When
+// useLow is true and the doc carries a geomLow, geometry is swapped to it (the
+// simplified one); otherwise geometry is left as the original. The geomLow field
+// itself is dropped — the stored geometry already IS the version we draw.
+func noaaLowZoomDoc(src bson.M, useLow bool) bson.M {
+	out := make(bson.M, len(src))
+	for k, v := range src {
+		if k == "geomLow" {
+			continue
+		}
+		out[k] = v
+	}
+	if useLow {
+		if gl, ok := src["geomLow"]; ok && gl != nil {
+			out["geometry"] = gl
+		}
+	}
+	return out
 }
 
 // ----- backfill-geomlow ----------------------------------------------------

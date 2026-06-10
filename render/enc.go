@@ -39,6 +39,12 @@ type ENCRenderer struct {
 	// renderer reads from. Nil renders no ENC content (transparent). The
 	// renderer is fully Mongo-backed — it never touches the disk ENC store.
 	noaaColl *mongo.Collection
+	// noaaLowColl is the curated overview-band collection (noaa.CollLowZoom):
+	// the coarse features with valid-simplified geometry. When attached, the
+	// overview tile query (z <= noaa.LowZoomMaxZoom) reads it instead of
+	// noaaColl so the huge $geoIntersects walks a much smaller 2dsphere index.
+	// Nil falls back to noaaColl (full geometry) at every zoom.
+	noaaLowColl *mongo.Collection
 	// osm is the set of per-minZoom-bucket MongoDB collections the
 	// /noaa-enc/osm-tile/ underlay queries. Nil disables the layer
 	// entirely — the handler serves a transparent fallback.
@@ -78,6 +84,12 @@ func (r *ENCRenderer) SetOSMCollections(c *osmtiler.OSMCollections) { r.osm = c 
 // that RenderTile reads from. Nil (the default) means the ENC layer renders
 // transparent. Set from the noaa feature collection (noaa.OpenCollection).
 func (r *ENCRenderer) SetNOAACollection(c *mongo.Collection) { r.noaaColl = c }
+
+// SetNOAALowZoomCollection attaches the curated overview-band collection
+// (noaa.CollLowZoom). When set, overview tiles (z <= noaa.LowZoomMaxZoom) query
+// it — its valid-simplified geometry makes the huge low-zoom $geoIntersects far
+// cheaper. Nil (the default) keeps every zoom on the full-geometry collection.
+func (r *ENCRenderer) SetNOAALowZoomCollection(c *mongo.Collection) { r.noaaLowColl = c }
 
 // Logger returns the renderer's logger (may be nil) so the HTTP handlers can
 // log per-request timing breakdowns through the same sublogger.
@@ -166,17 +178,27 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 		alwaysClasses = append(alwaysClasses, "M_COVR")
 	}
 
-	// At overview/mid zooms (z <= LowGeomMaxZoom) draw from the pre-simplified
-	// geomLow tier: the giant full-resolution coastlines/contours carry vertices
-	// finer than a pixel here, so transferring them whole is the dominant cost.
+	// At overview zooms (z <= noaa.LowZoomMaxZoom) read the curated low-zoom
+	// collection when it's attached: its geometry is already valid-simplified, so
+	// the $geoIntersects walks a far smaller 2dsphere index AND no geomLow
+	// coalesce is needed (useLowGeom stays false — the stored geometry IS the
+	// thinned one). The same band ceiling / alwaysClasses still apply, so the
+	// result set matches the main-collection query feature-for-feature. Above the
+	// overview band, or when the low collection isn't built, fall back to
+	// noaaColl with the geomLow coalesce (useLowGeom) for mid zooms.
+	coll := r.noaaColl
 	useLowGeom := z >= 0 && z <= noaa.LowGeomMaxZoom
+	if r.noaaLowColl != nil && z <= noaa.LowZoomMaxZoom {
+		coll = r.noaaLowColl
+		useLowGeom = false
+	}
 
 	qStart := time.Now()
-	docs, err := noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, maxBand, alwaysClasses, "", useLowGeom)
+	docs, err := noaa.QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, z, maxBand, alwaysClasses, "", useLowGeom)
 	if err == nil && len(docs) == 0 && maxBand > 0 {
 		// Sparse coverage at this band ceiling — retry unrestricted so the tile
 		// still shows the best available (finer-than-expected) data, not blank.
-		docs, err = noaa.QueryBBoxBanded(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, z, 0, alwaysClasses, "", useLowGeom)
+		docs, err = noaa.QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, z, 0, alwaysClasses, "", useLowGeom)
 	}
 	r.logSlowQuery("noaa", time.Since(qStart), len(docs), z, minLon, minLat, maxLon, maxLat)
 	if err != nil {

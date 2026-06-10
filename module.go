@@ -312,6 +312,10 @@ func StartChartplotterServer(
 			// same database (populated by `mapsync noaa-ingest`), instead of
 			// parsing .000 files off disk at request time.
 			encRenderer.SetNOAACollection(noaa.OpenCollection(db))
+			// Curated overview-band collection (noaa_lowzoom): valid-simplified
+			// geometry makes the z7..z10 query fast. Absent → renderer falls back
+			// to the full collection at every zoom.
+			encRenderer.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(mctx, db))
 			weatherColl = store.OpenCollection(db)
 			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",
 				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, store.CollWeather)

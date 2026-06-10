@@ -75,6 +75,7 @@ func run() error {
 
 	r := render.NewENCRenderer(logging.NewLogger("render-cmd"))
 	r.SetNOAACollection(noaa.OpenCollection(db))
+	r.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(ctx, db))
 	r.SetOSMCollections(osmtiler.OpenOSMCollections(db))
 
 	report, _ := r.TileFeatureReport(*zoom, x, y)

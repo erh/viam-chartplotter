@@ -75,6 +75,7 @@ func TestGoldenTiles(t *testing.T) {
 
 	r := NewENCRenderer(logging.NewTestLogger(t))
 	r.SetNOAACollection(noaa.OpenCollection(db))
+	r.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(ctx, db))
 	r.SetOSMCollections(osmtiler.OpenOSMCollections(db))
 
 	for _, loc := range goldenLocations {
