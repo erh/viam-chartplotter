@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fogleman/gg"
@@ -31,18 +32,27 @@ type ENCHandlers struct {
 	tileCache        *ENCTileCache
 	wmsFetch         WMSFetch // for the /compare endpoint; may be nil
 	defaultSafeDepth float64  // feet; used when ?sd= is absent
+
+	// lastRequest (unix nanos) is stamped by every registered handler; the
+	// background tile prewarmer (prewarm.go) only renders after 30s of quiet.
+	lastRequest   atomic.Int64
+	prewarmCancel context.CancelFunc
 }
 
 func NewENCHandlers(renderer *ENCRenderer, tileCache *ENCTileCache, wmsFetch WMSFetch, defaultSafeDepthFt float64) *ENCHandlers {
 	if defaultSafeDepthFt <= 0 {
 		defaultSafeDepthFt = 6
 	}
-	return &ENCHandlers{
+	h := &ENCHandlers{
 		renderer:         renderer,
 		tileCache:        tileCache,
 		wmsFetch:         wmsFetch,
 		defaultSafeDepth: defaultSafeDepthFt,
 	}
+	// Treat process start as "a request just happened" so the prewarmer holds
+	// off through the app's initial tile burst.
+	h.noteRequest()
+	return h
 }
 
 const feetPerMetre = 3.28084
@@ -94,15 +104,23 @@ func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
 }
 
 func (h *ENCHandlers) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/noaa-enc/tile/", h.handleTile)
-	mux.HandleFunc("/noaa-enc/debug", h.handleDebug)
-	mux.HandleFunc("/noaa-enc/debug-tile/", h.handleDebugTile)
-	mux.HandleFunc("/noaa-enc/debug-mongo/", h.handleDebugMongo)
-	mux.HandleFunc("/noaa-enc/compare/test", h.handleCompareTest)
-	mux.HandleFunc("/noaa-enc/compare/", h.handleCompare)
-	mux.HandleFunc("/noaa-enc/navaids", h.handleNavaids)
-	mux.HandleFunc("/noaa-enc/structures", h.handleStructures)
-	mux.HandleFunc("/noaa-enc/osm-tile/", h.handleOSMTile)
+	// Every route is wrapped with the last-request stamp so the background
+	// prewarmer (prewarm.go) yields whenever a user is actively browsing.
+	track := func(fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h.noteRequest()
+			fn(w, r)
+		}
+	}
+	mux.HandleFunc("/noaa-enc/tile/", track(h.handleTile))
+	mux.HandleFunc("/noaa-enc/debug", track(h.handleDebug))
+	mux.HandleFunc("/noaa-enc/debug-tile/", track(h.handleDebugTile))
+	mux.HandleFunc("/noaa-enc/debug-mongo/", track(h.handleDebugMongo))
+	mux.HandleFunc("/noaa-enc/compare/test", track(h.handleCompareTest))
+	mux.HandleFunc("/noaa-enc/compare/", track(h.handleCompare))
+	mux.HandleFunc("/noaa-enc/navaids", track(h.handleNavaids))
+	mux.HandleFunc("/noaa-enc/structures", track(h.handleStructures))
+	mux.HandleFunc("/noaa-enc/osm-tile/", track(h.handleOSMTile))
 }
 
 // handleOSMTile serves a 256×256 PNG containing only the OSM vector

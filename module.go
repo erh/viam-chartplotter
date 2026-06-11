@@ -288,6 +288,7 @@ func StartChartplotterServer(
 	// cache so it serves forecasts from Mongo (populated by weathersync) before
 	// falling back to disk/upstream.
 	var weatherColl *mongo.Collection
+	mongoChartsOK := false
 	if mongoURI != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer mcancel()
@@ -317,6 +318,7 @@ func StartChartplotterServer(
 			// to the full collection at every zoom.
 			encRenderer.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(mctx, db))
 			weatherColl = store.OpenCollection(db)
+			mongoChartsOK = true
 			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",
 				mongoDB, osmtiler.CollOverview, osmtiler.CollCoastal, osmtiler.CollDetail, noaa.CollNOAA, store.CollWeather)
 		}
@@ -325,6 +327,15 @@ func StartChartplotterServer(
 	}
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc renderer ready (mongo-backed; tile cache %s, default draft=%.1f ft)", filepath.Join(encDir, "tiles"), draftFt)
+	if mongoChartsOK {
+		// Slow background prewarm of the US-east-coast overview tiles (all of
+		// z7, then z8) into the disk tile cache: at most one tile per second,
+		// and only after 30s with no /noaa-enc/* requests — a user panning the
+		// map always wins. Already-cached tiles are skipped, so once a sweep
+		// has completed (or after restarts) this is just cheap cache probes.
+		encHandlers.StartPrewarm([4]float64{-82.0, 24.0, -66.5, 45.5}, []int{7, 8})
+		logger.Info("tile prewarm: east-coast z7/z8 background sweep started (idle-only, <=1 tile/s)")
+	}
 
 	// NOAA weather serving. The frontend wind layer (ol-wind) consumes
 	// /noaa-weather/data/{model}/latest.json. Serve is Mongo-only: a weathersync
@@ -406,6 +417,7 @@ func StartChartplotterServer(
 		server:         server,
 		weatherCache:   weatherCache,
 		tileCache:      encTileCache,
+		encHandlers:    encHandlers,
 		tracerShutdown: tracerShutdown,
 	}, nil
 }
@@ -417,6 +429,7 @@ type chartplotterResource struct {
 	server         *http.Server
 	weatherCache   *weather.WeatherCache
 	tileCache      *render.ENCTileCache
+	encHandlers    *render.ENCHandlers
 	tracerShutdown func(context.Context) error
 }
 
@@ -431,6 +444,9 @@ func (r *chartplotterResource) Status(ctx context.Context) (map[string]interface
 func (r *chartplotterResource) Close(ctx context.Context) error {
 	if r.weatherCache != nil {
 		r.weatherCache.Close()
+	}
+	if r.encHandlers != nil {
+		r.encHandlers.StopPrewarm()
 	}
 	if r.tileCache != nil {
 		r.tileCache.StopCleaner()
