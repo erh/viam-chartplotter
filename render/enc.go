@@ -999,7 +999,11 @@ const (
 // charted contour value neighbours agree on. Shallow water now paints the
 // lighter DEPMS everywhere (the saturated DEPVS band is retired — it
 // blanketed whole bays once DRVAL1 keying landed them all in one band).
-const ENCRenderRulesVersion = 16
+// v17: DRVAL1 keying scoped to z>=12. At overview (z<=11) the midpoint keys
+// again — coarse cells chart huge undifferentiated 0–18.2 m areas (all of
+// central Long Island Sound) and DRVAL1 painted them caution-blue where the
+// reader expects open-water white.
+const ENCRenderRulesVersion = 17
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -3072,23 +3076,35 @@ func areaFill(class string, f encFeature, safeDepthM float64, z int) color.Color
 		if !math.IsNaN(min) && min < 0 {
 			return s52DEPIT
 		}
-		// Key the shade off DRVAL1 — the area's shoalest charted depth —
-		// exactly like S-52 SEABED01 (a deeper band requires DRVAL1 to
-		// clear each contour). We used to key the DRVAL midpoint, but
-		// adjacent cells chart the same water with slightly different
-		// DRVAL2 (0–1.8 m vs 0–2.0 m in Great South Bay: midpoints 0.9 vs
-		// 1.0 straddle the shallow contour) which painted a knife-edge
-		// DEPVS/DEPMS seam along the cell boundary. DRVAL1 values are
-		// charted contour depths that neighbouring cells agree on, and
-		// NOAA's WMS implements SEABED01, so this matches the reference
-		// by construction. A "6.6–16.4 ft" channel (DRVAL1=2 m) still
-		// lands in DEPMD for the default draft, same as midpoint keying.
-		key := min
-		if math.IsNaN(key) {
-			if math.IsNaN(max) {
-				return s52DEPDW
-			}
+		// z>=12: key the shade off DRVAL1 — the area's shoalest charted
+		// depth — exactly like S-52 SEABED01 (a deeper band requires DRVAL1
+		// to clear each contour). Midpoint keying painted a knife-edge band
+		// seam along cell boundaries when adjacent cells chart the same
+		// water with slightly different DRVAL2 (0–1.8 m vs 0–2.0 m in Great
+		// South Bay: midpoints 0.9 vs 1.0 straddle the shallow contour);
+		// DRVAL1 values are charted contour depths neighbours agree on. A
+		// "6.6–16.4 ft" channel (DRVAL1=2 m) still lands in DEPMD for the
+		// default draft, same as midpoint keying.
+		//
+		// z<=11: key the range MIDPOINT instead. Coarse cells chart huge
+		// undifferentiated areas — all of central Long Island Sound is a
+		// single 0–18.2 m DEPARE in US3CT1AA — and DRVAL1 keying paints
+		// them caution-blue at overview, where the only readable signal is
+		// shallow-vs-open-water. Midpoint reads them as open water (white,
+		// the paper-chart small-scale look); genuinely shallow strips
+		// (0–2 m bays) stay blue. Midpoint cell-boundary seams are a
+		// detail-zoom problem — out here the palette collapses to two
+		// shades and the coarse cells are the only data anyway.
+		var key float64
+		switch {
+		case z <= 11 && !math.IsNaN(min) && !math.IsNaN(max):
+			key = (min + max) / 2
+		case !math.IsNaN(min):
+			key = min
+		case !math.IsNaN(max):
 			key = max
+		default:
+			return s52DEPDW
 		}
 		return depthFill(key, safeDepthM, z)
 	case "DRGARE":
@@ -3122,9 +3138,9 @@ func areaFill(class string, f encFeature, safeDepthM float64, z int) color.Color
 // 1 m would make the DEPMS band degenerate, so it's floored here.
 const s52ShallowContourM = 1.0
 
-// depthFill returns the water fill for a DEPARE polygon given its DRVAL1
-// (shoalest charted depth, metres — see areaFill for why DRVAL1 and not the
-// range midpoint), banded off the boat's draft (metres):
+// depthFill returns the water fill for a DEPARE polygon given its depth key
+// (metres — DRVAL1 at z>=12, the DRVAL range midpoint at z<=11; see areaFill
+// for the rationale), banded off the boat's draft (metres):
 //
 //	z≥12  DEPMS   0 … draft         (can shoal below the boat's draft — warning)
 //	      DEPMD   draft … 2×draft   (shoal limit just above draft — caution)
