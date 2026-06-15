@@ -156,6 +156,29 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 			Keys:    bson.D{{Key: "cell", Value: 1}},
 			Options: options.Index().SetName("cell_1"),
 		},
+		{
+			// Partial 2dsphere holding ONLY named canyon SEAARE (~200 docs
+			// nationwide) for the overview canyon-name leg (QueryNamedCanyons).
+			// A full index over a huge z7 box still fetches every SEAARE it
+			// intersects (~1.5k) before the CATSEA filter; this index contains
+			// only canyons, so the geo scan touches ~15 docs — milliseconds.
+			Keys: bson.D{{Key: "geometry", Value: "2dsphere"}},
+			Options: options.Index().SetName("canyon_geo").
+				SetPartialFilterExpression(bson.M{
+					"objectClass":       "SEAARE",
+					"attributes.CATSEA": SeaAreaCanyon,
+				}),
+		},
+		{
+			// Partial 2dsphere holding ONLY named wrecks (~190 docs) for the
+			// notable-wreck leg (QueryNotableWrecks) — same idea as canyon_geo.
+			Keys: bson.D{{Key: "geometry", Value: "2dsphere"}},
+			Options: options.Index().SetName("wreck_geo").
+				SetPartialFilterExpression(bson.M{
+					"objectClass":       "WRECKS",
+					"attributes.OBJNAM": bson.M{"$exists": true},
+				}),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("noaa: create indexes: %w", err)
@@ -251,6 +274,81 @@ func WriteMeta(ctx context.Context, coll *mongo.Collection, m CellMeta) error {
 // for a future Mongo-backed ENC renderer and for inspection tooling.
 func QueryBBox(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom int, objectClass string) ([]FeatureDoc, error) {
 	return QueryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, maxZoom, 0, nil, objectClass, false)
+}
+
+// SeaAreaCanyon is the S-57 CATSEA (category of sea area) code for a submarine
+// canyon. Named canyon SEAARE features carry this and an OBJNAM ("Hudson
+// Canyon"); see QueryNamedCanyons.
+const SeaAreaCanyon = "11"
+
+// QueryNamedCanyons returns the named submarine-canyon SEAARE features
+// intersecting the bbox, IGNORING the usual minZoom filter. Canyons are stored
+// at a high minZoom (~14, the SEAARE default) and excluded from the curated
+// overview collection, so the normal overview query never surfaces them — but
+// they're the one offshore label worth showing at chart-overview scale. There
+// are only ~200 nationwide, all indexed by geometry, so this extra leg is
+// cheap. Query the FULL noaa collection (not noaa_lowzoom, which omits them).
+func QueryNamedCanyons(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64) ([]FeatureDoc, error) {
+	if coll == nil {
+		return nil, fmt.Errorf("noaa: nil collection")
+	}
+	polygon := bson.M{
+		"type": "Polygon",
+		"coordinates": [][][]float64{{
+			{minLon, minLat}, {maxLon, minLat}, {maxLon, maxLat},
+			{minLon, maxLat}, {minLon, minLat},
+		}},
+	}
+	filter := bson.M{
+		"geometry":          bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
+		"objectClass":       "SEAARE",
+		"attributes.CATSEA": SeaAreaCanyon,
+		"attributes.OBJNAM": bson.M{"$exists": true, "$ne": ""},
+	}
+	// Force canyon_geo (partial 2dsphere over only the ~200 named canyons): the
+	// planner otherwise picks the geometry-first geo_minZoom_class and walks
+	// ~260k index keys for a huge z7 box, or a full class index that still
+	// fetches every in-box SEAARE before the CATSEA filter. canyon_geo indexes
+	// only canyons, so the geo scan touches ~15 docs.
+	cur, err := coll.Find(ctx, filter,
+		options.Find().SetProjection(bson.M{"geomLow": 0}).SetHint("canyon_geo"))
+	if err != nil {
+		return nil, fmt.Errorf("noaa: canyon find: %w", err)
+	}
+	defer cur.Close(ctx)
+	return decodeFeatureDocs(ctx, cur)
+}
+
+// QueryNotableWrecks returns NAMED wreck features (objectClass WRECKS with an
+// OBJNAM — e.g. "Bow Mariner") intersecting the bbox, ignoring the usual
+// minZoom filter. Wrecks are stored at minZoom≈15, so the normal query only
+// surfaces them at full detail; but the named ones are dive/fishing landmarks
+// worth showing from overview. Only ~190 are named nationwide (of ~22k wrecks),
+// so the dedicated wreck_geo partial index keeps this leg cheap. Query the FULL
+// noaa collection (wrecks aren't in noaa_lowzoom).
+func QueryNotableWrecks(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64) ([]FeatureDoc, error) {
+	if coll == nil {
+		return nil, fmt.Errorf("noaa: nil collection")
+	}
+	polygon := bson.M{
+		"type": "Polygon",
+		"coordinates": [][][]float64{{
+			{minLon, minLat}, {maxLon, minLat}, {maxLon, maxLat},
+			{minLon, maxLat}, {minLon, minLat},
+		}},
+	}
+	filter := bson.M{
+		"geometry":          bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
+		"objectClass":       "WRECKS",
+		"attributes.OBJNAM": bson.M{"$exists": true, "$ne": ""},
+	}
+	cur, err := coll.Find(ctx, filter,
+		options.Find().SetProjection(bson.M{"geomLow": 0}).SetHint("wreck_geo"))
+	if err != nil {
+		return nil, fmt.Errorf("noaa: wreck find: %w", err)
+	}
+	defer cur.Close(ctx)
+	return decodeFeatureDocs(ctx, cur)
 }
 
 // QueryBBoxBanded is QueryBBox with an additional S-57 usage-band ceiling:

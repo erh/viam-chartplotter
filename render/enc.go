@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,18 @@ type ENCRenderer struct {
 	// MongoDB collection is attached. Used to sample a warning at
 	// 1/20 so misconfigured deployments get noticed without spamming.
 	noMongoBlankCount atomic.Uint64
+
+	// Canonical named-landmark sets, loaded once and deduped by name globally.
+	// Named canyons/wrecks are stored in several overlapping ENC cells (band 2,
+	// band 3, …) — one polygon per cell — so labelling every instance prints
+	// the same name 2-4× across adjacent tiles. We instead keep ONE instance
+	// per name (the largest), so a name labels exactly once regardless of which
+	// tile renders it. Reference data, so a process-lifetime cache is fine; a
+	// re-ingest is picked up on restart. Guarded by landmarkMu.
+	landmarkMu       sync.Mutex
+	landmarksLoaded  bool
+	canonicalCanyons []*mongoFeature
+	canonicalWrecks  []*mongoFeature
 }
 
 // drawPass orders the rendering of features so fills are below lines are below
@@ -127,7 +140,40 @@ const (
 	// otherwise drop them — leaving z10 in particular with zero contours (the
 	// band ceiling only covers z≤9). At z≥11 they come through normally.
 	contourSurfaceMaxZoom = 10
+	// canyonNameMaxZoom: at or below this zoom, queryTileFeatures pulls named
+	// submarine-canyon SEAARE features (e.g. Hudson Canyon) via a dedicated
+	// leg and the label pass writes their names. They're stored at minZoom≈14
+	// and absent from the curated overview collection, so without this they'd
+	// only ever appear at chart-detail zoom — but offshore overview is exactly
+	// where a canyon name is the one useful label. At/below this zoom canyon
+	// names get a dedicated smaller font and are the only labels drawn.
+	canyonNameMaxZoom = 9
+	// canyonLegMaxZoom: the canyon-fetch leg runs at z <= this. Below z10 the
+	// names draw small-font (canyonsOnly); z10..13 they label through the
+	// normal place-name pass at its per-zoom size. At z>=14 the normal
+	// minZoom<=z query returns them natively (SEAARE minZoom≈14), so the leg
+	// stops there to avoid a redundant fetch.
+	canyonLegMaxZoom = 13
+	// wreckNameMinZoom..wreckNameLegMaxZoom bound the notable-(named-)wreck
+	// leg. Wrecks are stored at minZoom≈15, so the normal query surfaces them
+	// at z>=15; this leg surfaces the named landmarks (Bow Mariner, etc.) one
+	// step earlier — from z10 (the "show at 10,11,12" ask) up through z14, with
+	// both symbol and name. Overview (z<10) is left to canyons so the
+	// small-scale view doesn't accumulate wreck marks.
+	wreckNameMinZoom    = 10
+	wreckNameLegMaxZoom = 14
 )
+
+// canyonLabelScale is the basicfont multiplier for overview canyon names. The
+// general overview place-label scale (scale*1.7) reads too large for these —
+// canyons aren't a primary feature — so they get their own smaller size.
+const canyonLabelScale = 1.1
+
+// labelSeamPadFrac expands the canyon/wreck leg bbox by this fraction of the
+// tile on each side, so a feature whose centroid is in the neighbouring tile
+// but whose label overhangs into this one is still fetched and drawn. ~0.4 of a
+// 256px tile ≈ 100px, comfortably more than the widest canyon label's half.
+const labelSeamPadFrac = 0.4
 
 // logSlowQuery logs a MongoDB query that exceeded slowQueryThreshold, with the
 // collection, bbox, zoom, duration and row count, so slow DB queries are
@@ -138,6 +184,85 @@ func (r *ENCRenderer) logSlowQuery(coll string, dur time.Duration, n, z int, min
 	}
 	r.logger.Infof("slow mongo query: coll=%s z=%d bbox=[%.4f,%.4f,%.4f,%.4f] dur=%dms rows=%d",
 		coll, z, minLon, minLat, maxLon, maxLat, dur.Milliseconds(), n)
+}
+
+// landmarkLoadBounds is the lon/lat box the canonical landmark load queries.
+// It spans US Atlantic/Pacific/Gulf/Alaska/Hawaii waters (a valid sub-hemisphere
+// 2dsphere polygon, so the partial canyon_geo/wreck_geo indexes serve it fast).
+// Western-Pacific territories (Guam/CNMI, +145° lon) are out of scope.
+var landmarkLoadBounds = [4]float64{-180, 10, -60, 75} // minLon, minLat, maxLon, maxLat
+
+// ensureCanonicalLandmarks loads the named canyon/wreck reference sets once,
+// deduping by name so each name keeps a single instance (the largest-bbox
+// canyon; the first wreck) — see the canonicalCanyons field. Idempotent and
+// retried on failure (nothing is cached until a load succeeds).
+func (r *ENCRenderer) ensureCanonicalLandmarks(ctx context.Context) {
+	r.landmarkMu.Lock()
+	defer r.landmarkMu.Unlock()
+	if r.landmarksLoaded || r.noaaColl == nil {
+		return
+	}
+	b := landmarkLoadBounds
+	canyons, cerr := noaa.QueryNamedCanyons(ctx, r.noaaColl, b[0], b[1], b[2], b[3])
+	wrecks, werr := noaa.QueryNotableWrecks(ctx, r.noaaColl, b[0], b[1], b[2], b[3])
+	if cerr != nil || werr != nil {
+		if r.logger != nil {
+			r.logger.Warnf("canonical landmark load failed (canyons=%v wrecks=%v); will retry", cerr, werr)
+		}
+		return
+	}
+	r.canonicalCanyons = dedupeLandmarksByName(canyons, true)
+	r.canonicalWrecks = dedupeLandmarksByName(wrecks, false)
+	r.landmarksLoaded = true
+	if r.logger != nil {
+		r.logger.Infof("canonical landmarks loaded: %d canyon names, %d wreck names",
+			len(r.canonicalCanyons), len(r.canonicalWrecks))
+	}
+}
+
+// dedupeLandmarksByName decodes the docs and keeps one *mongoFeature per OBJNAM.
+// When preferLargest is true (canyons) the kept instance is the one with the
+// largest lon/lat bbox area; otherwise (wrecks) the first seen wins. Ties and
+// first-seen are made deterministic by the _id ordering Mongo returns.
+func dedupeLandmarksByName(docs []noaa.FeatureDoc, preferLargest bool) []*mongoFeature {
+	type pick struct {
+		mf   *mongoFeature
+		area float64
+	}
+	best := map[string]pick{}
+	for _, d := range docs {
+		mf, ok := featureFromDoc(d)
+		if !ok {
+			continue
+		}
+		name, _ := mf.attrs["OBJNAM"].(string)
+		if name == "" {
+			continue
+		}
+		area := (d.BBox[2] - d.BBox[0]) * (d.BBox[3] - d.BBox[1])
+		cur, seen := best[name]
+		if !seen || (preferLargest && area > cur.area) {
+			best[name] = pick{mf, area}
+		}
+	}
+	out := make([]*mongoFeature, 0, len(best))
+	for _, p := range best {
+		out = append(out, p.mf)
+	}
+	return out
+}
+
+// appendLandmarksInBBox appends the canonical landmarks whose bbox overlaps the
+// given (padded) tile box, deduped against ids already in out.
+func appendLandmarksInBBox(out []*mongoFeature, src []*mongoFeature, minLon, minLat, maxLon, maxLat float64) []*mongoFeature {
+	for _, mf := range src {
+		b := mf.bbox
+		if b[2] < minLon || b[0] > maxLon || b[3] < minLat || b[1] > maxLat {
+			continue
+		}
+		out = append(out, mf)
+	}
+	return out
 }
 
 // queryTileFeatures pulls every ENC feature whose geometry intersects the tile
@@ -204,10 +329,38 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]*mongoFeature, 0, len(docs))
 	for _, d := range docs {
 		if mf, ok := featureFromDoc(d); ok {
 			out = append(out, mf)
+		}
+	}
+
+	// Notable offshore landmarks below their native zoom, from the canonical
+	// (name-deduped) sets so each name labels exactly once instead of 2-4× from
+	// its overlapping ENC cells. Named canyons (SEAARE, minZoom≈14) and named
+	// wrecks (WRECKS, minZoom≈15) aren't in noaa_lowzoom and the band/minZoom
+	// query above won't surface them, but they're the one useful offshore label
+	// at overview/mid zoom. The bbox is padded by a fraction of the tile so a
+	// landmark whose centroid sits in a neighbouring tile — but whose label
+	// overhangs into THIS tile — is still included; the label pass then draws it
+	// at its true (off-tile) position so wide names read seamlessly across the
+	// seam (Atlantis/Veatch Canyon at z9+).
+	if z <= canyonLegMaxZoom || (z >= wreckNameMinZoom && z <= wreckNameLegMaxZoom) {
+		r.ensureCanonicalLandmarks(ctx)
+		padLon := (maxLon - minLon) * labelSeamPadFrac
+		padLat := (maxLat - minLat) * labelSeamPadFrac
+		pMinLon, pMinLat := minLon-padLon, minLat-padLat
+		pMaxLon, pMaxLat := maxLon+padLon, maxLat+padLat
+		r.landmarkMu.Lock()
+		canyons, wrecks := r.canonicalCanyons, r.canonicalWrecks
+		r.landmarkMu.Unlock()
+		if z <= canyonLegMaxZoom {
+			out = appendLandmarksInBBox(out, canyons, pMinLon, pMinLat, pMaxLon, pMaxLat)
+		}
+		if z >= wreckNameMinZoom && z <= wreckNameLegMaxZoom {
+			out = appendLandmarksInBBox(out, wrecks, pMinLon, pMinLat, pMaxLon, pMaxLat)
 		}
 	}
 	return out, nil
@@ -1003,7 +1156,25 @@ const (
 // again — coarse cells chart huge undifferentiated 0–18.2 m areas (all of
 // central Long Island Sound) and DRVAL1 painted them caution-blue where the
 // reader expects open-water white.
-const ENCRenderRulesVersion = 17
+// v18: named submarine-canyon SEAARE (e.g. Hudson Canyon) labelled at
+// z<=canyonNameMaxZoom (9) in a dedicated smaller font. They're stored at
+// minZoom≈14 and absent from the overview collection, so a dedicated query leg
+// surfaces them; only their name draws (the SEAARE minZoom guard suppresses any
+// outline/fill).
+// v19: canyon labels extended through z13 (z14+ already native); named/notable
+// wrecks (e.g. Bow Mariner) surfaced below their minZoom≈15 via a dedicated
+// leg — symbol from overview, name from z>=wreckNameMinZoom (10). Both legs
+// use partial 2dsphere indexes (canyon_geo / wreck_geo).
+// v20: canyon labels render seamlessly across tile seams — the leg bbox is
+// padded (labelSeamPadFrac) and canyon names draw even when centred in a
+// neighbouring tile / larger than the tile, so wide names (Atlantis/Veatch
+// Canyon) no longer vanish at z9+ where they straddle an edge.
+// v21: canyon/wreck labels deduped by name across cells. Each named landmark is
+// stored in several overlapping ENC cells (band 2, 3, …); labelling every
+// instance printed the same name 2-4× on adjacent tiles. A process-lifetime
+// canonical set keeps one instance per name (largest canyon), so a name labels
+// exactly once.
+const ENCRenderRulesVersion = 21
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -1417,7 +1588,10 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 		if transparentLand && isLandClass(f.class) {
 			continue
 		}
-		if !windowOK(f) {
+		// Notable wrecks come from a dedicated leg (a tiny curated set) and
+		// must always draw — bypass the cell-scale window, which would
+		// otherwise drop the ones on cells outside the overview window.
+		if !windowOK(f) && !isNotableWreck(f) {
 			continue
 		}
 		drawFeature(dc, f, passPoints, project, scale, safeDepthM, bbox, z, style)
@@ -1429,7 +1603,11 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 	// the largest polygon, sort largest-first, then place greedily with
 	// collision detection so a tile full of named marshes/coves doesn't
 	// turn into stacked unreadable text.
-	if z >= 10 {
+	//
+	// Below z10 the only candidates are named submarine canyons (the
+	// canyonNameMaxZoom query leg) — every other named class is gated off so
+	// the offshore overview stays uncluttered.
+	if z >= 10 || z <= canyonNameMaxZoom {
 		type labelCand struct {
 			name              string
 			px, py            float64
@@ -1438,8 +1616,16 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 			area              float64
 		}
 		bestByName := map[string]labelCand{}
+		// canyonsOnly: below the normal overview label zoom we only ever want
+		// canyon names. (At these zooms the candidate set is already just the
+		// canyon leg, but guard explicitly so a low-minZoom LNDRGN/ADMARE can't
+		// sneak a label onto an offshore tile.)
+		canyonsOnly := z < 10
 		for _, f := range features {
 			class := f.class
+			if canyonsOnly && !isNamedCanyon(f) {
+				continue
+			}
 			switch class {
 			// BUAARE/BUISGL (built-up areas — towns/cities) are intentionally
 			// excluded: OSM owns place=town/city labels, and the ENC name
@@ -1475,7 +1661,12 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 			if geom.Type != s57.GeometryTypePolygon || len(geom.Coordinates) < 3 {
 				continue
 			}
-			if isOversizedPolygon(geom.Coordinates, bbox, 4) {
+			isCanyon := isNamedCanyon(f)
+			// Canyons are legitimately large (a single polygon spans many tiles
+			// at z11+), so the oversized-ring guard would wrongly drop them;
+			// skip it for canyons. Other named areas keep it (it rejects
+			// overview-cell rings that would mis-place a label).
+			if !isCanyon && isOversizedPolygon(geom.Coordinates, bbox, 4) {
 				continue
 			}
 			cx, cy := polygonCentroid(geom.Coordinates)
@@ -1483,6 +1674,10 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 
 			ls := scale
 			switch {
+			case canyonsOnly:
+				// Offshore canyon names get a dedicated, smaller size (see
+				// canyonLabelScale) so they don't dominate the overview.
+				ls = scale * canyonLabelScale
 			case z <= 10:
 				ls = scale * 1.7
 			case z == 11:
@@ -1492,7 +1687,18 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 			}
 			halfW := float64(len(name)) * 7 * ls / 2
 			halfH := 6.5 * ls
-			if px-halfW < 2 || px+halfW > 254 || py-halfH < 2 || py+halfH > 254 {
+			// Canyons: draw whenever any part of the label falls in the tile,
+			// so a name centred in a neighbouring tile still renders its
+			// overhang here and reads seamlessly across the seam (the leg bbox
+			// is padded so both tiles fetch it). Other labels keep the strict
+			// fully-inside check to stay clear of edges.
+			var offTile bool
+			if isCanyon {
+				offTile = px+halfW < 0 || px-halfW > 256 || py+halfH < 0 || py-halfH > 256
+			} else {
+				offTile = px-halfW < 2 || px+halfW > 254 || py-halfH < 2 || py+halfH > 254
+			}
+			if offTile {
 				continue
 			}
 
@@ -1556,6 +1762,33 @@ func (r *ENCRenderer) drawENCTile(features []*mongoFeature, z, x, y int, opts Re
 
 // msSince returns elapsed milliseconds since t as a float (for timing logs).
 func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000.0 }
+
+// isNamedCanyon reports whether a feature is a named submarine-canyon SEAARE
+// (S-57 CATSEA=canyon with an OBJNAM). These are the only sub-z10 labels we
+// draw — see canyonNameMaxZoom.
+func isNamedCanyon(f *mongoFeature) bool {
+	if f.class != "SEAARE" {
+		return false
+	}
+	if v, ok := f.Attribute("CATSEA"); !ok || v != noaa.SeaAreaCanyon {
+		return false
+	}
+	name, _ := f.Attribute("OBJNAM")
+	s, _ := name.(string)
+	return s != ""
+}
+
+// isNotableWreck reports whether a feature is a named wreck — the "notable"
+// landmark subset surfaced below the WRECKS native minZoom (see
+// wreckNameLegMaxZoom). Takes encFeature so the drawFeature guard can call it.
+func isNotableWreck(f encFeature) bool {
+	if f.ObjectClass() != "WRECKS" {
+		return false
+	}
+	v, ok := f.Attribute("OBJNAM")
+	s, _ := v.(string)
+	return ok && s != ""
+}
 
 // isWaterBaseClass reports the area-fill classes that constitute water/depth
 // shading; these always paint after land so open water never reads as land.
@@ -2673,7 +2906,10 @@ func drawFeature(dc *gg.Context, f encFeature, pass drawPass, project func(lon, 
 		return
 	}
 	class := f.ObjectClass()
-	if z < noaa.MinZoomForObjectClass(class) {
+	if z < noaa.MinZoomForObjectClass(class) && !isNotableWreck(f) {
+		// Notable (named) wrecks are surfaced below their native minZoom by a
+		// dedicated query leg (see wreckNameLegMaxZoom); let them through the
+		// guard so their symbol/name draws at overview/mid zoom.
 		return
 	}
 
@@ -2863,6 +3099,34 @@ func drawNavaidLabel(dc *gg.Context, f encFeature, px, py, scale float64) {
 	dc.Push()
 	dc.ScaleAbout(scale*0.7, scale*0.7, tx, ty)
 	dc.DrawStringAnchored(name, tx, ty, 0, 0.5)
+	dc.Pop()
+}
+
+// drawWreckLabel paints a notable wreck's name next to its symbol. ENC wreck
+// names are often a vessel name plus a parenthetical description ("NORTH STAR
+// (55 ft long wooden eastern rig dragger)"); keep just the vessel name and cap
+// the length so the label stays compact at overview/mid zoom.
+func drawWreckLabel(dc *gg.Context, f encFeature, px, py, scale float64) {
+	v, ok := f.Attribute("OBJNAM")
+	if !ok {
+		return
+	}
+	name, _ := v.(string)
+	if i := strings.IndexByte(name, '('); i > 0 {
+		name = strings.TrimSpace(name[:i])
+	}
+	if name == "" {
+		return
+	}
+	const maxLen = 22
+	if len(name) > maxLen {
+		name = strings.TrimSpace(name[:maxLen-1]) + "…"
+	}
+	dc.SetFontFace(basicfont.Face7x13)
+	dc.SetColor(s52CHMGD)
+	dc.Push()
+	dc.ScaleAbout(scale*0.7, scale*0.7, px, py)
+	dc.DrawStringAnchored(name, px, py, 0, 0.5)
 	dc.Pop()
 }
 
@@ -3328,6 +3592,11 @@ func drawPoint(dc *gg.Context, class string, f encFeature, project func(lon, lat
 			dc.DrawLine(px-arm, py-arm, px+arm, py+arm)
 			dc.DrawLine(px-arm, py+arm, px+arm, py-arm)
 			dc.Stroke()
+			// Notable (named) wrecks surfaced below their native zoom get their
+			// name from wreckNameMinZoom up; the symbol alone shows at overview.
+			if z >= wreckNameMinZoom && isNotableWreck(f) {
+				drawWreckLabel(dc, f, px+arm+2, py, scale)
+			}
 		})
 	case "UWTROC":
 		// Underwater rock — small "+" so dense fields don't overpower the chart.
