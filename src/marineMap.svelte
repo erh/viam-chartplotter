@@ -2809,17 +2809,51 @@
     }
   }
 
-  // --- Satellite (GOES-East GeoColor) time scrubbing ------------------------
-  // GIBS publishes GeoColor every ~10 min but with gaps, and TIME=default is the
-  // latest valid frame. To let the user scroll back ~2 h we probe backward from
-  // now to find the valid frames, then drive the layer's TIME from a slider.
-  const SAT_TMS = "GoogleMapsCompatible_Level7";
-  const SAT_BASE =
-    "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GOES-East_ABI_GeoColor/default";
-  const satTileUrl = (time: string) =>
-    `${SAT_BASE}/${time}/${SAT_TMS}/{z}/{y}/{x}.png`;
-  const satProbeUrl = (time: string) =>
-    `${SAT_BASE}/${time}/${SAT_TMS}/0/0/0.png`;
+  // --- Satellite (GOES-East) band selection + time scrubbing ----------------
+  // GOES-East ABI imagery from NASA GIBS (free, no key). Three selectable bands,
+  // matching the "blue / vis / infra" options other marine sites offer:
+  //   blue  = GeoColor true-colour composite (the default, blue-ocean look)
+  //   vis   = Band 2 red-visible (sharp daytime cloud detail; dark at night)
+  //   infra = Band 13 clean IR (cloud-top temperature; works day AND night)
+  // GeoColor + visible publish to GoogleMapsCompatible_Level7; IR is coarser
+  // (Level6) and OpenLayers overzooms it above that — so each band sets its own
+  // source maxZoom. All PNG, ~10-min cadence. GIBS has gaps and TIME=default is
+  // the latest valid frame; we probe backward from now to find valid frames,
+  // then drive the layer's TIME from a slider.
+  const SAT_GIBS_BASE = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best";
+  type SatBand = "blue" | "vis" | "infra";
+  const SAT_BANDS: Record<
+    SatBand,
+    { layer: string; tms: string; maxZoom: number; label: string }
+  > = {
+    blue: {
+      layer: "GOES-East_ABI_GeoColor",
+      tms: "GoogleMapsCompatible_Level7",
+      maxZoom: 7,
+      label: "Color",
+    },
+    vis: {
+      layer: "GOES-East_ABI_Band2_Red_Visible_1km",
+      tms: "GoogleMapsCompatible_Level7",
+      maxZoom: 7,
+      label: "Visible",
+    },
+    infra: {
+      layer: "GOES-East_ABI_Band13_Clean_Infrared",
+      tms: "GoogleMapsCompatible_Level6",
+      maxZoom: 6,
+      label: "Infrared",
+    },
+  };
+  let satBand = $state<SatBand>("blue");
+  const satTileUrl = (time: string, band: SatBand = satBand) => {
+    const b = SAT_BANDS[band];
+    return `${SAT_GIBS_BASE}/${b.layer}/default/${time}/${b.tms}/{z}/{y}/{x}.png`;
+  };
+  const satProbeUrl = (time: string, band: SatBand = satBand) => {
+    const b = SAT_BANDS[band];
+    return `${SAT_GIBS_BASE}/${b.layer}/default/${time}/${b.tms}/0/0/0.png`;
+  };
   const satIso = (d: Date) => d.toISOString().replace(/\.\d+Z$/, "Z");
 
   let satFrames = $state<string[]>([]); // valid ISO times, oldest → newest
@@ -2870,6 +2904,27 @@
       src.setUrl(satTileUrl(t));
       src.refresh();
     }
+  }
+
+  // Switch the satellite band. The bands differ in native max zoom (IR is
+  // coarser), which is fixed at source-construction time, so we swap in a fresh
+  // XYZ source rather than just changing the URL. Reuses the discovered frame
+  // times — GOES publishes every band on the same ~10-min cadence.
+  function setSatelliteBand(band: SatBand) {
+    if (band === satBand) return;
+    satBand = band;
+    const entry = mapGlobal.layerOptions.find((l) => l.name === "satellite");
+    const layer = entry?.layer as TileLayer<XYZ> | undefined;
+    if (!layer) return;
+    const t = satFrames[satFrameIdx] ?? "default";
+    layer.setSource(
+      new XYZ({
+        url: satTileUrl(t, band),
+        crossOrigin: "anonymous",
+        transition: 300,
+        maxZoom: SAT_BANDS[band].maxZoom,
+      }),
+    );
   }
 
   // Lazily discover frames the first time the satellite layer is turned on, so
@@ -3253,7 +3308,7 @@
             url: satTileUrl("default"),
             crossOrigin: "anonymous",
             transition: 300,
-            maxZoom: 7,
+            maxZoom: SAT_BANDS[satBand].maxZoom,
           }),
         });
         const existing = mapGlobal.layerOptions.find(
@@ -5135,27 +5190,45 @@
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
-  <!-- Satellite time scrubber: shown when the satellite layer is on and we've
-       discovered more than one frame. Slide left to step back up to ~2 h. -->
-  {#if mapGlobal.layerOptions.find((l) => l.name === "satellite")?.on && satFrames.length > 1}
-    <div class="sat-time">
-      <input
-        class="sat-time-range"
-        type="range"
-        min="0"
-        max={satFrames.length - 1}
-        value={satFrameIdx}
-        oninput={(e) => {
-          satFrameIdx = +e.currentTarget.value;
-          applySatelliteFrame();
-        }}
-        aria-label="Satellite time"
-      />
-      <span class="sat-time-label">
-        {fmtSatTime(satFrames[satFrameIdx])}{satFrameIdx === satFrames.length - 1
-          ? " (latest)"
-          : ""}
-      </span>
+  <!-- Satellite controls: band selector (Color / Visible / Infrared) shown
+       whenever the satellite layer is on, plus a time scrubber once we've
+       discovered more than one frame (slide left to step back up to ~2 h). -->
+  {#if mapGlobal.layerOptions.find((l) => l.name === "satellite")?.on}
+    <div class="sat-controls">
+      <div class="sat-band" role="group" aria-label="Satellite band">
+        {#each Object.entries(SAT_BANDS) as [band, cfg]}
+          <button
+            type="button"
+            class="sat-band-btn"
+            class:active={satBand === band}
+            onclick={() => setSatelliteBand(band as SatBand)}
+          >
+            {cfg.label}
+          </button>
+        {/each}
+      </div>
+      {#if satFrames.length > 1}
+        <div class="sat-time">
+          <input
+            class="sat-time-range"
+            type="range"
+            min="0"
+            max={satFrames.length - 1}
+            value={satFrameIdx}
+            oninput={(e) => {
+              satFrameIdx = +e.currentTarget.value;
+              applySatelliteFrame();
+            }}
+            aria-label="Satellite time"
+          />
+          <span class="sat-time-label">
+            {fmtSatTime(satFrames[satFrameIdx])}{satFrameIdx ===
+            satFrames.length - 1
+              ? " (latest)"
+              : ""}
+          </span>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -6506,12 +6579,42 @@
     display: none;
   }
   /* Satellite time scrubber, bottom-centre of the map. */
-  .sat-time {
+  .sat-controls {
     position: absolute;
     bottom: 12px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .sat-band {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: 6px;
+  }
+  .sat-band-btn {
+    padding: 3px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #ddd;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sat-band-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+  }
+  .sat-band-btn.active {
+    background: rgba(255, 255, 255, 0.9);
+    color: #000;
+    font-weight: 600;
+  }
+  .sat-time {
     display: flex;
     align-items: center;
     gap: 8px;
