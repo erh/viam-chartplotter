@@ -2908,12 +2908,15 @@
         on: true,
         layer: navaidLayer,
         parent: "checkmate",
-        // Below z=12 the icons clutter without adding navigational
-        // value AND every pan at that scale pulls in a wide bbox of
-        // features the user can't read — so we'd be racking up
-        // memory + fetches for nothing. Major navaids stay baked
-        // into the chart raster at overview.
-        minZoom: 12,
+        // The tile bakes navaids in until it switches to midParams
+        // (navaids=0) at tile-zoom >= VECTOR_TILE_NAVAID_MIN_Z. OpenLayers
+        // picks the tile zoom by nearest RESOLUTION, so it starts loading those
+        // z12 tiles once the fractional view zoom crosses the res-midpoint
+        // between z11 and z12 — i.e. at viewZoom = 12 - log2(1.5) ≈ 11.415, not
+        // 12 and not 11.5. This vector layer's gate is `viewZoom >= minZoom`,
+        // so matching that exact crossover makes the vector navaids appear at
+        // the same instant the baked navaids drop — no gap, no double-draw.
+        minZoom: VECTOR_TILE_NAVAID_MIN_Z - Math.log2(1.5),
       });
       mapGlobal.layerOptions.push({
         name: "noaa-structures",
