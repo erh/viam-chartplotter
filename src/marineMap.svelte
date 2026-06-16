@@ -86,6 +86,49 @@
   // resolution-change listener installed in setupMap writes here.
   let currentZoom = $state(0);
 
+  // Chart base layers (radio-exclusive). When one is the active base, the
+  // opaque chart covers US waters, so the under-chart OSM fallback is wasted
+  // there.
+  const CHART_BASE_NAMES = ["checkmate", "noaa", "noaa-ecdis"];
+  // Tracks the last chartBaseActive() so updateOnLayers can refresh the OSM
+  // base source when the active base flips (the tileUrlFunction skips US tiles
+  // only while a chart base is active, so switching bases must re-evaluate).
+  let prevChartBaseActive = true;
+  function chartBaseActive(): boolean {
+    return CHART_BASE_NAMES.some((n) => {
+      const o = mapGlobal.layerOptions.find((p) => p.name === n);
+      return !!o && o.on;
+    });
+  }
+
+  // Approximate NOAA ENC coverage (US marine waters). Used to skip the
+  // under-chart OSM fallback fetch where the chart already covers the tile —
+  // see the OSM base tileUrlFunction. Generous rectangles; tiles only partly
+  // inside (coverage edges) still load OSM, so no blank gaps at the boundary.
+  const US_ENC_COVERAGE: Array<[number, number, number, number]> = [
+    [-128, 22, -64, 50], // CONUS + Atlantic/Gulf/Pacific coasts + Great Lakes
+    [-180, 50, -128, 73], // Alaska (mainland + eastern Aleutians)
+    [172, 50, 180, 73], //   Alaska (Aleutians across the dateline)
+    [-161, 18, -154, 23], // Hawaii
+    [-68.2, 17.3, -64.2, 19.1], // Puerto Rico / USVI
+    [144, 13, 146.5, 21], // Guam / CNMI
+    [-171.5, -14.6, -168, -10.8], // American Samoa
+  ];
+  // True when the whole XYZ tile falls inside US ENC coverage (web-mercator
+  // tile → lon/lat box, fully-contained test).
+  function tileFullyInUSWaters(z: number, x: number, y: number): boolean {
+    const n = 2 ** z;
+    const lonW = (x / n) * 360 - 180;
+    const lonE = ((x + 1) / n) * 360 - 180;
+    const latN =
+      (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+    const latS =
+      (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+    return US_ENC_COVERAGE.some(
+      (b) => lonW >= b[0] && lonE <= b[2] && latS >= b[1] && latN <= b[3],
+    );
+  }
+
   let boatImage = "topdown-boat.svg";
 
   // myBoat-only icon override. The Go module exposes /myboat-icon when the
@@ -2626,7 +2669,21 @@
         preload: Infinity, // Preload all tiles at lower zoom levels
         zIndex: 1,
         source: new XYZ({
-          url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          // When a chart base is active, OSM is the under-chart fallback for
+          // regions NOAA never charted. Skip the fetch (return undefined → no
+          // request) for tiles fully inside US ENC coverage at z>=7, where the
+          // opaque chart hides OSM anyway — so we only hit OSMF's tile servers
+          // in foreign/uncharted waters. When OSM is the *selected* base
+          // (no chart base active), load everything normally.
+          tileUrlFunction: (tc) => {
+            const z = tc[0],
+              x = tc[1],
+              y = tc[2];
+            if (z >= 7 && chartBaseActive() && tileFullyInUSWaters(z, x, y)) {
+              return undefined;
+            }
+            return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+          },
           transition: 250, // Faster fade-in
         }),
       }),
@@ -2869,6 +2926,30 @@
         // step before the navaid icons start to.
         minZoom: 13,
       });
+      // OpenSeaMap seamark overlay — global, crowd-sourced nautical marks
+      // (buoys, beacons, lights, harbours) as a transparent raster overlay,
+      // free + no API key + CORS-enabled. Complements the NOAA chart and, more
+      // usefully, gives nautical detail in waters NOAA never charted. Standalone
+      // (no parent) so it works over any base; default off; drawn above the
+      // chart (zIndex 7). Attribution shown via the OL Attribution control.
+      mapGlobal.layerOptions.push({
+        name: "openseamap",
+        displayName: "seamarks (OpenSeaMap)",
+        on: false,
+        layer: new TileLayer({
+          opacity: 1,
+          zIndex: 7,
+          source: new XYZ({
+            url: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+            crossOrigin: "anonymous",
+            maxZoom: 18,
+            attributions:
+              '© <a href="https://www.openseamap.org/" target="_blank" rel="noopener">OpenSeaMap</a> contributors',
+            transition: 300,
+          }),
+        }),
+      });
+
       // noaa-ecdis: same renderer + cells, but with S-52 conditional
       // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
       // soundings, TOPMAR rendering). Reads more like a real ECDIS display
@@ -3220,26 +3301,25 @@
     const myBoatPopupForceTrack =
       popupState.visible && popupState.content.isMyBoat;
 
-    // checkmate already paints OSM detail under its chart (osm-detail child
-     // layer) — the global OSM base layer underneath is redundant and bleeds
-     // through where checkmate has transparent water/land. Suppress it
-     // whenever checkmate is on.
-    const noaaLocalLayer = mapGlobal.layerOptions.find(
-      (p) => p.name === "checkmate",
-    );
-    const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
-
-    // The chart bases (checkmate / noaa / noaa-ecdis) are radio-exclusive base
-    // layers gated to z>=7 (minZoom:7) — they have no useful detail below that
-    // and we don't even request their tiles there. When one of them is the
-    // selected base, fall back to the public cloud OSM base at z<7 so the map
-    // isn't blank (OSM is the radio-"off" sibling, so we force it on here).
-    const CHART_BASE_NAMES = ["checkmate", "noaa", "noaa-ecdis"];
-    const chartBaseSelected = CHART_BASE_NAMES.some((n) => {
-      const o = mapGlobal.layerOptions.find((p) => p.name === n);
-      return !!o && o.on;
-    });
-    const osmLowZoomFallback = chartBaseSelected && currentZoom < 7;
+    // When a chart base (checkmate / noaa / noaa-ecdis) is active, force the
+    // public OSM base on (it's the radio-"off" sibling) at ALL zooms as a
+    // fallback: below z7 it's the sole base (chart hidden), and at z>=7 it sits
+    // UNDER the chart so regions NOAA never charted — where the merged tile is
+    // fully transparent — show OSM land/water/coastline instead of blank white.
+    // Covered tiles render fully opaque (no bleed), and the OSM base's
+    // tileUrlFunction skips the actual fetch inside US ENC coverage, so we only
+    // hit OSMF's servers in foreign/uncharted waters.
+    const osmChartFallback = chartBaseActive();
+    // The OSM base's tileUrlFunction skips US tiles only while a chart base is
+    // active; when that flips (user switches base), refresh so previously
+    // skipped/loaded tiles re-evaluate.
+    if (osmChartFallback !== prevChartBaseActive) {
+      prevChartBaseActive = osmChartFallback;
+      const osmBase = mapGlobal.layerOptions.find(
+        (l) => l.name === "open street map",
+      );
+      (osmBase?.layer as TileLayer<XYZ> | undefined)?.getSource()?.refresh();
+    }
 
     for (var l of mapGlobal.layerOptions) {
       // Virtual layers (no `layer` field, e.g. ais-projection) are
@@ -3258,19 +3338,15 @@
         (l.name === "ais-track" && aisPopupForceTrack) ||
         (l.name === "track" && myBoatPopupForceTrack);
 
-      // Only suppress the public OSM base where checkmate actually paints
-      // (z>=7). Below z7 checkmate is hidden by applyZoomGates (minZoom:7),
-      // so OSM must stay visible to be the sole base layer.
-      const suppressedByNoaaLocal =
-        l.name === "open street map" && noaaLocalOn && currentZoom >= 7;
-
-      // At z<7 with a chart base selected, force the (radio-"off") OSM base on
-      // as the low-zoom fallback.
-      const osmForcesOn = l.name === "open street map" && osmLowZoomFallback;
+      // Force the (radio-"off") OSM base on under a selected chart base at all
+      // zooms, so uncharted regions show OSM instead of blank white (see
+      // osmChartFallback above). No suppression needed: covered tiles render
+      // fully opaque, so the base only shows through where the chart is blank.
+      const osmForcesOn = l.name === "open street map" && osmChartFallback;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
       const shouldBeVisible =
-        (l.on || popupForcesOn || osmForcesOn) && !isParentOff && !suppressedByNoaaLocal;
+        (l.on || popupForcesOn || osmForcesOn) && !isParentOff;
 
       if (shouldBeVisible) {
         if (idx < 0) {
