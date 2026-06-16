@@ -173,7 +173,9 @@ var allModels = []*WeatherModel{
 	pacioosWaveModel(),
 	pacioosHawaiiWaveModel(),
 	gfsIsobarsModel(),
-	noaaGLMLightningStub(),
+	// Lightning is served straight from NOAA nowCOAST's NLDN strike-density
+	// WMS as a frontend raster overlay (see WeatherOverlays.svelte), so it
+	// isn't a backend weather model — no registry entry / GLM decoder needed.
 	// nomads-gfswave is unregistered until we verify NOMADS' actual
 	// current DODS URL pattern. Every variant I've tried (date dir
 	// with/without `gfswave` prefix, gfsv16 suffix, etc.) lands on
@@ -937,23 +939,6 @@ func iconGlobalWindStub() *WeatherModel {
 		Domain:      "global",
 		Disabled:    true,
 		Reason:      "needs icosahedral→latlon regrid (DWD ships native unstructured grid)",
-	}
-}
-
-// noaaGLMLightningStub registers the GOES-East GLM lightning option in
-// the picker so it surfaces in the layer panel under the weather
-// group, but flips Disabled so toggling it on shows the Reason
-// (matching the NAM/ECMWF/ICON pattern). The actual GLM L2 LCFA feed
-// is NetCDF4/HDF5 over the NESDIS S3 mirror — decoding that is a
-// separate work item.
-func noaaGLMLightningStub() *WeatherModel {
-	return &WeatherModel{
-		Name:        "noaa-glm",
-		DisplayName: "Lightning (GOES-East GLM, near-real-time)",
-		Kind:        "lightning",
-		Domain:      "americas",
-		Disabled:    true,
-		Reason:      "needs GOES-16/18 GLM NetCDF4 decoder (L2 LCFA strokes)",
 	}
 }
 

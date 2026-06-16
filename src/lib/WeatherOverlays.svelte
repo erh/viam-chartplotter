@@ -26,6 +26,7 @@
   } from "./isobarLayer";
   import TileLayer from "ol/layer/Tile";
   import XYZ from "ol/source/XYZ";
+  import TileWMS from "ol/source/TileWMS.js";
 
   // Minimal view of the parent's layerOptions entries the weather code touches.
   // (The parent's full LayerOption has more fields; structural typing lets us
@@ -422,6 +423,23 @@
     }
   });
 
+  // Keep the lightning raster current while it's on. NLDN publishes ~every
+  // 15 min; bump a cache-buster param every 5 min so the browser/GeoServer
+  // serve the latest grid instead of a pinned tile. The teardown clears the
+  // timer when the layer is toggled off (the effect re-runs on `.on`).
+  $effect(() => {
+    const on = !!mapGlobal.layerOptions.find((l) => l.name === "lightning")?.on;
+    if (!on) return;
+    const refresh = () => {
+      const layer = mapGlobal.layerOptions.find((l) => l.name === "lightning")
+        ?.layer as TileLayer<TileWMS> | undefined;
+      layer?.getSource()?.updateParams({ _ts: Date.now() });
+    };
+    refresh();
+    const id = setInterval(refresh, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  });
+
   // Pushes the weather layerOptions placeholders + fires the async layer setup.
   // Gated on mapGlobal.map existing (so tileBase is resolved and api() points at
   // the right origin) and on the NOAA cache being reachable (matches the parent's
@@ -478,10 +496,8 @@
         maxZoom: weatherMaxZoom,
       });
     }
-    // Lightning overlay. Backed by the noaa-glm stub model server-
-    // side — the option appears in the panel but turning it on
-    // surfaces the "needs NetCDF decoder" reason. Filled in for real
-    // when the GLM decoder ships.
+    // Lightning overlay. NOAA nowCOAST NLDN cloud-to-ground strike-density
+    // raster (free, no key) — setupLightningLayer fills the .layer ref.
     if (!mapGlobal.layerOptions.find((l) => l.name === "lightning")) {
       mapGlobal.layerOptions.push({
         name: "lightning",
@@ -511,6 +527,32 @@
     // via /noaa-weather/data/{model}/latest.json. No CDN/tile path.
     setupWindLayer();
     setupSatelliteLayer();
+    setupLightningLayer();
+
+    // NOAA nowCOAST NLDN lightning strike density (cloud-to-ground flashes,
+    // 8 km / 15 min, North America) as a WMS raster overlay — free, no API key,
+    // sends CORS. No TIME param → GeoServer serves the latest grid; a periodic
+    // cache-buster (see the $effect below) refreshes it while the layer is on.
+    // Drawn above satellite (zIndex 7) so strikes read over cloud imagery.
+    function setupLightningLayer() {
+      const layer = new TileLayer({
+        opacity: 0.85,
+        zIndex: 7,
+        source: new TileWMS({
+          url: "https://nowcoast.noaa.gov/geoserver/ows",
+          params: {
+            LAYERS: "lightning_detection:ldn_lightning_strike_density",
+            TRANSPARENT: true,
+          },
+          crossOrigin: "anonymous",
+          transition: 300,
+        }),
+      });
+      const existing = mapGlobal.layerOptions.find(
+        (l) => l.name === "lightning",
+      );
+      if (existing) existing.layer = layer;
+    }
 
     // GOES-East GeoColor (visible/IR cloud composite) satellite imagery from
     // NASA GIBS — free, no API key. TIME=default serves the latest near-real-
