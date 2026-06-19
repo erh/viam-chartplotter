@@ -187,7 +187,7 @@
   // The layer panel renders these (and their children) above a divider as
   // radio buttons; everything else (boat, ais, airstream + their children)
   // renders below as independent checkboxes.
-  const BASE_LAYER_NAMES = ["open street map", "satellite", "noaa", "checkmate", "noaa-ecdis"];
+  const BASE_LAYER_NAMES = ["open street map", "satellite-imagery", "noaa", "checkmate", "noaa-ecdis"];
   function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
     return (
       BASE_LAYER_NAMES.includes(l.name) ||
@@ -2690,14 +2690,16 @@
     });
 
     // Free satellite imagery base — Esri World Imagery. No API key, CORS-enabled,
-    // and free to use with attribution. Global high-res aerial/satellite coverage,
-    // which is handy in waters NOAA never charted and as a real-world reference
-    // alongside the chart. A mutually-exclusive base (radio), default off. Note
-    // Esri's tile path is {z}/{y}/{x} (row before column), not the usual
+    // and free to use with attribution. Global high-res aerial/satellite coverage
+    // (Google-Maps-satellite style), handy in waters NOAA never charted and as a
+    // real-world reference alongside the chart. A mutually-exclusive base (radio),
+    // default off. Distinct from the weather "satellite" overlay (GOES cloud
+    // imagery), so it carries its own name to avoid colliding with that layer.
+    // Note Esri's tile path is {z}/{y}/{x} (row before column), not the usual
     // {z}/{x}/{y}.
     mapGlobal.layerOptions.push({
-      name: "satellite",
-      displayName: "satellite",
+      name: "satellite-imagery",
+      displayName: "satellite (aerial)",
       on: false,
       layer: new TileLayer({
         opacity: 1,
