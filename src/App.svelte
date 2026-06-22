@@ -18,6 +18,8 @@
 
   import { tankSort } from "./helpers.ts";
   import MarineMap from "./marineMap.svelte";
+  import RoutesPanel from "./lib/RoutesPanel.svelte";
+  import type { RoutesApi } from "./lib/routeStore";
   import YachtDetails from "./YachtDetails.svelte";
 
   const globalLogger = new Logger({ name: "global" });
@@ -26,6 +28,12 @@
   let globalClientCloudMetaData = null;
 
   let globalCloudClient: VIAM.ViamClient;
+
+  // Saved-route preview polyline pushed to the map by RoutesPanel (display-only,
+  // not the active nav route). null = nothing previewed.
+  let routePreview = $state<{ waypoints: { lat: number; lng: number }[]; color?: string } | null>(
+    null
+  );
 
   // Cache of cloud clients for remote parts, keyed by the remote's name
   // (the prefix segment that components from that remote carry, e.g.
@@ -447,9 +455,7 @@
       // has selected it, since the airstream sensor itself is idle until
       // we send it a bounding box.
       if (globalConfig.airstreamName != "" && airstreamLayerActive) {
-        aisFetches.push(
-          fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream")
-        );
+        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream"));
       }
       if (aisFetches.length === 0) {
         globalData.aisBoats = [];
@@ -482,11 +488,7 @@
     // don't pile up). Gated on aisTracksNeeded so toggling the AIS
     // track layer off stops the network/CPU work — single-vessel
     // history is still fetched on popup-open via onBoatPopupOpen.
-    if (
-      loopNumber % 10 == 5 &&
-      globalConfig.aisSensorName != "" &&
-      globalData.aisTracksNeeded
-    ) {
+    if (loopNumber % 10 == 5 && globalConfig.aisSensorName != "" && globalData.aisTracksNeeded) {
       fetchAisHistory(client, globalConfig.aisSensorName);
     }
   }
@@ -536,9 +538,13 @@
   async function fetchAisBoatHistory(mmsi: string) {
     if (!globalClient || !globalConfig.aisSensorName) return;
     try {
-      const result = (await new VIAM.SensorClient(globalClient, globalConfig.aisSensorName).doCommand(
-        VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) })
-      )) as Record<string, any>;
+      const result = (await new VIAM.SensorClient(
+        globalClient,
+        globalConfig.aisSensorName
+      ).doCommand(VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) }))) as Record<
+        string,
+        any
+      >;
       const samples = result[mmsi];
       if (!Array.isArray(samples)) return;
       const points = aisSamplesToPoints(samples);
@@ -611,9 +617,7 @@
                   ? rawBoat.Speed
                   : 0;
           const length =
-            typeof rawBoat.Length === "number" && rawBoat.Length > 0
-              ? rawBoat.Length
-              : undefined;
+            typeof rawBoat.Length === "number" && rawBoat.Length > 0 ? rawBoat.Length : undefined;
           const beam =
             typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
               ? rawBoat.Beam
@@ -1171,7 +1175,7 @@
   async function buildTabularQuery(
     componentName: string,
     pipeline: Record<string, any>[],
-    opts: { methodName?: string; startTime?: Date } = {}
+    opts: { methodName?: string; startTime?: Date; endTime?: Date } = {}
   ): Promise<{ scope: any; query: any[]; leaf: string }> {
     var scope = await dataClientForComponent(componentName);
     var leaf = componentName.split(":").pop() || componentName;
@@ -1181,11 +1185,12 @@
       component_name: leaf,
     };
     if (opts.methodName) match.method_name = opts.methodName;
-    if (opts.startTime) match.time_received = { $gte: opts.startTime };
-    var query = [
-      BSON.serialize({ $match: match }),
-      ...pipeline.map((s) => BSON.serialize(s)),
-    ];
+    if (opts.startTime || opts.endTime) {
+      match.time_received = {};
+      if (opts.startTime) match.time_received.$gte = opts.startTime;
+      if (opts.endTime) match.time_received.$lte = opts.endTime;
+    }
+    var query = [BSON.serialize({ $match: match }), ...pipeline.map((s) => BSON.serialize(s))];
     return { scope, query, leaf };
   }
 
@@ -1278,6 +1283,74 @@
       }
     }
     return res;
+  }
+
+  // Fetch the boat's recorded track for an explicit [t0, t1] window straight
+  // from tabular data, independent of the in-memory ~7-day posHistory. The
+  // Routes panel uses this to capture an arbitrary historical window as a
+  // route. Returns minute-bucketed PositionPoint[] in chronological order
+  // (matching positionHistoryMQLNamed's grouping), trying the same configured
+  // movement-sensor name + alternates. Returns [] if nothing is connected or
+  // no data is found.
+  async function fetchTrackWindow(t0: Date, t1: Date): Promise<PositionPoint[]> {
+    if (!globalCloudClient) return [];
+    const names: string[] = [];
+    if (globalConfig.movementSensorForQuery) names.push(globalConfig.movementSensorForQuery);
+    for (const n of globalConfig.movementSensorAlternates) {
+      if (!names.includes(n)) names.push(n);
+    }
+    // The hot store only retains ~recent data; if the window's most-recent edge
+    // is older than 2 days it won't be there, so query cold directly. For newer
+    // windows query hot but fall back to cold if it comes back empty (the tail
+    // of the window may already have aged out).
+    const hot = t1.getTime() >= Date.now() - 2 * 24 * 3600 * 1000;
+    for (const n of names) {
+      let rows: any[] = [];
+      try {
+        const built = await buildTabularQuery(
+          n,
+          [
+            { $sort: { time_received: -1 } },
+            {
+              $group: {
+                _id: bucketIdConcat(),
+                ts: { $min: "$time_received" },
+                pos: { $first: "$data" },
+              },
+            },
+            { $sort: { ts: 1 } },
+          ],
+          { methodName: "Position", startTime: t0, endTime: t1 }
+        );
+        rows = await runTabularQuery("trackWindow[" + n + "]", built.scope, built.query, {
+          hot,
+          coldFallback: true,
+        });
+      } catch (e) {
+        console.log("fetchTrackWindow failed for", n, e);
+        continue;
+      }
+      if (rows.length === 0) continue;
+      if (!globalConfig.movementSensorForQuery) globalConfig.movementSensorForQuery = n;
+      return rows
+        .map((raw) => {
+          let ts: Date | undefined;
+          if (raw.ts instanceof Date) {
+            ts = raw.ts;
+          } else if (typeof raw.ts === "string") {
+            const p = new Date(raw.ts);
+            if (!Number.isNaN(p.getTime())) ts = p;
+          } else if (typeof raw.ts === "number") {
+            ts = new Date(raw.ts);
+          }
+          const lat = raw?.pos?.coordinate?.latitude;
+          const lng = raw?.pos?.coordinate?.longitude;
+          if (typeof lat !== "number" || typeof lng !== "number" || !ts) return null;
+          return { lat, lng, ts } as PositionPoint;
+        })
+        .filter((p): p is PositionPoint => p !== null);
+    }
+    return [];
   }
 
   function findComponentStatus(n) {
@@ -1866,9 +1939,7 @@
   // Stored as a record so each tank row owns its own readout
   // independently — peer-hover is per-row, but the captured value/ts
   // needs to live somewhere reactive.
-  let tankHover = $state<
-    Record<string, { value: number; ts: Date } | null>
-  >({});
+  let tankHover = $state<Record<string, { value: number; ts: Date } | null>>({});
 
   // Map a tank's historical _id (formatted bucket label like "26-5-11
   // 14:30") back to the bucket's start timestamp, so the hover handler
@@ -1923,9 +1994,7 @@
         VIAM.Struct.fromJson({ insert_waypoint: { before_id: beforeId, lat, lng } })
       );
       // Optimistically splice; the next poll will reconcile with the service.
-      const idx = beforeId
-        ? globalData.navWaypoints.findIndex((wp) => wp.id === beforeId)
-        : -1;
+      const idx = beforeId ? globalData.navWaypoints.findIndex((wp) => wp.id === beforeId) : -1;
       const placeholder = { id: `pending-${Date.now()}`, lat, lng };
       if (idx >= 0) {
         globalData.navWaypoints = [
@@ -1983,6 +2052,27 @@
         errorHandler(e, "removeWayPoint");
       }
     }
+  }
+
+  // Load a saved route into the nav service: one atomic set_waypoints replaces
+  // the whole active list (see nav.go). We then refresh the local mirror from
+  // the service so waypoint ids are the real backend ObjectIDs (needed for
+  // subsequent move/insert/remove), not optimistic placeholders.
+  async function loadNavRoute(waypoints: { lat: number; lng: number }[]) {
+    if (!globalClient || !globalConfig.navServiceName) return;
+    const nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
+    // doCommand requires a protobuf Struct, not a plain object — a plain object
+    // serializes to an EMPTY command (so the backend sees no verb and returns
+    // "DoCommand unimplemented"). Same wrap as insert/move waypoint above.
+    await nav.doCommand(
+      VIAM.Struct.fromJson({
+        set_waypoints: { waypoints: waypoints.map((w) => ({ lat: w.lat, lng: w.lng })) },
+      })
+    );
+    const wps = await nav.getWayPoints();
+    globalData.navWaypoints = (wps ?? [])
+      .filter((wp) => wp.location != null)
+      .map((wp) => ({ id: wp.id, lat: wp.location!.latitude, lng: wp.location!.longitude }));
   }
 
   function seakeeper(name, value) {
@@ -2060,6 +2150,44 @@
     />
   </div>
 {:else}
+  {#snippet routesOverlay()}
+    <RoutesPanel
+      getRoutesApi={() =>
+        globalClient && globalConfig.navServiceName
+          ? ({
+              doCommand: async (cmd) => {
+                try {
+                  // doCommand requires a protobuf Struct; a plain object
+                  // serializes to an EMPTY command, so the backend sees no verb
+                  // and returns "DoCommand unimplemented". Wrap like insert/move.
+                  // Round-trip through JSON first to drop any `undefined` values
+                  // (e.g. an optional route field) — Struct.fromJson rejects them
+                  // ("cannot decode google.protobuf.Value from JSON undefined").
+                  const clean = JSON.parse(JSON.stringify(cmd));
+                  return await new VIAM.NavigationClient(
+                    globalClient,
+                    globalConfig.navServiceName
+                  ).doCommand(VIAM.Struct.fromJson(clean));
+                } catch (e) {
+                  console.error(
+                    "routes doCommand failed",
+                    { nav: globalConfig.navServiceName, command: Object.keys(cmd)[0] },
+                    e
+                  );
+                  throw e;
+                }
+              },
+            } as RoutesApi)
+          : null}
+      currentWaypoints={globalData.navWaypoints}
+      positionHistory={globalData.posHistory}
+      {fetchTrackWindow}
+      onLoadRoute={loadNavRoute}
+      onPreviewRoute={(waypoints, color) =>
+        (routePreview = waypoints ? { waypoints, color } : null)}
+    />
+  {/snippet}
+
   <main
     class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_22rem] grid-rows-3 lg:grid-rows-6 gap-2 bg-black"
   >
@@ -2069,9 +2197,7 @@
         location: [globalData.pos.getLat(), globalData.pos.getLng()],
         speed: globalData.speed,
         heading:
-          globalData.speed > 1 && globalData.cog != null
-            ? globalData.cog
-            : globalData.heading,
+          globalData.speed > 1 && globalData.cog != null ? globalData.cog : globalData.heading,
         route: globalData.route
           ? {
               destinationLongitude: globalData.route["Destination Longitude"],
@@ -2084,14 +2210,16 @@
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
       positionHistorical={globalData.posHistory}
-      onBoatPopupOpen={onBoatPopupOpen}
+      {onBoatPopupOpen}
       bind:aisTracksNeeded={globalData.aisTracksNeeded}
       bind:depthColorTrack={globalData.showDepthOnTrack}
       depthSensorAvailable={globalConfig.depthSensorName !== ""}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
-      chartOnly={chartOnly}
+      {chartOnly}
       navWaypoints={globalData.navWaypoints}
+      {routePreview}
+      leftOverlay={globalConfig.navServiceName ? routesOverlay : undefined}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
       onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
@@ -2106,181 +2234,177 @@
     ></MarineMap>
 
     {#if !globalData.hideDataPanel}
-    <aside class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 lg:pr-2 min-h-full text-white">
-      {#if globalData.status === "Connected"}
-        <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
-          <PrimeIcon name="broadcast" cx="text-success-dark" />
-          <div class="text-sm text-success-dark">{globalData.status}</div>
-        </div>
-      {:else}
-        <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-info-medium">
-          <PrimeIcon name="broadcast-off" cx="text-info-dark" />
-          <div class="text-sm text-info-dark">{globalData.status}</div>
-        </div>
-      {/if}
+      <aside
+        class="lg:row-span-6 flex flex-col gap-4 border border-dark p-1 lg:pr-2 min-h-full text-white"
+      >
+        {#if globalData.status === "Connected"}
+          <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-success-medium">
+            <PrimeIcon name="broadcast" cx="text-success-dark" />
+            <div class="text-sm text-success-dark">{globalData.status}</div>
+          </div>
+        {:else}
+          <div class="flex gap-2 items-center w-full min-h-12 px-2 border border-info-medium">
+            <PrimeIcon name="broadcast-off" cx="text-info-dark" />
+            <div class="text-sm text-info-dark">{globalData.status}</div>
+          </div>
+        {/if}
 
-      <div id="navData" class="flex flex-col divide-y">
-        <!-- SOG / Depth / Heading / COG render in the map's top-right
+        <div id="navData" class="flex flex-col divide-y">
+          <!-- SOG / Depth / Heading / COG render in the map's top-right
              overlay (MarineMap's data-panel). The "color track by
              depth" toggle moved into MarineMap's layers panel — the
              $effect on showDepthOnTrack handles the cache reset
              whichever side flips it. -->
-        {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Next Waypoint</div>
-            <div>
-              <div class="font-bold">
-                {(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm
-              </div>
-              <div class="font-bold">
-                {(
-                  globalData.route["Distance to Waypoint"] /
-                  globalData.route["Waypoint Closing Velocity"] /
-                  60
-                ).toFixed(1)} minutes
-              </div>
-            </div>
-          </div>
-        {/if}
-
-        {#if globalConfig.windSensorName != ""}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Wind Direction</div>
-            <div>
-              <span class="font-bold">{globalData.windAngle.toFixed(0)}</span>
-              <sup>degrees</sup>
-            </div>
-          </div>
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Wind Speed</div>
-            <div>
-              <span class="font-bold">{globalData.windSpeed.toFixed(1)}</span>
-              <sup>kn</sup>
-            </div>
-          </div>
-        {/if}
-
-        {#if globalConfig.seatempSensorName != ""}
-          <div class="p-2 text-lg">
-            <div class="flex gap-2">
-              <div class="min-w-32">Water Temp</div>
+          {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">Next Waypoint</div>
               <div>
-                <span class="font-bold">{globalData.temp.toFixed(2)}</span>
-                <sup>f</sup>
+                <div class="font-bold">
+                  {(globalData.route["Distance to Waypoint"] * 0.000539957).toFixed(2)} nm
+                </div>
+                <div class="font-bold">
+                  {(
+                    globalData.route["Distance to Waypoint"] /
+                    globalData.route["Waypoint Closing Velocity"] /
+                    60
+                  ).toFixed(1)} minutes
+                </div>
               </div>
             </div>
-            {#if globalData.seaTempHistorical && globalData.seaTempHistorical.data.length >= 5}
-              {@const stData = seaTempToLinkedChart(globalData.seaTempHistorical)}
-              {@const stTsByKey = gaugeHistoricalTsByKey(globalData.seaTempHistorical)}
-              <!-- Auto-fit the y-range to the actual reading window so a
+          {/if}
+
+          {#if globalConfig.windSensorName != ""}
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">Wind Direction</div>
+              <div>
+                <span class="font-bold">{globalData.windAngle.toFixed(0)}</span>
+                <sup>degrees</sup>
+              </div>
+            </div>
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">Wind Speed</div>
+              <div>
+                <span class="font-bold">{globalData.windSpeed.toFixed(1)}</span>
+                <sup>kn</sup>
+              </div>
+            </div>
+          {/if}
+
+          {#if globalConfig.seatempSensorName != ""}
+            <div class="p-2 text-lg">
+              <div class="flex gap-2">
+                <div class="min-w-32">Water Temp</div>
+                <div>
+                  <span class="font-bold">{globalData.temp.toFixed(2)}</span>
+                  <sup>f</sup>
+                </div>
+              </div>
+              {#if globalData.seaTempHistorical && globalData.seaTempHistorical.data.length >= 5}
+                {@const stData = seaTempToLinkedChart(globalData.seaTempHistorical)}
+                {@const stTsByKey = gaugeHistoricalTsByKey(globalData.seaTempHistorical)}
+                <!-- Auto-fit the y-range to the actual reading window so a
                    small variation (~5°F) reads as a real curve rather
                    than a flat line near the chart's top. Pad ±0.5°F so
                    the line never touches the edges. -->
-              {@const stValues = Object.values(stData) as number[]}
-              {@const stMin = Math.floor(Math.min(...stValues) - 0.5)}
-              {@const stMax = Math.ceil(Math.max(...stValues) + 0.5)}
-              {@const stViewWidth = Math.max(100, Object.keys(stData).length * 4 + 4)}
-              <div class="relative mt-1">
-                <div
-                  role="article"
-                  tabindex="-1"
-                  class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
-                >
-                  <LinkedChart
-                    data={stData}
-                    style="width: 100%;"
-                    width={stViewWidth}
-                    height={26}
-                    type="line"
-                    lineColor="#fb923c"
-                    fill="#fb923c"
-                    scaleMin={stMin}
-                    scaleMax={stMax}
-                    linked="seatemp"
-                    uid="seatemp"
-                    barMinWidth="3"
-                    grow
-                    dispatchEvents={true}
-                    on:hover={(e) => {
-                      const ts = stTsByKey[e.detail.key];
-                      if (ts) {
-                        tankHover["seatemp"] = { value: e.detail.value, ts };
-                      }
-                    }}
-                    on:value-update={(e) => {
-                      if (e.detail.value == null) tankHover["seatemp"] = null;
-                    }}
-                  />
-                </div>
-                {#if tankHover["seatemp"]}
+                {@const stValues = Object.values(stData) as number[]}
+                {@const stMin = Math.floor(Math.min(...stValues) - 0.5)}
+                {@const stMax = Math.ceil(Math.max(...stValues) + 0.5)}
+                {@const stViewWidth = Math.max(100, Object.keys(stData).length * 4 + 4)}
+                <div class="relative mt-1">
                   <div
-                    class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
+                    role="article"
+                    tabindex="-1"
+                    class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
                   >
-                    <span class="font-semibold text-amber-300"
-                      >{tankHover["seatemp"]!.value.toFixed(1)}°F</span
-                    >
-                    <span class="text-gray-400"
-                      >{formatAgo(tankHover["seatemp"]!.ts)}</span
-                    >
+                    <LinkedChart
+                      data={stData}
+                      style="width: 100%;"
+                      width={stViewWidth}
+                      height={26}
+                      type="line"
+                      lineColor="#fb923c"
+                      fill="#fb923c"
+                      scaleMin={stMin}
+                      scaleMax={stMax}
+                      linked="seatemp"
+                      uid="seatemp"
+                      barMinWidth="3"
+                      grow
+                      dispatchEvents={true}
+                      on:hover={(e) => {
+                        const ts = stTsByKey[e.detail.key];
+                        if (ts) {
+                          tankHover["seatemp"] = { value: e.detail.value, ts };
+                        }
+                      }}
+                      on:value-update={(e) => {
+                        if (e.detail.value == null) tankHover["seatemp"] = null;
+                      }}
+                    />
                   </div>
-                {/if}
-              </div>
-            {/if}
+                  {#if tankHover["seatemp"]}
+                    <div
+                      class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
+                    >
+                      <span class="font-semibold text-amber-300"
+                        >{tankHover["seatemp"]!.value.toFixed(1)}°F</span
+                      >
+                      <span class="text-gray-400">{formatAgo(tankHover["seatemp"]!.ts)}</span>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+          <div class="flex gap-2 p-2 text-lg">
+            <div class="min-w-32">Location</div>
+            <span><small>{globalData.posString}</small></span>
           </div>
-        {/if}
-        <div class="flex gap-2 p-2 text-lg">
-          <div class="min-w-32">Location</div>
-          <span><small>{globalData.posString}</small></span>
-        </div>
-        <!-- Heading / COG also moved to MarineMap's data panel — same
+          <!-- Heading / COG also moved to MarineMap's data panel — same
              reason as SOG / Depth above. -->
-        {#if globalConfig.spotZeroFWSensorName != ""}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">SpotZero F/S</div>
-            <div class="whitespace-nowrap">
-              <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)}</span> /
-              <span class="font-bold">{@html globalData.spotZeroSW.toFixed(2)}</span>
-              gpm
+          {#if globalConfig.spotZeroFWSensorName != ""}
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">SpotZero F/S</div>
+              <div class="whitespace-nowrap">
+                <span class="font-bold">{@html globalData.spotZeroFW.toFixed(2)}</span> /
+                <span class="font-bold">{@html globalData.spotZeroSW.toFixed(2)}</span>
+                gpm
+              </div>
             </div>
-          </div>
-        {/if}
-        {#if globalConfig.seakeeperSensorName != ""}
-          <div class="flex gap-2 p-2 text-lg">
-            <div class="min-w-32">Seakeeper</div>
-            <div class="whitespace-nowrap">
-              <span class="font-bold">
-                {#if globalData.seakeeperData["power_enabled"] >= 1}
-                  <button onclick={() => seakeeper("power", false)}>P</button>
-                {:else if globalData.seakeeperData["power_available"] >= 1}
-                  <button onclick={() => seakeeper("power", true)}>p</button>
-                {/if}
-                {#if globalData.seakeeperData["stabilize_enabled"] >= 1}
-                  <button onclick={() => seakeeper("enable", false)}>E</button>
-                {:else if globalData.seakeeperData["stabilize_available"] >= 1}
-                  <button onclick={() => seakeeper("enable", true)}>e</button>
-                {/if}
-                {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}% ({globalData
-                  .seakeeperData["flywheel_speed"]})
-              </span>
+          {/if}
+          {#if globalConfig.seakeeperSensorName != ""}
+            <div class="flex gap-2 p-2 text-lg">
+              <div class="min-w-32">Seakeeper</div>
+              <div class="whitespace-nowrap">
+                <span class="font-bold">
+                  {#if globalData.seakeeperData["power_enabled"] >= 1}
+                    <button onclick={() => seakeeper("power", false)}>P</button>
+                  {:else if globalData.seakeeperData["power_available"] >= 1}
+                    <button onclick={() => seakeeper("power", true)}>p</button>
+                  {/if}
+                  {#if globalData.seakeeperData["stabilize_enabled"] >= 1}
+                    <button onclick={() => seakeeper("enable", false)}>E</button>
+                  {:else if globalData.seakeeperData["stabilize_available"] >= 1}
+                    <button onclick={() => seakeeper("enable", true)}>e</button>
+                  {/if}
+                  {@html globalData.seakeeperData["progress_bar_percentage"].toFixed(2)}% ({globalData
+                    .seakeeperData["flywheel_speed"]})
+                </span>
+              </div>
             </div>
-          </div>
-        {/if}
-        <div class="flex flex-col divide-y">
-          {#each organizeGauges(globalData.gauges) as { key, value, isAggregate, isCompact }}
-            {@const gallons = (value.Capacity * value.Level * 0.264172) / 100}
-            {@const capacityGal = value.Capacity * 0.264172}
-            {@const pct = value.Level}
-            {@const levelClass =
-              pct < 15
-                ? "text-red-400"
-                : pct < 30
-                  ? "text-amber-300"
-                  : "text-sky-300"}
-            <!-- Display name: the aggregate row strips the "-All" suffix
+          {/if}
+          <div class="flex flex-col divide-y">
+            {#each organizeGauges(globalData.gauges) as { key, value, isAggregate, isCompact }}
+              {@const gallons = (value.Capacity * value.Level * 0.264172) / 100}
+              {@const capacityGal = value.Capacity * 0.264172}
+              {@const pct = value.Level}
+              {@const levelClass =
+                pct < 15 ? "text-red-400" : pct < 30 ? "text-amber-300" : "text-sky-300"}
+              <!-- Display name: the aggregate row strips the "-All" suffix
                  since the visual treatment (border accent below + bold
                  name) already signals it's the rollup. -->
-            {@const displayName = isAggregate ? key.replace(/-all$/i, "") : key}
-            <!-- Tank row: header line (name on the left, % + volume on the
+              {@const displayName = isAggregate ? key.replace(/-all$/i, "") : key}
+              <!-- Tank row: header line (name on the left, % + volume on the
                  right) above a full-width sparkline. Header columns are
                  fixed-width and right-aligned so the percent and volume
                  numbers stack at the same x across every row, regardless
@@ -2292,45 +2416,48 @@
                  - isAggregate: the "-All" rollup for this type — render
                    at full size with a stronger top border so it visually
                    anchors the bottom of the group. -->
-            <section
-              class="overflow-visible px-2"
-              class:py-1.5={!isCompact}
-              class:py-0.5={isCompact}
-              class:tank-aggregate={isAggregate}
-            >
-              <div
-                class="flex items-baseline gap-3"
-                class:mb-1={!isCompact}
-                class:mb-0.5={isCompact}
+              <section
+                class="overflow-visible px-2"
+                class:py-1.5={!isCompact}
+                class:py-0.5={isCompact}
+                class:tank-aggregate={isAggregate}
               >
-                <h2
-                  class="capitalize flex-1 truncate"
-                  class:text-sm={!isCompact}
-                  class:text-xs={isCompact}
-                  class:font-medium={!isAggregate}
-                  class:font-semibold={isAggregate}
-                  class:text-gray-200={!isAggregate}
-                  class:text-sky-200={isAggregate}>{displayName}</h2
+                <div
+                  class="flex items-baseline gap-3"
+                  class:mb-1={!isCompact}
+                  class:mb-0.5={isCompact}
                 >
-                <span
-                  class={`font-bold tabular-nums w-12 text-right ${levelClass}`}
-                  class:text-base={!isCompact}
-                  class:text-sm={isCompact}
-                  >{pct.toFixed(0)}%</span
-                >
-                <span
-                  class="text-gray-300 tabular-nums w-28 text-right"
-                  class:text-sm={!isCompact}
-                  class:text-xs={isCompact}
-                >
-                  {gallons.toFixed(0)} / {capacityGal.toFixed(0)}
-                  <span class="text-gray-500 text-xs">gal</span>
-                </span>
-              </div>
-              {#if globalData.gaugesToHistorical[key] && globalData.gaugesToHistorical[key].data.length >= 5}
-                {@const tankData = gauageHistoricalToLinkedChart(globalData.gaugesToHistorical[key])}
-                {@const tsByKey = gaugeHistoricalTsByKey(globalData.gaugesToHistorical[key])}
-                <!-- viewBox width has to grow with bucket count or the
+                  <h2
+                    class="capitalize flex-1 truncate"
+                    class:text-sm={!isCompact}
+                    class:text-xs={isCompact}
+                    class:font-medium={!isAggregate}
+                    class:font-semibold={isAggregate}
+                    class:text-gray-200={!isAggregate}
+                    class:text-sky-200={isAggregate}
+                  >
+                    {displayName}
+                  </h2>
+                  <span
+                    class={`font-bold tabular-nums w-12 text-right ${levelClass}`}
+                    class:text-base={!isCompact}
+                    class:text-sm={isCompact}>{pct.toFixed(0)}%</span
+                  >
+                  <span
+                    class="text-gray-300 tabular-nums w-28 text-right"
+                    class:text-sm={!isCompact}
+                    class:text-xs={isCompact}
+                  >
+                    {gallons.toFixed(0)} / {capacityGal.toFixed(0)}
+                    <span class="text-gray-500 text-xs">gal</span>
+                  </span>
+                </div>
+                {#if globalData.gaugesToHistorical[key] && globalData.gaugesToHistorical[key].data.length >= 5}
+                  {@const tankData = gauageHistoricalToLinkedChart(
+                    globalData.gaugesToHistorical[key]
+                  )}
+                  {@const tsByKey = gaugeHistoricalTsByKey(globalData.gaugesToHistorical[key])}
+                  <!-- viewBox width has to grow with bucket count or the
                      right-aligned bars overflow past x=0 and only the
                      tail fits in view. Each bucket needs at least
                      barMinWidth + gap = 4 units; +4 of slack keeps the
@@ -2338,109 +2465,105 @@
                      `width: 100%` still stretches the SVG to fill the
                      panel; this just changes the internal coordinate
                      scale so all data lands inside the viewBox. -->
-                {@const chartViewWidth = Math.max(100, Object.keys(tankData).length * 4 + 4)}
-                <div class="relative">
-                  <div
-                    role="article"
-                    tabindex="-1"
-                    class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
-                  >
-                    <LinkedChart
-                      data={tankData}
-                      style="width: 100%;"
-                      width={chartViewWidth}
-                      height={isCompact ? 16 : 26}
-                      type="line"
-                      lineColor="#38bdf8"
-                      fill="#38bdf8"
-                      scaleMax={100}
-                      linked={key}
-                      uid={key}
-                      barMinWidth="3"
-                      grow
-                      dispatchEvents={true}
-                      on:hover={(e) => {
-                        const ts = tsByKey[e.detail.key];
-                        if (ts) {
-                          tankHover[key] = { value: e.detail.value, ts };
-                        }
-                      }}
-                      on:value-update={(e) => {
-                        if (e.detail.value == null) tankHover[key] = null;
-                      }}
-                    />
-                  </div>
-                  <!-- Hover readout: floats above the chart's top-right.
+                  {@const chartViewWidth = Math.max(100, Object.keys(tankData).length * 4 + 4)}
+                  <div class="relative">
+                    <div
+                      role="article"
+                      tabindex="-1"
+                      class="peer tank-chart bg-dark rounded hover:cursor-pointer overflow-hidden"
+                    >
+                      <LinkedChart
+                        data={tankData}
+                        style="width: 100%;"
+                        width={chartViewWidth}
+                        height={isCompact ? 16 : 26}
+                        type="line"
+                        lineColor="#38bdf8"
+                        fill="#38bdf8"
+                        scaleMax={100}
+                        linked={key}
+                        uid={key}
+                        barMinWidth="3"
+                        grow
+                        dispatchEvents={true}
+                        on:hover={(e) => {
+                          const ts = tsByKey[e.detail.key];
+                          if (ts) {
+                            tankHover[key] = { value: e.detail.value, ts };
+                          }
+                        }}
+                        on:value-update={(e) => {
+                          if (e.detail.value == null) tankHover[key] = null;
+                        }}
+                      />
+                    </div>
+                    <!-- Hover readout: floats above the chart's top-right.
                        Gated on tankHover[key] (populated by the chart's
                        hover event) instead of peer-hover so the contents
                        can never appear empty. z-10 keeps it above
                        sibling tank rows. -->
-                  {#if tankHover[key]}
-                    <div
-                      class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
-                    >
-                      <span class="font-semibold text-sky-300"
-                        >{tankHover[key]!.value}%</span
+                    {#if tankHover[key]}
+                      <div
+                        class="z-10 absolute -top-1 right-1 -translate-y-full flex items-baseline gap-1.5 px-2.5 py-1 rounded-md bg-black/85 text-white text-xs shadow-lg pointer-events-none whitespace-nowrap tabular-nums"
                       >
-                      <span class="text-gray-400"
-                        >{formatAgo(tankHover[key]!.ts)}</span
-                      >
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-            </section>
-          {/each}
-        </div>
-        {#if globalData.acPowerData}
-          <div class="flex gap-2 p-2">
-            <div class="min-w-32">AC Power</div>
-            <div style="font-size:.7em;">
-              <table class="text-white">
-                <tbody>
-                  <tr>
-                    <td></td>
-                    <th>Voltage</th>
-                    <th>Current</th>
-                  </tr>
-                  {#each dicToArray(globalData.acPowers) as [name, d]}
-                    <tr>
-                      <th>{name}</th>
-                      <td>{d["Line-Neutral AC RMS Voltage"]}</td>
-                      <td>{d["AC RMS Current"]}</td>
-                    </tr>
-                  {/each}
-                  <tr>
-                    <th>Ttl</th>
-                    <td>{acPowerVoltAverage(globalData.acPowers).toFixed(0)}</td>
-                    <td
-                      >{acPowerAmpAt(
-                        acPowerVoltAverage(globalData.acPowers),
-                        globalData.acPowers
-                      ).toFixed(0)}</td
-                    >
-                  </tr>
-                  <tr>
-                    <th>Ttl</th>
-                    <td>{(2 * acPowerVoltAverage(globalData.acPowers)).toFixed(0)}</td>
-                    <td
-                      >{acPowerAmpAt(
-                        2 * acPowerVoltAverage(globalData.acPowers),
-                        globalData.acPowers
-                      ).toFixed(0)}</td
-                    >
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                        <span class="font-semibold text-sky-300">{tankHover[key]!.value}%</span>
+                        <span class="text-gray-400">{formatAgo(tankHover[key]!.ts)}</span>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </section>
+            {/each}
           </div>
-        {/if}
-      </div>
+          {#if globalData.acPowerData}
+            <div class="flex gap-2 p-2">
+              <div class="min-w-32">AC Power</div>
+              <div style="font-size:.7em;">
+                <table class="text-white">
+                  <tbody>
+                    <tr>
+                      <td></td>
+                      <th>Voltage</th>
+                      <th>Current</th>
+                    </tr>
+                    {#each dicToArray(globalData.acPowers) as [name, d]}
+                      <tr>
+                        <th>{name}</th>
+                        <td>{d["Line-Neutral AC RMS Voltage"]}</td>
+                        <td>{d["AC RMS Current"]}</td>
+                      </tr>
+                    {/each}
+                    <tr>
+                      <th>Ttl</th>
+                      <td>{acPowerVoltAverage(globalData.acPowers).toFixed(0)}</td>
+                      <td
+                        >{acPowerAmpAt(
+                          acPowerVoltAverage(globalData.acPowers),
+                          globalData.acPowers
+                        ).toFixed(0)}</td
+                      >
+                    </tr>
+                    <tr>
+                      <th>Ttl</th>
+                      <td>{(2 * acPowerVoltAverage(globalData.acPowers)).toFixed(0)}</td>
+                      <td
+                        >{acPowerAmpAt(
+                          2 * acPowerVoltAverage(globalData.acPowers),
+                          globalData.acPowers
+                        ).toFixed(0)}</td
+                      >
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {/if}
+        </div>
 
-      <div class="grow text-xs flex flex-col-reverse text-gray-500 text-right">
-        {globalData.numUpdates}
-      </div>
-    </aside>
+        <div class="grow text-xs flex flex-col-reverse text-gray-500 text-right">
+          {globalData.numUpdates}
+        </div>
+      </aside>
     {/if}
 
     {#if !globalData.hideDataPanel}

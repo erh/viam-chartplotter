@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	"go.viam.com/rdk/app"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -122,10 +124,19 @@ func newNav(
 		return nil, err
 	}
 
+	// Robot-local routes live beside the waypoint file, e.g. nav/<name>-routes.json.
+	ext := filepath.Ext(dataPath)
+	routesPath := strings.TrimSuffix(dataPath, ext) + "-routes" + ext
+	robotRoutes, err := newDiskRoutesStore(routesPath)
+	if err != nil {
+		return nil, err
+	}
+
 	svc := &navService{
-		name:   conf.ResourceName(),
-		logger: logger,
-		store:  store,
+		name:        conf.ResourceName(),
+		logger:      logger,
+		store:       store,
+		robotRoutes: robotRoutes,
 	}
 	svc.mode.Store(uint32(navigation.ModeManual))
 	logger.Infof("nav waypoints persisted at %s", dataPath)
@@ -168,6 +179,26 @@ type navService struct {
 	// so no synchronisation needed.
 	arrivalState   ArrivalState
 	lastArrivalLog time.Time
+
+	// Lazily-created Viam app client used to read/write saved routes in the
+	// location metadata (see nav_routes.go). It authenticates with the
+	// machine's own VIAM_API_KEY/VIAM_API_KEY_ID env vars and uses
+	// VIAM_LOCATION_ID, so route storage works regardless of how the browser
+	// connected to the machine. routesMu serializes both the lazy init and the
+	// metadata read-modify-write.
+	routesMu   sync.Mutex
+	viamClient *app.ViamClient
+	appClient  *app.AppClient
+	locationID string
+	// Robot-local route fallback, used when the location metadata can't be
+	// written. Promoted to the location on demand (routes_promote).
+	robotRoutes *diskRoutesStore
+
+	// Test seams: when set, used instead of dialing the real app client, so the
+	// fallback/promote/inheritance logic can be exercised against fake stores.
+	// routesStoreFn is this machine's location; parentStoresFn the ancestors.
+	routesStoreFn  func(ctx context.Context) (metadataStore, error)
+	parentStoresFn func(ctx context.Context) ([]metadataStore, error)
 }
 
 // maybeArrivalInfo throttles a poller-status info log to one per
@@ -397,12 +428,25 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 //
 //	{"move_waypoint":   {"id": "<hex>", "lat": <float>, "lng": <float>}}
 //	{"insert_waypoint": {"before_id": "<hex>", "lat": <float>, "lng": <float>}}
+//	{"set_waypoints":   {"waypoints": [{"lat": <float>, "lng": <float>}, ...]}}
+//	{"routes_list":     true}
+//	{"routes_save":     {"route": {<route>}}}
+//	{"routes_delete":   {"id": "<id>"}}
+//	{"routes_rename":   {"id": "<id>", "name"?: ..., "notes"?: ..., "color"?: ..., "updatedAt"?: ...}}
+//	{"routes_promote":  {"id": "<id>"}}
 //	{"arrival_status":  true}
+//
+// The routes_* verbs read/write saved routes in the location metadata via the
+// Viam app API (see nav_routes.go), so the browser doesn't need its own cloud
+// credentials. When the location can't be written they fall back to a
+// robot-local store; routes_promote moves a robot route up to the location.
 //
 // move_waypoint updates an existing waypoint in place (preserving its ID and
 // order). insert_waypoint inserts a new waypoint immediately before the
 // waypoint with the given before_id; an empty/missing before_id is equivalent
-// to AddWayPoint (append). arrival_status returns a snapshot of the
+// to AddWayPoint (append). set_waypoints atomically replaces the entire active
+// list with the given ordered points (used to load a saved route); an empty
+// array clears the route. arrival_status returns a snapshot of the
 // auto-arrival poller so an operator can see, on demand, why a pass didn't
 // fire (current target, boat position, distances, minDistance, etc.).
 func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -411,6 +455,24 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 	if raw, ok := cmd["insert_waypoint"]; ok {
 		return s.doInsertWaypoint(ctx, raw)
+	}
+	if raw, ok := cmd["set_waypoints"]; ok {
+		return s.doSetWaypoints(ctx, raw)
+	}
+	if _, ok := cmd["routes_list"]; ok {
+		return s.doRoutesList(ctx)
+	}
+	if raw, ok := cmd["routes_save"]; ok {
+		return s.doRoutesSave(ctx, raw)
+	}
+	if raw, ok := cmd["routes_delete"]; ok {
+		return s.doRoutesDelete(ctx, raw)
+	}
+	if raw, ok := cmd["routes_rename"]; ok {
+		return s.doRoutesRename(ctx, raw)
+	}
+	if raw, ok := cmd["routes_promote"]; ok {
+		return s.doRoutesPromote(ctx, raw)
 	}
 	if _, ok := cmd["arrival_status"]; ok {
 		return s.doArrivalStatus(ctx)
@@ -547,6 +609,53 @@ func (s *navService) doInsertWaypoint(ctx context.Context, raw interface{}) (map
 	return map[string]interface{}{"ok": true, "id": wp.ID.Hex()}, nil
 }
 
+// doSetWaypoints replaces the whole active waypoint list in one shot. The
+// payload's "waypoints" is an ordered array of {lat,lng} objects; an empty or
+// missing array clears the route. Every point is validated before any mutation
+// so a single bad coordinate rejects the whole batch (no partial load).
+func (s *navService) doSetWaypoints(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("set_waypoints payload must be an object")
+	}
+	var list []interface{}
+	if raw, ok := m["waypoints"]; ok && raw != nil {
+		list, ok = raw.([]interface{})
+		if !ok {
+			return nil, errors.New("set_waypoints.waypoints must be an array")
+		}
+	}
+	points := make([]*geo.Point, 0, len(list))
+	for i, item := range list {
+		wp, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, errors.Errorf("set_waypoints.waypoints[%d] must be an object", i)
+		}
+		lat, latOK := wp["lat"].(float64)
+		lng, lngOK := wp["lng"].(float64)
+		if !latOK || !lngOK {
+			return nil, errors.Errorf("set_waypoints.waypoints[%d] needs numeric lat and lng", i)
+		}
+		if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+			return nil, errors.Errorf("set_waypoints.waypoints[%d] out of range (lat=%v lng=%v)", i, lat, lng)
+		}
+		points = append(points, geo.NewPoint(lat, lng))
+	}
+	replacer, ok := s.store.(interface {
+		ReplaceWaypoints(ctx context.Context, points []*geo.Point) (int, error)
+	})
+	if !ok {
+		return nil, errors.New("waypoint store does not support set_waypoints")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count, err := replacer.ReplaceWaypoints(ctx, points)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"ok": true, "count": count}, nil
+}
+
 func (s *navService) Close(ctx context.Context) error {
 	if s.arrivalCancel != nil {
 		s.arrivalCancel()
@@ -556,6 +665,15 @@ func (s *navService) Close(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	}
+	s.routesMu.Lock()
+	if s.viamClient != nil {
+		if err := s.viamClient.Close(); err != nil {
+			s.logger.Debugw("error closing viam app client", "error", err)
+		}
+		s.viamClient = nil
+		s.appClient = nil
+	}
+	s.routesMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.store.Close(ctx)

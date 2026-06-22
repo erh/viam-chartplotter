@@ -13,11 +13,7 @@
   import Collection from "ol/Collection.js";
   import { useGeographic } from "ol/proj.js";
   import { boundingExtent } from "ol/extent.js";
-  import {
-    WIND_COLOR_SCALE,
-    WAVE_COLOR_SCALE,
-    colorForValue,
-  } from "./lib/windLayer";
+  import { WIND_COLOR_SCALE, WAVE_COLOR_SCALE, colorForValue } from "./lib/windLayer";
   import WeatherOverlays, {
     type WeatherInfo,
     type CursorWeatherSample,
@@ -120,12 +116,10 @@
     const n = 2 ** z;
     const lonW = (x / n) * 360 - 180;
     const lonE = ((x + 1) / n) * 360 - 180;
-    const latN =
-      (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
-    const latS =
-      (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+    const latN = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+    const latS = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
     return US_ENC_COVERAGE.some(
-      (b) => lonW >= b[0] && lonE <= b[2] && latS >= b[1] && latN <= b[3],
+      (b) => lonW >= b[0] && lonE <= b[2] && latS >= b[1] && latN <= b[3]
     );
   }
 
@@ -152,10 +146,7 @@
   const BOAT_SCALE_MIN = 0.6;
   const BOAT_SCALE_MAX = 2.5;
 
-  function dimScaleFactor(
-    valueMeters: number | null | undefined,
-    referenceMeters: number
-  ): number {
+  function dimScaleFactor(valueMeters: number | null | undefined, referenceMeters: number): number {
     if (!valueMeters || !Number.isFinite(valueMeters) || valueMeters <= 0) {
       return 1;
     }
@@ -170,9 +161,7 @@
     beamMeters: number | null | undefined
   ): [number, number] {
     const sy = dimScaleFactor(lengthMeters, DEFAULT_BOAT_LENGTH_M);
-    const sx = beamMeters
-      ? dimScaleFactor(beamMeters, DEFAULT_BOAT_BEAM_M)
-      : 1;
+    const sx = beamMeters ? dimScaleFactor(beamMeters, DEFAULT_BOAT_BEAM_M) : 1;
     return [sx, sy];
   }
   // Floor on rendered width for the override icon. Some PNGs are very
@@ -189,10 +178,7 @@
   // renders below as independent checkboxes.
   const BASE_LAYER_NAMES = ["open street map", "satellite-imagery", "noaa", "checkmate", "noaa-ecdis"];
   function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
-    return (
-      BASE_LAYER_NAMES.includes(l.name) ||
-      (!!l.parent && BASE_LAYER_NAMES.includes(l.parent))
-    );
+    return BASE_LAYER_NAMES.includes(l.name) || (!!l.parent && BASE_LAYER_NAMES.includes(l.parent));
   }
 
   let popupState = $state({
@@ -238,6 +224,7 @@
 
   let layersExpanded = $state(false);
   let boatsExpanded = $state(false);
+  let routesExpanded = $state(false);
   let mapLoaded = $state(false);
   let currentDetections = $state<Detection[] | undefined>(undefined);
   let boatSearchTerm = $state("");
@@ -246,6 +233,10 @@
   let measurePoints = $state<number[][]>([]);
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
+
+  // Display-only preview of a saved route (RoutesPanel "show on map" / track
+  // capture preview). Not editable, not the active nav route.
+  let routePreviewSource: VectorSource | null = null;
 
   // Debug helper: when on, clicking the map prints + copies the checkmate
   // tile URL covering that point. Used for diffing our render against NOAA's
@@ -529,10 +520,7 @@
     const nextLngLat: [number, number] = [next.lng, next.lat];
     const nextMeters = getDistance(startLngLat, nextLngLat);
     const nextNm = nextMeters / 1852;
-    const nextBearing = bearingDeg(
-      [myBoat.location[0], myBoat.location[1]],
-      [next.lat, next.lng]
-    );
+    const nextBearing = bearingDeg([myBoat.location[0], myBoat.location[1]], [next.lat, next.lng]);
     // hours = nm / kn ; convert to minutes
     const nextMin = speedKn > 0.1 ? (nextNm / speedKn) * 60 : Infinity;
 
@@ -651,6 +639,7 @@
     fullWidth = false,
     chartOnly = false,
     navWaypoints,
+    routePreview,
     onAddWaypoint,
     onMoveWaypoint,
     onInsertWaypoint,
@@ -658,6 +647,7 @@
     onClearWaypoints,
     onReady,
     boatDetailSlot,
+    leftOverlay,
     fitBoundsPadding,
     onBoatPopupOpen,
     detectionConfig,
@@ -699,6 +689,9 @@
     /** Ordered waypoints from a navigation service. The route is drawn from the boat's
      *  current position through each waypoint in order. */
     navWaypoints?: { id: string; lat: number; lng: number }[];
+    /** Display-only preview of a saved route (RoutesPanel). Drawn as a dashed
+     *  polyline + vertex dots; null/undefined draws nothing. Not editable. */
+    routePreview?: { waypoints: { lat: number; lng: number }[]; color?: string } | null;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -727,6 +720,9 @@
       focusBoat: (mmsi: string) => void;
     }) => void;
     boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
+    /** Optional content rendered as a panel overlaying the LEFT side of the
+     *  map (e.g. the routes panel), just right of the toolbar. */
+    leftOverlay?: () => any;
     fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
     onBoatPopupOpen?: (boatPartId?: string) => void;
     detectionConfig?: DetectionConfig;
@@ -763,6 +759,23 @@
     updateFromData();
   });
 
+  // Redraw the display-only saved-route preview whenever the prop changes.
+  $effect(() => {
+    const preview = routePreview;
+    const source = routePreviewSource;
+    if (!source) return;
+    source.clear();
+    if (!preview?.waypoints?.length) return;
+    const color = preview.color || "#00d0ff";
+    const coords = preview.waypoints.map((w) => [w.lng, w.lat]);
+    if (coords.length >= 2) {
+      source.addFeature(new Feature({ geometry: new LineString(coords), color }));
+    }
+    for (const c of coords) {
+      source.addFeature(new Feature({ geometry: new Point(c), color }));
+    }
+  });
+
   // Update popup content if it's open and showing a boat that moved
   $effect(() => {
     if (!popupState.visible) return;
@@ -785,11 +798,7 @@
         popupState.content.lng = boat.location[1];
         popupState.content.length = boat.length;
         popupState.content.destination = boat.destination;
-        if (
-          myBoat &&
-          myBoat.location &&
-          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
-        ) {
+        if (myBoat && myBoat.location && !(myBoat.location[0] === 0 && myBoat.location[1] === 0)) {
           const r = computeCpa(
             myBoat.location[0],
             myBoat.location[1],
@@ -976,10 +985,7 @@
       // Otherwise the boat reports [0, 0] (null island) and yanks the
       // view away from the default Hudson-Canyon framing on fresh
       // loads with no GPS yet.
-      const boatHasFix = isValidCoordinate(
-        myBoat.location[0],
-        myBoat.location[1],
-      );
+      const boatHasFix = isValidCoordinate(myBoat.location[0], myBoat.location[1]);
       if (!inPanMode && sz && boatHasFix) {
         var boatPx: [number, number] =
           boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
@@ -1210,20 +1216,34 @@
   // S-57 COLOUR codes (csv string of "1".."13") -> CSS hex.
   function s57ColourToCss(code: string): string {
     switch (code.trim()) {
-      case "1": return "#ffffff"; // white
-      case "2": return "#000000"; // black
-      case "3": return "#d9263a"; // red
-      case "4": return "#1f9e49"; // green
-      case "5": return "#1446cc"; // blue
-      case "6": return "#f5d011"; // yellow
-      case "7": return "#888888"; // grey
-      case "8": return "#8b5a2b"; // brown
-      case "9": return "#ffa500"; // amber
-      case "10": return "#8246c8"; // violet
-      case "11": return "#ff6e00"; // orange
-      case "12": return "#c850c8"; // magenta
-      case "13": return "#ffb4d2"; // pink
-      default: return "#888888";
+      case "1":
+        return "#ffffff"; // white
+      case "2":
+        return "#000000"; // black
+      case "3":
+        return "#d9263a"; // red
+      case "4":
+        return "#1f9e49"; // green
+      case "5":
+        return "#1446cc"; // blue
+      case "6":
+        return "#f5d011"; // yellow
+      case "7":
+        return "#888888"; // grey
+      case "8":
+        return "#8b5a2b"; // brown
+      case "9":
+        return "#ffa500"; // amber
+      case "10":
+        return "#8246c8"; // violet
+      case "11":
+        return "#ff6e00"; // orange
+      case "12":
+        return "#c850c8"; // magenta
+      case "13":
+        return "#ffb4d2"; // pink
+      default:
+        return "#888888";
     }
   }
 
@@ -1248,9 +1268,7 @@
   function navaidIconSrc(class_: string, props: any): string {
     const colours = navaidColours(props);
     const lighted = props?.lighted === true;
-    const shape = Number(
-      class_.startsWith("BCN") ? props?.BCNSHP : props?.BOYSHP
-    );
+    const shape = Number(class_.startsWith("BCN") ? props?.BCNSHP : props?.BOYSHP);
     const key = `${class_}|${shape || 0}|${colours.join(",")}|L${lighted ? 1 : 0}`;
     if (navaidIconCache[key]) return navaidIconCache[key];
 
@@ -1387,9 +1405,7 @@
         // Barrel.
         const ry = 4,
           rx = 6;
-        return (
-          `<ellipse cx="${ax}" cy="${ay - ry}" rx="${rx}" ry="${ry}" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
-        );
+        return `<ellipse cx="${ax}" cy="${ay - ry}" rx="${rx}" ry="${ry}" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`;
       }
       case 7: {
         // Super-buoy.
@@ -1407,9 +1423,7 @@
         // Unknown / unspecified shape — small filled circle in primary
         // colour. Most cells set BOYSHP; falling back to a generic dot
         // keeps the chart usable when they don't.
-        return (
-          `<circle cx="${ax}" cy="${ay - 4}" r="4" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
-        );
+        return `<circle cx="${ax}" cy="${ay - 4}" r="4" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`;
       }
     }
   }
@@ -1453,53 +1467,90 @@
     });
   }
 
-
   // Human-readable label for an S-57 class code. Used in hover tooltips.
   function navaidClassLabel(c: string): string {
     switch (c) {
-      case "BOYLAT": return "Lateral buoy";
-      case "BOYCAR": return "Cardinal buoy";
-      case "BOYISD": return "Isolated-danger buoy";
-      case "BOYSAW": return "Safe-water buoy";
-      case "BOYSPP": return "Special-purpose buoy";
-      case "BOYINB": return "Installation buoy";
-      case "BCNLAT": return "Lateral beacon";
-      case "BCNCAR": return "Cardinal beacon";
-      case "BCNISD": return "Isolated-danger beacon";
-      case "BCNSAW": return "Safe-water beacon";
-      case "BCNSPP": return "Special-purpose beacon";
-      case "LIGHTS": return "Light";
-      case "DAYMAR": return "Daymark";
-      default:       return c;
+      case "BOYLAT":
+        return "Lateral buoy";
+      case "BOYCAR":
+        return "Cardinal buoy";
+      case "BOYISD":
+        return "Isolated-danger buoy";
+      case "BOYSAW":
+        return "Safe-water buoy";
+      case "BOYSPP":
+        return "Special-purpose buoy";
+      case "BOYINB":
+        return "Installation buoy";
+      case "BCNLAT":
+        return "Lateral beacon";
+      case "BCNCAR":
+        return "Cardinal beacon";
+      case "BCNISD":
+        return "Isolated-danger beacon";
+      case "BCNSAW":
+        return "Safe-water beacon";
+      case "BCNSPP":
+        return "Special-purpose beacon";
+      case "LIGHTS":
+        return "Light";
+      case "DAYMAR":
+        return "Daymark";
+      default:
+        return c;
     }
   }
 
   // S-57 LITCHR enum -> short S-52 code (F, Fl, Q, Iso, Oc, …).
   function lightCharLabel(code: number): string {
     switch (code) {
-      case 1: return "F";
-      case 2: return "Fl";
-      case 3: return "Fl";
-      case 4: return "Q";
-      case 5: return "VQ";
-      case 6: return "UQ";
-      case 7: return "Iso";
-      case 8: return "Iso";
-      case 9: return "Oc";
-      case 10: return "Oc";
-      case 11: return "Mo";
-      case 12: return "FFl";
-      case 13: return "FFl";
-      default: return "";
+      case 1:
+        return "F";
+      case 2:
+        return "Fl";
+      case 3:
+        return "Fl";
+      case 4:
+        return "Q";
+      case 5:
+        return "VQ";
+      case 6:
+        return "UQ";
+      case 7:
+        return "Iso";
+      case 8:
+        return "Iso";
+      case 9:
+        return "Oc";
+      case 10:
+        return "Oc";
+      case 11:
+        return "Mo";
+      case 12:
+        return "FFl";
+      case 13:
+        return "FFl";
+      default:
+        return "";
     }
   }
 
   // S-57 COLOUR csv -> single-letter code list (W/R/G/Y/etc).
   function colourLetters(csv: string): string {
     const map: Record<string, string> = {
-      "1": "W", "2": "Bk", "3": "R", "4": "G", "5": "Bu",
-      "6": "Y", "7": "Gy", "8": "Br", "9": "Am", "10": "Vi",
-      "11": "Or", "12": "Mg", "13": "Pk",
+      "1": "W",
+      "2": "Bk",
+      "3": "R",
+      "4": "G",
+      "5": "Bu",
+      "6": "Y",
+      "7": "Gy",
+      "8": "Br",
+      "9": "Am",
+      "10": "Vi",
+      "11": "Or",
+      "12": "Mg",
+      "13": "Pk",
     };
     return csv
       .split(",")
@@ -1519,13 +1570,9 @@
   function formatNavaidTooltip(props: any): string {
     const class_ = String(props.class ?? "");
     const lines: string[] = [];
-    const title = props.OBJNAM
-      ? escapeHtml(String(props.OBJNAM))
-      : navaidClassLabel(class_);
+    const title = props.OBJNAM ? escapeHtml(String(props.OBJNAM)) : navaidClassLabel(class_);
     lines.push(`<div class="navaid-tt-title">${title}</div>`);
-    lines.push(
-      `<div class="navaid-tt-sub">${escapeHtml(navaidClassLabel(class_))}</div>`
-    );
+    lines.push(`<div class="navaid-tt-sub">${escapeHtml(navaidClassLabel(class_))}</div>`);
 
     // Light characteristic line: e.g. "Fl R 5s 65ft 12nm". For a buoy
     // that's been server-side joined to a co-located LIGHTS feature the
@@ -1565,15 +1612,11 @@
     const sectr1 = props.SECTR1 ?? props.LIGHT_SECTR1;
     const sectr2 = props.SECTR2 ?? props.LIGHT_SECTR2;
     if (sectr1 != null && sectr2 != null) {
-      lines.push(
-        `<div class="navaid-tt-row">Sector ${sectr1}°–${sectr2}°</div>`
-      );
+      lines.push(`<div class="navaid-tt-row">Sector ${sectr1}°–${sectr2}°</div>`);
     }
 
     if (props.INFORM) {
-      lines.push(
-        `<div class="navaid-tt-info">${escapeHtml(String(props.INFORM))}</div>`
-      );
+      lines.push(`<div class="navaid-tt-info">${escapeHtml(String(props.INFORM))}</div>`);
     }
 
     return lines.join("");
@@ -1582,29 +1625,47 @@
   // S-57 CATBRG enum → human-readable bridge category.
   function bridgeCategoryLabel(code: number): string {
     switch (code) {
-      case 1: return "Fixed";
-      case 2: return "Opening";
-      case 3: return "Swing";
-      case 4: return "Lifting";
-      case 5: return "Bascule";
-      case 6: return "Pontoon";
-      case 7: return "Drawbridge";
-      case 8: return "Transporter";
-      case 9: return "Footbridge";
-      case 10: return "Viaduct";
-      case 11: return "Aqueduct";
-      case 12: return "Suspension";
-      default: return "";
+      case 1:
+        return "Fixed";
+      case 2:
+        return "Opening";
+      case 3:
+        return "Swing";
+      case 4:
+        return "Lifting";
+      case 5:
+        return "Bascule";
+      case 6:
+        return "Pontoon";
+      case 7:
+        return "Drawbridge";
+      case 8:
+        return "Transporter";
+      case 9:
+        return "Footbridge";
+      case 10:
+        return "Viaduct";
+      case 11:
+        return "Aqueduct";
+      case 12:
+        return "Suspension";
+      default:
+        return "";
     }
   }
 
   function structureClassLabel(c: string): string {
     switch (c) {
-      case "BRIDGE": return "Bridge";
-      case "CBLOHD": return "Overhead cable";
-      case "PIPOHD": return "Overhead pipe";
-      case "CONVYR": return "Conveyor";
-      default:       return c;
+      case "BRIDGE":
+        return "Bridge";
+      case "CBLOHD":
+        return "Overhead cable";
+      case "PIPOHD":
+        return "Overhead pipe";
+      case "CONVYR":
+        return "Conveyor";
+      default:
+        return c;
     }
   }
 
@@ -1670,9 +1731,7 @@
             lineDash: isBridge ? undefined : [8, 5],
           }),
           fill: new Fill({
-            color: isBridge
-              ? "rgba(250,204,21,0.55)"
-              : "rgba(253,230,138,0.4)",
+            color: isBridge ? "rgba(250,204,21,0.55)" : "rgba(253,230,138,0.4)",
           }),
         })
       );
@@ -1705,13 +1764,9 @@
   function formatStructureTooltip(props: any): string {
     const class_ = String(props.class ?? "");
     const lines: string[] = [];
-    const title = props.OBJNAM
-      ? escapeHtml(String(props.OBJNAM))
-      : structureClassLabel(class_);
+    const title = props.OBJNAM ? escapeHtml(String(props.OBJNAM)) : structureClassLabel(class_);
     lines.push(`<div class="navaid-tt-title">${title}</div>`);
-    lines.push(
-      `<div class="navaid-tt-sub">${escapeHtml(structureClassLabel(class_))}</div>`
-    );
+    lines.push(`<div class="navaid-tt-sub">${escapeHtml(structureClassLabel(class_))}</div>`);
     const meta: string[] = [];
     if (class_ === "BRIDGE" && props.CATBRG != null) {
       const label = bridgeCategoryLabel(Number(props.CATBRG));
@@ -1761,10 +1816,7 @@
     const w = baseW;
     const h = baseH * lengthScale;
     const inset = sw / 2;
-    const points =
-      `${w / 2},${inset} ` +
-      `${w - inset},${h - inset} ` +
-      `${inset},${h - inset}`;
+    const points = `${w / 2},${inset} ` + `${w - inset},${h - inset} ` + `${inset},${h - inset}`;
     const svg =
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" ` +
       `width="${w}" height="${h}">` +
@@ -1785,8 +1837,7 @@
     const length = feature.get("length") as number | null | undefined;
     // Heading of exactly 0 from AIS usually means "unknown" rather than
     // genuinely pointing north — fall back to COG when available.
-    const direction =
-      heading != null && heading !== 0 ? heading : (cog ?? 0);
+    const direction = heading != null && heading !== 0 ? heading : (cog ?? 0);
     const rotation = (direction * Math.PI) / 180;
 
     // Triangle is always 2:1 (height:width) at the default vessel length;
@@ -1908,9 +1959,7 @@
       // When a popup is open on a boat, suppress every other boat's track
       // (and its detections) so only the selected target's history shows.
       if (popupState.visible) {
-        const selectedBoatId = popupState.content.isMyBoat
-          ? "myBoat"
-          : popupState.content.mmsi;
+        const selectedBoatId = popupState.content.isMyBoat ? "myBoat" : popupState.content.mmsi;
         if (selectedBoatId && boatId !== selectedBoatId) {
           return new Style({});
         }
@@ -2097,11 +2146,7 @@
   // the window historical paints unconditionally. Net effect: no
   // double-painting of the recent past, but disconnections / sensor blips
   // in realtime get filled in by historical.
-  function renderHistoricalTrack(
-    boatId: string,
-    history: PositionPoint[],
-    idPrefix: string
-  ): void {
+  function renderHistoricalTrack(boatId: string, history: PositionPoint[], idPrefix: string): void {
     const now = Date.now();
     const realtimeWindowStart = now - realtimeWindowMs;
 
@@ -2197,8 +2242,7 @@
     // The override-resize branch only applies to the user-configured myBoat
     // icon (when an override has actually loaded), not to the bundled AIS
     // variant which already matches the default natural dimensions.
-    const isOverride =
-      src === myBoatImage && myBoatImage !== boatImage;
+    const isOverride = src === myBoatImage && myBoatImage !== boatImage;
     if (isOverride && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
       const ratio = BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight;
       sx *= ratio;
@@ -2414,11 +2458,7 @@
     return Math.sqrt(ex * ex + ey * ey);
   }
 
-  function showEditPopup(
-    mode: "insert" | "delete",
-    coord: number[],
-    waypointId: string
-  ) {
+  function showEditPopup(mode: "insert" | "delete", coord: number[], waypointId: string) {
     editPopupState.mode = mode;
     editPopupState.lng = coord[0];
     editPopupState.lat = coord[1];
@@ -2624,7 +2664,6 @@
     }
   }
 
-
   // tileBase is the origin of the map+weather server the app fetches tiles and
   // weather from. Empty = same-origin (this server). Set from /app-config at
   // startup (loadAppConfig), so an app on :8888 can pull tiles/weather from a
@@ -2787,9 +2826,7 @@
           fetch(url)
             .then((r) => r.json())
             .then((j) => {
-              const feats = navaidSource
-                .getFormat()!
-                .readFeatures(j) as Feature[];
+              const feats = navaidSource.getFormat()!.readFeatures(j) as Feature[];
               navaidSource.addFeatures(feats);
               success?.(feats);
               capVectorSource(navaidSource);
@@ -2828,9 +2865,7 @@
           fetch(url)
             .then((r) => r.json())
             .then((j) => {
-              const feats = structureSource
-                .getFormat()!
-                .readFeatures(j) as Feature[];
+              const feats = structureSource.getFormat()!.readFeatures(j) as Feature[];
               structureSource.addFeatures(feats);
               success?.(feats);
               capVectorSource(structureSource);
@@ -3003,7 +3038,6 @@
           }),
         }),
       });
-
     }
 
     // Track layer for myBoat (child of boat layer)
@@ -3167,6 +3201,38 @@
         layer: navWaypointLayer,
         parent: "boat",
       });
+
+      // Saved-route preview: a single display-only layer fed by the
+      // `routePreview` prop (see the $effect below). Lower zIndex than the
+      // active nav route so the live route always sits on top.
+      routePreviewSource = new VectorSource();
+      var routePreviewLayer = new Vector({
+        source: routePreviewSource,
+        style: (feature) => {
+          const color = (feature.get("color") as string) || "#00d0ff";
+          if (feature.getGeometry()?.getType() === "Point") {
+            return new Style({
+              image: new CircleStyle({
+                radius: 4,
+                fill: new Fill({ color }),
+                stroke: new Stroke({ color: "white", width: 1 }),
+              }),
+            });
+          }
+          return new Style({
+            stroke: new Stroke({ color, width: 3, lineDash: [2, 6] }),
+          });
+        },
+        opacity: 0.85,
+        zIndex: 20,
+      });
+      mapGlobal.layerOptions.push({
+        name: "route-preview",
+        displayName: "route preview",
+        on: true,
+        layer: routePreviewLayer,
+        parent: "boat",
+      });
     }
 
     var aisLayer = new Vector({
@@ -3304,7 +3370,6 @@
     onAirstreamBboxChange({ minLon, minLat, maxLon, maxLat });
   }
 
-
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
     if (l == null) {
@@ -3325,11 +3390,8 @@
     // off — the per-feature filter in createTrackStyleFunction hides the
     // other boats' tracks, so only the selected one renders.
     const aisPopupForceTrack =
-      popupState.visible &&
-      !popupState.content.isMyBoat &&
-      !!popupState.content.mmsi;
-    const myBoatPopupForceTrack =
-      popupState.visible && popupState.content.isMyBoat;
+      popupState.visible && !popupState.content.isMyBoat && !!popupState.content.mmsi;
+    const myBoatPopupForceTrack = popupState.visible && popupState.content.isMyBoat;
 
     // When a chart base (checkmate / noaa / noaa-ecdis) is active, force the
     // public OSM base on (it's the radio-"off" sibling) at ALL zooms as a
@@ -3345,9 +3407,7 @@
     // skipped/loaded tiles re-evaluate.
     if (osmChartFallback !== prevChartBaseActive) {
       prevChartBaseActive = osmChartFallback;
-      const osmBase = mapGlobal.layerOptions.find(
-        (l) => l.name === "open street map",
-      );
+      const osmBase = mapGlobal.layerOptions.find((l) => l.name === "open street map");
       (osmBase?.layer as TileLayer<XYZ> | undefined)?.getSource()?.refresh();
     }
 
@@ -3375,8 +3435,7 @@
       const osmForcesOn = l.name === "open street map" && osmChartFallback;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      const shouldBeVisible =
-        (l.on || popupForcesOn || osmForcesOn) && !isParentOff;
+      const shouldBeVisible = (l.on || popupForcesOn || osmForcesOn) && !isParentOff;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -3535,10 +3594,7 @@
               !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
             ) {
               const map = event.map ?? mapGlobal.map;
-              const px = map?.getPixelFromCoordinate([
-                myBoat.location[1],
-                myBoat.location[0],
-              ]);
+              const px = map?.getPixelFromCoordinate([myBoat.location[1], myBoat.location[0]]);
               const sz = map?.getSize();
               if (px && sz && px[0] >= 0 && px[1] >= 0 && px[0] <= sz[0] && px[1] <= sz[1]) {
                 event.pixel = px;
@@ -3626,7 +3682,6 @@
       offset: [0, -18],
     });
     mapGlobal.map.addOverlay(aisTooltipOverlay);
-
 
     // Setup measure layer
     measureSource = new VectorSource();
@@ -3858,9 +3913,7 @@
             }
             const geom = (feature as Feature).getGeometry();
             if (geom && geom.getType() === "Point") {
-              navaidTooltipOverlay.setPosition(
-                (geom as Point).getCoordinates()
-              );
+              navaidTooltipOverlay.setPosition((geom as Point).getCoordinates());
             } else if (geom) {
               // Line/polygon (typical for bridges): anchor at the cursor
               // so the tooltip tracks the hover point rather than the
@@ -3871,8 +3924,7 @@
           {
             hitTolerance: 4,
             layerFilter: (layer) =>
-              layer === mapGlobal.navaidLayer ||
-              layer === mapGlobal.structureLayer,
+              layer === mapGlobal.navaidLayer || layer === mapGlobal.structureLayer,
           }
         );
       }
@@ -3942,11 +3994,7 @@
         const cursorLatLng: [number, number] = [cursorLngLat[1], cursorLngLat[0]];
         let nm: number | null = null;
         let brg: number | null = null;
-        if (
-          myBoat &&
-          myBoat.location &&
-          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
-        ) {
+        if (myBoat && myBoat.location && !(myBoat.location[0] === 0 && myBoat.location[1] === 0)) {
           const boatLatLng: [number, number] = [myBoat.location[0], myBoat.location[1]];
           const meters = getDistance(
             [myBoat.location[1], myBoat.location[0]], // [lng, lat]
@@ -3958,13 +4006,15 @@
         // Wind/wave sampling lives in WeatherOverlays (which owns the
         // handles); it publishes cursorSampler back to us. Read it at call
         // time so we always see the latest closure over the child's state.
-        const { windKt, windFromDeg, waveM, waveFromDeg } =
-          cursorSampler?.(cursorLngLat[0], cursorLngLat[1]) ?? {
-            windKt: null,
-            windFromDeg: null,
-            waveM: null,
-            waveFromDeg: null,
-          };
+        const { windKt, windFromDeg, waveM, waveFromDeg } = cursorSampler?.(
+          cursorLngLat[0],
+          cursorLngLat[1]
+        ) ?? {
+          windKt: null,
+          windFromDeg: null,
+          waveM: null,
+          waveFromDeg: null,
+        };
         cursorInfo = {
           lat: cursorLatLng[0],
           lng: cursorLatLng[1],
@@ -4158,9 +4208,7 @@
   }
 
   // True when the data panel has at least one row to show.
-  let hasSensorData = $derived(
-    sog != null || hdg != null || cog != null || depth != null
-  );
+  let hasSensorData = $derived(sog != null || hdg != null || cog != null || depth != null);
   let hasDataPanel = $derived(
     hasSensorData || !!routeStats || !!cursorInfo || !!tideInfo || !!weatherInfo
   );
@@ -4225,8 +4273,7 @@
     const now = tideView.now;
     const inRange = now >= tStart && now <= tEnd;
     const nowX = inRange ? xOf(now) : null;
-    const nowY =
-      inRange && tideView.currentLevel !== null ? yOf(tideView.currentLevel) : null;
+    const nowY = inRange && tideView.currentLevel !== null ? yOf(tideView.currentLevel) : null;
     return { points, nowX, nowY };
   });
 
@@ -4301,8 +4348,7 @@
       const lat2 = (s.lat * Math.PI) / 180;
       const dLat = lat2 - lat1;
       const dLng = ((s.lng - lng) * Math.PI) / 180;
-      const a =
-        Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
       const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       if (d < bestNm) {
         bestNm = d;
@@ -4361,11 +4407,7 @@
   // Clip a series to [tStart, tEnd]. Linearly interpolates endpoints at
   // tStart and tEnd so the resulting polyline reaches both window edges
   // (rather than snapping to the nearest sample inside the window).
-  function clipSeries(
-    series: TideSeriesPoint[],
-    tStart: number,
-    tEnd: number
-  ): TideSeriesPoint[] {
+  function clipSeries(series: TideSeriesPoint[], tStart: number, tEnd: number): TideSeriesPoint[] {
     if (series.length === 0) return [];
     const sorted = [...series].sort((a, b) => a.t.getTime() - b.t.getTime());
     const interpAt = (t: number): number | null => {
@@ -4525,9 +4567,9 @@
   let weatherInfo = $state<WeatherInfo | null>(null);
   // Wind/wave sampler published by WeatherOverlays. The pointer handler calls
   // it (read at call time) so the wind/wave handles stay private to the child.
-  let cursorSampler = $state<
-    ((lon: number, lat: number) => CursorWeatherSample) | undefined
-  >(undefined);
+  let cursorSampler = $state<((lon: number, lat: number) => CursorWeatherSample) | undefined>(
+    undefined
+  );
 
   function handleMapContainerClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
@@ -4608,7 +4650,9 @@
 
 <div
   id="map-container"
-  class="relative {fullWidth ? 'lg:col-span-4 lg:row-span-6' : 'lg:col-span-3 lg:row-span-5'} row-span-3 border border-dark"
+  class="relative {fullWidth
+    ? 'lg:col-span-4 lg:row-span-6'
+    : 'lg:col-span-3 lg:row-span-5'} row-span-3 border border-dark"
   class:layers-expanded={layersExpanded}
   class:boats-expanded={boatsExpanded}
   class:map-loaded={mapLoaded}
@@ -4630,13 +4674,7 @@
   <!-- Tiny "Powered By Viam" overlay anchored above the OL ScaleLine so it
        doesn't fight for the same bottom-left corner. Pointer-events off so
        it can't swallow map clicks. -->
-  <img
-    class="viam-logo-overlay"
-    src={viamLogoUrl}
-    alt="Powered by Viam"
-    width="80"
-    height="16"
-  />
+  <img class="viam-logo-overlay" src={viamLogoUrl} alt="Powered by Viam" width="80" height="16" />
 
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
@@ -4644,10 +4682,8 @@
     <div class="popup-header">
       <h3 class="popup-title">
         {#if popupCountry}
-          <span
-            class="popup-flag"
-            title={popupCountry[1]}
-            aria-label={popupCountry[1]}>{flagEmoji(popupCountry[0])}</span
+          <span class="popup-flag" title={popupCountry[1]} aria-label={popupCountry[1]}
+            >{flagEmoji(popupCountry[0])}</span
           >
         {/if}
         {popupState.content.name}
@@ -4735,7 +4771,6 @@
   <!-- AIS flag/country hover tooltip -->
   <div id="ais-tooltip" class="ais-tooltip"></div>
 
-
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
        CSS — no OL overlay needed since the content isn't bound to a coord. -->
@@ -4789,30 +4824,30 @@
       {@const isHidden = l.name === "airstream" && !airstreamConfigured}
       {@const isBaseLayer = BASE_LAYER_NAMES.includes(l.name)}
       {#if !isHidden && isBaseLayerGroup(l)}
-      <label class:child-layer={l.parent} class:disabled={isParentOff}>
-        <input
-          type={isBaseLayer ? "radio" : "checkbox"}
-          name={isBaseLayer ? "base-layer" : undefined}
-          checked={mapGlobal.layerOptions[idx].on}
-          onchange={(e) => {
-            const checked = (e.currentTarget as HTMLInputElement).checked;
-            mapGlobal.layerOptions[idx].on = checked;
-            // Radio behaviour for base layers: turning one on flips
-            // every other base layer off so we never have two
-            // simultaneously selected.
-            if (isBaseLayer && checked) {
-              for (var other of mapGlobal.layerOptions) {
-                if (other.name !== l.name && BASE_LAYER_NAMES.includes(other.name)) {
-                  other.on = false;
+        <label class:child-layer={l.parent} class:disabled={isParentOff}>
+          <input
+            type={isBaseLayer ? "radio" : "checkbox"}
+            name={isBaseLayer ? "base-layer" : undefined}
+            checked={mapGlobal.layerOptions[idx].on}
+            onchange={(e) => {
+              const checked = (e.currentTarget as HTMLInputElement).checked;
+              mapGlobal.layerOptions[idx].on = checked;
+              // Radio behaviour for base layers: turning one on flips
+              // every other base layer off so we never have two
+              // simultaneously selected.
+              if (isBaseLayer && checked) {
+                for (var other of mapGlobal.layerOptions) {
+                  if (other.name !== l.name && BASE_LAYER_NAMES.includes(other.name)) {
+                    other.on = false;
+                  }
                 }
               }
-            }
-            saveLayerStates();
-          }}
-          disabled={isParentOff}
-        />
-        {l.displayName || l.name}
-      </label>
+              saveLayerStates();
+            }}
+            disabled={isParentOff}
+          />
+          {l.displayName || l.name}
+        </label>
       {/if}
     {/each}
 
@@ -4825,61 +4860,61 @@
       {@const isParentOff = parentLayer && !parentLayer.on}
       {@const isHidden = l.name === "airstream" && !airstreamConfigured}
       {#if !isHidden && !isBaseLayerGroup(l)}
-      {#if l.name === "weather"}
-        <!-- Folder-style section header: no checkbox, just labels the
+        {#if l.name === "weather"}
+          <!-- Folder-style section header: no checkbox, just labels the
              wind/waves rows that follow as a group. -->
-        <div class="layer-section-header">{l.displayName || l.name}</div>
-      {:else}
-      <label class:child-layer={l.parent} class:disabled={isParentOff}>
-        <input
-          type="checkbox"
-          checked={mapGlobal.layerOptions[idx].on}
-          onchange={(e) => {
-            const checked = (e.currentTarget as HTMLInputElement).checked;
-            mapGlobal.layerOptions[idx].on = checked;
-            saveLayerStates();
-            if (l.name === "airstream") {
-              if (checked) {
-                lastAirstreamBboxKey = "";
-                maybeEmitAirstreamBbox();
-              } else if (onAirstreamBboxChange) {
-                lastAirstreamBboxKey = "";
-                onAirstreamBboxChange(null);
-              }
-            }
-          }}
-          disabled={isParentOff}
-        />
-        {l.displayName || l.name}
-        {#if l.name === "heading-line"}
-          <select
-            class="heading-line-length"
-            value={headingLineLengthNm}
-            onchange={(e) => setHeadingLineLength(Number(e.currentTarget.value))}
-            disabled={isParentOff || !l.on}
-            onclick={(e) => e.stopPropagation()}
-            aria-label="heading line length"
-          >
-            {#each HEADING_LINE_LENGTH_OPTIONS as nm}
-              <option value={nm}>{nm} nm</option>
-            {/each}
-          </select>
-        {:else if l.name === "ais-projection"}
-          <select
-            class="heading-line-length"
-            value={aisProjectionMinutes}
-            onchange={(e) => setAisProjectionMinutes(Number(e.currentTarget.value))}
-            disabled={isParentOff || !l.on}
-            onclick={(e) => e.stopPropagation()}
-            aria-label="ais projection length in minutes"
-          >
-            {#each AIS_PROJECTION_OPTIONS as min}
-              <option value={min}>{min} min</option>
-            {/each}
-          </select>
+          <div class="layer-section-header">{l.displayName || l.name}</div>
+        {:else}
+          <label class:child-layer={l.parent} class:disabled={isParentOff}>
+            <input
+              type="checkbox"
+              checked={mapGlobal.layerOptions[idx].on}
+              onchange={(e) => {
+                const checked = (e.currentTarget as HTMLInputElement).checked;
+                mapGlobal.layerOptions[idx].on = checked;
+                saveLayerStates();
+                if (l.name === "airstream") {
+                  if (checked) {
+                    lastAirstreamBboxKey = "";
+                    maybeEmitAirstreamBbox();
+                  } else if (onAirstreamBboxChange) {
+                    lastAirstreamBboxKey = "";
+                    onAirstreamBboxChange(null);
+                  }
+                }
+              }}
+              disabled={isParentOff}
+            />
+            {l.displayName || l.name}
+            {#if l.name === "heading-line"}
+              <select
+                class="heading-line-length"
+                value={headingLineLengthNm}
+                onchange={(e) => setHeadingLineLength(Number(e.currentTarget.value))}
+                disabled={isParentOff || !l.on}
+                onclick={(e) => e.stopPropagation()}
+                aria-label="heading line length"
+              >
+                {#each HEADING_LINE_LENGTH_OPTIONS as nm}
+                  <option value={nm}>{nm} nm</option>
+                {/each}
+              </select>
+            {:else if l.name === "ais-projection"}
+              <select
+                class="heading-line-length"
+                value={aisProjectionMinutes}
+                onchange={(e) => setAisProjectionMinutes(Number(e.currentTarget.value))}
+                disabled={isParentOff || !l.on}
+                onclick={(e) => e.stopPropagation()}
+                aria-label="ais projection length in minutes"
+              >
+                {#each AIS_PROJECTION_OPTIONS as min}
+                  <option value={min}>{min} min</option>
+                {/each}
+              </select>
+            {/if}
+          </label>
         {/if}
-      </label>
-      {/if}
       {/if}
     {/each}
 
@@ -4977,9 +5012,15 @@
         />
         <button class="fit-all-btn" onclick={fitToVisibleBoats}> Fit All Visible </button>
       </div>
-
     {/if}
   </div>
+
+  <!-- Optional left-side panel overlay (e.g. routes), toggled by the routes
+       toolbar button below; sits just right of the toolbar over the left edge
+       of the chart. -->
+  {#if leftOverlay && routesExpanded}
+    <div class="left-overlay">{@render leftOverlay()}</div>
+  {/if}
 
   <!-- Left-side toolbar: every map control stacks here under the OL
        zoom +/- buttons so the toolbar reads top-to-bottom in one place
@@ -5007,11 +5048,41 @@
         stroke-linejoin="round"
         aria-hidden="true"
       >
-        <path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+        <path
+          d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"
+        />
         <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
         <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
       </svg>
     </button>
+
+    {#if leftOverlay}
+      <button
+        class="routes-toggle"
+        class:active={routesExpanded}
+        onclick={() => (routesExpanded = !routesExpanded)}
+        data-tip="Routes"
+        aria-label="Toggle routes panel"
+        aria-pressed={routesExpanded}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="6" cy="19" r="3" />
+          <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+          <circle cx="18" cy="5" r="3" />
+        </svg>
+      </button>
+    {/if}
 
     {#if enableBoatsPanel}
       <button
@@ -5034,7 +5105,9 @@
           stroke-linejoin="round"
           aria-hidden="true"
         >
-          <path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+          <path
+            d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"
+          />
           <path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.34 2.81 7.76" />
           <path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6" />
           <path d="M12 10v4" />
@@ -5054,165 +5127,165 @@
     </button>
 
     <button
-    class="measure-toggle"
-    class:active={measureActive}
-    onclick={toggleMeasure}
-    aria-pressed={measureActive}
-    data-tip="Measure distance"
-    aria-label="Measure distance"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-      ><path
-        d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"
-      /><path d="m14.5 12.5 2-2" /><path d="m11.5 9.5 2-2" /><path d="m8.5 6.5 2-2" /><path
-        d="m17.5 15.5 2-2"
-      /></svg
+      class="measure-toggle"
+      class:active={measureActive}
+      onclick={toggleMeasure}
+      aria-pressed={measureActive}
+      data-tip="Measure distance"
+      aria-label="Measure distance"
     >
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        ><path
+          d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"
+        /><path d="m14.5 12.5 2-2" /><path d="m11.5 9.5 2-2" /><path d="m8.5 6.5 2-2" /><path
+          d="m17.5 15.5 2-2"
+        /></svg
+      >
+    </button>
 
-  {#if onAddWaypoint}
-    <!-- Horizontal pair: pin (add) + ✕ (clear). Clear only renders when
+    {#if onAddWaypoint}
+      <!-- Horizontal pair: pin (add) + ✕ (clear). Clear only renders when
          a route exists, so the pin is alone otherwise. The wrapper keeps
          them on the same row inside the otherwise-vertical toolbar. -->
-    <div class="toolbar-row">
-      <button
-        class="add-waypoint-toggle"
-        class:active={addWaypointActive}
-        onclick={toggleAddWaypoint}
-        aria-pressed={addWaypointActive}
-        data-tip={addWaypointActive
-          ? "Click on the chart to add a waypoint (active)"
-          : "Add a route waypoint from current position"}
-        aria-label="Add waypoint"
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="15"
-          height="15"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
-          <circle cx="12" cy="9" r="2.5" />
-        </svg>
-      </button>
-      {#if addWaypointActive && navWaypoints && navWaypoints.length > 0}
+      <div class="toolbar-row">
         <button
-          class="clear-waypoints-btn"
-          class:armed={clearConfirmArmed}
-          onclick={clearWaypoints}
-          data-tip={clearConfirmArmed
-            ? "Click again to confirm clearing all waypoints"
-            : "Clear all route waypoints"}
-          aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+          class="add-waypoint-toggle"
+          class:active={addWaypointActive}
+          onclick={toggleAddWaypoint}
+          aria-pressed={addWaypointActive}
+          data-tip={addWaypointActive
+            ? "Click on the chart to add a waypoint (active)"
+            : "Add a route waypoint from current position"}
+          aria-label="Add waypoint"
         >
-          {clearConfirmArmed ? "?" : "✕"}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
+            <circle cx="12" cy="9" r="2.5" />
+          </svg>
         </button>
-      {/if}
-    </div>
-  {/if}
+        {#if addWaypointActive && navWaypoints && navWaypoints.length > 0}
+          <button
+            class="clear-waypoints-btn"
+            class:armed={clearConfirmArmed}
+            onclick={clearWaypoints}
+            data-tip={clearConfirmArmed
+              ? "Click again to confirm clearing all waypoints"
+              : "Clear all route waypoints"}
+            aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+          >
+            {clearConfirmArmed ? "?" : "✕"}
+          </button>
+        {/if}
+      </div>
+    {/if}
 
-  <button
-    class="heads-up-toggle"
-    class:active={headsUpActive}
-    onclick={toggleHeadsUp}
-    aria-pressed={headsUpActive}
-    disabled={!myBoat}
-    data-tip={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
-    aria-label="Toggle heads-up orientation"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-      ><circle cx="12" cy="12" r="10" /><polygon
-        points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
-      /></svg
+    <button
+      class="heads-up-toggle"
+      class:active={headsUpActive}
+      onclick={toggleHeadsUp}
+      aria-pressed={headsUpActive}
+      disabled={!myBoat}
+      data-tip={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
+      aria-label="Toggle heads-up orientation"
     >
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        ><circle cx="12" cy="12" r="10" /><polygon
+          points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
+        /></svg
+      >
+    </button>
 
-  <button
-    class="boat-position-toggle"
-    class:active={boatPositionMode === "bottom"}
-    onclick={toggleBoatPosition}
-    aria-pressed={boatPositionMode === "bottom"}
-    disabled={!myBoat}
-    data-tip={boatPositionMode === "bottom"
-      ? "Boat position: bottom 20% (click for centered)"
-      : "Boat position: centered (click for bottom 20%)"}
-    aria-label="Toggle boat position on screen"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
+    <button
+      class="boat-position-toggle"
+      class:active={boatPositionMode === "bottom"}
+      onclick={toggleBoatPosition}
+      aria-pressed={boatPositionMode === "bottom"}
+      disabled={!myBoat}
+      data-tip={boatPositionMode === "bottom"
+        ? "Boat position: bottom 20% (click for centered)"
+        : "Boat position: centered (click for bottom 20%)"}
+      aria-label="Toggle boat position on screen"
     >
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      {#if boatPositionMode === "bottom"}
-        <circle cx="12" cy="18" r="2" fill="currentColor" />
-      {:else}
-        <circle cx="12" cy="12" r="2" fill="currentColor" />
-      {/if}
-    </svg>
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        {#if boatPositionMode === "bottom"}
+          <circle cx="12" cy="18" r="2" fill="currentColor" />
+        {:else}
+          <circle cx="12" cy="12" r="2" fill="currentColor" />
+        {/if}
+      </svg>
+    </button>
 
-  <button
-    class="auto-zoom-toggle"
-    class:active={autoZoomActive}
-    onclick={toggleAutoZoom}
-    aria-pressed={autoZoomActive}
-    data-tip={autoZoomActive
-      ? "Auto-zoom (on): zoom follows boat speed"
-      : "Auto-zoom (off): manual zoom"}
-    aria-label="Toggle auto-zoom"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
+    <button
+      class="auto-zoom-toggle"
+      class:active={autoZoomActive}
+      onclick={toggleAutoZoom}
+      aria-pressed={autoZoomActive}
+      data-tip={autoZoomActive
+        ? "Auto-zoom (on): zoom follows boat speed"
+        : "Auto-zoom (off): manual zoom"}
+      aria-label="Toggle auto-zoom"
     >
-      <circle cx="11" cy="11" r="7" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-      <line x1="8" y1="11" x2="14" y2="11" />
-      <line x1="11" y1="8" x2="11" y2="14" />
-    </svg>
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="11" cy="11" r="7" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        <line x1="8" y1="11" x2="14" y2="11" />
+        <line x1="11" y1="8" x2="11" y2="14" />
+      </svg>
+    </button>
   </div>
 
   {#if measureActive && measureDistance !== null}
@@ -5262,8 +5335,9 @@
             <span class="data-panel-label">Next</span>
             <span class="data-panel-value">
               <span class="data-panel-bold">{routeStats.next.distNm.toFixed(2)}</span><sup>nm</sup>
-              · {routeStats.next.headingDeg.toFixed(0)}°
-              · {formatDurationMin(routeStats.next.minutes)}
+              · {routeStats.next.headingDeg.toFixed(0)}° · {formatDurationMin(
+                routeStats.next.minutes
+              )}
               · ETA {formatEta(routeStats.next.minutes)}
             </span>
           </div>
@@ -5271,7 +5345,9 @@
             <div class="data-panel-row">
               <span class="data-panel-label">Final</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup>nm</sup>
+                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup
+                  >nm</sup
+                >
                 · {formatDurationMin(routeStats.final.minutes)}
                 · ETA {formatEta(routeStats.final.minutes)}
               </span>
@@ -5296,17 +5372,8 @@
             <span class="data-panel-station">{tideInfo.station.distNm.toFixed(1)} nm away</span>
           </div>
           {#if tideSpark}
-            <svg
-              class="tide-spark"
-              viewBox="0 0 {sparkW} {sparkH}"
-              preserveAspectRatio="none"
-            >
-              <polyline
-                points={tideSpark.points}
-                fill="none"
-                stroke="#4ade80"
-                stroke-width="1.5"
-              />
+            <svg class="tide-spark" viewBox="0 0 {sparkW} {sparkH}" preserveAspectRatio="none">
+              <polyline points={tideSpark.points} fill="none" stroke="#4ade80" stroke-width="1.5" />
               {#if tideSpark.nowX !== null}
                 <line
                   x1={tideSpark.nowX}
@@ -5388,7 +5455,9 @@
             <span class="data-panel-label">Rain</span>
             <span class="data-panel-value">
               {#if weatherInfo.rainTotalIn > 0}
-                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup>in</sup>
+                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup
+                  >in</sup
+                >
                 · {weatherInfo.rainHoursAny}h
               {:else}
                 <span class="data-panel-bold">none</span>
@@ -5418,15 +5487,11 @@
               </span>
             {/if}
             {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
-              {@const windColor = colorForValue(
-                WIND_COLOR_SCALE,
-                cursorInfo.windKt / MS_TO_KT,
-                15,
-              )}
+              {@const windColor = colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}
               <span class="data-panel-value" style="color: {windColor}">
-                <span class="weather-swatch" style="background: {windColor}"
-                ></span>
-                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup>
+                <span class="weather-swatch" style="background: {windColor}"></span>
+                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup
+                >
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
@@ -5434,12 +5499,13 @@
               {@const waveColor = colorForValue(
                 WAVE_COLOR_SCALE,
                 cursorInfo.waveM,
-                WAVE_RANGE_MAX_M,
+                WAVE_RANGE_MAX_M
               )}
               <span class="data-panel-value" style="color: {waveColor}">
-                <span class="weather-swatch" style="background: {waveColor}"
-                ></span>
-                wave <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span><sup>ft</sup>
+                <span class="weather-swatch" style="background: {waveColor}"></span>
+                wave
+                <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span
+                ><sup>ft</sup>
                 from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
@@ -5729,6 +5795,24 @@
     flex-direction: column;
     gap: 5px;
     z-index: 1001;
+  }
+
+  /* Panel overlay on the left edge of the chart (routes). Sits to the right of
+     the toolbar's button column; dark translucent so the white panel text
+     stays readable over light chart tiles. Capped height with its own scroll
+     so it never runs off the bottom of the map. */
+  .left-overlay {
+    position: absolute;
+    top: 90px;
+    left: 48px;
+    width: 17rem;
+    max-height: calc(100% - 110px);
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.82);
+    border: 1px solid #444;
+    border-radius: 4px;
+    z-index: 1002;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   }
 
   /* Sub-row for paired buttons inside the otherwise-vertical toolbar.
@@ -6094,6 +6178,36 @@
     background: #1d4ed8;
   }
 
+  .routes-toggle {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .routes-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .routes-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .routes-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
   /* Map-control buttons share a base style and stack vertically inside
      .left-toolbar; per-button rules below only override colour/active
      states. */
@@ -6379,7 +6493,6 @@
   .edit-waypoint-close:hover {
     color: white;
   }
-
 
   /* Boats panel (bottom-right, next to Layers) */
   .boats-controls {

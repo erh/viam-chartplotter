@@ -32,6 +32,12 @@ lint: node_modules
 	npm run lint-fix
 	npx svelte-check --tsconfig ./tsconfig.json
 
+# Run the whole test suite: Go unit tests plus the frontend (Vitest) tests.
+.PHONY: test
+test: node_modules
+	go test ./...
+	npm test
+
 bin/viamchartplottermodule: bin $(GO_SRC) go.mod go.sum Makefile dist/index.html
 	go build -o bin/viamchartplottermodule cmd/module/cmd.go
 

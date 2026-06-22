@@ -288,6 +288,43 @@ func (s *diskNavStore) MoveWaypoint(ctx context.Context, id primitive.ObjectID, 
 	return errors.Errorf("no waypoint with id %s", id.Hex())
 }
 
+// ReplaceWaypoints atomically swaps the entire active waypoint list for the
+// given ordered points. Every previous waypoint (including visited ones) is
+// discarded and a fresh ObjectID + sequential Order is assigned to each new
+// point, so loading a saved route can't collide with stale IDs. An empty
+// points slice clears the route. It is not part of the upstream NavStore
+// interface; the chartplotter UI uses it (via DoCommand) to load a saved route
+// in one shot rather than N AddWaypoint round-trips. Returns the new count.
+func (s *diskNavStore) ReplaceWaypoints(ctx context.Context, points []*geo.Point) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	for i, p := range points {
+		if p == nil {
+			return 0, errors.Errorf("waypoint %d is nil", i)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make([]*navigation.Waypoint, 0, len(points))
+	for i, p := range points {
+		next = append(next, &navigation.Waypoint{
+			ID:    primitive.NewObjectID(),
+			Lat:   p.Lat(),
+			Long:  p.Lng(),
+			Order: i,
+		})
+	}
+	s.snapshot()
+	prev := s.waypoints
+	s.waypoints = next
+	if err := s.save(); err != nil {
+		s.waypoints = prev
+		return 0, err
+	}
+	return len(next), nil
+}
+
 func (s *diskNavStore) NextWaypoint(ctx context.Context) (navigation.Waypoint, error) {
 	if err := ctx.Err(); err != nil {
 		return navigation.Waypoint{}, err
