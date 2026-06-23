@@ -38,6 +38,8 @@ export default defineConfig({
       // dev server on :5173 behaves like the bundled production server.
       "/noaa-wms": "http://localhost:8888",
       "/noaa-enc": "http://localhost:8888",
+      "/noaa-weather": "http://localhost:8888",
+      "/app-config": "http://localhost:8888",
       "/version": "http://localhost:8888",
       "/myboat-icon": "http://localhost:8888",
     },

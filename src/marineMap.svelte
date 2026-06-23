@@ -13,21 +13,11 @@
   import Collection from "ol/Collection.js";
   import { useGeographic } from "ol/proj.js";
   import { boundingExtent } from "ol/extent.js";
-  import {
-    setupWeatherLayer,
-    WIND_COLOR_SCALE,
-    WAVE_COLOR_SCALE,
-    colorForValue,
-    type WeatherLayerHandle,
-  } from "./lib/windLayer";
-  import {
-    WindCDNClient,
-    loadServerWindConfig,
-  } from "./lib/windTiles";
-  import {
-    setupIsobarLayer,
-    type IsobarLayerHandle,
-  } from "./lib/isobarLayer";
+  import { WIND_COLOR_SCALE, WAVE_COLOR_SCALE, colorForValue } from "./lib/windLayer";
+  import WeatherOverlays, {
+    type WeatherInfo,
+    type CursorWeatherSample,
+  } from "./lib/WeatherOverlays.svelte";
   import "ol/ol.css";
   import ScaleLine from "ol/control/ScaleLine.js";
   import { defaults as defaultControls } from "ol/control/defaults.js";
@@ -79,157 +69,58 @@
     maxZoom?: number;
   }
 
-  // Weather overlay state. Populated once GFS / GFSWAVE data + ol-wind
-  // import resolve. Drives the shared forecast-hour slider beneath the
-  // chart and the cursor wind/wave readout.
-  let windHandle: WeatherLayerHandle | null = $state(null);
-  let waveHandle: WeatherLayerHandle | null = $state(null);
-  // Isobar layer (GFS PRMSL contours, GeoJSON LineStrings). Same
-  // forecast-hour slider as the wind/wave layers, but no model picker —
-  // there's only one PRMSL source registered today.
-  let isobarHandle: IsobarLayerHandle | null = $state(null);
-  let isobarLoading = $state(true);
-  // Constants used by the wind/wave legend UIs. ol-wind's Field
-  // carries the magnitude slot — wind speed in m/s for the wind layer,
-  // wave height in m for the wave layer (we encoded h·sin/h·cos as u/v
-  // on the backend). Both display ranges match the maxVelocity passed
-  // to setupWeatherLayer further down so the legend gradient is
-  // pixel-for-pixel what ol-wind paints.
+  // Constants used by the cursor wind/wave readout. ol-wind's Field
+  // carries the magnitude slot — wave height in m for the wave layer.
+  // WAVE_RANGE_MAX_M / METERS_TO_FEET / MS_TO_KT are shared with the
+  // (non-weather) cursor readout markup below; the weather overlay UI
+  // keeps its own copies in WeatherOverlays.svelte.
   const WAVE_RANGE_MAX_M = 3;
-  // 15 m/s ≈ 29.16 kt — the wind layer's maxVelocity. Rounded to 29
-  // for the legend so the rightmost tick reads cleanly.
-  const WIND_RANGE_MAX_KT = 29;
   const METERS_TO_FEET = 3.28084;
   const MS_TO_KT = 1.94384;
-  // GFS forecast hour the slider is currently displaying. Snapped to a
-  // 3 h step so changes line up with both wind + wave file cadences.
-  let weatherForecastHour = $state(0);
-  let weatherRunTime = $state<string | null>(null);
-  // Per-layer fetch state. Default true because both setupWeatherLayer
-  // calls fire at mount; flipped false in each .finally below. Reused
-  // for refetches (model swap, forecast-hour scrub) so the spinner in
-  // the forecast bar covers both initial load and subsequent fetches.
-  let windLoading = $state(true);
-  let waveLoading = $state(true);
-  let weatherLoading = $derived(windLoading || waveLoading || isobarLoading);
-  // First forecast hour ≥ "now", computed from the GFS run time. Used
-  // as the slider minimum so the user can't scrub back into already-
-  // expired analysis hours.
-  let weatherMinForecastHour = $state(0);
-  // Slider upper bound — driven by the currently-selected wind model's
-  // MaxFh (ECMWF=144, GFS=240, HRRR=18, ICON-EU=120 …). Updated by the
-  // model picker onchange handler so a GFS→ECMWF switch at fh=207
-  // visibly snaps the slider to 144, instead of leaving the thumb at
-  // a value the publisher has no tile for. Default 240 covers GFS at
-  // startup before the per-model meta lands.
-  let weatherMaxForecastHour = $state(240);
-  // Highest zoom at which the GFS-resolution weather overlay reads as
-  // signal rather than a flat coloured wash. Above this, both the
-  // wind/wave layers and the forecast-hour slider hide automatically.
-  const weatherMaxZoom = 12;
   // Reactive copy of map zoom so template conditionals (slider / wave
   // legend / etc.) re-render when the user scrolls past the gate. The
   // resolution-change listener installed in setupMap writes here.
   let currentZoom = $state(0);
-  // The set of wind / wave forecast models the user can switch between
-  // — populated from /noaa-weather/models on mount. Each entry carries
-  // its own MaxFh / StepFh / Disabled flag so the picker can both
-  // display the human label and grey out models whose decoders haven't
-  // been wired up server-side yet (NAM, ECMWF, ICON-Global).
-  type WeatherModelMeta = {
-    name: string;
-    displayName: string;
-    kind: "wind" | "wave" | "isobars" | "lightning";
-    domain: string;
-    minFh: number;
-    maxFh: number;
-    stepFh: number;
-    disabled?: boolean;
-    reason?: string;
-  };
-  let weatherModels = $state<WeatherModelMeta[]>([]);
-  // Currently selected model per kind. Defaults to the legacy product
-  // names so behaviour is unchanged until the user pops the dropdown.
-  let windModel = $state("gfs");
-  let waveModel = $state("pacioos-ww3");
-  // Last error from a failed model switch, surfaced under the picker
-  // so a user who picks a disabled stub can see *why* it's disabled
-  // instead of just seeing the layer blank.
-  let weatherModelError = $state<string | null>(null);
-  // setWeatherError mirrors the user-facing banner string into the
-  // browser console so the failure is grep-able + copy-pastable from
-  // DevTools even when the banner times out / scrolls off.
-  function setWeatherError(msg: string | null): void {
-    weatherModelError = msg;
-    if (msg) console.error("[weather]", msg);
+
+  // Chart base layers (radio-exclusive). When one is the active base, the
+  // opaque chart covers US waters, so the under-chart OSM fallback is wasted
+  // there.
+  const CHART_BASE_NAMES = ["checkmate", "noaa", "noaa-ecdis"];
+  // Tracks the last chartBaseActive() so updateOnLayers can refresh the OSM
+  // base source when the active base flips (the tileUrlFunction skips US tiles
+  // only while a chart base is active, so switching bases must re-evaluate).
+  let prevChartBaseActive = true;
+  function chartBaseActive(): boolean {
+    return CHART_BASE_NAMES.some((n) => {
+      const o = mapGlobal.layerOptions.find((p) => p.name === n);
+      return !!o && o.on;
+    });
   }
 
-  // Convert a "GFS run time + forecast hour" pair into a Date in local
-  // time, so we can show "Tue 14:00" instead of "+12h" on the slider.
-  function weatherDataDate(runTimeIso: string | null, fh: number): Date | null {
-    if (!runTimeIso) return null;
-    const d = new Date(runTimeIso);
-    if (Number.isNaN(d.getTime())) return null;
-    return new Date(d.getTime() + fh * 3600_000);
-  }
-
-  // Switch the wave layer to a different upstream model. Today there's
-  // only one registered wave option (pacioos-ww3) so the dropdown
-  // doesn't render — this stays as a one-liner forwarder so adding a
-  // second wave model (ECMWF WAM, GFSWAVE once we have JPEG2000) just
-  // works without UI changes.
-  async function swapWaveModel(next: string): Promise<string | null> {
-    if (next === waveModel || !waveHandle) return null;
-    const err = await waveHandle.setModel(next);
-    if (!err) waveModel = next;
-    return err;
-  }
-
-  // Compute the smallest 3-h-aligned forecast hour that lands at or
-  // after "now" — used as the slider floor so the user always starts
-  // from "current" rather than from the GFS analysis (which may be
-  // several hours in the past).
-  function nowForecastHour(runTimeIso: string | null): number {
-    if (!runTimeIso) return 0;
-    const run = new Date(runTimeIso);
-    if (Number.isNaN(run.getTime())) return 0;
-    const hoursFromRun = (Date.now() - run.getTime()) / 3600_000;
-    return Math.max(0, Math.ceil(hoursFromRun / 3) * 3);
-  }
-
-  // Forecast hours that land on local midnight inside [minFh, maxFh], with
-  // a weekday label for each. Used to overlay day-boundary ticks on the
-  // weather slider so the user can see at a glance where Tuesday ends and
-  // Wednesday begins, regardless of timezone or run-time alignment.
-  function computeDayMarkers(
-    runTimeIso: string | null,
-    minFh: number,
-    maxFh: number,
-  ): Array<{ pct: number; label: string }> {
-    if (!runTimeIso || maxFh <= minFh) return [];
-    const run = new Date(runTimeIso);
-    if (Number.isNaN(run.getTime())) return [];
-    const sliderEnd = new Date(run.getTime() + maxFh * 3600_000).getTime();
-    // First local midnight strictly after the slider's start; setHours(24,...)
-    // lands on the next calendar day's 00:00 local. From there step by 24 h
-    // (real-clock) — accepts the ~1 px slop on DST-transition days.
-    const sliderStart = new Date(run.getTime() + minFh * 3600_000);
-    const first = new Date(sliderStart);
-    first.setHours(24, 0, 0, 0);
-    const out: Array<{ pct: number; label: string }> = [];
-    for (
-      let t = first.getTime();
-      t <= sliderEnd;
-      t += 24 * 3600_000
-    ) {
-      const fh = (t - run.getTime()) / 3600_000;
-      const pct = ((fh - minFh) / (maxFh - minFh)) * 100;
-      const label = new Date(t).toLocaleDateString(undefined, {
-        weekday: "short",
-      });
-      out.push({ pct, label });
-    }
-    return out;
+  // Approximate NOAA ENC coverage (US marine waters). Used to skip the
+  // under-chart OSM fallback fetch where the chart already covers the tile —
+  // see the OSM base tileUrlFunction. Generous rectangles; tiles only partly
+  // inside (coverage edges) still load OSM, so no blank gaps at the boundary.
+  const US_ENC_COVERAGE: Array<[number, number, number, number]> = [
+    [-128, 22, -64, 50], // CONUS + Atlantic/Gulf/Pacific coasts + Great Lakes
+    [-180, 50, -128, 73], // Alaska (mainland + eastern Aleutians)
+    [172, 50, 180, 73], //   Alaska (Aleutians across the dateline)
+    [-161, 18, -154, 23], // Hawaii
+    [-68.2, 17.3, -64.2, 19.1], // Puerto Rico / USVI
+    [144, 13, 146.5, 21], // Guam / CNMI
+    [-171.5, -14.6, -168, -10.8], // American Samoa
+  ];
+  // True when the whole XYZ tile falls inside US ENC coverage (web-mercator
+  // tile → lon/lat box, fully-contained test).
+  function tileFullyInUSWaters(z: number, x: number, y: number): boolean {
+    const n = 2 ** z;
+    const lonW = (x / n) * 360 - 180;
+    const lonE = ((x + 1) / n) * 360 - 180;
+    const latN = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+    const latS = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+    return US_ENC_COVERAGE.some(
+      (b) => lonW >= b[0] && lonE <= b[2] && latS >= b[1] && latN <= b[3]
+    );
   }
 
   let boatImage = "topdown-boat.svg";
@@ -255,10 +146,7 @@
   const BOAT_SCALE_MIN = 0.6;
   const BOAT_SCALE_MAX = 2.5;
 
-  function dimScaleFactor(
-    valueMeters: number | null | undefined,
-    referenceMeters: number
-  ): number {
+  function dimScaleFactor(valueMeters: number | null | undefined, referenceMeters: number): number {
     if (!valueMeters || !Number.isFinite(valueMeters) || valueMeters <= 0) {
       return 1;
     }
@@ -273,9 +161,7 @@
     beamMeters: number | null | undefined
   ): [number, number] {
     const sy = dimScaleFactor(lengthMeters, DEFAULT_BOAT_LENGTH_M);
-    const sx = beamMeters
-      ? dimScaleFactor(beamMeters, DEFAULT_BOAT_BEAM_M)
-      : 1;
+    const sx = beamMeters ? dimScaleFactor(beamMeters, DEFAULT_BOAT_BEAM_M) : 1;
     return [sx, sy];
   }
   // Floor on rendered width for the override icon. Some PNGs are very
@@ -290,12 +176,9 @@
   // The layer panel renders these (and their children) above a divider as
   // radio buttons; everything else (boat, ais, airstream + their children)
   // renders below as independent checkboxes.
-  const BASE_LAYER_NAMES = ["open street map", "noaa", "noaa-local", "noaa-ecdis"];
+  const BASE_LAYER_NAMES = ["open street map", "satellite-imagery", "noaa", "checkmate", "noaa-ecdis"];
   function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
-    return (
-      BASE_LAYER_NAMES.includes(l.name) ||
-      (!!l.parent && BASE_LAYER_NAMES.includes(l.parent))
-    );
+    return BASE_LAYER_NAMES.includes(l.name) || (!!l.parent && BASE_LAYER_NAMES.includes(l.parent));
   }
 
   let popupState = $state({
@@ -341,6 +224,7 @@
 
   let layersExpanded = $state(false);
   let boatsExpanded = $state(false);
+  let routesExpanded = $state(false);
   let mapLoaded = $state(false);
   let currentDetections = $state<Detection[] | undefined>(undefined);
   let boatSearchTerm = $state("");
@@ -350,7 +234,11 @@
   let measureDistance = $state<number | null>(null);
   let measureSource: VectorSource | null = null;
 
-  // Debug helper: when on, clicking the map prints + copies the noaa-local
+  // Display-only preview of a saved route (RoutesPanel "show on map" / track
+  // capture preview). Not editable, not the active nav route.
+  let routePreviewSource: VectorSource | null = null;
+
+  // Debug helper: when on, clicking the map prints + copies the checkmate
   // tile URL covering that point. Used for diffing our render against NOAA's
   // WMS for a specific tile.
   let tileUrlActive = $state(false);
@@ -632,10 +520,7 @@
     const nextLngLat: [number, number] = [next.lng, next.lat];
     const nextMeters = getDistance(startLngLat, nextLngLat);
     const nextNm = nextMeters / 1852;
-    const nextBearing = bearingDeg(
-      [myBoat.location[0], myBoat.location[1]],
-      [next.lat, next.lng]
-    );
+    const nextBearing = bearingDeg([myBoat.location[0], myBoat.location[1]], [next.lat, next.lng]);
     // hours = nm / kn ; convert to minutes
     const nextMin = speedKn > 0.1 ? (nextNm / speedKn) * 60 : Infinity;
 
@@ -754,7 +639,9 @@
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
     fullWidth = false,
+    chartOnly = false,
     navWaypoints,
+    routePreview,
     onAddWaypoint,
     onMoveWaypoint,
     onInsertWaypoint,
@@ -762,6 +649,7 @@
     onClearWaypoints,
     onReady,
     boatDetailSlot,
+    leftOverlay,
     fitBoundsPadding,
     onBoatPopupOpen,
     detectionConfig,
@@ -788,6 +676,9 @@
     depthSensorAvailable?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    /** Chart-extended (kiosk) mode: no boat/robot — hide the map toolbar and
+     *  controls and show only the chart. */
+    chartOnly?: boolean;
     /** Speed-over-ground (knots). When provided, shown in the combined data
      *  panel at the top-right of the map. */
     sog?: number | null;
@@ -805,6 +696,9 @@
     /** Ordered waypoints from a navigation service. The route is drawn from the boat's
      *  current position through each waypoint in order. */
     navWaypoints?: { id: string; lat: number; lng: number }[];
+    /** Display-only preview of a saved route (RoutesPanel). Drawn as a dashed
+     *  polyline + vertex dots; null/undefined draws nothing. Not editable. */
+    routePreview?: { waypoints: { lat: number; lng: number }[]; color?: string } | null;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -833,6 +727,9 @@
       focusBoat: (mmsi: string) => void;
     }) => void;
     boatDetailSlot?: (boat: { host?: string; partId?: string; name: string }) => any;
+    /** Optional content rendered as a panel overlaying the LEFT side of the
+     *  map (e.g. the routes panel), just right of the toolbar. */
+    leftOverlay?: () => any;
     fitBoundsPadding?: number | { top?: number; right?: number; bottom?: number; left?: number };
     onBoatPopupOpen?: (boatPartId?: string) => void;
     detectionConfig?: DetectionConfig;
@@ -882,6 +779,23 @@
     updateFromData();
   });
 
+  // Redraw the display-only saved-route preview whenever the prop changes.
+  $effect(() => {
+    const preview = routePreview;
+    const source = routePreviewSource;
+    if (!source) return;
+    source.clear();
+    if (!preview?.waypoints?.length) return;
+    const color = preview.color || "#00d0ff";
+    const coords = preview.waypoints.map((w) => [w.lng, w.lat]);
+    if (coords.length >= 2) {
+      source.addFeature(new Feature({ geometry: new LineString(coords), color }));
+    }
+    for (const c of coords) {
+      source.addFeature(new Feature({ geometry: new Point(c), color }));
+    }
+  });
+
   // Update popup content if it's open and showing a boat that moved
   $effect(() => {
     if (!popupState.visible) return;
@@ -904,11 +818,7 @@
         popupState.content.lng = boat.location[1];
         popupState.content.length = boat.length;
         popupState.content.destination = boat.destination;
-        if (
-          myBoat &&
-          myBoat.location &&
-          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
-        ) {
+        if (myBoat && myBoat.location && !(myBoat.location[0] === 0 && myBoat.location[1] === 0)) {
           const r = computeCpa(
             myBoat.location[0],
             myBoat.location[1],
@@ -993,61 +903,6 @@
     if (mapLoaded) {
       renderDetections(currentDetections);
     }
-  });
-
-  // Catch a weather child layer up the next time it goes from
-  // off → on. The forecast-hour slider only syncs visible layers
-  // (each layer's setData blocks the main thread, so syncing
-  // hidden ones would stack onto the user's wait), which means a
-  // hidden layer can lag the slider value. We track effective-on
-  // (parent && self) across runs and trigger a one-shot fetch on
-  // the false → true edge. Idempotent: setForecastHour returns
-  // immediately when fh already matches.
-  let prevWindOn = $state(false);
-  let prevWaveOn = $state(false);
-  let prevIsobarOn = $state(false);
-  $effect(() => {
-    const parent = mapGlobal.layerOptions.find((l) => l.name === "weather");
-    const wind = mapGlobal.layerOptions.find((l) => l.name === "wind");
-    const wave = mapGlobal.layerOptions.find((l) => l.name === "waves");
-    const isobar = mapGlobal.layerOptions.find((l) => l.name === "isobars");
-    const parentOn = parent?.on ?? true;
-    const windOn = parentOn && !!wind?.on;
-    const waveOn = parentOn && !!wave?.on;
-    const isobarOn = parentOn && !!isobar?.on;
-    if (
-      windOn && !prevWindOn && windHandle &&
-      windHandle.getForecastHour() !== weatherForecastHour
-    ) {
-      windLoading = true;
-      windHandle
-        .setForecastHour(weatherForecastHour)
-        .catch(() => {})
-        .finally(() => { windLoading = false; });
-    }
-    if (
-      waveOn && !prevWaveOn && waveHandle &&
-      waveHandle.getForecastHour() !== weatherForecastHour
-    ) {
-      waveLoading = true;
-      waveHandle
-        .setForecastHour(weatherForecastHour)
-        .catch(() => {})
-        .finally(() => { waveLoading = false; });
-    }
-    if (
-      isobarOn && !prevIsobarOn && isobarHandle &&
-      isobarHandle.getForecastHour() !== weatherForecastHour
-    ) {
-      isobarLoading = true;
-      isobarHandle
-        .setForecastHour(weatherForecastHour)
-        .catch(() => {})
-        .finally(() => { isobarLoading = false; });
-    }
-    prevWindOn = windOn;
-    prevWaveOn = waveOn;
-    prevIsobarOn = isobarOn;
   });
 
   let mapGlobal = $state({
@@ -1150,10 +1005,7 @@
       // Otherwise the boat reports [0, 0] (null island) and yanks the
       // view away from the default Hudson-Canyon framing on fresh
       // loads with no GPS yet.
-      const boatHasFix = isValidCoordinate(
-        myBoat.location[0],
-        myBoat.location[1],
-      );
+      const boatHasFix = isValidCoordinate(myBoat.location[0], myBoat.location[1]);
       if (!inPanMode && sz && boatHasFix) {
         var boatPx: [number, number] =
           boatPositionMode === "bottom" ? [sz[0] / 2, sz[1] * 0.8] : [sz[0] / 2, sz[1] / 2];
@@ -1429,20 +1281,34 @@
   // S-57 COLOUR codes (csv string of "1".."13") -> CSS hex.
   function s57ColourToCss(code: string): string {
     switch (code.trim()) {
-      case "1": return "#ffffff"; // white
-      case "2": return "#000000"; // black
-      case "3": return "#d9263a"; // red
-      case "4": return "#1f9e49"; // green
-      case "5": return "#1446cc"; // blue
-      case "6": return "#f5d011"; // yellow
-      case "7": return "#888888"; // grey
-      case "8": return "#8b5a2b"; // brown
-      case "9": return "#ffa500"; // amber
-      case "10": return "#8246c8"; // violet
-      case "11": return "#ff6e00"; // orange
-      case "12": return "#c850c8"; // magenta
-      case "13": return "#ffb4d2"; // pink
-      default: return "#888888";
+      case "1":
+        return "#ffffff"; // white
+      case "2":
+        return "#000000"; // black
+      case "3":
+        return "#d9263a"; // red
+      case "4":
+        return "#1f9e49"; // green
+      case "5":
+        return "#1446cc"; // blue
+      case "6":
+        return "#f5d011"; // yellow
+      case "7":
+        return "#888888"; // grey
+      case "8":
+        return "#8b5a2b"; // brown
+      case "9":
+        return "#ffa500"; // amber
+      case "10":
+        return "#8246c8"; // violet
+      case "11":
+        return "#ff6e00"; // orange
+      case "12":
+        return "#c850c8"; // magenta
+      case "13":
+        return "#ffb4d2"; // pink
+      default:
+        return "#888888";
     }
   }
 
@@ -1467,9 +1333,7 @@
   function navaidIconSrc(class_: string, props: any): string {
     const colours = navaidColours(props);
     const lighted = props?.lighted === true;
-    const shape = Number(
-      class_.startsWith("BCN") ? props?.BCNSHP : props?.BOYSHP
-    );
+    const shape = Number(class_.startsWith("BCN") ? props?.BCNSHP : props?.BOYSHP);
     const key = `${class_}|${shape || 0}|${colours.join(",")}|L${lighted ? 1 : 0}`;
     if (navaidIconCache[key]) return navaidIconCache[key];
 
@@ -1606,9 +1470,7 @@
         // Barrel.
         const ry = 4,
           rx = 6;
-        return (
-          `<ellipse cx="${ax}" cy="${ay - ry}" rx="${rx}" ry="${ry}" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
-        );
+        return `<ellipse cx="${ax}" cy="${ay - ry}" rx="${rx}" ry="${ry}" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`;
       }
       case 7: {
         // Super-buoy.
@@ -1626,9 +1488,7 @@
         // Unknown / unspecified shape — small filled circle in primary
         // colour. Most cells set BOYSHP; falling back to a generic dot
         // keeps the chart usable when they don't.
-        return (
-          `<circle cx="${ax}" cy="${ay - 4}" r="4" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`
-        );
+        return `<circle cx="${ax}" cy="${ay - 4}" r="4" fill="${c1}" stroke="${stroke}" stroke-width="${sw}"/>`;
       }
     }
   }
@@ -1672,53 +1532,90 @@
     });
   }
 
-
   // Human-readable label for an S-57 class code. Used in hover tooltips.
   function navaidClassLabel(c: string): string {
     switch (c) {
-      case "BOYLAT": return "Lateral buoy";
-      case "BOYCAR": return "Cardinal buoy";
-      case "BOYISD": return "Isolated-danger buoy";
-      case "BOYSAW": return "Safe-water buoy";
-      case "BOYSPP": return "Special-purpose buoy";
-      case "BOYINB": return "Installation buoy";
-      case "BCNLAT": return "Lateral beacon";
-      case "BCNCAR": return "Cardinal beacon";
-      case "BCNISD": return "Isolated-danger beacon";
-      case "BCNSAW": return "Safe-water beacon";
-      case "BCNSPP": return "Special-purpose beacon";
-      case "LIGHTS": return "Light";
-      case "DAYMAR": return "Daymark";
-      default:       return c;
+      case "BOYLAT":
+        return "Lateral buoy";
+      case "BOYCAR":
+        return "Cardinal buoy";
+      case "BOYISD":
+        return "Isolated-danger buoy";
+      case "BOYSAW":
+        return "Safe-water buoy";
+      case "BOYSPP":
+        return "Special-purpose buoy";
+      case "BOYINB":
+        return "Installation buoy";
+      case "BCNLAT":
+        return "Lateral beacon";
+      case "BCNCAR":
+        return "Cardinal beacon";
+      case "BCNISD":
+        return "Isolated-danger beacon";
+      case "BCNSAW":
+        return "Safe-water beacon";
+      case "BCNSPP":
+        return "Special-purpose beacon";
+      case "LIGHTS":
+        return "Light";
+      case "DAYMAR":
+        return "Daymark";
+      default:
+        return c;
     }
   }
 
   // S-57 LITCHR enum -> short S-52 code (F, Fl, Q, Iso, Oc, …).
   function lightCharLabel(code: number): string {
     switch (code) {
-      case 1: return "F";
-      case 2: return "Fl";
-      case 3: return "Fl";
-      case 4: return "Q";
-      case 5: return "VQ";
-      case 6: return "UQ";
-      case 7: return "Iso";
-      case 8: return "Iso";
-      case 9: return "Oc";
-      case 10: return "Oc";
-      case 11: return "Mo";
-      case 12: return "FFl";
-      case 13: return "FFl";
-      default: return "";
+      case 1:
+        return "F";
+      case 2:
+        return "Fl";
+      case 3:
+        return "Fl";
+      case 4:
+        return "Q";
+      case 5:
+        return "VQ";
+      case 6:
+        return "UQ";
+      case 7:
+        return "Iso";
+      case 8:
+        return "Iso";
+      case 9:
+        return "Oc";
+      case 10:
+        return "Oc";
+      case 11:
+        return "Mo";
+      case 12:
+        return "FFl";
+      case 13:
+        return "FFl";
+      default:
+        return "";
     }
   }
 
   // S-57 COLOUR csv -> single-letter code list (W/R/G/Y/etc).
   function colourLetters(csv: string): string {
     const map: Record<string, string> = {
-      "1": "W", "2": "Bk", "3": "R", "4": "G", "5": "Bu",
-      "6": "Y", "7": "Gy", "8": "Br", "9": "Am", "10": "Vi",
-      "11": "Or", "12": "Mg", "13": "Pk",
+      "1": "W",
+      "2": "Bk",
+      "3": "R",
+      "4": "G",
+      "5": "Bu",
+      "6": "Y",
+      "7": "Gy",
+      "8": "Br",
+      "9": "Am",
+      "10": "Vi",
+      "11": "Or",
+      "12": "Mg",
+      "13": "Pk",
     };
     return csv
       .split(",")
@@ -1738,13 +1635,9 @@
   function formatNavaidTooltip(props: any): string {
     const class_ = String(props.class ?? "");
     const lines: string[] = [];
-    const title = props.OBJNAM
-      ? escapeHtml(String(props.OBJNAM))
-      : navaidClassLabel(class_);
+    const title = props.OBJNAM ? escapeHtml(String(props.OBJNAM)) : navaidClassLabel(class_);
     lines.push(`<div class="navaid-tt-title">${title}</div>`);
-    lines.push(
-      `<div class="navaid-tt-sub">${escapeHtml(navaidClassLabel(class_))}</div>`
-    );
+    lines.push(`<div class="navaid-tt-sub">${escapeHtml(navaidClassLabel(class_))}</div>`);
 
     // Light characteristic line: e.g. "Fl R 5s 65ft 12nm". For a buoy
     // that's been server-side joined to a co-located LIGHTS feature the
@@ -1784,15 +1677,11 @@
     const sectr1 = props.SECTR1 ?? props.LIGHT_SECTR1;
     const sectr2 = props.SECTR2 ?? props.LIGHT_SECTR2;
     if (sectr1 != null && sectr2 != null) {
-      lines.push(
-        `<div class="navaid-tt-row">Sector ${sectr1}°–${sectr2}°</div>`
-      );
+      lines.push(`<div class="navaid-tt-row">Sector ${sectr1}°–${sectr2}°</div>`);
     }
 
     if (props.INFORM) {
-      lines.push(
-        `<div class="navaid-tt-info">${escapeHtml(String(props.INFORM))}</div>`
-      );
+      lines.push(`<div class="navaid-tt-info">${escapeHtml(String(props.INFORM))}</div>`);
     }
 
     return lines.join("");
@@ -1801,29 +1690,47 @@
   // S-57 CATBRG enum → human-readable bridge category.
   function bridgeCategoryLabel(code: number): string {
     switch (code) {
-      case 1: return "Fixed";
-      case 2: return "Opening";
-      case 3: return "Swing";
-      case 4: return "Lifting";
-      case 5: return "Bascule";
-      case 6: return "Pontoon";
-      case 7: return "Drawbridge";
-      case 8: return "Transporter";
-      case 9: return "Footbridge";
-      case 10: return "Viaduct";
-      case 11: return "Aqueduct";
-      case 12: return "Suspension";
-      default: return "";
+      case 1:
+        return "Fixed";
+      case 2:
+        return "Opening";
+      case 3:
+        return "Swing";
+      case 4:
+        return "Lifting";
+      case 5:
+        return "Bascule";
+      case 6:
+        return "Pontoon";
+      case 7:
+        return "Drawbridge";
+      case 8:
+        return "Transporter";
+      case 9:
+        return "Footbridge";
+      case 10:
+        return "Viaduct";
+      case 11:
+        return "Aqueduct";
+      case 12:
+        return "Suspension";
+      default:
+        return "";
     }
   }
 
   function structureClassLabel(c: string): string {
     switch (c) {
-      case "BRIDGE": return "Bridge";
-      case "CBLOHD": return "Overhead cable";
-      case "PIPOHD": return "Overhead pipe";
-      case "CONVYR": return "Conveyor";
-      default:       return c;
+      case "BRIDGE":
+        return "Bridge";
+      case "CBLOHD":
+        return "Overhead cable";
+      case "PIPOHD":
+        return "Overhead pipe";
+      case "CONVYR":
+        return "Conveyor";
+      default:
+        return c;
     }
   }
 
@@ -1864,21 +1771,32 @@
     const geom = feature.getGeometry();
     const geomType = geom?.getType();
     const styles: Style[] = [];
-    if (geomType === "LineString" || geomType === "Polygon" || geomType === "MultiLineString") {
-      // Trace lines/polygons in a translucent amber so the structure
-      // is visible at zoom levels where the icon alone would be lost
-      // in the chart detail. The icon (added below) still pins the
-      // hover anchor to the first vertex.
+    if (
+      geomType === "LineString" ||
+      geomType === "Polygon" ||
+      geomType === "MultiLineString" ||
+      geomType === "MultiPolygon"
+    ) {
+      // At z>=14 the tile is built with skip=BRIDGE,CBLOHD,... so this
+      // vector trace is the *sole* renderer for the structure — it has to
+      // stand in for the bold chart symbol, not just hint at it. So draw
+      // bridges as a solid amber bar with a thick dark outline, and
+      // overhead cables/pipes/conveyors as a thick dashed line (the dash
+      // reads as "overhead"). The icon (added below) still pins the hover
+      // anchor. A translucent fill here would wash out and read as "no
+      // bridge, just the label".
+      const isBridge = class_ === "BRIDGE";
       styles.push(
         new Style({
           stroke: new Stroke({
-            color: class_ === "BRIDGE" ? "rgba(133,77,14,0.85)" : "rgba(180,83,9,0.85)",
-            width: 2,
+            color: isBridge ? "rgba(120,53,15,0.95)" : "rgba(154,52,18,0.95)",
+            width: isBridge ? 3 : 3,
+            // Solid for bridges (a physical deck); dashed for overhead
+            // cables/pipes/conveyors so they don't read as a solid span.
+            lineDash: isBridge ? undefined : [8, 5],
           }),
           fill: new Fill({
-            color: class_ === "BRIDGE"
-              ? "rgba(250,204,21,0.18)"
-              : "rgba(253,230,138,0.15)",
+            color: isBridge ? "rgba(250,204,21,0.55)" : "rgba(253,230,138,0.4)",
           }),
         })
       );
@@ -1911,13 +1829,9 @@
   function formatStructureTooltip(props: any): string {
     const class_ = String(props.class ?? "");
     const lines: string[] = [];
-    const title = props.OBJNAM
-      ? escapeHtml(String(props.OBJNAM))
-      : structureClassLabel(class_);
+    const title = props.OBJNAM ? escapeHtml(String(props.OBJNAM)) : structureClassLabel(class_);
     lines.push(`<div class="navaid-tt-title">${title}</div>`);
-    lines.push(
-      `<div class="navaid-tt-sub">${escapeHtml(structureClassLabel(class_))}</div>`
-    );
+    lines.push(`<div class="navaid-tt-sub">${escapeHtml(structureClassLabel(class_))}</div>`);
     const meta: string[] = [];
     if (class_ === "BRIDGE" && props.CATBRG != null) {
       const label = bridgeCategoryLabel(Number(props.CATBRG));
@@ -1967,10 +1881,7 @@
     const w = baseW;
     const h = baseH * lengthScale;
     const inset = sw / 2;
-    const points =
-      `${w / 2},${inset} ` +
-      `${w - inset},${h - inset} ` +
-      `${inset},${h - inset}`;
+    const points = `${w / 2},${inset} ` + `${w - inset},${h - inset} ` + `${inset},${h - inset}`;
     const svg =
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" ` +
       `width="${w}" height="${h}">` +
@@ -1991,8 +1902,7 @@
     const length = feature.get("length") as number | null | undefined;
     // Heading of exactly 0 from AIS usually means "unknown" rather than
     // genuinely pointing north — fall back to COG when available.
-    const direction =
-      heading != null && heading !== 0 ? heading : (cog ?? 0);
+    const direction = heading != null && heading !== 0 ? heading : (cog ?? 0);
     const rotation = (direction * Math.PI) / 180;
 
     // Triangle is always 2:1 (height:width) at the default vessel length;
@@ -2114,9 +2024,7 @@
       // When a popup is open on a boat, suppress every other boat's track
       // (and its detections) so only the selected target's history shows.
       if (popupState.visible) {
-        const selectedBoatId = popupState.content.isMyBoat
-          ? "myBoat"
-          : popupState.content.mmsi;
+        const selectedBoatId = popupState.content.isMyBoat ? "myBoat" : popupState.content.mmsi;
         if (selectedBoatId && boatId !== selectedBoatId) {
           return new Style({});
         }
@@ -2413,8 +2321,7 @@
     // The override-resize branch only applies to the user-configured myBoat
     // icon (when an override has actually loaded), not to the bundled AIS
     // variant which already matches the default natural dimensions.
-    const isOverride =
-      src === myBoatImage && myBoatImage !== boatImage;
+    const isOverride = src === myBoatImage && myBoatImage !== boatImage;
     if (isOverride && myBoatImageNaturalHeight && myBoatImageNaturalHeight > 0) {
       const ratio = BOAT_IMAGE_NATURAL_HEIGHT / myBoatImageNaturalHeight;
       sx *= ratio;
@@ -2630,11 +2537,7 @@
     return Math.sqrt(ex * ex + ey * ey);
   }
 
-  function showEditPopup(
-    mode: "insert" | "delete",
-    coord: number[],
-    waypointId: string
-  ) {
+  function showEditPopup(mode: "insert" | "delete", coord: number[], waypointId: string) {
     editPopupState.mode = mode;
     editPopupState.lng = coord[0];
     editPopupState.lat = coord[1];
@@ -2801,7 +2704,7 @@
   }
 
   // showTileUrlForClick computes the XYZ tile that contains the clicked
-  // lon/lat at the current view zoom and prints + copies its noaa-local
+  // lon/lat at the current view zoom and prints + copies its checkmate
   // tile URL (and the /compare URL). Used for diffing our render against
   // NOAA's WMS for a specific tile — toggle "tile URL" in the bottom
   // controls, click the map, paste the URL.
@@ -2818,7 +2721,7 @@
     const y = Math.floor(
       ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
     );
-    const origin = window.location.origin;
+    const origin = tileBase || window.location.origin;
     const tileUrl = `${origin}/noaa-enc/tile/${z}/${x}/${y}.png`;
     const compareUrl = `${origin}/noaa-enc/compare/${z}/${x}/${y}.png`;
     const compareAllUrl = `${origin}/noaa-enc/compare/test?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
@@ -2840,12 +2743,41 @@
     }
   }
 
+  // tileBase is the origin of the map+weather server the app fetches tiles and
+  // weather from. Empty = same-origin (this server). Set from /app-config at
+  // startup (loadAppConfig), so an app on :8888 can pull tiles/weather from a
+  // separate map server on :8989. api() prefixes every backend URL with it.
+  let tileBase = "";
+  function api(path: string): string {
+    return `${tileBase}${path}`;
+  }
+  // Hosted chart server to fall back to when there's no /app-config at all
+  // (e.g. a pure-static deploy with no module). Keeps the chart working instead
+  // of requesting tiles from a blank same-origin host. When /app-config DOES
+  // respond, its tileServerBaseURL wins — including "" which means "this server
+  // serves tiles" (same-origin).
+  const HOSTED_TILE_FALLBACK = "https://nycmaps.checkmatemaps.com";
+  async function loadAppConfig(): Promise<void> {
+    try {
+      const resp = await fetch("/app-config");
+      if (!resp.ok) {
+        tileBase = HOSTED_TILE_FALLBACK;
+        return;
+      }
+      const cfg = await resp.json();
+      if (cfg && typeof cfg.tileServerBaseURL === "string") {
+        tileBase = cfg.tileServerBaseURL.replace(/\/$/, "");
+      }
+    } catch {
+      tileBase = HOSTED_TILE_FALLBACK;
+    }
+  }
 
   function setupLayers() {
     // Explicit zIndex per tile layer so OpenLayers renders in declaration
     // order regardless of toggle/insert sequence. Without this, toggling a
     // layer off and back on can land it on top of layers that should sit
-    // above it (e.g. OSM ending up above noaa-local after a reload).
+    // above it (e.g. OSM ending up above checkmate after a reload).
     // core open street maps
     mapGlobal.layerOptions.push({
       name: "open street map",
@@ -2855,8 +2787,49 @@
         preload: Infinity, // Preload all tiles at lower zoom levels
         zIndex: 1,
         source: new XYZ({
-          url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          // When a chart base is active, OSM is the under-chart fallback for
+          // regions NOAA never charted. Skip the fetch (return undefined → no
+          // request) for tiles fully inside US ENC coverage at z>=7, where the
+          // opaque chart hides OSM anyway — so we only hit OSMF's tile servers
+          // in foreign/uncharted waters. When OSM is the *selected* base
+          // (no chart base active), load everything normally.
+          tileUrlFunction: (tc) => {
+            const z = tc[0],
+              x = tc[1],
+              y = tc[2];
+            if (z >= 7 && chartBaseActive() && tileFullyInUSWaters(z, x, y)) {
+              return undefined;
+            }
+            return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+          },
           transition: 250, // Faster fade-in
+        }),
+      }),
+    });
+
+    // Free satellite imagery base — Esri World Imagery. No API key, CORS-enabled,
+    // and free to use with attribution. Global high-res aerial/satellite coverage
+    // (Google-Maps-satellite style), handy in waters NOAA never charted and as a
+    // real-world reference alongside the chart. A mutually-exclusive base (radio),
+    // default off. Distinct from the weather "satellite" overlay (GOES cloud
+    // imagery), so it carries its own name to avoid colliding with that layer.
+    // Note Esri's tile path is {z}/{y}/{x} (row before column), not the usual
+    // {z}/{x}/{y}.
+    mapGlobal.layerOptions.push({
+      name: "satellite-imagery",
+      displayName: "satellite (aerial)",
+      on: false,
+      layer: new TileLayer({
+        opacity: 1,
+        preload: Infinity,
+        zIndex: 2,
+        source: new XYZ({
+          url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+          crossOrigin: "anonymous",
+          maxZoom: 19,
+          attributions:
+            "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+          transition: 250,
         }),
       }),
     });
@@ -2866,11 +2839,14 @@
     // proxied by Vite), we route through `/noaa-wms/proxy` so the disk cache
     // absorbs repeat tile fetches; otherwise we hit NOAA directly.
     const noaaWmsUrl = noaaCacheReachable()
-      ? "/noaa-wms/proxy"
+      ? api("/noaa-wms/proxy")
       : "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer";
+    // NOAA's public WMS as a manual reference/fallback layer (off by default).
+    // The Checkmate chart below is always the default.
     mapGlobal.layerOptions.push({
       name: "noaa",
       on: false,
+      minZoom: 7,
       layer: new TileLayer({
         opacity: 0.7,
         preload: 2,
@@ -2923,15 +2899,13 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/navaids?` +
+            api(`/noaa-enc/navaids?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
             .then((r) => r.json())
             .then((j) => {
-              const feats = navaidSource
-                .getFormat()!
-                .readFeatures(j) as Feature[];
+              const feats = navaidSource.getFormat()!.readFeatures(j) as Feature[];
               navaidSource.addFeatures(feats);
               success?.(feats);
               capVectorSource(navaidSource);
@@ -2948,7 +2922,7 @@
         zIndex: 7,
       });
       mapGlobal.navaidLayer = navaidLayer;
-      // noaa-local: tuned to mirror NOAA's WMS look as closely as possible.
+      // checkmate: tuned to mirror NOAA's WMS look as closely as possible.
       // Use this for offline use that should look interchangeable with the
       // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
       // the tile PNG — those render in the noaa-navaids OL vector layer
@@ -2964,15 +2938,13 @@
         loader: function (extent, _res, _proj, success, failure) {
           const [minLon, minLat, maxLon, maxLat] = extent;
           const url =
-            `/noaa-enc/structures?` +
+            api(`/noaa-enc/structures?`) +
             `minLon=${minLon}&minLat=${minLat}` +
             `&maxLon=${maxLon}&maxLat=${maxLat}`;
           fetch(url)
             .then((r) => r.json())
             .then((j) => {
-              const feats = structureSource
-                .getFormat()!
-                .readFeatures(j) as Feature[];
+              const feats = structureSource.getFormat()!.readFeatures(j) as Feature[];
               structureSource.addFeatures(feats);
               success?.(feats);
               capVectorSource(structureSource);
@@ -3030,14 +3002,28 @@
       const detailParams = new URLSearchParams(midParams);
       detailParams.set("skip", "BRIDGE,CBLOHD,PIPOHD,CONVYR");
 
+      // The Checkmate chart: our merged ENC + OSM + weather raster, served from
+      // the configured tile host (local module, a split tile server, or the
+      // hosted default). Always the default chart layer.
       mapGlobal.layerOptions.push({
-        name: "noaa-local",
+        name: "checkmate",
+        displayName: "Checkmate",
         on: true,
+        // Below z7 the Checkmate/NOAA charts have no useful detail and the
+        // overview tiles are expensive to render; at that scale we show only
+        // the public cloud OSM base layer (see the open-street-map suppression
+        // in updateOnLayers, which is gated to z>=7 to match).
+        minZoom: 7,
         layer: new TileLayer({
           opacity: 1,
           preload: 2,
           zIndex: 5,
           source: new XYZ({
+            // Don't request (or preload) tiles below z7: the chart isn't shown
+            // there (public OSM is), and a z5/z6 request triggers a ~10s NOAA
+            // overview render server-side for a tile nobody sees. Without this,
+            // preload:2 fetches z5/z6 backdrops while panning at z7.
+            minZoom: 7,
             tileUrlFunction: (tileCoord) => {
               const [z, x, y] = tileCoord;
               const params =
@@ -3046,60 +3032,68 @@
                   : z >= VECTOR_TILE_NAVAID_MIN_Z
                     ? midParams
                     : overviewParams;
-              return `/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`;
+              return api(`/noaa-enc/tile/${z}/${x}/${y}.png?${params.toString()}`);
             },
             transition: 300,
           }),
         }),
       });
 
-      // OSM vector underlay as its own tile layer, served from
-      // /noaa-enc/osm-tile/. Renders highways + buildings only; depth
-      // and chart features come from noaa-local on top. Defaults on,
-      // toggleable independently from noaa-local — Overpass cold fetches
-      // can be slow, so isolating it lets the chart keep painting at
-      // full speed and lets the user disable OSM if the latency hurts.
-      const osmTileParams = new URLSearchParams();
-      osmTileParams.set("v", tileGenVersion);
-      mapGlobal.layerOptions.push({
-        name: "osm-detail",
-        displayName: "streets",
-        on: true,
-        parent: "noaa-local",
-        layer: new TileLayer({
-          opacity: 1,
-          preload: 2,
-          zIndex: 4,
-          source: new XYZ({
-            url: `/noaa-enc/osm-tile/{z}/{x}/{y}.png?${osmTileParams.toString()}`,
-            transition: 300,
-          }),
-        }),
-      });
+      // OSM detail (streets/buildings/land) is now composited INTO the
+      // checkmate tile server-side (the merged ENC+OSM tile), so there's no
+      // separate osm-detail layer anymore — that would draw OSM twice. The
+      // standalone /noaa-enc/osm-tile endpoint still exists for debugging.
       mapGlobal.layerOptions.push({
         name: "noaa-navaids",
         displayName: "navaids",
         on: true,
         layer: navaidLayer,
-        parent: "noaa-local",
-        // Below z=12 the icons clutter without adding navigational
-        // value AND every pan at that scale pulls in a wide bbox of
-        // features the user can't read — so we'd be racking up
-        // memory + fetches for nothing. Major navaids stay baked
-        // into the chart raster at overview.
-        minZoom: 12,
+        parent: "checkmate",
+        // The tile bakes navaids in until it switches to midParams
+        // (navaids=0) at tile-zoom >= VECTOR_TILE_NAVAID_MIN_Z. OpenLayers
+        // picks the tile zoom by nearest RESOLUTION, so it starts loading those
+        // z12 tiles once the fractional view zoom crosses the res-midpoint
+        // between z11 and z12 — i.e. at viewZoom = 12 - log2(1.5) ≈ 11.415, not
+        // 12 and not 11.5. This vector layer's gate is `viewZoom >= minZoom`,
+        // so matching that exact crossover makes the vector navaids appear at
+        // the same instant the baked navaids drop — no gap, no double-draw.
+        minZoom: VECTOR_TILE_NAVAID_MIN_Z - Math.log2(1.5),
       });
       mapGlobal.layerOptions.push({
         name: "noaa-structures",
         displayName: "structures",
         on: true,
         layer: structureLayer,
-        parent: "noaa-local",
+        parent: "checkmate",
         // One zoom level tighter than navaids — bridges/cables are
         // denser in busy harbours and would clutter the overview a
         // step before the navaid icons start to.
         minZoom: 13,
       });
+      // OpenSeaMap seamark overlay — global, crowd-sourced nautical marks
+      // (buoys, beacons, lights, harbours) as a transparent raster overlay,
+      // free + no API key + CORS-enabled. Complements the NOAA chart and, more
+      // usefully, gives nautical detail in waters NOAA never charted. Standalone
+      // (no parent) so it works over any base; default off; drawn above the
+      // chart (zIndex 7). Attribution shown via the OL Attribution control.
+      mapGlobal.layerOptions.push({
+        name: "openseamap",
+        displayName: "seamarks (OpenSeaMap)",
+        on: false,
+        layer: new TileLayer({
+          opacity: 1,
+          zIndex: 7,
+          source: new XYZ({
+            url: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+            crossOrigin: "anonymous",
+            maxZoom: 18,
+            attributions:
+              '© <a href="https://www.openseamap.org/" target="_blank" rel="noopener">OpenSeaMap</a> contributors',
+            transition: 300,
+          }),
+        }),
+      });
+
       // noaa-ecdis: same renderer + cells, but with S-52 conditional
       // symbology (DEPCNT02 bold safety contour, SOUNDG02 two-tone
       // soundings, TOPMAR rendering). Reads more like a real ECDIS display
@@ -3109,341 +3103,20 @@
       mapGlobal.layerOptions.push({
         name: "noaa-ecdis",
         on: false,
+        minZoom: 7,
         layer: new TileLayer({
           opacity: 0.7,
           preload: 2,
           zIndex: 6,
           source: new XYZ({
-            url: `/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`,
+            // See checkmate: no tile requests below z7 (the chart isn't shown
+            // there and a z5/z6 render is a wasted ~10s NOAA overview query).
+            minZoom: 7,
+            url: api(`/noaa-enc/tile/{z}/{x}/{y}.png?${ecdisParams.toString()}`),
             transition: 300,
           }),
         }),
       });
-
-      // Weather overlays (wind + waves), both backed by NOMADS GFS /
-      // GFSWAVE data via the bundled cache and rendered by ol-wind. The
-      // "weather" parent is a folder toggle so the wind / waves
-      // children can be enabled independently. All three default off.
-      // "weather" is a folder-style parent (no actual layer of its own)
-      // grouping the wind + waves children in the layer panel. Default
-      // ON so the children are immediately togglable — turning weather
-      // off disables both children at once, the standard parent/child
-      // behaviour the panel already implements.
-      mapGlobal.layerOptions.push({
-        name: "weather",
-        displayName: "weather",
-        on: true,
-      });
-      // Pre-allocate the wind + waves entries so their panel rows sit
-      // directly under the weather header — setupWeatherLayer is async
-      // and would otherwise push them last (after boat / ais). The
-      // actual OL layer reference is filled in by setupWeatherLayer
-      // when each respective fetch returns.
-      mapGlobal.layerOptions.push({
-        name: "wind",
-        displayName: "wind",
-        parent: "weather",
-        on: false,
-        maxZoom: weatherMaxZoom,
-      });
-      mapGlobal.layerOptions.push({
-        name: "waves",
-        displayName: "waves",
-        parent: "weather",
-        on: false,
-        maxZoom: weatherMaxZoom,
-      });
-      // Isobar overlay (GFS PRMSL contours). Placeholder row so the
-      // panel order matches wind/waves; setupIsobarLayer fills in the
-      // .layer reference once the first GeoJSON fetch resolves.
-      mapGlobal.layerOptions.push({
-        name: "isobars",
-        displayName: "isobars",
-        parent: "weather",
-        on: false,
-        maxZoom: weatherMaxZoom,
-      });
-      // Lightning overlay. Backed by the noaa-glm stub model server-
-      // side — the option appears in the panel but turning it on
-      // surfaces the "needs NetCDF decoder" reason. Filled in for real
-      // when the GLM decoder ships.
-      mapGlobal.layerOptions.push({
-        name: "lightning",
-        displayName: "lightning",
-        parent: "weather",
-        on: false,
-        maxZoom: weatherMaxZoom,
-      });
-      const ensureRendered = () => {
-        if (mapGlobal.map) {
-          mapGlobal.map.render();
-          return;
-        }
-        window.setTimeout(ensureRendered, 200);
-      };
-      const initialFh = nowForecastHour(null); // 0 until we know the run time
-      // ECMWF tile-CDN client: when the server config exposes a
-      // windCDNBaseURL, route ECMWF wind fetches through the
-      // wind-publisher's R2 output instead of asking this module to
-      // decode/encode global JSON on every request. Falls back to the
-      // legacy local endpoint on any CDN error so a CDN outage doesn't
-      // kill the wind layer. setupLayers() isn't async, so we lazy-
-      // load the config inside the fetchData callback below — the
-      // shared promise dedupes if the first scrub fires before the
-      // config arrives.
-      let ecmwfTileClientPromise: Promise<WindCDNClient | null> | null = null;
-      const getECMWFTileClient = (): Promise<WindCDNClient | null> => {
-        if (!ecmwfTileClientPromise) {
-          ecmwfTileClientPromise = loadServerWindConfig()
-            .catch(() => null)
-            .then((cfg) => {
-              const base = cfg?.windCDNBaseURL ?? "";
-              return base ? new WindCDNClient(base, "ecmwf", cfg?.tileGrid) : null;
-            });
-        }
-        return ecmwfTileClientPromise;
-      };
-      // Reads the live viewport at fetch time so a user pan that
-      // crosses tile boundaries triggers a re-fetch on the next slider
-      // event. ol-wind's setData call rebinds the field on each
-      // loadInto, so panning + the next scrub gives us the right tile.
-      const viewportBbox = (): [number, number, number, number] => {
-        const ext = mapGlobal.view?.calculateExtent?.(
-          mapGlobal.map?.getSize?.() ?? [800, 600],
-        );
-        if (Array.isArray(ext) && ext.length === 4) {
-          return [ext[0], ext[1], ext[2], ext[3]];
-        }
-        // Sensible default (Atlantic-ish) so a viewport-less fetch
-        // still resolves to a valid tile.
-        return [-80, 30, -60, 50];
-      };
-      // Prefer ECMWF as the default wind model when the CDN is up
-      // and serving fresh data — it's higher-fidelity than GFS at
-      // short range AND it's served from R2 (free fan-out at fleet
-      // scale). Fall back to "gfs" (the existing default, fetched
-      // locally from NOMADS) when the CDN's latest.json is
-      // unreachable or stale, so a publisher outage doesn't take
-      // the wind layer down for the fleet.
-      //
-      // setupLayers isn't async, so we do this as a promise chain
-      // that resolves before setupWeatherLayer is called. The
-      // probe is fast (a single fetch of a ~5 KB JSON pointer) and
-      // dedupes with the regular per-fh fetch path (the lazy
-      // getECMWFTileClient caches the client and the LatestPointer).
-      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-      const probeECMWF: Promise<void> = getECMWFTileClient()
-        .then(async (client) => {
-          if (!client) return;
-          const latest = await client.getLatest();
-          const age = Date.now() - Date.parse(latest.publishedAt);
-          if (Number.isFinite(age) && age < STALE_THRESHOLD_MS) {
-            windModel = "ecmwf";
-            console.log(`wind layer default: ecmwf (CDN fresh, publishedAt=${latest.publishedAt})`);
-          } else {
-            console.log(`wind layer default: gfs (ECMWF CDN stale, ${age}ms old)`);
-          }
-        })
-        .catch((e) => {
-          console.warn("wind layer default: gfs (ECMWF CDN probe failed):", e);
-        });
-      probeECMWF.then(() => setupWindLayer());
-
-      function setupWindLayer() {
-        setupWeatherLayer(mapGlobal, {
-        layerName: "wind",
-        displayName: "wind",
-        parent: "weather",
-        initialModel: windModel,
-        dataUrlFor: (model, fh) => `/noaa-weather/data/${model}/latest.json`,
-        fetchData: async (model, fh) => {
-          const fetchLocal = async () => {
-            const resp = await fetch(`/noaa-weather/data/${model}/latest.json?fh=${fh}`);
-            if (!resp.ok) {
-              const body = await resp.text().catch(() => "");
-              return { error: body.trim() || `HTTP ${resp.status}` };
-            }
-            return { data: await resp.json() };
-          };
-          // Only ECMWF is tile-published right now. Other models stay
-          // on the local URL-based fetch.
-          if (model !== "ecmwf") return fetchLocal();
-          const client = await getECMWFTileClient();
-          // No CDN configured at all (dev mode): use the local
-          // decoder. Distinct from the configured-but-stale case
-          // below; this path is the only one a single-instance
-          // deployment ever takes.
-          if (!client) return fetchLocal();
-
-          // STALE-ONLY FALLBACK POLICY: the local endpoint hits
-          // ECMWF Open Data directly. At fleet scale (~10K
-          // chartplotters) a transient CDN hiccup must NOT push
-          // every client onto ECMWF — that's the failure mode the
-          // wind-publisher exists to prevent. So we only fall back
-          // when the publisher is GENUINELY broken (no fresh
-          // publish in 24h). Other errors surface to the UI but
-          // keep the chartplotter on the CDN.
-          const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-          try {
-            const latest = await client.getLatest();
-            const publishedAt = Date.parse(latest.publishedAt);
-            if (Number.isFinite(publishedAt) && Date.now() - publishedAt > STALE_THRESHOLD_MS) {
-              const hoursOld = ((Date.now() - publishedAt) / 3_600_000).toFixed(1);
-              console.warn(`ECMWF CDN data is ${hoursOld}h old (>24h), falling back to local fetch`);
-              return fetchLocal();
-            }
-          } catch (e) {
-            // latest.json itself unreachable — can't determine
-            // freshness. Refuse to fall back: a CDN outage flipping
-            // 10K clients to direct-fetch would crush ECMWF. The
-            // user sees a missing/stale wind layer until the CDN
-            // recovers, which is the right pressure on the
-            // publisher operator.
-            return { error: `ECMWF CDN unreachable (${e}); not falling back to protect ECMWF` };
-          }
-
-          // CDN is fresh: fetch the tile. A tile-level failure here
-          // (404, 5xx) is a publisher bug, not a reason to fall
-          // back — surface the error so it gets noticed and fixed.
-          try {
-            const tileUrl = await client.urlFor(viewportBbox(), fh);
-            const resp = await fetch(tileUrl);
-            if (!resp.ok) {
-              return { error: `ECMWF CDN tile fetch: HTTP ${resp.status}` };
-            }
-            return { data: await resp.json() };
-          } catch (e) {
-            return { error: `ECMWF CDN tile fetch: ${e}` };
-          }
-        },
-        colorScale: WIND_COLOR_SCALE,
-        minVelocity: 0,
-        maxVelocity: 15,
-        // Particle motion is in degrees under useGeographic. Halved
-        // from ol-wind's 0.3 default to 0.225 / 2^z so a 10 m/s wind
-        // drifts ~1.5 px / frame — between "creeping" (0.15) and
-        // "darting" (0.3). High-wind streaks still come out
-        // noticeably longer than calm-air streaks because the per-
-        // frame distance is `velocityScale * magnitude`.
-        velocityScale: () => {
-          const z = mapGlobal.view?.getZoom() ?? 6;
-          return 0.225 / Math.pow(2, z);
-        },
-        // Per-particle stroke width keyed off wind magnitude (m/s,
-        // ≤ 15 per maxVelocity). ~2.7 px at calm air, ~4.35 px at
-        // gale strength — midway between the prior constant 2.4 px
-        // line and the more aggressive 3..6.3 px ramp, so faster
-        // wind reads as thicker streaks without overwhelming the
-        // chart underneath.
-        lineWidth: (m: number) => 2.7 + Math.max(0, m) * 0.11,
-        initialForecastHour: initialFh,
-      })
-        .then((wind) => {
-          windHandle = wind;
-          const refTime = wind?.getRunTime() ?? null;
-          weatherRunTime = refTime;
-          const floor = nowForecastHour(refTime);
-          weatherMinForecastHour = floor;
-          // Slider max tracks the active wind model's MaxFh from
-          // /noaa-weather/models meta. Falls back to 240 (GFS) if
-          // the models endpoint hasn't responded yet at this point.
-          const initialMeta = weatherModels.find((m) => m.name === windModel);
-          if (initialMeta) weatherMaxForecastHour = initialMeta.maxFh;
-          weatherForecastHour = floor;
-          // Re-fetch at the "now-aligned" hour if the initial f000
-          // fetch happened before we knew the run time.
-          if (floor > 0 && wind) wind.setForecastHour(floor).catch(() => {});
-          // Bump the wave layer to the same forecast hour the wind
-          // slider settled on, so both display the same future time.
-          if (waveHandle && floor > 0) {
-            waveHandle.setForecastHour(floor).catch(() => {});
-          }
-          ensureRendered();
-        })
-        .catch((err) => {
-          console.warn("wind layer disabled:", err);
-        })
-        .finally(() => {
-          windLoading = false;
-        });
-      } // end setupWindLayer
-      // Wave overlay: ol-wind particle animation driven by Thgt+Tdir
-      // from PacIOOS WaveWatch III, fetched server-side via OPeNDAP
-      // and converted to u/v vectors so it shares the same JSON shape
-      // and rendering pipeline as the wind layer. Slower velocityScale
-      // since wave-propagation speed is a fraction of wind speed, and
-      // a different colour ramp keyed to typical wave heights (0..3 m).
-      setupWeatherLayer(mapGlobal, {
-        layerName: "waves",
-        displayName: "waves",
-        parent: "weather",
-        initialModel: waveModel,
-        dataUrlFor: (model) => `/noaa-weather/data/${model}/latest.json`,
-        colorScale: WAVE_COLOR_SCALE,
-        minVelocity: 0,
-        maxVelocity: 3,
-        velocityScale: () => {
-          const z = mapGlobal.view?.getZoom() ?? 6;
-          // Was 0.06 / 2^z; bumped so a 1.5 m wave-height "particle"
-          // drifts visibly each frame — wave-celerity isn't literally
-          // proportional to height, but the eye reads the slow streaks
-          // as "no data" otherwise.
-          return 0.12 / Math.pow(2, z);
-        },
-        paths: 6000,
-        lineWidth: 7.5,
-        // Brighter strokes than wind — the calm/cyan end of the wave
-        // ramp washes out against the ocean basemap otherwise.
-        globalAlpha: 0.97,
-        initialForecastHour: initialFh,
-        zIndex: 29,
-      })
-        .then((wave) => {
-          waveHandle = wave;
-          if (wave && weatherForecastHour > 0) {
-            wave.setForecastHour(weatherForecastHour).catch(() => {});
-          }
-        })
-        .catch((err) => {
-          console.warn("wave layer disabled:", err);
-        })
-        .finally(() => {
-          waveLoading = false;
-        });
-      // Isobar overlay (GFS PRMSL contours). Same backend cache as
-      // wind/waves, but the model returns GeoJSON LineStrings instead
-      // of ol-wind records — handled by setupIsobarLayer with a thin
-      // OL Vector layer. Forecast-hour scrubs are driven by the same
-      // slider via the lockstep handler further down.
-      setupIsobarLayer(mapGlobal, {
-        layerName: "isobars",
-        displayName: "isobars",
-        parent: "weather",
-        model: "gfs-isobars",
-        initialForecastHour: initialFh,
-        maxZoom: weatherMaxZoom,
-      })
-        .then((handle) => {
-          isobarHandle = handle;
-          if (handle && weatherForecastHour > 0) {
-            handle.setForecastHour(weatherForecastHour).catch(() => {});
-          }
-        })
-        .catch((err) => {
-          console.warn("isobar layer disabled:", err);
-        })
-        .finally(() => {
-          isobarLoading = false;
-        });
-      // Populate the model picker. Failures are non-fatal — the picker
-      // just stays at the bundled defaults (GFS + PacIOOS) if the
-      // registry endpoint isn't reachable for some reason.
-      fetch("/noaa-weather/models")
-        .then((r) => (r.ok ? r.json() : []))
-        .then((list: WeatherModelMeta[]) => {
-          weatherModels = Array.isArray(list) ? list : [];
-        })
-        .catch(() => {});
     }
 
     // Track layer for myBoat (child of boat layer)
@@ -3607,6 +3280,38 @@
         layer: navWaypointLayer,
         parent: "boat",
       });
+
+      // Saved-route preview: a single display-only layer fed by the
+      // `routePreview` prop (see the $effect below). Lower zIndex than the
+      // active nav route so the live route always sits on top.
+      routePreviewSource = new VectorSource();
+      var routePreviewLayer = new Vector({
+        source: routePreviewSource,
+        style: (feature) => {
+          const color = (feature.get("color") as string) || "#00d0ff";
+          if (feature.getGeometry()?.getType() === "Point") {
+            return new Style({
+              image: new CircleStyle({
+                radius: 4,
+                fill: new Fill({ color }),
+                stroke: new Stroke({ color: "white", width: 1 }),
+              }),
+            });
+          }
+          return new Style({
+            stroke: new Stroke({ color, width: 3, lineDash: [2, 6] }),
+          });
+        },
+        opacity: 0.85,
+        zIndex: 20,
+      });
+      mapGlobal.layerOptions.push({
+        name: "route-preview",
+        displayName: "route preview",
+        on: true,
+        layer: routePreviewLayer,
+        parent: "boat",
+      });
     }
 
     var aisLayer = new Vector({
@@ -3672,7 +3377,7 @@
   // the page is served from anywhere else we skip both the proxy URL and the prefetch
   // calls and let OpenLayers hit NOAA directly.
   // Whether the Go module's noaa-enc + noaa-wms endpoints are reachable on
-  // the current origin. Probed once at mount via /noaa-enc/stats; falls
+  // the current origin. Probed once at mount via /noaa-wms/stats; falls
   // back to the legacy port heuristic for environments where the probe
   // hasn't completed yet (so layer setup at first render still picks the
   // right URL when running locally on :5173 / :8888).
@@ -3687,16 +3392,12 @@
 
   async function probeNoaaCache() {
     try {
-      const resp = await fetch("/noaa-enc/stats", { method: "GET" });
+      const resp = await fetch(api("/noaa-wms/stats"), { method: "GET" });
       noaaCacheProbeResult = resp.ok;
     } catch {
       noaaCacheProbeResult = false;
     }
   }
-
-  // Tracks the last bbox we asked the ENC store to sync so a single-tile pan doesn't
-  // spam the backend with overlapping cell-download jobs.
-  let lastNoaaPrefetchKey = "";
 
   // Last bbox we emitted to onAirstreamBboxChange so trivial pans don't
   // re-fire the callback. Rounded to keep this a coarse comparison.
@@ -3773,37 +3474,6 @@
     onHistoricalBboxChange({ minLon, minLat, maxLon, maxLat });
   }
 
-  function maybePrefetchNoaaTiles() {
-    if (!noaaCacheReachable()) return;
-    // Either noaa-local or noaa-ecdis being on warrants a prefetch — both
-    // pull from the same ENC cell store, just with different render styles.
-    const local = findLayerByName("noaa-local");
-    const ecdis = findLayerByName("noaa-ecdis");
-    if (!((local && local.on) || (ecdis && ecdis.on))) return;
-    if (!mapGlobal.map || !mapGlobal.view) return;
-
-    const size = mapGlobal.map.getSize();
-    if (!size) return;
-    const extent = mapGlobal.view.calculateExtent(size);
-    // Round bbox to ~0.01 deg so trivial pans share a key.
-    const round = (n: number) => Math.round(n * 100) / 100;
-    const minLon = round(extent[0]);
-    const minLat = round(extent[1]);
-    const maxLon = round(extent[2]);
-    const maxLat = round(extent[3]);
-    const key = `${minLon},${minLat},${maxLon},${maxLat}`;
-    if (key === lastNoaaPrefetchKey) return;
-    lastNoaaPrefetchKey = key;
-
-    fetch("/noaa-enc/prefetch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ minLon, minLat, maxLon, maxLat }),
-    }).catch(() => {
-      // Best-effort: prefetch failures shouldn't disrupt the UI.
-    });
-  }
-
   function findOnLayerIndexOfName(name: string): number {
     var l = findLayerByName(name);
     if (l == null) {
@@ -3824,20 +3494,26 @@
     // off — the per-feature filter in createTrackStyleFunction hides the
     // other boats' tracks, so only the selected one renders.
     const aisPopupForceTrack =
-      popupState.visible &&
-      !popupState.content.isMyBoat &&
-      !!popupState.content.mmsi;
-    const myBoatPopupForceTrack =
-      popupState.visible && popupState.content.isMyBoat;
+      popupState.visible && !popupState.content.isMyBoat && !!popupState.content.mmsi;
+    const myBoatPopupForceTrack = popupState.visible && popupState.content.isMyBoat;
 
-    // noaa-local already paints OSM detail under its chart (osm-detail child
-     // layer) — the global OSM base layer underneath is redundant and bleeds
-     // through where noaa-local has transparent water/land. Suppress it
-     // whenever noaa-local is on.
-    const noaaLocalLayer = mapGlobal.layerOptions.find(
-      (p) => p.name === "noaa-local",
-    );
-    const noaaLocalOn = !!noaaLocalLayer && noaaLocalLayer.on;
+    // When a chart base (checkmate / noaa / noaa-ecdis) is active, force the
+    // public OSM base on (it's the radio-"off" sibling) at ALL zooms as a
+    // fallback: below z7 it's the sole base (chart hidden), and at z>=7 it sits
+    // UNDER the chart so regions NOAA never charted — where the merged tile is
+    // fully transparent — show OSM land/water/coastline instead of blank white.
+    // Covered tiles render fully opaque (no bleed), and the OSM base's
+    // tileUrlFunction skips the actual fetch inside US ENC coverage, so we only
+    // hit OSMF's servers in foreign/uncharted waters.
+    const osmChartFallback = chartBaseActive();
+    // The OSM base's tileUrlFunction skips US tiles only while a chart base is
+    // active; when that flips (user switches base), refresh so previously
+    // skipped/loaded tiles re-evaluate.
+    if (osmChartFallback !== prevChartBaseActive) {
+      prevChartBaseActive = osmChartFallback;
+      const osmBase = mapGlobal.layerOptions.find((l) => l.name === "open street map");
+      (osmBase?.layer as TileLayer<XYZ> | undefined)?.getSource()?.refresh();
+    }
 
     for (var l of mapGlobal.layerOptions) {
       // Virtual layers (no `layer` field, e.g. ais-projection) are
@@ -3856,12 +3532,14 @@
         (l.name === "ais-track" && aisPopupForceTrack) ||
         (l.name === "track" && myBoatPopupForceTrack);
 
-      const suppressedByNoaaLocal =
-        l.name === "open street map" && noaaLocalOn;
+      // Force the (radio-"off") OSM base on under a selected chart base at all
+      // zooms, so uncharted regions show OSM instead of blank white (see
+      // osmChartFallback above). No suppression needed: covered tiles render
+      // fully opaque, so the base only shows through where the chart is blank.
+      const osmForcesOn = l.name === "open street map" && osmChartFallback;
 
       // Layer should be visible only if it's on AND (has no parent OR parent is on)
-      const shouldBeVisible =
-        (l.on || popupForcesOn) && !isParentOff && !suppressedByNoaaLocal;
+      const shouldBeVisible = (l.on || popupForcesOn || osmForcesOn) && !isParentOff;
 
       if (shouldBeVisible) {
         if (idx < 0) {
@@ -3888,7 +3566,6 @@
         }
       }
     }
-    maybePrefetchNoaaTiles();
   }
 
   function pointDiff(x: number[], y: number[]): number {
@@ -3905,9 +3582,12 @@
 
   async function setupMap() {
     useGeographic();
-    // Probe before setupLayers so the noaa-local / noaa-ecdis / noaa-wms
+    // Probe before setupLayers so the checkmate / noaa-ecdis / noaa-wms
     // layers register with the correct origin assumption regardless of
     // which port the Go module is bound to.
+    // Resolve where to fetch tiles/weather (same-origin or a separate map
+    // server) first, so the cache probe and every layer URL use the right base.
+    await loadAppConfig();
     await probeNoaaCache();
     setupLayers();
 
@@ -3946,6 +3626,7 @@
         l.layer.setVisible(minOK && maxOK);
       }
     };
+    let lastOverview = (mapGlobal.view.getZoom() ?? 0) < 7;
     mapGlobal.view.on("change:resolution", () => {
       const z = mapGlobal.view?.getZoom();
       if (typeof z === "number" && Number.isFinite(z)) {
@@ -3953,6 +3634,14 @@
         currentZoom = z;
       }
       applyZoomGates();
+      // Crossing the z7 boundary flips whether the OSM base is suppressed by
+      // checkmate (updateOnLayers only re-runs on toggles, not on zoom), so
+      // re-run it on a crossing to add/remove the OSM base layer accordingly.
+      const overview = (z ?? 0) < 7;
+      if (overview !== lastOverview) {
+        lastOverview = overview;
+        updateOnLayers();
+      }
     });
     const z0 = mapGlobal.view.getZoom();
     if (typeof z0 === "number" && Number.isFinite(z0)) currentZoom = z0;
@@ -4009,10 +3698,7 @@
               !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
             ) {
               const map = event.map ?? mapGlobal.map;
-              const px = map?.getPixelFromCoordinate([
-                myBoat.location[1],
-                myBoat.location[0],
-              ]);
+              const px = map?.getPixelFromCoordinate([myBoat.location[1], myBoat.location[0]]);
               const sz = map?.getSize();
               if (px && sz && px[0] >= 0 && px[1] >= 0 && px[0] <= sz[0] && px[1] <= sz[1]) {
                 event.pixel = px;
@@ -4025,10 +3711,7 @@
       mapGlobal.map.addInteraction(new BoatAnchoredMouseWheelZoom());
     }
 
-    // After every pan/zoom settles, ask the NOAA cache to warm tiles around the
-    // current viewport. The handler is a no-op when the noaa layer is off.
     mapGlobal.map.on("moveend", () => {
-      maybePrefetchNoaaTiles();
       maybeEmitAirstreamBbox();
       maybeEmitHistoricalBbox();
       maybeReanchorOnBoat();
@@ -4104,7 +3787,6 @@
       offset: [0, -18],
     });
     mapGlobal.map.addOverlay(aisTooltipOverlay);
-
 
     // Setup measure layer
     measureSource = new VectorSource();
@@ -4336,9 +4018,7 @@
             }
             const geom = (feature as Feature).getGeometry();
             if (geom && geom.getType() === "Point") {
-              navaidTooltipOverlay.setPosition(
-                (geom as Point).getCoordinates()
-              );
+              navaidTooltipOverlay.setPosition((geom as Point).getCoordinates());
             } else if (geom) {
               // Line/polygon (typical for bridges): anchor at the cursor
               // so the tooltip tracks the hover point rather than the
@@ -4349,8 +4029,7 @@
           {
             hitTolerance: 4,
             layerFilter: (layer) =>
-              layer === mapGlobal.navaidLayer ||
-              layer === mapGlobal.structureLayer,
+              layer === mapGlobal.navaidLayer || layer === mapGlobal.structureLayer,
           }
         );
       }
@@ -4420,11 +4099,7 @@
         const cursorLatLng: [number, number] = [cursorLngLat[1], cursorLngLat[0]];
         let nm: number | null = null;
         let brg: number | null = null;
-        if (
-          myBoat &&
-          myBoat.location &&
-          !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
-        ) {
+        if (myBoat && myBoat.location && !(myBoat.location[0] === 0 && myBoat.location[1] === 0)) {
           const boatLatLng: [number, number] = [myBoat.location[0], myBoat.location[1]];
           const meters = getDistance(
             [myBoat.location[1], myBoat.location[0]], // [lng, lat]
@@ -4433,29 +4108,18 @@
           nm = meters / 1852;
           brg = bearingDeg(boatLatLng, cursorLatLng);
         }
-        let windKt: number | null = null;
-        let windFromDeg: number | null = null;
-        let waveM: number | null = null;
-        let waveFromDeg: number | null = null;
-        const layerOn = (n: string) =>
-          !!mapGlobal.layerOptions.find((l) => l.name === n)?.on;
-        if (layerOn("wind") && windHandle) {
-          const s = windHandle.sampleAt(cursorLngLat[0], cursorLngLat[1]);
-          if (s) {
-            windKt = s.magnitude * 1.94384;
-            windFromDeg = s.fromDeg;
-          }
-        }
-        if (layerOn("waves") && waveHandle) {
-          const s = waveHandle.sampleAt(cursorLngLat[0], cursorLngLat[1]);
-          if (s) {
-            // Backend encodes wave HEIGHT as the magnitude slot, so
-            // s.magnitude is in metres. fromDeg is the direction-from
-            // we want to surface.
-            waveM = s.magnitude;
-            waveFromDeg = s.fromDeg;
-          }
-        }
+        // Wind/wave sampling lives in WeatherOverlays (which owns the
+        // handles); it publishes cursorSampler back to us. Read it at call
+        // time so we always see the latest closure over the child's state.
+        const { windKt, windFromDeg, waveM, waveFromDeg } = cursorSampler?.(
+          cursorLngLat[0],
+          cursorLngLat[1]
+        ) ?? {
+          windKt: null,
+          windFromDeg: null,
+          waveM: null,
+          waveFromDeg: null,
+        };
         cursorInfo = {
           lat: cursorLatLng[0],
           lng: cursorLatLng[1],
@@ -4654,9 +4318,7 @@
   }
 
   // True when the data panel has at least one row to show.
-  let hasSensorData = $derived(
-    sog != null || hdg != null || cog != null || depth != null
-  );
+  let hasSensorData = $derived(sog != null || hdg != null || cog != null || depth != null);
   let hasDataPanel = $derived(
     hasSensorData || !!routeStats || !!cursorInfo || !!tideInfo || !!weatherInfo
   );
@@ -4721,8 +4383,7 @@
     const now = tideView.now;
     const inRange = now >= tStart && now <= tEnd;
     const nowX = inRange ? xOf(now) : null;
-    const nowY =
-      inRange && tideView.currentLevel !== null ? yOf(tideView.currentLevel) : null;
+    const nowY = inRange && tideView.currentLevel !== null ? yOf(tideView.currentLevel) : null;
     return { points, nowX, nowY };
   });
 
@@ -4797,8 +4458,7 @@
       const lat2 = (s.lat * Math.PI) / 180;
       const dLat = lat2 - lat1;
       const dLng = ((s.lng - lng) * Math.PI) / 180;
-      const a =
-        Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
       const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       if (d < bestNm) {
         bestNm = d;
@@ -4857,11 +4517,7 @@
   // Clip a series to [tStart, tEnd]. Linearly interpolates endpoints at
   // tStart and tEnd so the resulting polyline reaches both window edges
   // (rather than snapping to the nearest sample inside the window).
-  function clipSeries(
-    series: TideSeriesPoint[],
-    tStart: number,
-    tEnd: number
-  ): TideSeriesPoint[] {
+  function clipSeries(series: TideSeriesPoint[], tStart: number, tEnd: number): TideSeriesPoint[] {
     if (series.length === 0) return [];
     const sorted = [...series].sort((a, b) => a.t.getTime() - b.t.getTime());
     const interpAt = (t: number): number | null => {
@@ -5016,113 +4672,14 @@
     return p.tStr.split(" ")[1]?.slice(0, 5) ?? p.tStr;
   }
 
-  // ---- Weather (Open-Meteo, no API key needed). Fetched directly from
-  // the browser; refetched when the boat moves ~6 nm or every 30 minutes.
-  let weatherInfo = $state<{
-    tempNowF: number | null;
-    tempMinF: number;
-    tempMaxF: number;
-    windNowKn: number | null;
-    windNowDirDeg: number | null;
-    windMaxKn: number;
-    rainTotalIn: number;
-    rainHoursAny: number;
-    sunriseLocal: string | null;
-    sunsetLocal: string | null;
-  } | null>(null);
-  let lastWeatherFetchKey = "";
-  let weatherRefetchTimer: ReturnType<typeof setInterval> | null = null;
-
-  async function refreshWeather(lat: number, lng: number): Promise<void> {
-    try {
-      const url =
-        `https://api.open-meteo.com/v1/forecast` +
-        `?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}` +
-        `&current=temperature_2m,wind_speed_10m,wind_direction_10m` +
-        `&hourly=temperature_2m,precipitation,wind_speed_10m` +
-        `&daily=sunrise,sunset` +
-        `&temperature_unit=fahrenheit&wind_speed_unit=kn&precipitation_unit=inch` +
-        `&timezone=auto&forecast_hours=4&forecast_days=2`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`weather http ${r.status}`);
-      const j = await r.json();
-
-      const cur = j.current ?? {};
-      const hourly = j.hourly ?? {};
-      const daily = j.daily ?? {};
-
-      const temps: number[] = (hourly.temperature_2m ?? [])
-        .filter((v: any) => typeof v === "number");
-      const winds: number[] = (hourly.wind_speed_10m ?? [])
-        .filter((v: any) => typeof v === "number");
-      const rains: number[] = (hourly.precipitation ?? [])
-        .filter((v: any) => typeof v === "number");
-
-      // Pick today's sunrise/sunset relative to "now". Open-Meteo returns an
-      // array indexed by day; the [0] entry is today in the requested tz, but
-      // if today's sunset has already passed we'd rather show tomorrow's so
-      // the panel stays useful all night.
-      const nowMs = Date.now();
-      const sunriseArr: string[] = daily.sunrise ?? [];
-      const sunsetArr: string[] = daily.sunset ?? [];
-      let dayIdx = 0;
-      if (sunsetArr[0] && new Date(sunsetArr[0]).getTime() < nowMs) dayIdx = 1;
-
-      const fmtLocalTime = (iso: string | undefined): string | null => {
-        if (!iso) return null;
-        // Open-Meteo's ISO strings come without a tz suffix, so JS treats
-        // them as local — which is what we want since timezone=auto already
-        // returned them in the boat's local time.
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return null;
-        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      };
-
-      weatherInfo = {
-        tempNowF: typeof cur.temperature_2m === "number" ? cur.temperature_2m : null,
-        tempMinF: temps.length ? Math.min(...temps) : 0,
-        tempMaxF: temps.length ? Math.max(...temps) : 0,
-        windNowKn: typeof cur.wind_speed_10m === "number" ? cur.wind_speed_10m : null,
-        windNowDirDeg:
-          typeof cur.wind_direction_10m === "number" ? cur.wind_direction_10m : null,
-        windMaxKn: winds.length ? Math.max(...winds) : 0,
-        rainTotalIn: rains.reduce((a, b) => a + b, 0),
-        rainHoursAny: rains.filter((v) => v > 0).length,
-        sunriseLocal: fmtLocalTime(sunriseArr[dayIdx]),
-        sunsetLocal: fmtLocalTime(sunsetArr[dayIdx]),
-      };
-    } catch (e) {
-      console.warn("weather fetch failed", e);
-    }
-  }
-
-  // Same trigger pattern as tide: refetch on ~6 nm location change, plus a
-  // 30-minute background timer so the forecast stays fresh at anchor.
-  $effect(() => {
-    if (!myBoat?.location) return;
-    const [lat, lng] = myBoat.location;
-    if (lat === 0 && lng === 0) return;
-    const key = `${Math.round(lat * 10) / 10},${Math.round(lng * 10) / 10}`;
-    if (key === lastWeatherFetchKey) return;
-    lastWeatherFetchKey = key;
-    refreshWeather(lat, lng);
-    if (weatherRefetchTimer) clearInterval(weatherRefetchTimer);
-    weatherRefetchTimer = setInterval(
-      () => {
-        const loc = myBoat?.location;
-        if (loc && !(loc[0] === 0 && loc[1] === 0)) {
-          refreshWeather(loc[0], loc[1]);
-        }
-      },
-      30 * 60 * 1000
-    );
-    return () => {
-      if (weatherRefetchTimer) {
-        clearInterval(weatherRefetchTimer);
-        weatherRefetchTimer = null;
-      }
-    };
-  });
+  // ---- Weather (Open-Meteo current conditions). Owned by WeatherOverlays;
+  // two-way bound here so the data-panel current-conditions row can render it.
+  let weatherInfo = $state<WeatherInfo | null>(null);
+  // Wind/wave sampler published by WeatherOverlays. The pointer handler calls
+  // it (read at call time) so the wind/wave handles stay private to the child.
+  let cursorSampler = $state<((lon: number, lat: number) => CursorWeatherSample) | undefined>(
+    undefined
+  );
 
   function handleMapContainerClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
@@ -5203,276 +4760,31 @@
 
 <div
   id="map-container"
-  class="relative {fullWidth ? 'lg:col-span-4 lg:row-span-6' : 'lg:col-span-3 lg:row-span-5'} row-span-3 border border-dark"
+  class="relative {fullWidth
+    ? 'lg:col-span-4 lg:row-span-6'
+    : 'lg:col-span-3 lg:row-span-5'} row-span-3 border border-dark"
   class:layers-expanded={layersExpanded}
   class:boats-expanded={boatsExpanded}
   class:map-loaded={mapLoaded}
   class:full-width={fullWidth}
+  class:chart-only={chartOnly}
 >
   <div id="map" class="w-full aspect-video bg-white"></div>
 
-  {#if (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
-    <!-- Stacked weather legends. Wind on top, waves below — both are
-         pure-CSS horizontal gradients matched to the colour scales
-         exported from windLayer.ts so a glance at the legend matches
-         what the particle layer paints. Avoiding the WMS
-         GetLegendGraphic PNG sidesteps a caching bug where the legacy
-         14×140 vertical-orientation response kept rendering even
-         after the URL changed to 200×16 horizontal. Sits above OL's
-         ScaleLine (bottom-left). -->
-    <div class="weather-legend-stack">
-      {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on}
-        <div class="weather-legend">
-          <div class="weather-legend-strip weather-legend-strip-wind"></div>
-          <div class="weather-legend-ticks">
-            {#each [0, WIND_RANGE_MAX_KT * 0.25, WIND_RANGE_MAX_KT * 0.5, WIND_RANGE_MAX_KT * 0.75, WIND_RANGE_MAX_KT] as kt}
-              <span>{Math.round(kt)} kt</span>
-            {/each}
-          </div>
-        </div>
-      {/if}
-      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on}
-        <div class="weather-legend">
-          <div class="weather-legend-strip weather-legend-strip-wave"></div>
-          <div class="weather-legend-ticks">
-            {#each [0, WAVE_RANGE_MAX_M * 0.25, WAVE_RANGE_MAX_M * 0.5, WAVE_RANGE_MAX_M * 0.75, WAVE_RANGE_MAX_M] as m}
-              <span>{Math.round(m * METERS_TO_FEET)} ft</span>
-            {/each}
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  {#if (windHandle || waveHandle) && (mapGlobal.layerOptions.find((l) => l.name === "wind")?.on || mapGlobal.layerOptions.find((l) => l.name === "waves")?.on) && currentZoom <= weatherMaxZoom}
-    {@const previewDate = weatherDataDate(weatherRunTime, weatherForecastHour)}
-    {@const windModelOptions = weatherModels.filter((m) => m.kind === "wind")}
-    {@const waveModelOptions = weatherModels.filter((m) => m.kind === "wave")}
-    {@const dayMarkers = computeDayMarkers(
-      weatherRunTime,
-      weatherMinForecastHour,
-      weatherMaxForecastHour,
-    )}
-    <div class="wind-forecast-bar">
-      {#if mapGlobal.layerOptions.find((l) => l.name === "wind")?.on && windModelOptions.length > 1}
-        <!-- Wind model picker. Disabled-stub models stay listed (so the
-             user sees what's *planned*) but the option is greyed and a
-             selection attempt surfaces the registered Reason. -->
-        <label class="wind-forecast-bar-model">
-          <span class="wind-forecast-bar-model-prefix">wind</span>
-          <select
-            disabled={weatherLoading}
-            value={windModel}
-            onchange={async (e) => {
-              const next = (e.currentTarget as HTMLSelectElement).value;
-              windLoading = true;
-              setWeatherError(null);
-              try {
-                const err = await windHandle?.setModel(next);
-                if (err) {
-                  setWeatherError(`${next}: ${err}`);
-                  // Snap the select back to whatever the handle is
-                  // actually serving so the UI doesn't lie about the
-                  // current state.
-                  windModel = windHandle?.getModel() ?? windModel;
-                } else {
-                  windModel = next;
-                  weatherRunTime = windHandle?.getRunTime() ?? weatherRunTime;
-                  // Re-floor the slider — different models have
-                  // different run cadences, so the "now hour" shifts.
-                  const floor = nowForecastHour(weatherRunTime);
-                  weatherMinForecastHour = floor;
-                  // Update the slider's MAX too — ECMWF caps at 144,
-                  // GFS at 240, HRRR at 18. Drives the visible track
-                  // length AND the value the thumb can be dragged to,
-                  // so the user can't even select an fh the publisher
-                  // doesn't have.
-                  const newModelMeta = weatherModels.find((m) => m.name === next);
-                  const newMaxFh = newModelMeta?.maxFh ?? 240;
-                  weatherMaxForecastHour = newMaxFh;
-                  // Clamp the current value to the new [floor, newMaxFh]
-                  // window. Without the down-clamp, switching GFS@fh=207
-                  // → ECMWF would silently 404 on every tile.
-                  let target = weatherForecastHour;
-                  if (target < floor) target = floor;
-                  if (target > newMaxFh) target = newMaxFh;
-                  if (target !== weatherForecastHour) {
-                    weatherForecastHour = target;
-                    await windHandle?.setForecastHour(target);
-                  }
-                  mapGlobal.map?.render();
-                }
-              } finally {
-                windLoading = false;
-              }
-            }}
-          >
-            {#each windModelOptions as m}
-              <option value={m.name} disabled={m.disabled} title={m.reason ?? ""}>
-                {m.displayName}{m.disabled ? " (n/a)" : ""}
-              </option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      {#if mapGlobal.layerOptions.find((l) => l.name === "waves")?.on && waveModelOptions.length > 0}
-        <label class="wind-forecast-bar-model">
-          <span class="wind-forecast-bar-model-prefix">wave</span>
-          <select
-            disabled={weatherLoading}
-            value={waveModel}
-            onchange={async (e) => {
-              const next = (e.currentTarget as HTMLSelectElement).value;
-              waveLoading = true;
-              setWeatherError(null);
-              try {
-                const err = await swapWaveModel(next);
-                if (err) {
-                  // Roll the dropdown back to whatever is actually
-                  // mounted so the UI doesn't claim a model that
-                  // isn't rendering.
-                  setWeatherError(err);
-                  (e.currentTarget as HTMLSelectElement).value = waveModel;
-                }
-              } finally {
-                waveLoading = false;
-              }
-            }}
-          >
-            {#each waveModelOptions as m}
-              <option value={m.name} disabled={m.disabled} title={m.reason ?? ""}>
-                {m.displayName}{m.disabled ? " (n/a)" : ""}
-              </option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      <label class="wind-forecast-bar-label">
-        {#if previewDate}
-          {previewDate.toLocaleString(undefined, {
-            weekday: "short",
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        {:else}
-          +{weatherForecastHour}h
-        {/if}
-        {#if weatherLoading}
-          <span class="wind-forecast-bar-spinner" aria-label="loading" title="loading"></span>
-        {/if}
-      </label>
-      <div class="wind-forecast-bar-slider-wrap">
-        {#each dayMarkers as m (m.pct)}
-          <span
-            class="wind-forecast-bar-daymark"
-            style="left: {m.pct}%"
-            aria-hidden="true"
-          >
-            <span class="wind-forecast-bar-daymark-label">{m.label}</span>
-          </span>
-        {/each}
-        <input
-          type="range"
-          min={weatherMinForecastHour}
-          max={weatherMaxForecastHour}
-          step="3"
-        value={weatherForecastHour}
-        disabled={weatherLoading}
-        oninput={(e) => {
-          const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-          weatherForecastHour = v;
-        }}
-        onchange={async (e) => {
-          const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-          // Commit the new value into reactive state *before* awaiting
-          // anything. Clicking the slider track (vs dragging) skips
-          // `input` in some browsers, so the value prop would otherwise
-          // re-render at the stale old value and snap the thumb back
-          // to the slider's min.
-          weatherForecastHour = v;
-          // Sync only the layers the user can actually see. ol-wind
-          // setData and ol's GeoJSON readFeatures both block the main
-          // thread, so they serialise on the event loop even though
-          // we Promise.all them — every off-but-fetched layer adds
-          // wall-clock time the user feels as slider lag. The on→off
-          // $effect further down catches a layer up the next time
-          // it's enabled.
-          const weatherParent = mapGlobal.layerOptions.find(
-            (l) => l.name === "weather",
-          );
-          const parentOn = weatherParent?.on ?? true;
-          const windOpt = mapGlobal.layerOptions.find((l) => l.name === "wind");
-          const waveOpt = mapGlobal.layerOptions.find((l) => l.name === "waves");
-          const isobarOpt = mapGlobal.layerOptions.find(
-            (l) => l.name === "isobars",
-          );
-          const syncWind = parentOn && !!windOpt?.on && !!windHandle;
-          const syncWave = parentOn && !!waveOpt?.on && !!waveHandle;
-          const syncIsobars = parentOn && !!isobarOpt?.on && !!isobarHandle;
-          if (syncWind) windLoading = true;
-          if (syncWave) waveLoading = true;
-          if (syncIsobars) isobarLoading = true;
-          // Hide each layer that's about to refetch so the user
-          // doesn't see the previous forecast hour's pixels under
-          // the new forecast-hour label. Don't touch off layers —
-          // their visibility is governed by the panel's $effect.
-          const windLayer = windOpt?.layer as any;
-          const waveLayer = waveOpt?.layer as any;
-          const isobarLayer = isobarOpt?.layer as any;
-          if (syncWind) windLayer?.setVisible?.(false);
-          if (syncWave) waveLayer?.setVisible?.(false);
-          if (syncIsobars) isobarLayer?.setVisible?.(false);
-          try {
-            const tasks: Promise<void>[] = [];
-            if (syncWind && windHandle) tasks.push(windHandle.setForecastHour(v));
-            if (syncWave && waveHandle) tasks.push(waveHandle.setForecastHour(v));
-            if (syncIsobars && isobarHandle) tasks.push(isobarHandle.setForecastHour(v));
-            await Promise.all(tasks);
-            if (syncWind && windHandle) {
-              weatherForecastHour = windHandle.getForecastHour();
-              weatherRunTime = windHandle.getRunTime();
-            } else if (syncWave && waveHandle) {
-              weatherForecastHour = waveHandle.getForecastHour();
-            } else if (syncIsobars && isobarHandle) {
-              weatherForecastHour = isobarHandle.getForecastHour();
-            } else {
-              weatherForecastHour = v;
-            }
-            mapGlobal.map?.render();
-          } finally {
-            windLoading = false;
-            waveLoading = false;
-            isobarLoading = false;
-            if (syncWind) windLayer?.setVisible?.(true);
-            if (syncWave) waveLayer?.setVisible?.(true);
-            if (syncIsobars) isobarLayer?.setVisible?.(true);
-          }
-        }}
-        />
-      </div>
-      <span class="wind-forecast-bar-runtime">
-        {#if weatherRunTime}
-          {windModel.toUpperCase()} run {weatherRunTime.slice(0, 16).replace("T", " ")}Z
-        {/if}
-      </span>
-    </div>
-    {#if weatherModelError}
-      <div class="wind-forecast-bar-error">{weatherModelError}</div>
-    {/if}
-  {/if}
+  <WeatherOverlays
+    {mapGlobal}
+    {currentZoom}
+    {myBoat}
+    {api}
+    {noaaCacheReachable}
+    bind:cursorSampler
+    bind:weatherInfo
+  />
 
   <!-- Tiny "Powered By Viam" overlay anchored above the OL ScaleLine so it
        doesn't fight for the same bottom-left corner. Pointer-events off so
        it can't swallow map clicks. -->
-  <img
-    class="viam-logo-overlay"
-    src={viamLogoUrl}
-    alt="Powered by Viam"
-    width="80"
-    height="16"
-  />
+  <img class="viam-logo-overlay" src={viamLogoUrl} alt="Powered by Viam" width="80" height="16" />
 
   <!-- Boat Info Popup -->
   <div id="boat-popup" class="boat-popup" class:hidden={!popupState.visible}>
@@ -5480,10 +4792,8 @@
     <div class="popup-header">
       <h3 class="popup-title">
         {#if popupCountry}
-          <span
-            class="popup-flag"
-            title={popupCountry[1]}
-            aria-label={popupCountry[1]}>{flagEmoji(popupCountry[0])}</span
+          <span class="popup-flag" title={popupCountry[1]} aria-label={popupCountry[1]}
+            >{flagEmoji(popupCountry[0])}</span
           >
         {/if}
         {popupState.content.name}
@@ -5571,7 +4881,6 @@
   <!-- AIS flag/country hover tooltip -->
   <div id="ais-tooltip" class="ais-tooltip"></div>
 
-
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
        CSS — no OL overlay needed since the content isn't bound to a coord. -->
@@ -5607,7 +4916,7 @@
   <div class="layer-controls">
     <!--
       Layers are split into two groups:
-        1. Base maps (open street map / noaa / noaa-local / noaa-ecdis)
+        1. Base maps (open street map / noaa / checkmate / noaa-ecdis)
            and their children — mutually exclusive radio buttons. Picking
            one auto-disables the others so we never paint two raster
            bases on top of each other.
@@ -5625,34 +4934,30 @@
       {@const isHidden = l.name === "airstream" && !airstreamConfigured}
       {@const isBaseLayer = BASE_LAYER_NAMES.includes(l.name)}
       {#if !isHidden && isBaseLayerGroup(l)}
-      <label class:child-layer={l.parent} class:disabled={isParentOff}>
-        <input
-          type={isBaseLayer ? "radio" : "checkbox"}
-          name={isBaseLayer ? "base-layer" : undefined}
-          checked={mapGlobal.layerOptions[idx].on}
-          onchange={(e) => {
-            const checked = (e.currentTarget as HTMLInputElement).checked;
-            mapGlobal.layerOptions[idx].on = checked;
-            // Radio behaviour for base layers: turning one on flips
-            // every other base layer off so we never have two
-            // simultaneously selected.
-            if (isBaseLayer && checked) {
-              for (var other of mapGlobal.layerOptions) {
-                if (other.name !== l.name && BASE_LAYER_NAMES.includes(other.name)) {
-                  other.on = false;
+        <label class:child-layer={l.parent} class:disabled={isParentOff}>
+          <input
+            type={isBaseLayer ? "radio" : "checkbox"}
+            name={isBaseLayer ? "base-layer" : undefined}
+            checked={mapGlobal.layerOptions[idx].on}
+            onchange={(e) => {
+              const checked = (e.currentTarget as HTMLInputElement).checked;
+              mapGlobal.layerOptions[idx].on = checked;
+              // Radio behaviour for base layers: turning one on flips
+              // every other base layer off so we never have two
+              // simultaneously selected.
+              if (isBaseLayer && checked) {
+                for (var other of mapGlobal.layerOptions) {
+                  if (other.name !== l.name && BASE_LAYER_NAMES.includes(other.name)) {
+                    other.on = false;
+                  }
                 }
               }
-            }
-            saveLayerStates();
-            if ((l.name === "noaa-local" || l.name === "noaa-ecdis") && checked) {
-              lastNoaaPrefetchKey = "";
-              maybePrefetchNoaaTiles();
-            }
-          }}
-          disabled={isParentOff}
-        />
-        {l.displayName || l.name}
-      </label>
+              saveLayerStates();
+            }}
+            disabled={isParentOff}
+          />
+          {l.displayName || l.name}
+        </label>
       {/if}
     {/each}
 
@@ -5665,61 +4970,61 @@
       {@const isParentOff = parentLayer && !parentLayer.on}
       {@const isHidden = l.name === "airstream" && !airstreamConfigured}
       {#if !isHidden && !isBaseLayerGroup(l)}
-      {#if l.name === "weather"}
-        <!-- Folder-style section header: no checkbox, just labels the
+        {#if l.name === "weather"}
+          <!-- Folder-style section header: no checkbox, just labels the
              wind/waves rows that follow as a group. -->
-        <div class="layer-section-header">{l.displayName || l.name}</div>
-      {:else}
-      <label class:child-layer={l.parent} class:disabled={isParentOff}>
-        <input
-          type="checkbox"
-          checked={mapGlobal.layerOptions[idx].on}
-          onchange={(e) => {
-            const checked = (e.currentTarget as HTMLInputElement).checked;
-            mapGlobal.layerOptions[idx].on = checked;
-            saveLayerStates();
-            if (l.name === "airstream") {
-              if (checked) {
-                lastAirstreamBboxKey = "";
-                maybeEmitAirstreamBbox();
-              } else if (onAirstreamBboxChange) {
-                lastAirstreamBboxKey = "";
-                onAirstreamBboxChange(null);
-              }
-            }
-          }}
-          disabled={isParentOff}
-        />
-        {l.displayName || l.name}
-        {#if l.name === "heading-line"}
-          <select
-            class="heading-line-length"
-            value={headingLineLengthNm}
-            onchange={(e) => setHeadingLineLength(Number(e.currentTarget.value))}
-            disabled={isParentOff || !l.on}
-            onclick={(e) => e.stopPropagation()}
-            aria-label="heading line length"
-          >
-            {#each HEADING_LINE_LENGTH_OPTIONS as nm}
-              <option value={nm}>{nm} nm</option>
-            {/each}
-          </select>
-        {:else if l.name === "ais-projection"}
-          <select
-            class="heading-line-length"
-            value={aisProjectionMinutes}
-            onchange={(e) => setAisProjectionMinutes(Number(e.currentTarget.value))}
-            disabled={isParentOff || !l.on}
-            onclick={(e) => e.stopPropagation()}
-            aria-label="ais projection length in minutes"
-          >
-            {#each AIS_PROJECTION_OPTIONS as min}
-              <option value={min}>{min} min</option>
-            {/each}
-          </select>
+          <div class="layer-section-header">{l.displayName || l.name}</div>
+        {:else}
+          <label class:child-layer={l.parent} class:disabled={isParentOff}>
+            <input
+              type="checkbox"
+              checked={mapGlobal.layerOptions[idx].on}
+              onchange={(e) => {
+                const checked = (e.currentTarget as HTMLInputElement).checked;
+                mapGlobal.layerOptions[idx].on = checked;
+                saveLayerStates();
+                if (l.name === "airstream") {
+                  if (checked) {
+                    lastAirstreamBboxKey = "";
+                    maybeEmitAirstreamBbox();
+                  } else if (onAirstreamBboxChange) {
+                    lastAirstreamBboxKey = "";
+                    onAirstreamBboxChange(null);
+                  }
+                }
+              }}
+              disabled={isParentOff}
+            />
+            {l.displayName || l.name}
+            {#if l.name === "heading-line"}
+              <select
+                class="heading-line-length"
+                value={headingLineLengthNm}
+                onchange={(e) => setHeadingLineLength(Number(e.currentTarget.value))}
+                disabled={isParentOff || !l.on}
+                onclick={(e) => e.stopPropagation()}
+                aria-label="heading line length"
+              >
+                {#each HEADING_LINE_LENGTH_OPTIONS as nm}
+                  <option value={nm}>{nm} nm</option>
+                {/each}
+              </select>
+            {:else if l.name === "ais-projection"}
+              <select
+                class="heading-line-length"
+                value={aisProjectionMinutes}
+                onchange={(e) => setAisProjectionMinutes(Number(e.currentTarget.value))}
+                disabled={isParentOff || !l.on}
+                onclick={(e) => e.stopPropagation()}
+                aria-label="ais projection length in minutes"
+              >
+                {#each AIS_PROJECTION_OPTIONS as min}
+                  <option value={min}>{min} min</option>
+                {/each}
+              </select>
+            {/if}
+          </label>
         {/if}
-      </label>
-      {/if}
       {/if}
     {/each}
 
@@ -5817,9 +5122,15 @@
         />
         <button class="fit-all-btn" onclick={fitToVisibleBoats}> Fit All Visible </button>
       </div>
-
     {/if}
   </div>
+
+  <!-- Optional left-side panel overlay (e.g. routes), toggled by the routes
+       toolbar button below; sits just right of the toolbar over the left edge
+       of the chart. -->
+  {#if leftOverlay && routesExpanded}
+    <div class="left-overlay">{@render leftOverlay()}</div>
+  {/if}
 
   <!-- Left-side toolbar: every map control stacks here under the OL
        zoom +/- buttons so the toolbar reads top-to-bottom in one place
@@ -5847,11 +5158,41 @@
         stroke-linejoin="round"
         aria-hidden="true"
       >
-        <path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+        <path
+          d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"
+        />
         <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
         <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
       </svg>
     </button>
+
+    {#if leftOverlay}
+      <button
+        class="routes-toggle"
+        class:active={routesExpanded}
+        onclick={() => (routesExpanded = !routesExpanded)}
+        data-tip="Routes"
+        aria-label="Toggle routes panel"
+        aria-pressed={routesExpanded}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="6" cy="19" r="3" />
+          <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+          <circle cx="18" cy="5" r="3" />
+        </svg>
+      </button>
+    {/if}
 
     {#if enableBoatsPanel}
       <button
@@ -5874,7 +5215,9 @@
           stroke-linejoin="round"
           aria-hidden="true"
         >
-          <path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+          <path
+            d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"
+          />
           <path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.34 2.81 7.76" />
           <path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6" />
           <path d="M12 10v4" />
@@ -5887,172 +5230,172 @@
       class="tile-url-toggle"
       class:active={tileUrlActive}
       onclick={() => (tileUrlActive = !tileUrlActive)}
-      data-tip="When on, click the map to copy the noaa-local tile URL for that location"
+      data-tip="When on, click the map to copy the checkmate tile URL for that location"
       aria-label="Tile URL debug mode"
     >
       {"{}"}
     </button>
 
     <button
-    class="measure-toggle"
-    class:active={measureActive}
-    onclick={toggleMeasure}
-    aria-pressed={measureActive}
-    data-tip="Measure distance"
-    aria-label="Measure distance"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-      ><path
-        d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"
-      /><path d="m14.5 12.5 2-2" /><path d="m11.5 9.5 2-2" /><path d="m8.5 6.5 2-2" /><path
-        d="m17.5 15.5 2-2"
-      /></svg
+      class="measure-toggle"
+      class:active={measureActive}
+      onclick={toggleMeasure}
+      aria-pressed={measureActive}
+      data-tip="Measure distance"
+      aria-label="Measure distance"
     >
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        ><path
+          d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"
+        /><path d="m14.5 12.5 2-2" /><path d="m11.5 9.5 2-2" /><path d="m8.5 6.5 2-2" /><path
+          d="m17.5 15.5 2-2"
+        /></svg
+      >
+    </button>
 
-  {#if onAddWaypoint}
-    <!-- Horizontal pair: pin (add) + ✕ (clear). Clear only renders when
+    {#if onAddWaypoint}
+      <!-- Horizontal pair: pin (add) + ✕ (clear). Clear only renders when
          a route exists, so the pin is alone otherwise. The wrapper keeps
          them on the same row inside the otherwise-vertical toolbar. -->
-    <div class="toolbar-row">
-      <button
-        class="add-waypoint-toggle"
-        class:active={addWaypointActive}
-        onclick={toggleAddWaypoint}
-        aria-pressed={addWaypointActive}
-        data-tip={addWaypointActive
-          ? "Click on the chart to add a waypoint (active)"
-          : "Add a route waypoint from current position"}
-        aria-label="Add waypoint"
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="15"
-          height="15"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
-          <circle cx="12" cy="9" r="2.5" />
-        </svg>
-      </button>
-      {#if addWaypointActive && navWaypoints && navWaypoints.length > 0}
+      <div class="toolbar-row">
         <button
-          class="clear-waypoints-btn"
-          class:armed={clearConfirmArmed}
-          onclick={clearWaypoints}
-          data-tip={clearConfirmArmed
-            ? "Click again to confirm clearing all waypoints"
-            : "Clear all route waypoints"}
-          aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+          class="add-waypoint-toggle"
+          class:active={addWaypointActive}
+          onclick={toggleAddWaypoint}
+          aria-pressed={addWaypointActive}
+          data-tip={addWaypointActive
+            ? "Click on the chart to add a waypoint (active)"
+            : "Add a route waypoint from current position"}
+          aria-label="Add waypoint"
         >
-          {clearConfirmArmed ? "?" : "✕"}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 21s-7-7.5-7-12a7 7 0 0 1 14 0c0 4.5-7 12-7 12Z" />
+            <circle cx="12" cy="9" r="2.5" />
+          </svg>
         </button>
-      {/if}
-    </div>
-  {/if}
+        {#if addWaypointActive && navWaypoints && navWaypoints.length > 0}
+          <button
+            class="clear-waypoints-btn"
+            class:armed={clearConfirmArmed}
+            onclick={clearWaypoints}
+            data-tip={clearConfirmArmed
+              ? "Click again to confirm clearing all waypoints"
+              : "Clear all route waypoints"}
+            aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
+          >
+            {clearConfirmArmed ? "?" : "✕"}
+          </button>
+        {/if}
+      </div>
+    {/if}
 
-  <button
-    class="heads-up-toggle"
-    class:active={headsUpActive}
-    onclick={toggleHeadsUp}
-    aria-pressed={headsUpActive}
-    disabled={!myBoat}
-    data-tip={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
-    aria-label="Toggle heads-up orientation"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-      ><circle cx="12" cy="12" r="10" /><polygon
-        points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
-      /></svg
+    <button
+      class="heads-up-toggle"
+      class:active={headsUpActive}
+      onclick={toggleHeadsUp}
+      aria-pressed={headsUpActive}
+      disabled={!myBoat}
+      data-tip={headsUpActive ? "Heads-up orientation (on)" : "Heads-up orientation (north up)"}
+      aria-label="Toggle heads-up orientation"
     >
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        ><circle cx="12" cy="12" r="10" /><polygon
+          points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"
+        /></svg
+      >
+    </button>
 
-  <button
-    class="boat-position-toggle"
-    class:active={boatPositionMode === "bottom"}
-    onclick={toggleBoatPosition}
-    aria-pressed={boatPositionMode === "bottom"}
-    disabled={!myBoat}
-    data-tip={boatPositionMode === "bottom"
-      ? "Boat position: bottom 20% (click for centered)"
-      : "Boat position: centered (click for bottom 20%)"}
-    aria-label="Toggle boat position on screen"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
+    <button
+      class="boat-position-toggle"
+      class:active={boatPositionMode === "bottom"}
+      onclick={toggleBoatPosition}
+      aria-pressed={boatPositionMode === "bottom"}
+      disabled={!myBoat}
+      data-tip={boatPositionMode === "bottom"
+        ? "Boat position: bottom 20% (click for centered)"
+        : "Boat position: centered (click for bottom 20%)"}
+      aria-label="Toggle boat position on screen"
     >
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      {#if boatPositionMode === "bottom"}
-        <circle cx="12" cy="18" r="2" fill="currentColor" />
-      {:else}
-        <circle cx="12" cy="12" r="2" fill="currentColor" />
-      {/if}
-    </svg>
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        {#if boatPositionMode === "bottom"}
+          <circle cx="12" cy="18" r="2" fill="currentColor" />
+        {:else}
+          <circle cx="12" cy="12" r="2" fill="currentColor" />
+        {/if}
+      </svg>
+    </button>
 
-  <button
-    class="auto-zoom-toggle"
-    class:active={autoZoomActive}
-    onclick={toggleAutoZoom}
-    aria-pressed={autoZoomActive}
-    data-tip={autoZoomActive
-      ? "Auto-zoom (on): zoom follows boat speed"
-      : "Auto-zoom (off): manual zoom"}
-    aria-label="Toggle auto-zoom"
-  >
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
+    <button
+      class="auto-zoom-toggle"
+      class:active={autoZoomActive}
+      onclick={toggleAutoZoom}
+      aria-pressed={autoZoomActive}
+      data-tip={autoZoomActive
+        ? "Auto-zoom (on): zoom follows boat speed"
+        : "Auto-zoom (off): manual zoom"}
+      aria-label="Toggle auto-zoom"
     >
-      <circle cx="11" cy="11" r="7" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-      <line x1="8" y1="11" x2="14" y2="11" />
-      <line x1="11" y1="8" x2="11" y2="14" />
-    </svg>
-  </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="11" cy="11" r="7" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        <line x1="8" y1="11" x2="14" y2="11" />
+        <line x1="11" y1="8" x2="11" y2="14" />
+      </svg>
+    </button>
   </div>
 
   {#if measureActive && measureDistance !== null}
@@ -6102,8 +5445,9 @@
             <span class="data-panel-label">Next</span>
             <span class="data-panel-value">
               <span class="data-panel-bold">{routeStats.next.distNm.toFixed(2)}</span><sup>nm</sup>
-              · {routeStats.next.headingDeg.toFixed(0)}°
-              · {formatDurationMin(routeStats.next.minutes)}
+              · {routeStats.next.headingDeg.toFixed(0)}° · {formatDurationMin(
+                routeStats.next.minutes
+              )}
               · ETA {formatEta(routeStats.next.minutes)}
             </span>
           </div>
@@ -6111,7 +5455,9 @@
             <div class="data-panel-row">
               <span class="data-panel-label">Final</span>
               <span class="data-panel-value">
-                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup>nm</sup>
+                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup
+                  >nm</sup
+                >
                 · {formatDurationMin(routeStats.final.minutes)}
                 · ETA {formatEta(routeStats.final.minutes)}
               </span>
@@ -6136,17 +5482,8 @@
             <span class="data-panel-station">{tideInfo.station.distNm.toFixed(1)} nm away</span>
           </div>
           {#if tideSpark}
-            <svg
-              class="tide-spark"
-              viewBox="0 0 {sparkW} {sparkH}"
-              preserveAspectRatio="none"
-            >
-              <polyline
-                points={tideSpark.points}
-                fill="none"
-                stroke="#4ade80"
-                stroke-width="1.5"
-              />
+            <svg class="tide-spark" viewBox="0 0 {sparkW} {sparkH}" preserveAspectRatio="none">
+              <polyline points={tideSpark.points} fill="none" stroke="#4ade80" stroke-width="1.5" />
               {#if tideSpark.nowX !== null}
                 <line
                   x1={tideSpark.nowX}
@@ -6228,7 +5565,9 @@
             <span class="data-panel-label">Rain</span>
             <span class="data-panel-value">
               {#if weatherInfo.rainTotalIn > 0}
-                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup>in</sup>
+                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup
+                  >in</sup
+                >
                 · {weatherInfo.rainHoursAny}h
               {:else}
                 <span class="data-panel-bold">none</span>
@@ -6258,15 +5597,11 @@
               </span>
             {/if}
             {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
-              {@const windColor = colorForValue(
-                WIND_COLOR_SCALE,
-                cursorInfo.windKt / MS_TO_KT,
-                15,
-              )}
+              {@const windColor = colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}
               <span class="data-panel-value" style="color: {windColor}">
-                <span class="weather-swatch" style="background: {windColor}"
-                ></span>
-                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup>
+                <span class="weather-swatch" style="background: {windColor}"></span>
+                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup
+                >
                 from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
@@ -6274,12 +5609,13 @@
               {@const waveColor = colorForValue(
                 WAVE_COLOR_SCALE,
                 cursorInfo.waveM,
-                WAVE_RANGE_MAX_M,
+                WAVE_RANGE_MAX_M
               )}
               <span class="data-panel-value" style="color: {waveColor}">
-                <span class="weather-swatch" style="background: {waveColor}"
-                ></span>
-                wave <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span><sup>ft</sup>
+                <span class="weather-swatch" style="background: {waveColor}"></span>
+                wave
+                <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span
+                ><sup>ft</sup>
                 from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
               </span>
             {/if}
@@ -6550,6 +5886,17 @@
      left:5 and run ~75px tall). Children are flex items so conditional
      buttons (add waypoint, clear waypoints, boats) can appear/disappear
      without breaking the layout. */
+  /* Chart-extended (kiosk) mode: no boat/robot. Keep the layers button (the map
+     selector — its panel also holds the weather toggles) and the tile-url debug
+     box (the {} toggle, useful for grabbing tile URLs in kiosk deployments), but
+     hide the boat/nav controls and the boat data panel. (The add-waypoint and
+     boats buttons aren't rendered in this mode anyway — no nav service / boats
+     panel.) */
+  .chart-only .data-panel,
+  .chart-only .boats-toggle,
+  .chart-only .measure-toggle {
+    display: none;
+  }
   .left-toolbar {
     position: absolute;
     top: 90px;
@@ -6558,6 +5905,24 @@
     flex-direction: column;
     gap: 5px;
     z-index: 1001;
+  }
+
+  /* Panel overlay on the left edge of the chart (routes). Sits to the right of
+     the toolbar's button column; dark translucent so the white panel text
+     stays readable over light chart tiles. Capped height with its own scroll
+     so it never runs off the bottom of the map. */
+  .left-overlay {
+    position: absolute;
+    top: 90px;
+    left: 48px;
+    width: 17rem;
+    max-height: calc(100% - 110px);
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.82);
+    border: 1px solid #444;
+    border-radius: 4px;
+    z-index: 1002;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   }
 
   /* Sub-row for paired buttons inside the otherwise-vertical toolbar.
@@ -6846,224 +6211,6 @@
     color: #0066cc;
   }
 
-  .weather-legend-stack {
-    position: absolute;
-    /* Bottom-left stack — bottom→top: Viam logo (6 px), ScaleLine
-       (~50 px), legend stack (80 px). The ScaleLine override below
-       lifts OL's distance scale up enough to clear the wordmark
-       comfortably. */
-    bottom: 80px;
-    left: 8px;
-    z-index: 10;
-    pointer-events: none;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .weather-legend {
-    background: rgba(255, 255, 255, 0.9);
-    padding: 4px 6px 3px 6px;
-    border-radius: 4px;
-    border: 1px solid rgba(0, 0, 0, 0.15);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
-    font-size: 10px;
-    color: #444;
-  }
-  .weather-legend-strip {
-    display: block;
-    width: 200px;
-    height: 14px;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-  }
-  /* Mirrors WIND_COLOR_SCALE in src/lib/windLayer.ts: 15 evenly-spaced
-     stops from deep blue at 0 kt through teal/green around 10 kt to
-     yellow at 16 kt, orange at 20 kt, deep red at 28+ kt. */
-  .weather-legend-strip-wind {
-    background: linear-gradient(
-      to right,
-      #0a3d91 0%,
-      #1565c0 7.14%,
-      #1e88e5 14.29%,
-      #4fc3f7 21.43%,
-      #26a69a 28.57%,
-      #2e7d32 35.71%,
-      #66bb6a 42.86%,
-      #cddc39 50%,
-      #fbc02d 57.14%,
-      #f57f17 64.29%,
-      #e65100 71.43%,
-      #d84315 78.57%,
-      #bf360c 85.71%,
-      #b71c1c 92.86%,
-      #7f0000 100%
-    );
-  }
-  /* Mirrors WAVE_COLOR_SCALE in src/lib/windLayer.ts: near-white at
-     calm (so it reads on a blue basemap), cyan around 2 ft, green
-     around 4–5 ft, yellow/orange around 6–7 ft, deep red at 10 ft. */
-  .weather-legend-strip-wave {
-    background: linear-gradient(
-      to right,
-      #f0f7ff 0%,
-      #3eb1ff 20%,
-      #3ed24a 40%,
-      #bde534 50%,
-      #fff200 57%,
-      #ff7a1a 70%,
-      #e51d1d 85%,
-      #6e0606 100%
-    );
-  }
-  .weather-legend-ticks {
-    display: flex;
-    justify-content: space-between;
-    width: 200px;
-    line-height: 1;
-  }
-  .weather-legend-ticks > span {
-    white-space: nowrap;
-  }
-
-  .layer-section-header {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #555;
-    padding: 6px 0 2px 2px;
-    border-top: 1px dashed rgba(0, 0, 0, 0.15);
-    margin-top: 4px;
-  }
-  .layer-section-header:first-child {
-    border-top: none;
-    margin-top: 0;
-  }
-
-  .wind-forecast-bar {
-    position: absolute;
-    bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 12px;
-    background: rgba(255, 255, 255, 0.92);
-    border: 1px solid rgba(0, 0, 0, 0.15);
-    border-radius: 6px;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-    font-size: 12px;
-    color: #333;
-    z-index: 10;
-    pointer-events: auto;
-  }
-  .wind-forecast-bar-label {
-    font-weight: 600;
-    min-width: 70px;
-    text-align: right;
-  }
-  .wind-forecast-bar-spinner {
-    display: inline-block;
-    width: 12px;
-    height: 12px;
-    margin-left: 6px;
-    vertical-align: -2px;
-    border: 2px solid rgba(0, 0, 0, 0.18);
-    border-top-color: #0a66c2;
-    border-radius: 50%;
-    animation: wind-forecast-bar-spin 0.7s linear infinite;
-  }
-  @keyframes wind-forecast-bar-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  .wind-forecast-bar input[type="range"] {
-    width: 240px;
-    display: block;
-  }
-  /* Wraps the slider so day-boundary tick marks can be positioned over the
-     same width as the input. Padding-top reserves space for the weekday
-     labels that sit above the track. */
-  .wind-forecast-bar-slider-wrap {
-    position: relative;
-    width: 240px;
-    padding-top: 14px;
-  }
-  /* One tick per local-midnight forecast hour. The thin vertical bar sits
-     inside the slider's track area; the label centres on the same x. The
-     ~6 px inset on the wrap is half the native range thumb width so
-     ticks line up with the slider's logical 0 % and 100 % positions
-     instead of the input element edges. */
-  .wind-forecast-bar-daymark {
-    position: absolute;
-    top: 14px;
-    bottom: 0;
-    width: 1px;
-    margin-left: 6px;
-    background: rgba(0, 0, 0, 0.35);
-    pointer-events: none;
-  }
-  .wind-forecast-bar-daymark-label {
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 10px;
-    line-height: 1;
-    color: #555;
-    white-space: nowrap;
-  }
-  .wind-forecast-bar-runtime {
-    font-size: 11px;
-    color: #888;
-    min-width: 150px;
-  }
-  .wind-forecast-bar-model {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: #555;
-  }
-  .wind-forecast-bar-model-prefix {
-    color: #888;
-    text-transform: uppercase;
-    font-size: 10px;
-    letter-spacing: 0.04em;
-  }
-  .wind-forecast-bar-model select {
-    font-size: 11px;
-    padding: 1px 2px;
-    max-width: 160px;
-  }
-  .wind-forecast-bar-error {
-    position: absolute;
-    bottom: 48px;
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 4px 10px;
-    background: rgba(220, 53, 69, 0.92);
-    color: white;
-    border-radius: 4px;
-    font-size: 11px;
-    z-index: 10;
-    /* Selectable so the user can copy the upstream error message
-       to share / paste into a bug report. The banner sits above
-       the slider and ScaleLine but doesn't need to block clicks
-       to anything underneath — `auto` only enables selection on
-       the banner itself. */
-    pointer-events: auto;
-    user-select: text;
-    -webkit-user-select: text;
-    cursor: text;
-    max-width: 480px;
-    text-align: center;
-  }
-
   .layer-controls input[type="checkbox"] {
     margin: 0;
     width: 14px;
@@ -7138,6 +6285,36 @@
   }
 
   .layers-toggle.active:hover {
+    background: #1d4ed8;
+  }
+
+  .routes-toggle {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #333;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .routes-toggle:hover {
+    background: white;
+    border-color: #999;
+  }
+
+  .routes-toggle.active {
+    background: #2563eb;
+    color: white;
+    border-color: #1d4ed8;
+  }
+
+  .routes-toggle.active:hover {
     background: #1d4ed8;
   }
 
@@ -7426,7 +6603,6 @@
   .edit-waypoint-close:hover {
     color: white;
   }
-
 
   /* Boats panel (bottom-right, next to Layers) */
   .boats-controls {

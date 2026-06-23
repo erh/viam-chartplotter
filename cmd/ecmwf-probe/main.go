@@ -32,7 +32,7 @@ import (
 	"path/filepath"
 	"time"
 
-	vc "github.com/erh/viam-chartplotter"
+	"github.com/erh/viam-chartplotter/weather"
 )
 
 const ecmwfBaseURL = "https://data.ecmwf.int/forecasts/%s/%02dz/ifs/0p25/oper/%s%02d0000-%dh-oper-fc"
@@ -59,7 +59,7 @@ func main() {
 	flag.Parse()
 
 	if !*quiet {
-		vc.AECDebug = log.New(os.Stderr, "", 0)
+		weather.AECDebug = log.New(os.Stderr, "", 0)
 	}
 
 	var grib []byte
@@ -119,10 +119,10 @@ func main() {
 
 	// DebugDumpGRIB is the in-package helper that walks each
 	// message, prints per-section diagnostics, and invokes the
-	// CCSDS decoder. With vc.AECDebug wired to stderr above, we
+	// CCSDS decoder. With weather.AECDebug wired to stderr above, we
 	// also get one line per block decoded so it's easy to bisect a
 	// failure to a specific block id / position.
-	if err := vc.DebugDumpGRIB(grib, os.Stdout); err != nil {
+	if err := weather.DebugDumpGRIB(grib, os.Stdout); err != nil {
 		log.Fatalf("dump: %v", err)
 	}
 }

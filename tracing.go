@@ -34,10 +34,7 @@ const tracerName = "viam-chartplotter"
 // should defer it (or invoke it from resource.Close) so the last
 // in-flight batch makes it out before the process exits.
 func initTracer(logger logging.Logger) (func(context.Context) error, error) {
-	exporter := &slowSpanExporter{
-		logger:    logger,
-		threshold: slowRequestThreshold(),
-	}
+	exporter := &slowSpanExporter{logger: logger}
 	// BatchSpanProcessor buffers spans and flushes in the background so
 	// the exporter doesn't block the request path. Sampling defaults to
 	// AlwaysSample — we collect every span and let the exporter decide
@@ -53,27 +50,25 @@ func initTracer(logger logging.Logger) (func(context.Context) error, error) {
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
-	logger.Infof("tracing: slow-span exporter ready (threshold=%s)", exporter.threshold)
+	logger.Infof("tracing: span exporter ready (logs errored spans only)")
 	return tp.Shutdown, nil
 }
 
-// slowSpanExporter implements sdktrace.SpanExporter. Spans below the
-// threshold AND without an error status get dropped on the floor —
-// no log line, no buffering. Slow / errored spans become one-line
-// WARN log entries naming the span, its duration, the error message
-// (if any), and the span's attributes inline.
+// slowSpanExporter implements sdktrace.SpanExporter. It only logs spans
+// that ended with an Error status — those are the ones worth a line in
+// the logs. Slow-but-successful requests are already reported (more
+// usefully, with status / bytes / x-cache) by slowRequestLog, so logging
+// every slow span here too was just duplicate per-tile noise.
 type slowSpanExporter struct {
-	logger    logging.Logger
-	threshold time.Duration
+	logger logging.Logger
 }
 
 func (e *slowSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
 	for _, sp := range spans {
-		dur := sp.EndTime().Sub(sp.StartTime())
-		errored := sp.Status().Code == codes.Error
-		if dur < e.threshold && !errored {
+		if sp.Status().Code != codes.Error {
 			continue
 		}
+		dur := sp.EndTime().Sub(sp.StartTime())
 		var attrs strings.Builder
 		for _, kv := range sp.Attributes() {
 			attrs.WriteByte(' ')
@@ -81,13 +76,8 @@ func (e *slowSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadO
 			attrs.WriteByte('=')
 			attrs.WriteString(kv.Value.Emit())
 		}
-		if errored {
-			e.logger.Warnf("span %s dur=%s ERR=%q%s",
-				sp.Name(), dur.Round(time.Millisecond), sp.Status().Description, attrs.String())
-		} else {
-			e.logger.Warnf("span %s dur=%s%s",
-				sp.Name(), dur.Round(time.Millisecond), attrs.String())
-		}
+		e.logger.Warnf("span %s dur=%s ERR=%q%s",
+			sp.Name(), dur.Round(time.Millisecond), sp.Status().Description, attrs.String())
 	}
 	return nil
 }

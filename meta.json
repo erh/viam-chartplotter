@@ -9,19 +9,25 @@
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:chartplotter",
       "description": "Chartplotter web UI + NOAA ENC/WMS tile server. Renders S-57 vector charts with draft-keyed depth shading.",
-      "markdown_link": "README.md#viam-chartplotter"
+      "markdown_link": "README.md#chartplotter"
     },
     {
       "api": "rdk:service:navigation",
       "model": "erh:viam-chartplotter:nav",
       "description": "Persistent in-memory navigation service for the chartplotter UI.",
-      "markdown_link": "README.md#navigation-service"
+      "markdown_link": "README.md#navigation"
     },
     {
       "api": "rdk:component:generic",
-      "model": "erh:viam-chartplotter:wind-publisher",
-      "description": "Fleet-wide ECMWF wind cache populator. Configure on ONE machine; pulls ECMWF Open Data, decodes, crops into a tile grid, and uploads to Cloudflare R2 so every other chartplotter reads from R2 instead of hammering ECMWF.",
-      "markdown_link": "README.md#ecmwf-wind-one-machine-populates-the-cache-for-the-whole-fleet"
+      "model": "erh:viam-chartplotter:datasync",
+      "description": "Keeps the shared MongoDB 'noaa' collection current by periodically refreshing the NOAA ENC catalog and ingesting every published cell worldwide. Run on one machine; the chartplotter/tileserver read charts from Mongo.",
+      "markdown_link": "README.md#datasync"
+    },
+    {
+      "api": "rdk:component:generic",
+      "model": "erh:viam-chartplotter:weathersync",
+      "description": "Decodes weather forecast GRIB into the shared MongoDB 'weather' collection on an interval, so render/tile servers serve weather from Mongo instead of every instance re-fetching GRIB.",
+      "markdown_link": "README.md#weathersync"
     }
   ],
   "first_run": "",
@@ -29,7 +35,12 @@
   "build": {
     "build": "make module",
     "setup": "make setup-linux",
-    "arch": ["linux/amd64", "linux/arm64", "darwin/arm64"],
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ],
+    "darwin_deps" : ["touch","go", "pkg-config"],
     "path": "module.tar.gz"
   },
   "applications": [
