@@ -1174,7 +1174,11 @@ const (
 // instance printed the same name 2-4× on adjacent tiles. A process-lifetime
 // canonical set keeps one instance per name (largest canyon), so a name labels
 // exactly once.
-const ENCRenderRulesVersion = 21
+// v22: navigation lines / recommended tracks (NAVLNE/RECTRC) no longer drawn.
+// They're long straight leading/range lines that streak across open-water
+// tiles (e.g. Cape Cod Bay) and clutter the chart without aiding our use; the
+// magenta area-limit classes (FAIRWY/ACHARE/RESARE) are unaffected.
+const ENCRenderRulesVersion = 22
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -3479,19 +3483,12 @@ func lineStroke(class string, f encFeature, safeDepthM float64, style RenderStyl
 		}
 		return s52DEPCN, 0.6
 	case "NAVLNE", "RECTRC":
-		// Navigation line / recommended track: BLACK in S-52 (LS(...,CHBLK)) —
-		// these are the leading/range lines through fixed marks, not area
-		// boundaries. We previously drew them magenta like the fairway/anchorage
-		// boundaries below, but NOAA renders them black (a magenta leading line
-		// is wrong — only the area-limit classes are magenta).
-		w := 0.8
-		switch {
-		case z <= 10:
-			w = 1.4
-		case z == 11:
-			w = 1.1
-		}
-		return s52CHBLK, w
+		// Navigation lines / recommended tracks (leading/range lines through
+		// fixed marks) are intentionally not drawn: they're long straight lines
+		// that streak across open-water tiles and clutter the chart. nil stroke
+		// => the caller skips drawing (see ENCRenderRulesVersion v22). NOAA draws
+		// them black (LS(...,CHBLK)); restore s52CHBLK here to bring them back.
+		return nil, 0
 	case "FAIRWY", "ACHARE", "DWRTPT", "TWRTPT", "RESARE":
 		// Fairway / anchorage / deep-water route / traffic route / restricted
 		// area — magenta boundary line, drawn DASHED (see isMagentaLimitClass)
