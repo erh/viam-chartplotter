@@ -10,7 +10,7 @@
 
 import type { LatLng } from "./simplify";
 
-export type RouteScope = "location" | "parent" | "robot";
+export type RouteScope = "location" | "parent";
 
 export interface Route {
   id: string;
@@ -23,16 +23,9 @@ export interface Route {
   waypoints: LatLng[];
   stats?: { distanceNm: number; count: number };
   // Where this route lives: "location" = this machine's location; "parent" =
-  // inherited from an ancestor location (read-only here); "robot" = local
-  // fallback on this machine. Set by the backend on list responses.
+  // inherited from an ancestor location (read-only here). Set by the backend on
+  // list responses.
   scope?: RouteScope;
-}
-
-export interface RouteList {
-  routes: Route[];
-  // False when the location metadata couldn't be read/written (so robot routes
-  // can't be shared/promoted). Drives the UI's share affordances.
-  locationAvailable: boolean;
 }
 
 // Minimal nav-service surface: a DoCommand passthrough. Backed by
@@ -81,26 +74,14 @@ export function sizeWarning(routes: Route[]): boolean {
   return new TextEncoder().encode(JSON.stringify(routes)).length > SIZE_WARN_BYTES;
 }
 
-export async function listRoutes(api: RoutesApi): Promise<RouteList> {
+export async function listRoutes(api: RoutesApi): Promise<Route[]> {
   const resp = await api.doCommand({ routes_list: true });
   const routes = resp?.routes;
-  return {
-    routes: Array.isArray(routes) ? (routes as Route[]) : [],
-    locationAvailable: resp?.location_available === true,
-  };
+  return Array.isArray(routes) ? (routes as Route[]) : [];
 }
 
-// Returns the scope the route actually landed in ("location" when shared, or
-// "robot" when it fell back to local storage because the location wasn't
-// writable).
-export async function saveRoute(api: RoutesApi, route: Route): Promise<RouteScope> {
-  const resp = await api.doCommand({ routes_save: { route } });
-  return resp?.scope === "robot" ? "robot" : "location";
-}
-
-// Move a robot-local route up to the shared location store (needs location access).
-export async function promoteRoute(api: RoutesApi, id: string): Promise<void> {
-  await api.doCommand({ routes_promote: { id } });
+export async function saveRoute(api: RoutesApi, route: Route): Promise<void> {
+  await api.doCommand({ routes_save: { route } });
 }
 
 export async function deleteRoute(api: RoutesApi, id: string): Promise<void> {

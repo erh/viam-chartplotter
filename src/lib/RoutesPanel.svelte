@@ -9,7 +9,6 @@
   import {
     listRoutes,
     saveRoute,
-    promoteRoute,
     deleteRoute,
     renameRoute,
     sizeWarning,
@@ -48,10 +47,6 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let loaded = $state(false);
-  // Whether the shared location store is reachable (drives Promote affordances).
-  let locationAvailable = $state(true);
-  // Set when a save fell back to robot-local storage, so we can tell the user.
-  let savedLocallyNote = $state(false);
 
   // Inline forms.
   let saveCurrentOpen = $state(false);
@@ -96,9 +91,7 @@
     loading = true;
     error = null;
     try {
-      const res = await listRoutes(api);
-      routes = res.routes;
-      locationAvailable = res.locationAvailable;
+      routes = await listRoutes(api);
       loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -117,9 +110,7 @@
     error = null;
     try {
       const result = await fn(api);
-      const res = await listRoutes(api);
-      routes = res.routes;
-      locationAvailable = res.locationAvailable;
+      routes = await listRoutes(api);
       return result;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -172,8 +163,7 @@
       updatedAt: now,
       waypoints,
     };
-    const scope = await withStore((api) => saveRoute(api, route));
-    savedLocallyNote = scope === "robot";
+    await withStore((api) => saveRoute(api, route));
     saveCurrentOpen = false;
   }
 
@@ -193,10 +183,6 @@
     if (!confirm(`Delete route "${r.name}"? This can't be undone.`)) return;
     if (previewId === r.id) togglePreview(r); // clear preview if showing
     await withStore((api) => deleteRoute(api, r.id));
-  }
-
-  async function doPromote(r: Route) {
-    await withStore((api) => promoteRoute(api, r.id));
   }
 
   // Overwrite a route's geometry with the current active waypoints, keeping its
@@ -223,8 +209,7 @@
       updatedAt: new Date().toISOString(),
       waypoints: currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
     };
-    const scope = await withStore((api) => saveRoute(api, updated));
-    savedLocallyNote = scope === "robot";
+    await withStore((api) => saveRoute(api, updated));
   }
 
   function togglePreview(r: Route) {
@@ -328,8 +313,7 @@
       updatedAt: now,
       waypoints: trackPreview.waypoints,
     };
-    const scope = await withStore((api) => saveRoute(api, route));
-    savedLocallyNote = scope === "robot";
+    await withStore((api) => saveRoute(api, route));
     trackFormOpen = false;
   }
 
@@ -355,13 +339,6 @@
   {#if error}
     <div class="text-warning-dark text-xs border border-warning-medium rounded px-2 py-1">
       {error}
-    </div>
-  {/if}
-
-  {#if savedLocallyNote}
-    <div class="text-warning-dark text-[11px] border border-warning-medium rounded px-2 py-1">
-      Saved on this robot only — the location wasn't writable. Use “Promote” to share it once access
-      is available.
     </div>
   {/if}
 
@@ -397,14 +374,7 @@
               <span class:font-bold={previewId === r.id}>{r.name}</span>
             </button>
           {/if}
-          {#if r.scope === "robot"}
-            <span
-              class="text-[10px] uppercase text-warning-dark"
-              title="Stored on this robot only — not shared with the location"
-            >
-              local
-            </span>
-          {:else if r.scope === "parent"}
+          {#if r.scope === "parent"}
             <span
               class="text-[10px] uppercase opacity-40"
               title="Inherited from a parent location — read-only here"
@@ -449,16 +419,6 @@
               class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark"
               onclick={() => startRename(r)}>Rename</button
             >
-            {#if r.scope === "robot"}
-              <button
-                class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark text-success-dark disabled:opacity-40"
-                onclick={() => doPromote(r)}
-                disabled={busy || !locationAvailable}
-                title={locationAvailable
-                  ? "Share this route with the location"
-                  : "No location access — can't share yet"}>Promote</button
-              >
-            {/if}
             <button
               class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark text-warning-dark"
               onclick={() => doDelete(r)}

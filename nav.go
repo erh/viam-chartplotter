@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,19 +123,10 @@ func newNav(
 		return nil, err
 	}
 
-	// Robot-local routes live beside the waypoint file, e.g. nav/<name>-routes.json.
-	ext := filepath.Ext(dataPath)
-	routesPath := strings.TrimSuffix(dataPath, ext) + "-routes" + ext
-	robotRoutes, err := newDiskRoutesStore(routesPath)
-	if err != nil {
-		return nil, err
-	}
-
 	svc := &navService{
-		name:        conf.ResourceName(),
-		logger:      logger,
-		store:       store,
-		robotRoutes: robotRoutes,
+		name:   conf.ResourceName(),
+		logger: logger,
+		store:  store,
 	}
 	svc.mode.Store(uint32(navigation.ModeManual))
 	logger.Infof("nav waypoints persisted at %s", dataPath)
@@ -190,12 +180,9 @@ type navService struct {
 	viamClient *app.ViamClient
 	appClient  *app.AppClient
 	locationID string
-	// Robot-local route fallback, used when the location metadata can't be
-	// written. Promoted to the location on demand (routes_promote).
-	robotRoutes *diskRoutesStore
 
 	// Test seams: when set, used instead of dialing the real app client, so the
-	// fallback/promote/inheritance logic can be exercised against fake stores.
+	// location/inheritance logic can be exercised against fake stores.
 	// routesStoreFn is this machine's location; parentStoresFn the ancestors.
 	routesStoreFn  func(ctx context.Context) (metadataStore, error)
 	parentStoresFn func(ctx context.Context) ([]metadataStore, error)
@@ -433,13 +420,11 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 //	{"routes_save":     {"route": {<route>}}}
 //	{"routes_delete":   {"id": "<id>"}}
 //	{"routes_rename":   {"id": "<id>", "name"?: ..., "notes"?: ..., "color"?: ..., "updatedAt"?: ...}}
-//	{"routes_promote":  {"id": "<id>"}}
 //	{"arrival_status":  true}
 //
 // The routes_* verbs read/write saved routes in the location metadata via the
 // Viam app API (see nav_routes.go), so the browser doesn't need its own cloud
-// credentials. When the location can't be written they fall back to a
-// robot-local store; routes_promote moves a robot route up to the location.
+// credentials.
 //
 // move_waypoint updates an existing waypoint in place (preserving its ID and
 // order). insert_waypoint inserts a new waypoint immediately before the
@@ -470,9 +455,6 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 	if raw, ok := cmd["routes_rename"]; ok {
 		return s.doRoutesRename(ctx, raw)
-	}
-	if raw, ok := cmd["routes_promote"]; ok {
-		return s.doRoutesPromote(ctx, raw)
 	}
 	if _, ok := cmd["arrival_status"]; ok {
 		return s.doArrivalStatus(ctx)

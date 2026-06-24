@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   listRoutes,
   saveRoute,
-  promoteRoute,
   deleteRoute,
   renameRoute,
   sizeWarning,
@@ -78,47 +77,29 @@ describe("sizeWarning", () => {
 });
 
 describe("listRoutes", () => {
-  it("issues routes_list and returns routes + locationAvailable", async () => {
+  it("issues routes_list and returns the routes", async () => {
     const api = new FakeApi();
-    api.response = { routes: [mkRoute({ id: "x" })], location_available: true };
-    const out = await listRoutes(api);
+    api.response = { routes: [mkRoute({ id: "x" })] };
+    const routes = await listRoutes(api);
     expect(api.last()).toEqual({ routes_list: true });
-    expect(out.routes).toHaveLength(1);
-    expect(out.routes[0].id).toBe("x");
-    expect(out.locationAvailable).toBe(true);
+    expect(routes).toHaveLength(1);
+    expect(routes[0].id).toBe("x");
   });
 
-  it("defaults to empty + locationAvailable false when fields are missing", async () => {
+  it("defaults to empty when the routes field is missing", async () => {
     const api = new FakeApi();
     api.response = {};
-    const out = await listRoutes(api);
-    expect(out.routes).toEqual([]);
-    expect(out.locationAvailable).toBe(false);
+    expect(await listRoutes(api)).toEqual([]);
   });
 });
 
 describe("saveRoute", () => {
-  it("issues routes_save and returns the location scope", async () => {
+  it("issues routes_save with the route", async () => {
     const api = new FakeApi();
     api.response = { ok: true, scope: "location" };
     const r = mkRoute();
-    const scope = await saveRoute(api, r);
+    await saveRoute(api, r);
     expect(api.last()).toEqual({ routes_save: { route: r } });
-    expect(scope).toBe("location");
-  });
-
-  it("reports robot scope on fallback", async () => {
-    const api = new FakeApi();
-    api.response = { ok: true, scope: "robot", location_error: "no access" };
-    expect(await saveRoute(api, mkRoute())).toBe("robot");
-  });
-});
-
-describe("promoteRoute", () => {
-  it("issues routes_promote with the id", async () => {
-    const api = new FakeApi();
-    await promoteRoute(api, "rte_a");
-    expect(api.last()).toEqual({ routes_promote: { id: "rte_a" } });
   });
 });
 
