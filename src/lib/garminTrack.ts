@@ -3,8 +3,15 @@
 // The map fires a bbox callback on first render and whenever the viewport
 // settles. We (re)query the garmin-position-decimated data pipeline's sink
 // collection for our own boat's track points inside that bounding box
-// (2dsphere geo search on `location`, filtered by part_id) and hand the
+// (2dsphere geo search on `location`, filtered by robot_id) and hand the
 // resulting points to MarineMap as the faded long-term track.
+//
+// We filter by robot_id (the machine id), not part_id, and the caller passes
+// the org of the *part that owns the position data* — which can differ from
+// the host machine's org (the host views the boat as a remote part). App.svelte
+// resolves that org/robot/data-client via dataClientForComponent, exactly the
+// way position history does; passing the host org instead yields a
+// permission_denied on the pipeline-sink query.
 //
 // This module holds the pure query/mapping logic; App.svelte owns the
 // orchestration (debounce, in-flight guard, keyed retry, state assignment).
@@ -51,8 +58,8 @@ function bboxToPolygon(bbox: Bbox) {
   };
 }
 
-// Map one pipeline-sink document to a PositionPoint. The collection is
-// indexed on `location` (GeoJSON Point) + part_id, so coordinates come from
+// Map one pipeline-sink document to a PositionPoint. The collection stores
+// `location` as a GeoJSON Point, so coordinates come from
 // location.coordinates ([lng, lat]). Timestamp field name isn't guaranteed,
 // so we accept the usual candidates and tolerate its absence (the track
 // renderer copes with a missing ts).
@@ -96,7 +103,7 @@ export function decimatedRowToPoint(row: any): PositionPoint | null {
 export async function fetchGarminDecimatedTrack(
   dataClient: any,
   orgId: string,
-  partId: string,
+  robotId: string,
   bbox: Bbox,
   pipelineId: string = GARMIN_PIPELINE_ID
 ): Promise<PositionPoint[]> {
@@ -104,7 +111,7 @@ export async function fetchGarminDecimatedTrack(
   const stages = [
     {
       $match: {
-        part_id: partId,
+        robot_id: robotId,
         location: { $geoWithin: { $geometry: polygon } },
       },
     },

@@ -713,6 +713,10 @@
   let lastHistoricalBbox: Bbox | null = null;
   let decimatedFetchedKey = "";
   let decimatedFetchInFlight = false;
+  // Wall-clock of the last actual fetch attempt. Throttles retries to at most
+  // once a minute so a persistent failure (e.g. permission denied on the
+  // pipeline-sink query) doesn't hammer the data API every cloud-loop tick.
+  let decimatedLastAttempt = 0;
 
   function onHistoricalBboxChange(bbox: Bbox) {
     lastHistoricalBbox = bbox;
@@ -730,21 +734,38 @@
     if (decimatedFetchInFlight) return;
     var key = bboxKey(bbox);
     if (key === decimatedFetchedKey) return;
-    var partId = globalClientCloudMetaData.machinePartId;
-    if (!partId) return;
-    var orgId = globalClientCloudMetaData.primaryOrgId;
+
+    // The position data (and the garmin-position-decimated sink) belongs to
+    // the movement sensor's part, which can live in a different org than the
+    // host machine — the host views the boat as a remote part. Using the host
+    // org/part here triggers a permission_denied on the pipeline-sink query.
+    // So resolve the data client + org + robot id from the component, exactly
+    // like position history does (dataClientForComponent), and filter the sink
+    // by robot_id = scope.robotId (the machine id).
+    var componentName = globalConfig.movementSensorForQuery || globalConfig.movementSensorName;
+    if (!componentName) return;
+
+    // Throttle attempts to once a minute. Set synchronously before the first
+    // await so overlapping cloud-loop ticks can't both slip through.
+    var now = Date.now();
+    if (now - decimatedLastAttempt < 60_000) return;
+    decimatedLastAttempt = now;
 
     decimatedFetchInFlight = true;
     try {
-      globalData.posHistoryDecimated = await fetchGarminDecimatedTrack(
-        globalCloudClient.dataClient,
-        orgId,
-        partId,
-        bbox
-      );
-      decimatedFetchedKey = key;
+      var scope = await dataClientForComponent(componentName);
+      if (scope.orgId && scope.robotId) {
+        globalData.posHistoryDecimated = await fetchGarminDecimatedTrack(
+          scope.dc,
+          scope.orgId,
+          scope.robotId,
+          bbox
+        );
+        decimatedFetchedKey = key;
+      }
     } catch (e: any) {
-      // Leave decimatedFetchedKey unset so the cloud loop retries.
+      // Leave decimatedFetchedKey unset so the cloud loop retries — but no
+      // sooner than the once-a-minute throttle above allows.
       console.log("garmin decimated geo query threw:", e?.message || String(e));
     } finally {
       decimatedFetchInFlight = false;
