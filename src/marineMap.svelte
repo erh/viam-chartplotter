@@ -689,9 +689,10 @@
     /** Ordered waypoints from a navigation service. The route is drawn from the boat's
      *  current position through each waypoint in order. */
     navWaypoints?: { id: string; lat: number; lng: number }[];
-    /** Display-only preview of a saved route (RoutesPanel). Drawn as a dashed
-     *  polyline + vertex dots; null/undefined draws nothing. Not editable. */
-    routePreview?: { waypoints: { lat: number; lng: number }[]; color?: string } | null;
+    /** Display-only preview of saved routes (RoutesPanel). Each is drawn as a
+     *  dashed polyline + vertex dots; an empty/undefined list draws nothing.
+     *  Holds many when "show all on map" is on. Not editable. */
+    routePreview?: { waypoints: { lat: number; lng: number }[]; color?: string }[] | null;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -759,20 +760,23 @@
     updateFromData();
   });
 
-  // Redraw the display-only saved-route preview whenever the prop changes.
+  // Redraw the display-only saved-route previews whenever the prop changes.
   $effect(() => {
-    const preview = routePreview;
+    const previews = routePreview;
     const source = routePreviewSource;
     if (!source) return;
     source.clear();
-    if (!preview?.waypoints?.length) return;
-    const color = preview.color || "#00d0ff";
-    const coords = preview.waypoints.map((w) => [w.lng, w.lat]);
-    if (coords.length >= 2) {
-      source.addFeature(new Feature({ geometry: new LineString(coords), color }));
-    }
-    for (const c of coords) {
-      source.addFeature(new Feature({ geometry: new Point(c), color }));
+    if (!previews?.length) return;
+    for (const preview of previews) {
+      if (!preview?.waypoints?.length) continue;
+      const color = preview.color || "#00d0ff";
+      const coords = preview.waypoints.map((w) => [w.lng, w.lat]);
+      if (coords.length >= 2) {
+        source.addFeature(new Feature({ geometry: new LineString(coords), color }));
+      }
+      for (const c of coords) {
+        source.addFeature(new Feature({ geometry: new Point(c), color }));
+      }
     }
   });
 

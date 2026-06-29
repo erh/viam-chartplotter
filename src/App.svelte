@@ -29,11 +29,10 @@
 
   let globalCloudClient: VIAM.ViamClient;
 
-  // Saved-route preview polyline pushed to the map by RoutesPanel (display-only,
-  // not the active nav route). null = nothing previewed.
-  let routePreview = $state<{ waypoints: { lat: number; lng: number }[]; color?: string } | null>(
-    null
-  );
+  // Saved-route preview polylines pushed to the map by RoutesPanel (display-only,
+  // not the active nav route). Empty = nothing previewed; may hold many when
+  // "show all on map" is on.
+  let routePreview = $state<{ waypoints: { lat: number; lng: number }[]; color?: string }[]>([]);
 
   // Cache of cloud clients for remote parts, keyed by the remote's name
   // (the prefix segment that components from that remote carry, e.g.
@@ -2183,8 +2182,7 @@
       positionHistory={globalData.posHistory}
       {fetchTrackWindow}
       onLoadRoute={loadNavRoute}
-      onPreviewRoute={(waypoints, color) =>
-        (routePreview = waypoints ? { waypoints, color } : null)}
+      onPreviewRoutes={(routes) => (routePreview = routes)}
     />
   {/snippet}
 

@@ -27,8 +27,9 @@
     // from tabular data (beyond the in-memory positionHistory). When absent the
     // track form falls back to filtering positionHistory.
     fetchTrackWindow?: (t0: Date, t1: Date) => Promise<PositionPoint[]>;
-    // Optional: preview a route's geometry on the map (null clears it).
-    onPreviewRoute?: (waypoints: LatLng[] | null, color?: string) => void;
+    // Optional: preview route geometry on the map. Pass the set of routes to
+    // draw; an empty array clears the overlay.
+    onPreviewRoutes?: (routes: { waypoints: LatLng[]; color?: string }[]) => void;
   }
 
   let {
@@ -37,12 +38,16 @@
     positionHistory,
     fetchTrackWindow,
     onLoadRoute,
-    onPreviewRoute,
+    onPreviewRoutes,
   }: Props = $props();
 
   const NM = 1852;
 
   let routes = $state<Route[]>([]);
+  // Display order: alphabetical by name (case-insensitive), stable across loads.
+  const sortedRoutes = $derived(
+    [...routes].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+  );
   let loading = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -51,9 +56,15 @@
   // Inline forms.
   let saveCurrentOpen = $state(false);
   let saveCurrentName = $state("");
+  let saveCurrentColor = $state("#ff8800");
   let renamingId = $state<string | null>(null);
   let renameValue = $state("");
-  let previewId = $state<string | null>(null);
+  // The route whose options menu is expanded (also previewed on the map). Only
+  // one is open at a time.
+  let expandedId = $state<string | null>(null);
+  // When on, every route is drawn on the map at once (so you see the ones in
+  // the region you're looking at), instead of just the expanded one.
+  let showAll = $state(false);
 
   // Track-capture form.
   let trackFormOpen = $state(false);
@@ -61,6 +72,7 @@
   let t1Str = $state("");
   let granularity = $state(200);
   let trackName = $state("");
+  let trackColor = $state("#ff8800");
   // Track fetched on demand for the chosen window (null = not fetched yet, so
   // the preview falls back to the in-memory positionHistory).
   let windowPoints = $state<PositionPoint[] | null>(null);
@@ -69,6 +81,21 @@
 
   function routesAvailable(): boolean {
     return !!getRoutesApi();
+  }
+
+  // Push the right set of routes to the map: all of them when "show all" is on,
+  // otherwise just the expanded one (or nothing). Re-run whenever the routes or
+  // selection change so the overlay stays in sync.
+  function applyMapPreview() {
+    if (!onPreviewRoutes) return;
+    if (showAll) {
+      onPreviewRoutes(routes.map((r) => ({ waypoints: r.waypoints, color: r.color })));
+    } else if (expandedId) {
+      const r = routes.find((x) => x.id === expandedId);
+      onPreviewRoutes(r ? [{ waypoints: r.waypoints, color: r.color }] : []);
+    } else {
+      onPreviewRoutes([]);
+    }
   }
 
   // datetime-local <-> Date helpers (local time, no timezone suffix).
@@ -93,6 +120,7 @@
     try {
       routes = await listRoutes(api);
       loaded = true;
+      applyMapPreview();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -111,6 +139,7 @@
     try {
       const result = await fn(api);
       routes = await listRoutes(api);
+      applyMapPreview();
       return result;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -146,6 +175,7 @@
 
   function openSaveCurrent() {
     saveCurrentName = "";
+    saveCurrentColor = nextColor(routes);
     saveCurrentOpen = true;
   }
 
@@ -158,13 +188,20 @@
       id: newRouteId(),
       name,
       source: "manual",
-      color: nextColor(routes),
+      color: saveCurrentColor,
       createdAt: now,
       updatedAt: now,
       waypoints,
     };
     await withStore((api) => saveRoute(api, route));
     saveCurrentOpen = false;
+  }
+
+  // Change an existing route's color (persisted via routes_rename, which carries
+  // the color field). The expanded preview re-renders in the new color.
+  async function setColor(r: Route, color: string) {
+    if (color === r.color) return;
+    await withStore((api) => renameRoute(api, r.id, { color }, new Date().toISOString()));
   }
 
   function startRename(r: Route) {
@@ -181,8 +218,8 @@
 
   async function doDelete(r: Route) {
     if (!confirm(`Delete route "${r.name}"? This can't be undone.`)) return;
-    if (previewId === r.id) togglePreview(r); // clear preview if showing
-    await withStore((api) => deleteRoute(api, r.id));
+    if (expandedId === r.id) expandedId = null; // collapse the menu we're deleting
+    await withStore((api) => deleteRoute(api, r.id)); // refresh re-applies the preview
   }
 
   // Overwrite a route's geometry with the current active waypoints, keeping its
@@ -212,14 +249,16 @@
     await withStore((api) => saveRoute(api, updated));
   }
 
-  function togglePreview(r: Route) {
-    if (previewId === r.id) {
-      previewId = null;
-      onPreviewRoute?.(null);
-    } else {
-      previewId = r.id;
-      onPreviewRoute?.(r.waypoints, r.color);
-    }
+  // Clicking a route expands its options menu and previews it on the map;
+  // clicking it again collapses. Only one route is open at a time.
+  function toggleExpand(r: Route) {
+    expandedId = expandedId === r.id ? null : r.id;
+    applyMapPreview();
+  }
+
+  function toggleShowAll() {
+    showAll = !showAll;
+    applyMapPreview();
   }
 
   function openTrackForm() {
@@ -227,6 +266,7 @@
     t1Str = toLocalInput(now);
     t0Str = toLocalInput(new Date(now.getTime() - 24 * 3600 * 1000));
     trackName = "";
+    trackColor = nextColor(routes);
     windowPoints = null;
     fetchError = null;
     trackFormOpen = true;
@@ -292,11 +332,14 @@
     };
   });
 
-  // Push the preview polyline to the map while the form is open.
+  // Push the preview polyline to the map while the form is open. On close,
+  // restore whatever the route list wants shown (expanded route / show-all).
   $effect(() => {
-    if (trackFormOpen && onPreviewRoute) {
-      onPreviewRoute(trackPreview.waypoints.length ? trackPreview.waypoints : null, "#00d0ff");
-      return () => onPreviewRoute(null);
+    if (trackFormOpen && onPreviewRoutes) {
+      onPreviewRoutes(
+        trackPreview.waypoints.length ? [{ waypoints: trackPreview.waypoints, color: trackColor }] : []
+      );
+      return () => applyMapPreview();
     }
   });
 
@@ -308,7 +351,7 @@
       id: newRouteId(),
       name,
       source: "track",
-      color: nextColor(routes),
+      color: trackColor,
       createdAt: now,
       updatedAt: now,
       waypoints: trackPreview.waypoints,
@@ -349,85 +392,106 @@
       <div class="text-xs opacity-60">No saved routes yet.</div>
     {/if}
 
-    {#each routes as r (r.id)}
-      <div class="flex flex-col gap-1 border border-dark rounded px-2 py-1">
-        <div class="flex items-center gap-2">
-          <span
-            class="inline-block w-3 h-3 rounded-sm shrink-0"
-            style="background:{r.color ?? '#888'}"
-          ></span>
-          {#if renamingId === r.id}
-            <!-- svelte-ignore a11y_autofocus -->
-            <input
-              class="flex-1 bg-dark px-1 rounded text-white"
-              bind:value={renameValue}
-              autofocus
-              onkeydown={(e) => e.key === "Enter" && commitRename(r)}
-              onblur={() => commitRename(r)}
-            />
-          {:else}
-            <button
-              class="flex-1 text-left truncate hover:underline"
-              title="Show on map"
-              onclick={() => togglePreview(r)}
-            >
-              <span class:font-bold={previewId === r.id}>{r.name}</span>
-            </button>
-          {/if}
-          {#if r.scope === "parent"}
+    {#if routes.length > 0}
+      <label class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none">
+        <input type="checkbox" checked={showAll} onchange={toggleShowAll} />
+        Show all on map
+      </label>
+    {/if}
+
+    <div class="flex flex-col">
+      {#each sortedRoutes as r (r.id)}
+        <div class="border-b border-dark/60 last:border-b-0">
+          <!-- Dense row: swatch + name + distance. Click toggles the menu below. -->
+          <div class="flex items-center gap-2 py-0.5">
             <span
-              class="text-[10px] uppercase opacity-40"
-              title="Inherited from a parent location — read-only here"
-            >
-              inherited
-            </span>
-          {:else}
-            <span class="text-[10px] uppercase opacity-40" title="Shared across this location"
-              >shared</span
-            >
+              class="inline-block w-3 h-3 rounded-sm shrink-0"
+              style="background:{r.color ?? '#888'}"
+            ></span>
+            {#if renamingId === r.id}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="flex-1 bg-dark px-1 rounded text-white"
+                bind:value={renameValue}
+                autofocus
+                onkeydown={(e) => e.key === "Enter" && commitRename(r)}
+                onblur={() => commitRename(r)}
+              />
+            {:else}
+              <button
+                class="flex-1 min-w-0 text-left truncate hover:text-accent"
+                title="Show on map / options"
+                onclick={() => toggleExpand(r)}
+              >
+                <span class:font-bold={expandedId === r.id}>{r.name}</span>
+                {#if r.scope === "parent"}
+                  <span class="text-[10px] uppercase opacity-40" title="Inherited from a parent location — read-only here">
+                    · inherited</span
+                  >
+                {/if}
+              </button>
+            {/if}
+            <span class="text-xs opacity-50 shrink-0 tabular-nums">{r.stats?.distanceNm.toFixed(1)} nm</span>
+          </div>
+
+          {#if expandedId === r.id}
+            <div class="flex flex-col gap-1 pb-1.5 pl-5">
+              <div class="flex items-center gap-2 text-xs opacity-60">
+                <span>{r.stats?.count} pts</span>
+                <span>·</span>
+                <span class="uppercase">{r.source}</span>
+                {#if r.createdAt}<span>·</span><span>{fmtDate(r.createdAt)}</span>{/if}
+                {#if r.scope !== "parent"}
+                  <span>·</span>
+                  <label class="flex items-center gap-1 cursor-pointer" title="Route color">
+                    Color
+                    <input
+                      type="color"
+                      class="w-6 h-5 bg-transparent border border-dark rounded cursor-pointer p-0 align-middle"
+                      value={r.color ?? "#ff8800"}
+                      disabled={busy}
+                      onchange={(e) => setColor(r, (e.currentTarget as HTMLInputElement).value)}
+                    />
+                  </label>
+                {/if}
+              </div>
+              <div class="flex flex-wrap gap-1 text-xs">
+                <button
+                  class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+                  onclick={() => doLoad(r)}
+                  disabled={busy}>Load</button
+                >
+                <button
+                  class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+                  onclick={() => doLoad(r, true)}
+                  disabled={busy}
+                  title="Load this route in reverse (navigate the other way)">Reverse</button
+                >
+                <!-- Inherited (parent-location) routes are read-only here. -->
+                {#if r.scope !== "parent"}
+                  <button
+                    class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+                    onclick={() => doReplaceWithCurrent(r)}
+                    disabled={busy || currentWaypoints.length < 2}
+                    title="Overwrite this route with the current active waypoints"
+                    >Replace w/ current</button
+                  >
+                  <button
+                    class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark"
+                    onclick={() => startRename(r)}>Rename</button
+                  >
+                  <button
+                    class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark text-warning-dark"
+                    onclick={() => doDelete(r)}
+                    disabled={busy}>Delete</button
+                  >
+                {/if}
+              </div>
+            </div>
           {/if}
-          <span class="text-[10px] uppercase opacity-50">{r.source}</span>
         </div>
-        <div class="flex items-center gap-2 text-xs opacity-70">
-          <span>{r.stats?.distanceNm.toFixed(1)} nm</span>
-          <span>·</span>
-          <span>{r.stats?.count} pts</span>
-          {#if r.createdAt}<span>·</span><span>{fmtDate(r.createdAt)}</span>{/if}
-        </div>
-        <div class="flex flex-wrap gap-1 text-xs">
-          <button
-            class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
-            onclick={() => doLoad(r)}
-            disabled={busy}>Load</button
-          >
-          <button
-            class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
-            onclick={() => doLoad(r, true)}
-            disabled={busy}
-            title="Load this route in reverse (navigate the other way)">Reverse</button
-          >
-          <!-- Inherited (parent-location) routes are read-only here. -->
-          {#if r.scope !== "parent"}
-            <button
-              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
-              onclick={() => doReplaceWithCurrent(r)}
-              disabled={busy || currentWaypoints.length < 2}
-              title="Overwrite this route with the current active waypoints"
-              >Replace w/ current</button
-            >
-            <button
-              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark"
-              onclick={() => startRename(r)}>Rename</button
-            >
-            <button
-              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark text-warning-dark"
-              onclick={() => doDelete(r)}
-              disabled={busy}>Delete</button
-            >
-          {/if}
-        </div>
-      </div>
-    {/each}
+      {/each}
+    </div>
 
     {#if sizeWarning(routes)}
       <div class="text-warning-dark text-[11px]">
@@ -444,6 +508,14 @@
           placeholder="Route name"
           bind:value={saveCurrentName}
         />
+        <label class="text-xs flex items-center gap-1.5">
+          Color
+          <input
+            type="color"
+            class="w-6 h-5 bg-transparent border border-dark rounded cursor-pointer p-0"
+            bind:value={saveCurrentColor}
+          />
+        </label>
         <div class="flex gap-2 text-xs">
           <button
             class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
@@ -519,6 +591,14 @@
           placeholder="Route name"
           bind:value={trackName}
         />
+        <label class="text-xs flex items-center gap-1.5">
+          Color
+          <input
+            type="color"
+            class="w-6 h-5 bg-transparent border border-dark rounded cursor-pointer p-0"
+            bind:value={trackColor}
+          />
+        </label>
         <div class="flex gap-2 text-xs">
           <button
             class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
