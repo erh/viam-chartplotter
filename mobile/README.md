@@ -18,8 +18,12 @@ integrations in one runnable app:
   satellite), a boat marker rotated to heading, and a live data panel.
 - Recenters on the first GPS fix; a FAB recenters on demand.
 
-It deliberately does **not** do AIS, weather, routes, camera, history, or the
-real login flow — those are Phases 1–3.
+It now also implements the **app.viam.com login** (the decided v1 auth model):
+OAuth + PKCE, token persistence/refresh, and a machine picker — see
+[OAuth setup](#oauth-setup-login-path).
+
+It deliberately does **not** yet do AIS, weather, routes, camera, or history —
+those are Phases 1–3.
 
 ## Run it
 
@@ -29,17 +33,64 @@ No Flutter toolchain is bundled here. On a machine with Flutter ≥ 3.22:
 cd mobile
 flutter create .          # materialize android/ ios/ platform folders (gitignored)
 flutter pub get
+```
+
+There are **two ways to run**, picked automatically by which dart-defines you
+pass:
+
+### A) app.viam.com login (the v1 auth model)
+
+Supply the OAuth client registered with Viam and the app routes through
+**Sign in with Viam → pick org/location/machine → map**:
+
+```bash
+flutter run \
+  --dart-define=VIAM_OAUTH_ISSUER=https://<viam-oidc-issuer> \
+  --dart-define=VIAM_OAUTH_CLIENT_ID=<client-id> \
+  --dart-define=VIAM_OAUTH_REDIRECT=com.viam.chartplotter:/oauthredirect \
+  --dart-define=TILE_BASE=https://<your-tile-server>
+```
+
+### B) API-key fallback (the original spike path)
+
+Omit the `VIAM_OAUTH_*` defines and the app skips login, dialing a single boat
+directly — handy for credential-only testing and CI:
+
+```bash
 flutter run \
   --dart-define=VIAM_HOST=boat-main.<loc>.viam.cloud \
-  --dart-define=VIAM_API_KEY_ID=<id> \
-  --dart-define=VIAM_API_KEY=<key> \
+  --dart-define=VIAM_API_KEY_ID=<id> --dart-define=VIAM_API_KEY=<key> \
   --dart-define=TILE_BASE=https://<your-tile-server> \
   --dart-define=DEPTH_SENSOR=depth        # optional
 ```
 
-With no `VIAM_*` defines it starts in chart-only mode (map works, no boat) so
-you can verify tile rendering before wiring up credentials. `TILE_BASE`
-defaults to the public hosted server.
+With no boat defines at all it starts chart-only (map works, no boat) so you can
+verify tile rendering first. `TILE_BASE` defaults to the public hosted server.
+
+## OAuth setup (login path)
+
+The Viam Flutter SDK has **no built-in login UI** — it only consumes an access
+token via `Viam.withAccessToken`. So login is a standard OAuth 2.0
+authorization-code + PKCE flow (`flutter_appauth`) against Viam's identity
+provider, with tokens kept in the platform keystore (`flutter_secure_storage`).
+See `lib/auth/`.
+
+Two things are required and are **external dependencies**, not code:
+
+1. **Register an OAuth client with Viam** to get a `clientId` and to whitelist
+   the redirect URI. The issuer/clientId are environment-specific; pass them via
+   `--dart-define` (`lib/auth/oauth_config.dart`). They are not secrets (PKCE
+   means no client secret), so dart-define is appropriate.
+2. **Native redirect config** (added after `flutter create .`):
+   - **Android** — set the AppAuth redirect scheme in `android/app/build.gradle`:
+     ```gradle
+     android { defaultConfig { manifestPlaceholders += [
+       'appAuthRedirectScheme': 'com.viam.chartplotter'] } }
+     ```
+   - **iOS** — add a URL type with scheme `com.viam.chartplotter` to
+     `ios/Runner/Info.plist`.
+
+   The scheme must match `VIAM_OAUTH_REDIRECT`.
 
 ## Things to verify during the spike (beta-SDK parity, plan §4.4)
 
@@ -55,21 +106,17 @@ The `viam_sdk` symbols used in `lib/viam_connection.dart` are the documented
 Also worth confirming on real hardware: WebRTC connect time and reconnect
 behavior on flaky cellular, and tile fetch latency at chart zoom levels.
 
-## Auth note (v1, not the spike)
-
-The product decision is **full app.viam.com login** (plan §6). This spike uses a
-static API key for speed. v1 swaps in an OAuth flow whose access token is fed to
-`Viam.withAccessToken(token)`; the boat connection then comes from
-`viam.getRobotClient(robot)` after the user picks a machine via `appClient`,
-rather than the hard-coded `RobotClient.atAddress` used here.
-
 ## Files
 
 | File | Role |
 |------|------|
-| `lib/config.dart` | `--dart-define` config (host, creds, tile base) |
-| `lib/viam_connection.dart` | connect + 1 Hz poll loop (port of `doUpdate`) |
+| `lib/auth/oauth_config.dart` | OAuth client config from `--dart-define` |
+| `lib/auth/viam_session.dart` | login, token persist/refresh, builds the `Viam` handle |
+| `lib/screens/login_screen.dart` | "Sign in with Viam" landing |
+| `lib/screens/machine_picker_screen.dart` | org → location → machine picker, opens `RobotClient` |
+| `lib/config.dart` | `--dart-define` config (tile base, API-key fallback, sensors) |
+| `lib/viam_connection.dart` | connect + 1 Hz poll loop (port of `doUpdate`); takes a session robot or API key |
 | `lib/boat_state.dart` | observable reading snapshot |
 | `lib/tile_sources.dart` | base-layer XYZ URLs into the Go server |
 | `lib/map_screen.dart` | `flutter_map` UI: layers, boat marker, data panel |
-| `lib/main.dart` | app entry |
+| `lib/main.dart` | app entry + login/picker/map routing |

@@ -16,6 +16,10 @@ dependencies:
   # Leaflet-style map: reuses the Go server's XYZ raster tiles directly.
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
+  # app.viam.com login: OAuth 2.0 + PKCE via the system browser, then feed the
+  # access token to Viam.withAccessToken. Tokens kept in the platform keystore.
+  flutter_appauth: ^8.0.0
+  flutter_secure_storage: ^9.2.2
 
 dev_dependencies:
   flutter_lints: ^4.0.0

@@ -11,12 +11,14 @@ import 'config.dart';
 /// trimmed to the spike's risk-proving subset: position, speed, heading,
 /// and (optionally) depth.
 ///
-/// NOTE (beta SDK): symbol names below — RobotClient.atAddress,
-/// RobotClientOptions.withApiKey, MovementSensor.fromRobot/.position()/
-/// .linearVelocity()/.compassHeading(), Sensor.fromRobot/.readings(),
-/// robot.resourceNames — are the documented surface of viam_sdk ~0.3.
-/// Re-verify when the dependency is resolved; they're the most likely
-/// thing to drift in a patch release.
+/// Two entry points:
+///  - [startWithRobot]   — an already-connected RobotClient handed over by the
+///                         logged-in session (viam.getRobotClient). The v1 path.
+///  - [startWithApiKey]  — direct dial via RobotClient.atAddress + API key, the
+///                         original spike path, kept for credential-free runs.
+///
+/// NOTE (beta SDK): the viam_sdk symbols used here are the documented ~0.3
+/// surface; re-verify when the dependency resolves (plan §4.4).
 class ViamConnection {
   ViamConnection(this.state);
 
@@ -25,8 +27,15 @@ class ViamConnection {
   String? _movementSensorName;
   Timer? _timer;
   bool _polling = false;
+  bool _ownsRobot = false; // close it on dispose only if we dialed it
 
-  Future<void> start() async {
+  Future<void> startWithRobot(RobotClient robot) async {
+    _robot = robot;
+    _ownsRobot = false; // owned by the session/picker that connected it
+    await _afterConnect();
+  }
+
+  Future<void> startWithApiKey() async {
     if (!Config.hasBoat) {
       state.setStatus('No boat configured — chart-only mode');
       return;
@@ -37,16 +46,21 @@ class ViamConnection {
         Config.host,
         RobotClientOptions.withApiKey(Config.apiKeyId, Config.apiKey),
       );
-      _movementSensorName = await _discoverMovementSensor(_robot!);
-      if (_movementSensorName == null) {
-        state.setStatus('Connected, but no movement_sensor found');
-      } else {
-        state.setStatus('Connected ($_movementSensorName)');
-      }
+      _ownsRobot = true;
     } catch (e) {
       state.setStatus('Connect failed: $e');
       return;
     }
+    await _afterConnect();
+  }
+
+  Future<void> _afterConnect() async {
+    final robot = _robot;
+    if (robot == null) return;
+    _movementSensorName = await _discoverMovementSensor(robot);
+    state.setStatus(_movementSensorName == null
+        ? 'Connected, but no movement_sensor found'
+        : 'Connected ($_movementSensorName)');
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
@@ -73,7 +87,6 @@ class ViamConnection {
     try {
       final ms = MovementSensor.fromRobot(robot, msName);
 
-      // Position
       try {
         final p = await ms.position();
         state.update(
@@ -81,19 +94,16 @@ class ViamConnection {
         );
       } catch (_) {}
 
-      // Speed over ground (m/s on y → knots), matching the web app.
       try {
         final v = await ms.linearVelocity();
         state.update(speedKn: v.y * 1.94384);
       } catch (_) {}
 
-      // Compass heading (degrees).
       try {
         final h = await ms.compassHeading();
         state.update(headingDeg: h);
       } catch (_) {}
 
-      // Optional depth via a generic sensor (m → ft), like the web loop.
       if (Config.depthSensor.isNotEmpty) {
         try {
           final s = Sensor.fromRobot(robot, Config.depthSensor);
@@ -109,6 +119,6 @@ class ViamConnection {
 
   Future<void> dispose() async {
     _timer?.cancel();
-    await _robot?.close();
+    if (_ownsRobot) await _robot?.close();
   }
 }
