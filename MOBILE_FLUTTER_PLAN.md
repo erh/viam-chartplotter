@@ -114,7 +114,7 @@ free), `viam_sdk` (boat + cloud), `riverpod` (state), `fl_chart` (sparklines).
 
 ## 4. Hard parts (ranked)
 
-### 4.1 Wind-particle weather animation — *hardest*
+### 4.1 Wind-particle weather animation — *hardest* (DEFERRED past v1, see §6)
 `ol-wind` gives the flowing wind streamlines essentially for free in OpenLayers.
 There is no equivalent for `flutter_map`. Options, cheapest first:
 1. **Static barbs/arrows** sampled on a grid (a `CustomPainter` over the map) —
@@ -133,7 +133,8 @@ marker/polyline hit-testing, but the measure tool, click-to-identify against
 vector overlays, and smooth multi-layer opacity blending are all hand-built.
 Plan for a few hundred lines of gesture/hit-test code.
 
-### 4.3 Connectivity, auth & onboarding
+### 4.3 Connectivity, auth & onboarding — *main net-new build for v1*
+**Decided: full `app.viam.com` login (§6).** 
 The web app is *handed* its host + credentials via URL params / cookies /
 `userToken`, and opens both a WebRTC `RobotClient` and a cloud `ViamClient`.
 A mobile app has no such ambient context and must own:
@@ -165,7 +166,7 @@ cellular/satellite at sea. Needs: adaptive poll rates, tile caching to disk
 (`flutter_map` cache plugins), pause-when-backgrounded, and a cell-data budget.
 The web app never had to care about this; the mobile app must.
 
-### 4.6 Offline charts
+### 4.6 Offline charts — *DEFERRED past v1 (§6); online-only to start*
 Biggest *product* gap, not strictly required for v1 but expected of a "real"
 chartplotter: phones lose signal offshore. Server-rendered tiles assume
 connectivity. True offline needs either pre-fetched tile bundles (download a
@@ -197,23 +198,40 @@ engineer; weather animation and true offline are the long-tail items.
 
 ---
 
-## 6. Open questions for product
+## 6. Product decisions (locked) & remaining questions
 
-1. **Primary platform** — phone, or tablet at the helm (changes layout density
-   and whether this competes with a real MFD)?
-2. **Auth model** — personal API key per user, or full `app.viam.com` login? Who
-   are the users (boat owner only, or guests)?
-3. **Offline expectation for v1** — is "needs connectivity" acceptable to start,
-   or is offline region download table-stakes?
-4. **Weather fidelity for v1** — are static wind barbs acceptable, or is the
-   flowing-particle animation considered core?
+Decided:
+
+1. **Platform — both, phone-first.** Responsive layout; optimize the handheld
+   case first, let tablets use the extra screen. → favors a single adaptive
+   layout (`LayoutBuilder`/breakpoints), not two codebases. Design the data
+   panel to collapse on phones and expand into a helm dashboard on tablets.
+2. **Auth — full `app.viam.com` login.** OAuth against Viam cloud, then list the
+   user's locations/machines and let them pick the boat. → onboarding is real
+   work (Phase 1); supports multiple users/guests, not just the owner. The web
+   app's API-key/cookie path is *not* the model.
+3. **Offline — online-only for v1.** Ship needing connectivity. Tile disk
+   caching is still worth it for speed/flakiness, but region pre-fetch and
+   on-device rendering are explicitly **out of scope for v1** (fast-follow).
+4. **Weather — static wind barbs + isobars for v1.** Removes the hardest item
+   (§4.1) from the critical path: grid-sampled barbs + isobar polylines in a
+   `CustomPainter`. Animated particles become a post-v1 stretch.
+
+Still open:
+
 5. **Camera priority** — important on mobile, or drop it for v1 to save
-   bandwidth/effort?
-6. **Codebase** — new repo or a `mobile/` dir in this repo (keeps it next to the
-   server contract it depends on; recommended)?
+   bandwidth/effort? (Leaning: include but behind a tap, not auto-streaming.)
+6. **Codebase** — new repo or a `mobile/` dir in this repo? Recommended:
+   `mobile/` here, so it lives next to the server contract it depends on.
+
+These decisions shrink v1's risk: the two hardest items (wind animation, offline
+charts) are both deferred, leaving **Viam-login onboarding** as the main net-new
+build beyond the straight UI port.
 
 ---
 
 *Sketch only — no app code written yet. The recommended next concrete step is
 Phase 0: a throwaway spike proving `viam_sdk` WebRTC connect + `flutter_map`
-tile reuse against a real boat.*
+tile reuse against a real boat. With weather animation and offline deferred,
+Phase 1's onboarding (Viam OAuth + machine picker) is the main new risk to
+de-risk early.*
