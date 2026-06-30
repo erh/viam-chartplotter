@@ -181,6 +181,10 @@ avoid). Recommend region pre-fetch as a fast-follow.
   with a hard-coded API key; `flutter_map` showing `/noaa-enc/tile` + boat
   marker from live `movement_sensor`. Confirms the two riskiest integrations
   (WebRTC connect + tile reuse) in one shot.
+  → **Scaffolded in [`mobile/`](mobile/)** (see `mobile/README.md`). Code is
+  written against the documented `viam_sdk` ~0.3 surface; still needs a Flutter
+  toolchain + real boat creds to compile and validate on hardware (§4.4 parity
+  checks).
 - **Phase 1 — Core nav (2–3 wk):** poll loop → data panel (speed/heading/depth/
   wind/temp); base-layer switcher (OSM/ENC/satellite); AIS targets + popups;
   navaids/structures overlays; onboarding (machine picker + secure-stored API
