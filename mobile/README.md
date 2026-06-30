@@ -106,6 +106,15 @@ The `viam_sdk` symbols used in `lib/viam_connection.dart` are the documented
 Also worth confirming on real hardware: WebRTC connect time and reconnect
 behavior on flaky cellular, and tile fetch latency at chart zoom levels.
 
+## CI
+
+`.github/workflows/mobile-flutter.yml` runs on changes under `mobile/`:
+`flutter analyze` + a debug-APK build are the gates (these compiler-check the
+Dart and surface any beta `viam_sdk` symbol drift or dependency-resolution
+issues), with `dart format` advisory. It builds without any credentials — the
+app compiles and runs chart-only when no dart-defines are set — so no secrets
+are needed in CI.
+
 ## Files
 
 | File | Role |
