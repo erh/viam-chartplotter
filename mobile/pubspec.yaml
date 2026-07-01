@@ -22,6 +22,8 @@ dependencies:
   # access token to Viam.withAccessToken. Tokens kept in the platform keystore.
   flutter_appauth: ^8.0.0
   flutter_secure_storage: ^9.2.2
+  # Plain HTTP for the weather JSON grid (tiles go through flutter_map).
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:

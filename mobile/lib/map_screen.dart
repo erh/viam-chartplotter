@@ -7,10 +7,13 @@ import 'package:latlong2/latlong.dart';
 import 'ais.dart';
 import 'boat_state.dart';
 import 'camera_screen.dart';
+import 'config.dart';
 import 'data_drawer.dart';
 import 'debug_screen.dart';
 import 'tile_sources.dart';
 import 'viam_connection.dart';
+import 'weather.dart';
+import 'wind_layer.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
 /// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
@@ -29,6 +32,37 @@ class _MapScreenState extends State<MapScreen> {
   final MapController _map = MapController();
   TileSource _base = baseLayers.first;
   bool _followedFirstFix = false;
+
+  // Wind overlay (fetched lazily on first toggle-on).
+  WindField? _wind;
+  bool _windOn = false;
+  bool _windLoading = false;
+
+  Future<void> _toggleWind() async {
+    if (_windOn) {
+      setState(() => _windOn = false);
+      return;
+    }
+    if (_wind != null) {
+      setState(() => _windOn = true);
+      return;
+    }
+    setState(() => _windLoading = true);
+    try {
+      final f = await fetchWindField(Config.tileBase, 'gfs');
+      if (!mounted) return;
+      setState(() {
+        _wind = f;
+        _windOn = true;
+        _windLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _windLoading = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Wind unavailable: $e')));
+    }
+  }
 
   @override
   void initState() {
@@ -137,6 +171,8 @@ class _MapScreenState extends State<MapScreen> {
                 errorTileCallback: (tile, error, stackTrace) =>
                     debugPrint('tile load failed (${_base.id}): $error'),
               ),
+              // Wind overlay (over the chart, under markers).
+              if (_windOn && _wind != null) WindLayer(field: _wind!),
               // Active route: line from the boat to the destination.
               if (s.position != null && s.destination != null)
                 PolylineLayer(
@@ -229,6 +265,14 @@ class _MapScreenState extends State<MapScreen> {
                       tooltip: 'Boat data',
                       onTap: () => _scaffoldKey.currentState?.openEndDrawer(),
                     ),
+                    const SizedBox(height: 8),
+                    _RoundButton(
+                      icon: Icons.air,
+                      tooltip: 'Wind',
+                      active: _windOn,
+                      busy: _windLoading,
+                      onTap: _toggleWind,
+                    ),
                     if (s.cameraNames.isNotEmpty &&
                         widget.connection.robot != null) ...[
                       const SizedBox(height: 8),
@@ -312,21 +356,37 @@ class _StatusChip extends StatelessWidget {
 }
 
 class _RoundButton extends StatelessWidget {
-  const _RoundButton(
-      {required this.icon, required this.tooltip, required this.onTap});
+  const _RoundButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.active = false,
+    this.busy = false,
+  });
   final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
+  final bool active;
+  final bool busy;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.black.withValues(alpha: 0.6),
+      color: active
+          ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.85)
+          : Colors.black.withValues(alpha: 0.6),
       shape: const CircleBorder(),
       child: IconButton(
-        icon: Icon(icon, color: Colors.white),
+        icon: busy
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white),
+              )
+            : Icon(icon, color: Colors.white),
         tooltip: tooltip,
-        onPressed: onTap,
+        onPressed: busy ? null : onTap,
       ),
     );
   }
