@@ -35,9 +35,13 @@ class _CameraScreenState extends State<CameraScreen> {
     _busy = true;
     for (final name in widget.names) {
       try {
-        final img = await Camera.fromRobot(widget.robot, name).image();
-        _frames[name] = Uint8List.fromList(img.raw);
-        _errors.remove(name);
+        // getImages() (not image()): these cameras implement GetImages but not
+        // the single-image GetImage RPC. Requires viam_sdk >= 0.x with getImages.
+        final res = await Camera.fromRobot(widget.robot, name).getImages();
+        if (res.images.isNotEmpty) {
+          _frames[name] = Uint8List.fromList(res.images.first.image.raw);
+          _errors.remove(name);
+        }
       } catch (e) {
         _errors[name] = '$e';
       }
