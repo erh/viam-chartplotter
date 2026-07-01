@@ -37,6 +37,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _windOn = false;
   bool _windLoading = false;
   LatLngBounds? _bounds; // current viewport, for sampling wind arrows
+  List<Marker> _windMarkerCache = const [];
 
   Future<void> _toggleWind() async {
     if (_windOn) {
@@ -53,14 +54,12 @@ class _MapScreenState extends State<MapScreen> {
     try {
       final f = await fetchWindField(Config.tileBase, 'gfs');
       if (!mounted) return;
-      setState(() {
-        _wind = f;
-        _windOn = true;
-        _windLoading = false;
-        _bounds = _map.camera.visibleBounds; // seed so arrows show immediately
-      });
-      widget.state
-          .setWindInfo('loaded ${f.nx}×${f.ny} grid (${f.u.length} cells)');
+      _bounds = _map.camera.visibleBounds; // seed so arrows show immediately
+      _wind = f;
+      _windOn = true;
+      _windLoading = false;
+      _rebuildWindMarkers(); // also updates the Debug wind row with the count
+      setState(() {});
     } catch (e) {
       if (!mounted) return;
       setState(() => _windLoading = false);
@@ -82,6 +81,11 @@ class _MapScreenState extends State<MapScreen> {
     super.dispose();
   }
 
+  void _zoom(double delta) {
+    final c = _map.camera;
+    _map.move(c.center, (c.zoom + delta).clamp(3.0, 20.0));
+  }
+
   void _onState() {
     // Recenter once when the first GPS fix arrives, then leave the user in
     // control of the viewport.
@@ -93,35 +97,50 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  /// Wind arrows sampled across the visible bounds. Uses MarkerLayer (which is
-  /// proven to render here) rather than a CustomPainter. Each arrow points the
-  /// way the wind blows and is coloured by speed.
-  List<Marker> _windMarkers(WindField f, LatLngBounds b) {
+  /// Rebuild the wind arrow markers for the current field + viewport, caching
+  /// them and reporting the count into the Debug wind row. Called from event
+  /// handlers (never build). Uses MarkerLayer (proven to render) rather than a
+  /// CustomPainter.
+  void _rebuildWindMarkers() {
+    final f = _wind;
+    final b = _bounds;
+    if (!_windOn || f == null || b == null) {
+      _windMarkerCache = const [];
+      return;
+    }
     final markers = <Marker>[];
     final span = math.max(b.east - b.west, b.north - b.south);
     final step = math.max(f.dx, span / 14);
-    if (step <= 0) return markers;
-    for (double lat = b.north; lat >= b.south; lat -= step) {
-      for (double lon = b.west; lon <= b.east; lon += step) {
-        final nlon = ((lon + 540) % 360) - 180;
-        final s = f.sample(nlon, lat);
-        if (s == null) continue;
-        final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
-        // Bearing (clockwise from north) the wind blows toward.
-        final ang = math.atan2(s.u, s.v);
-        markers.add(Marker(
-          point: LatLng(lat, nlon),
-          width: 24,
-          height: 24,
-          child: Transform.rotate(
-            angle: ang,
-            child: Icon(Icons.navigation, size: 16, color: _windColor(knots)),
-          ),
-        ));
-        if (markers.length >= 1500) return markers;
+    if (step > 0) {
+      for (double lat = b.north; lat >= b.south; lat -= step) {
+        for (double lon = b.west; lon <= b.east; lon += step) {
+          final nlon = ((lon + 540) % 360) - 180;
+          final s = f.sample(nlon, lat);
+          if (s == null) continue;
+          final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
+          final ang = math.atan2(s.u, s.v); // bearing wind blows toward
+          markers.add(Marker(
+            point: LatLng(lat, nlon),
+            width: 24,
+            height: 24,
+            child: Transform.rotate(
+              angle: ang,
+              child:
+                  Icon(Icons.navigation, size: 16, color: _windColor(knots)),
+            ),
+          ));
+          if (markers.length >= 1500) break;
+        }
+        if (markers.length >= 1500) break;
       }
     }
-    return markers;
+    _windMarkerCache = markers;
+    widget.state.setWindInfo(
+      'loaded ${f.nx}×${f.ny}; ${markers.length} arrows; '
+      'view ${b.south.toStringAsFixed(1)}..${b.north.toStringAsFixed(1)}N, '
+      '${b.west.toStringAsFixed(1)}..${b.east.toStringAsFixed(1)}E; step '
+      '${step.toStringAsFixed(2)}°',
+    );
   }
 
   Color _windColor(double kn) {
@@ -206,7 +225,10 @@ class _MapScreenState extends State<MapScreen> {
               initialZoom: 9,
               onPositionChanged: (camera, _) {
                 _bounds = camera.visibleBounds;
-                if (_windOn && mounted) setState(() {});
+                if (_windOn && mounted) {
+                  _rebuildWindMarkers();
+                  setState(() {});
+                }
               },
             ),
             children: [
@@ -222,8 +244,8 @@ class _MapScreenState extends State<MapScreen> {
                     debugPrint('tile load failed (${_base.id}): $error'),
               ),
               // Wind overlay (arrow markers, over the chart, under boat markers).
-              if (_windOn && _wind != null && _bounds != null)
-                MarkerLayer(markers: _windMarkers(_wind!, _bounds!)),
+              if (_windOn && _windMarkerCache.isNotEmpty)
+                MarkerLayer(markers: _windMarkerCache),
               // Active route: line from the boat to the destination.
               if (s.position != null && s.destination != null)
                 PolylineLayer(
@@ -340,6 +362,29 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                     ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Center-right: zoom controls.
+          SafeArea(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _RoundButton(
+                        icon: Icons.add,
+                        tooltip: 'Zoom in',
+                        onTap: () => _zoom(1)),
+                    const SizedBox(height: 8),
+                    _RoundButton(
+                        icon: Icons.remove,
+                        tooltip: 'Zoom out',
+                        onTap: () => _zoom(-1)),
                   ],
                 ),
               ),
