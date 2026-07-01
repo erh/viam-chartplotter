@@ -134,6 +134,29 @@ class _MapScreenState extends State<MapScreen> {
                 errorTileCallback: (tile, error, stackTrace) =>
                     debugPrint('tile load failed (${_base.id}): $error'),
               ),
+              // Active route: line from the boat to the destination.
+              if (s.position != null && s.destination != null)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: [s.position!, s.destination!],
+                      strokeWidth: 3,
+                      color: Colors.purpleAccent,
+                    ),
+                  ],
+                ),
+              if (s.destination != null)
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: s.destination!,
+                      width: 30,
+                      height: 30,
+                      child: const Icon(Icons.flag,
+                          color: Colors.purpleAccent, size: 26),
+                    ),
+                  ],
+                ),
               // AIS targets (drawn under the own-boat marker).
               if (s.aisBoats.isNotEmpty)
                 MarkerLayer(

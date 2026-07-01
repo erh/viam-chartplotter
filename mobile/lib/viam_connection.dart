@@ -30,6 +30,7 @@ class ViamConnection {
   String? _windSensorName;
   String? _seatempSensorName;
   String? _aisSensorName;
+  String? _routeSensorName;
   Timer? _timer;
   int _tickN = 0;
   bool _polling = false;
@@ -68,12 +69,14 @@ class ViamConnection {
     _windSensorName = _discoverSensorByName(robot, 'wind', '');
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
+    _routeSensorName = _discoverSensorEndingWith(robot, 'route');
     state.setSources({
       'Movement': _movementSensorName,
       'Depth': _depthSensorName,
       'Wind': _windSensorName,
       'Sea temp': _seatempSensorName,
       'AIS': _aisSensorName,
+      'Route': _routeSensorName,
     });
     state.setStatus(
         _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
@@ -207,6 +210,20 @@ class ViamConnection {
         try {
           final r = await Sensor.fromRobot(robot, aisName).readings();
           state.setAis(parseAisReadings(r));
+        } catch (_) {}
+      }
+
+      // Active route destination from the `route` sensor (rarely changes, so
+      // poll on the slow cadence). Cleared when there's no active route.
+      final routeName = _routeSensorName;
+      if (routeName != null && _tickN % 5 == 0) {
+        try {
+          final r = await Sensor.fromRobot(robot, routeName).readings();
+          final lat = r['destinationLatitude'];
+          final lon = r['destinationLongitude'];
+          state.setDestination((lat is num && lon is num)
+              ? LatLng(lat.toDouble(), lon.toDouble())
+              : null);
         } catch (_) {}
       }
     } finally {
