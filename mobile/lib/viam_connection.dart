@@ -69,7 +69,8 @@ class ViamConnection {
   Future<String?> _discoverMovementSensor(RobotClient robot) async {
     if (Config.movementSensor.isNotEmpty) return Config.movementSensor;
     try {
-      final names = await robot.resourceNames;
+      // resourceNames is a synchronous getter (not a Future) in viam_sdk.
+      final names = robot.resourceNames;
       for (final rn in names) {
         if (rn.subtype == 'movement_sensor') return rn.name;
       }
@@ -89,8 +90,9 @@ class ViamConnection {
 
       try {
         final p = await ms.position();
+        // Position exposes `coordinates` (a GeoPoint), not `coordinate`.
         state.update(
-          position: LatLng(p.coordinate.latitude, p.coordinate.longitude),
+          position: LatLng(p.coordinates.latitude, p.coordinates.longitude),
         );
       } catch (_) {}
 

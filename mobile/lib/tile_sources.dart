@@ -16,14 +16,14 @@ final List<TileSource> baseLayers = [
   // NOAA ENC vector charts rendered to PNG server-side, depth-shaded by the
   // configured draft. The `?` style params from the web app can be appended
   // here later; default style is fine for the spike.
-  TileSource(
+  const TileSource(
     'noaa-enc',
     'NOAA ENC',
     '${Config.tileBase}/noaa-enc/tile/{z}/{x}/{y}.png',
     maxZoom: 16,
   ),
   // OSM land underlay served by the same module.
-  TileSource(
+  const TileSource(
     'osm',
     'OpenStreetMap',
     '${Config.tileBase}/noaa-enc/osm-tile/{z}/{x}/{y}.png',
