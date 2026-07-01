@@ -5,12 +5,12 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'boat_state.dart';
+import 'data_drawer.dart';
 import 'tile_sources.dart';
 
-/// The whole spike UI: a full-screen map (base-layer switchable) with the
-/// boat marker and a translucent data panel. Phone-first; on a wide screen
-/// the panel sits in a corner (the responsive split for tablets is a v1
-/// concern, stubbed here with a LayoutBuilder breakpoint).
+/// Full-screen chart with a heading-rotated boat marker. The data readouts live
+/// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
+/// map *controls* (layer switcher, dashboard button, recenter) sit on top.
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key, required this.state});
   final BoatState state;
@@ -20,6 +20,7 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final MapController _map = MapController();
   TileSource _base = baseLayers.first;
   bool _followedFirstFix = false;
@@ -51,13 +52,15 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     final s = widget.state;
     return Scaffold(
+      key: _scaffoldKey,
+      endDrawer: DataDrawer(state: s),
       body: Stack(
         children: [
           FlutterMap(
             mapController: _map,
             options: const MapOptions(
               initialCenter: LatLng(41.3, -72.0), // Long Island Sound-ish
-              initialZoom: 8,
+              initialZoom: 9,
             ),
             children: [
               TileLayer(
@@ -84,19 +87,37 @@ class _MapScreenState extends State<MapScreen> {
                 ),
             ],
           ),
+          // Top-left: compact connection status.
           SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _DataPanel(state: s),
-                  const SizedBox(height: 8),
-                  _LayerSwitcher(
-                    current: _base,
-                    onChanged: (t) => setState(() => _base = t),
-                  ),
-                ],
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: _StatusChip(state: s),
+              ),
+            ),
+          ),
+          // Top-right: map controls (layer switcher + dashboard opener).
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    _LayerSwitcher(
+                      current: _base,
+                      onChanged: (t) => setState(() => _base = t),
+                    ),
+                    const SizedBox(height: 8),
+                    _RoundButton(
+                      icon: Icons.dashboard,
+                      tooltip: 'Boat data',
+                      onTap: () => _scaffoldKey.currentState?.openEndDrawer(),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -126,46 +147,57 @@ class _BoatMarker extends StatelessWidget {
   }
 }
 
-class _DataPanel extends StatelessWidget {
-  const _DataPanel({required this.state});
+/// Small pill in the top-left: a colour-coded dot plus the connection status.
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.state});
   final BoatState state;
-
-  String _fmt(double? v, String unit, {int digits = 1}) =>
-      v == null ? '—' : '${v.toStringAsFixed(digits)} $unit';
 
   @override
   Widget build(BuildContext context) {
-    final pos = state.position;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(20),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(state.status,
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
-          const SizedBox(height: 4),
-          Text(
-            pos == null
-                ? 'Position: —'
-                : '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}',
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'SOG ${_fmt(state.speedKn, 'kn')}   '
-            'HDG ${_fmt(state.headingDeg, '°', digits: 0)}   '
-            'DEPTH ${_fmt(state.depthFt, 'ft')}',
-            style: const TextStyle(color: Colors.white, fontSize: 14),
+          Icon(Icons.circle,
+              size: 10,
+              color:
+                  state.connected ? Colors.greenAccent : Colors.orangeAccent),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: Text(
+              state.status,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _RoundButton extends StatelessWidget {
+  const _RoundButton(
+      {required this.icon, required this.tooltip, required this.onTap});
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.6),
+      shape: const CircleBorder(),
+      child: IconButton(
+        icon: Icon(icon, color: Colors.white),
+        tooltip: tooltip,
+        onPressed: onTap,
       ),
     );
   }

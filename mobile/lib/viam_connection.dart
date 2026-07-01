@@ -26,6 +26,8 @@ class ViamConnection {
   RobotClient? _robot;
   String? _movementSensorName;
   String? _depthSensorName;
+  String? _windSensorName;
+  String? _seatempSensorName;
   Timer? _timer;
   bool _polling = false;
   bool _ownsRobot = false; // close it on dispose only if we dialed it
@@ -60,6 +62,8 @@ class ViamConnection {
     if (robot == null) return;
     _movementSensorName = await _discoverMovementSensor(robot);
     _depthSensorName = _discoverSensorByName(robot, 'depth', Config.depthSensor);
+    _windSensorName = _discoverSensorByName(robot, 'wind', '');
+    _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     state.setStatus(_movementSensorName == null
         ? 'Connected, but no movement_sensor found'
         : 'Connected ($_movementSensorName)');
@@ -124,6 +128,43 @@ class ViamConnection {
         final h = await ms.compassHeading();
         state.update(headingDeg: h);
       } catch (_) {}
+
+      // Course over ground lives in the movement sensor's generic readings
+      // under one of several key spellings (matches the web app).
+      try {
+        final rd = await ms.readings();
+        final cog = rd['Course Over Ground'] ??
+            rd['course_over_ground'] ??
+            rd['CourseOverGround'] ??
+            rd['cog'] ??
+            rd['COG'];
+        if (cog is num) state.update(cogDeg: cog.toDouble());
+      } catch (_) {}
+
+      final windName = _windSensorName;
+      if (windName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, windName).readings();
+          // Only the true (ground-referenced) wind, like the web app.
+          if (r['Reference'] == 'True (ground referenced to North)') {
+            final wa = r['Wind Angle'];
+            final ws = r['Wind Speed']; // m/s → knots
+            state.update(
+              windAngleDeg: wa is num ? wa.toDouble() : null,
+              windSpeedKn: ws is num ? ws.toDouble() * 1.94384 : null,
+            );
+          }
+        } catch (_) {}
+      }
+
+      final tempName = _seatempSensorName;
+      if (tempName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, tempName).readings();
+          final t = r['Temperature']; // °C → °F
+          if (t is num) state.update(seaTempF: 32 + t.toDouble() * 1.8);
+        } catch (_) {}
+      }
 
       final depthName = _depthSensorName;
       if (depthName != null) {
