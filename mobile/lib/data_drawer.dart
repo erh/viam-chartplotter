@@ -58,12 +58,6 @@ class DataDrawer extends StatelessWidget {
             _Row('Depth', _fmt(state.depthFt, 'ft')),
             _Row('Water temp', _fmt(state.seaTempF, '°F')),
             _Row('Wind', wind),
-            if (state.sources.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              const _Section('Sources'),
-              for (final e in state.sources.entries)
-                _Row(e.key, e.value ?? '(none found)'),
-            ],
           ],
         ),
       ),

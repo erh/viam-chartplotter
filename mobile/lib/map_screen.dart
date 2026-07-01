@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'ais.dart';
 import 'boat_state.dart';
 import 'data_drawer.dart';
+import 'debug_screen.dart';
 import 'tile_sources.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
@@ -172,7 +173,14 @@ class _MapScreenState extends State<MapScreen> {
               alignment: Alignment.topLeft,
               child: Padding(
                 padding: const EdgeInsets.all(12),
-                child: _StatusChip(state: s),
+                child: GestureDetector(
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => DebugScreen(state: s),
+                    ),
+                  ),
+                  child: _StatusChip(state: s),
+                ),
               ),
             ),
           ),
