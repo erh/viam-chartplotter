@@ -10,7 +10,12 @@
 !.env.example
 
 # --- Agent / tooling ---
-.claude
+# Ignore local/personal agent settings, but keep shared project hooks + the
+# committed SessionStart config tracked.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 
 # --- Node / frontend build output ---
 node_modules
