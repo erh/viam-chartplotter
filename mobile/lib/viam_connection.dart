@@ -136,7 +136,7 @@ class ViamConnection {
         if (score > bestScore ||
             (score == bestScore &&
                 best != null &&
-                rn.name.length < best!.length)) {
+                rn.name.length < best.length)) {
           best = rn.name;
           bestScore = score;
         }
