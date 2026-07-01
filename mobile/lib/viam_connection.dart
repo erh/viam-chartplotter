@@ -6,6 +6,7 @@ import 'package:viam_sdk/viam_sdk.dart';
 import 'ais.dart';
 import 'boat_state.dart';
 import 'config.dart';
+import 'history.dart';
 
 /// Owns the boat connection and the 1 Hz poll loop. This is the Dart
 /// re-implementation of the web app's `doUpdate` loop (src/App.svelte),
@@ -25,9 +26,14 @@ class ViamConnection {
 
   final BoatState state;
   RobotClient? _robot;
+  Viam? _viam; // present on the login path; enables cloud-data backfill
 
   /// The live robot connection, for features that fetch on demand (cameras).
   RobotClient? get robot => _robot;
+
+  /// Cloud-data backfill for the detail graphs, or null in API-key mode.
+  HistoryService? _history;
+  HistoryService? get history => _history;
   String? _movementSensorName;
   String? _depthSensorName;
   String? _windSensorName;
@@ -44,8 +50,9 @@ class ViamConnection {
   bool _polling = false;
   bool _ownsRobot = false; // close it on dispose only if we dialed it
 
-  Future<void> startWithRobot(RobotClient robot) async {
+  Future<void> startWithRobot(RobotClient robot, {Viam? viam}) async {
     _robot = robot;
+    _viam = viam;
     _ownsRobot = false; // owned by the session/picker that connected it
     await _afterConnect();
   }
@@ -98,7 +105,52 @@ class ViamConnection {
     });
     state.setStatus(
         _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
+    await _buildHistory(robot);
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  /// Assemble the cloud-data backfill for the detail graphs: the machine's
+  /// cloud identity (from the robot) plus a capture spec per graphable metric.
+  /// Only possible on the login path, where we hold a [Viam] handle.
+  Future<void> _buildHistory(RobotClient robot) async {
+    final viam = _viam;
+    if (viam == null) return;
+    try {
+      final meta = await robot.getCloudMetadata();
+      String leaf(String? n) => (n ?? '').split(':').last;
+      final specs = <String, HistorySpec>{};
+      if (_depthSensorName != null) {
+        specs['depth'] = HistorySpec(
+            leaf(_depthSensorName), 'Depth', (v) => v * 3.28084);
+      }
+      if (_seatempSensorName != null) {
+        specs['seatemp'] = HistorySpec(
+            leaf(_seatempSensorName), 'Temperature', (v) => 32 + v * 1.8);
+      }
+      if (_windSensorName != null) {
+        specs['wind'] = HistorySpec(
+          leaf(_windSensorName),
+          'Wind Speed',
+          (v) => v * 1.94384,
+          extraMatch: const {
+            'data.readings.Reference': 'True (ground referenced to North)',
+          },
+        );
+      }
+      for (final tn in _tankNames) {
+        specs['tank:${leaf(tn)}'] =
+            HistorySpec(leaf(tn), 'Level', (v) => v);
+      }
+      _history = HistoryService(
+        dataClient: viam.dataClient,
+        orgId: meta.primaryOrgId,
+        locationId: meta.locationId,
+        robotId: meta.machineId,
+        specs: specs,
+      );
+    } catch (_) {
+      // No cloud metadata / data access → graphs stay live-only.
+    }
   }
 
   /// Find a sensor component whose name contains [needle] (case-insensitive),

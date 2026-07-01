@@ -229,7 +229,7 @@ class _MapScreenState extends State<MapScreen> {
     final s = widget.state;
     return Scaffold(
       key: _scaffoldKey,
-      endDrawer: DataDrawer(state: s),
+      endDrawer: DataDrawer(state: s, history: widget.connection.history),
       body: Stack(
         children: [
           FlutterMap(

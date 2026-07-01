@@ -3,11 +3,13 @@ import 'dart:math' show max, min;
 import 'package:flutter/material.dart';
 
 import 'boat_state.dart';
+import 'history.dart';
 
 /// Full-screen detail graph for one metric with a time x-axis and an
 /// adjustable time window (15 min / 1 h / 4 h / all). Opened by tapping a row
-/// in the data drawer. Live-updates as new samples arrive. The 4 h window is
-/// the "fueling" case: a tight, highly detailed view of recent history.
+/// in the data drawer. On open it backfills recorded history from Viam's
+/// tabular data store (via [history]) and then live-updates as new samples
+/// arrive. The 4 h window is the "fueling" case: a tight, highly detailed view.
 class GraphScreen extends StatefulWidget {
   const GraphScreen({
     super.key,
@@ -16,6 +18,7 @@ class GraphScreen extends StatefulWidget {
     required this.label,
     required this.unit,
     this.digits = 1,
+    this.history,
   });
 
   final BoatState state;
@@ -23,13 +26,15 @@ class GraphScreen extends StatefulWidget {
   final String label;
   final String unit;
   final int digits;
+  final HistoryService? history;
 
   @override
   State<GraphScreen> createState() => _GraphScreenState();
 }
 
 class _GraphScreenState extends State<GraphScreen> {
-  // null = all history.
+  // For the "All" window we still bound the backfill to 24 h.
+  static const _backfillCap = Duration(hours: 24);
   static const _windows = <(String, Duration?)>[
     ('15m', Duration(minutes: 15)),
     ('1h', Duration(hours: 1)),
@@ -38,24 +43,77 @@ class _GraphScreenState extends State<GraphScreen> {
   ];
   int _sel = 2; // default to the 4 h "fueling" window
 
+  List<({DateTime t, double v})> _backfill = const [];
+  bool _loading = false;
+  int _fetchId = 0; // guards against out-of-order responses
+
+  @override
+  void initState() {
+    super.initState();
+    _loadHistory();
+  }
+
+  bool get _canBackfill =>
+      widget.history?.hasMetric(widget.metric) ?? false;
+
+  Future<void> _loadHistory() async {
+    final h = widget.history;
+    if (h == null || !h.hasMetric(widget.metric)) return;
+    final id = ++_fetchId;
+    setState(() => _loading = true);
+    final rows =
+        await h.fetch(widget.metric, _windows[_sel].$2 ?? _backfillCap);
+    if (!mounted || id != _fetchId) return;
+    setState(() {
+      _backfill = rows;
+      _loading = false;
+    });
+  }
+
+  void _selectWindow(int i) {
+    setState(() => _sel = i);
+    _loadHistory();
+  }
+
   @override
   Widget build(BuildContext context) {
     final window = _windows[_sel].$2;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.label)),
+      appBar: AppBar(
+        title: Text(widget.label),
+        actions: [
+          if (_canBackfill)
+            IconButton(
+              tooltip: 'Refresh history',
+              onPressed: _loading ? null : _loadHistory,
+              icon: const Icon(Icons.refresh),
+            ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
             padding: const EdgeInsets.all(12),
-            child: Wrap(
-              spacing: 8,
+            child: Row(
               children: [
-                for (var i = 0; i < _windows.length; i++)
-                  ChoiceChip(
-                    label: Text(_windows[i].$1),
-                    selected: _sel == i,
-                    onSelected: (_) => setState(() => _sel = i),
-                  ),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (var i = 0; i < _windows.length; i++)
+                      ChoiceChip(
+                        label: Text(_windows[i].$1),
+                        selected: _sel == i,
+                        onSelected: (_) => _selectWindow(i),
+                      ),
+                  ],
+                ),
+                if (_loading) ...[
+                  const SizedBox(width: 12),
+                  const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                ],
               ],
             ),
           ),
@@ -63,18 +121,14 @@ class _GraphScreenState extends State<GraphScreen> {
             child: ListenableBuilder(
               listenable: widget.state,
               builder: (context, _) {
-                final all = widget.state.series(widget.metric);
                 final now = DateTime.now();
-                final data = window == null
-                    ? all
-                    : [
-                        for (final s in all)
-                          if (now.difference(s.t) <= window) s
-                      ];
+                final live = widget.state.series(widget.metric);
+                final data = _merge(live, window, now);
                 if (data.length < 2) {
-                  return const Center(
-                    child: Text('Collecting data…',
-                        style: TextStyle(color: Colors.white54)),
+                  return Center(
+                    child: Text(
+                        _loading ? 'Loading history…' : 'Collecting data…',
+                        style: const TextStyle(color: Colors.white54)),
                   );
                 }
                 return Padding(
@@ -98,6 +152,27 @@ class _GraphScreenState extends State<GraphScreen> {
         ],
       ),
     );
+  }
+
+  /// Backfill (older, cloud-recorded) points spliced in front of the live
+  /// in-memory series, both clipped to the window. The live series carries the
+  /// recent, high-resolution tail; backfill covers everything before it.
+  List<({DateTime t, double v})> _merge(
+      List<({DateTime t, double v})> live, Duration? window, DateTime now) {
+    final liveIn = window == null
+        ? live
+        : [
+            for (final s in live)
+              if (now.difference(s.t) <= window) s
+          ];
+    final liveStart = liveIn.isNotEmpty ? liveIn.first.t : now;
+    final back = [
+      for (final b in _backfill)
+        if (b.t.isBefore(liveStart) &&
+            (window == null || now.difference(b.t) <= window))
+          b
+    ];
+    return [...back, ...liveIn];
   }
 }
 

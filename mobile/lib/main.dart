@@ -54,7 +54,7 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
   }
 
   void _onRobotConnected(RobotClient robot) {
-    _conn.startWithRobot(robot);
+    _conn.startWithRobot(robot, viam: _session.viam);
     setState(() => _boatConnected = true);
   }
 

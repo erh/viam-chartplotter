@@ -2,22 +2,27 @@ import 'package:flutter/material.dart';
 
 import 'boat_state.dart';
 import 'graph_screen.dart';
+import 'history.dart';
 import 'sparkline.dart';
 
 /// The dashboard: all the boat readouts that used to be overlaid on the chart,
 /// grouped into sections. Opened from the map's dashboard button. Rebuilds live
 /// while open because MapScreen setState()s on every BoatState tick.
 class DataDrawer extends StatelessWidget {
-  const DataDrawer({super.key, required this.state});
+  const DataDrawer({super.key, required this.state, this.history});
   final BoatState state;
+  final HistoryService? history;
 
   String _fmt(double? v, String unit, {int digits = 1}) =>
       v == null ? '—' : '${v.toStringAsFixed(digits)} $unit';
 
-  /// A graph spec for a row, or null when there's no history to plot yet.
+  /// A graph spec for a row, or null when there's nothing to plot yet — no
+  /// live samples collected and no cloud backfill available for the metric.
   _GraphSpec? _graph(BoatState state, String metric, String label, String unit,
       {int digits = 1}) {
-    if (state.series(metric).length < 2) return null;
+    final hasLive = state.series(metric).length >= 2;
+    final hasBackfill = history?.hasMetric(metric) ?? false;
+    if (!hasLive && !hasBackfill) return null;
     return _GraphSpec(metric, label, unit, digits);
   }
 
@@ -72,7 +77,8 @@ class DataDrawer extends StatelessWidget {
             _Row('SOG', _fmt(state.speedKn, 'kn'),
                 spark: state.spark('sog'),
                 graph: _graph(state, 'sog', 'SOG', 'kn'),
-                state: state),
+                state: state,
+                history: history),
             _Row('COG', _fmt(state.cogDeg, '°', digits: 0)),
             _Row('Heading', _fmt(state.headingDeg, '°', digits: 0)),
             const SizedBox(height: 16),
@@ -80,15 +86,18 @@ class DataDrawer extends StatelessWidget {
             _Row('Depth', _fmt(state.depthFt, 'ft'),
                 spark: state.spark('depth'),
                 graph: _graph(state, 'depth', 'Depth', 'ft'),
-                state: state),
+                state: state,
+                history: history),
             _Row('Water temp', _fmt(state.seaTempF, '°F'),
                 spark: state.spark('seatemp'),
                 graph: _graph(state, 'seatemp', 'Water temp', '°F'),
-                state: state),
+                state: state,
+                history: history),
             _Row('Wind', wind,
                 spark: state.spark('wind'),
                 graph: _graph(state, 'wind', 'Wind speed', 'kn'),
-                state: state),
+                state: state,
+                history: history),
             if (state.spotZeroFwGph != null || state.spotZeroSwGph != null) ...[
               const SizedBox(height: 16),
               const _Section('Watermaker'),
@@ -105,7 +114,8 @@ class DataDrawer extends StatelessWidget {
                     spark: state.spark('tank:${t.name}'),
                     graph: _graph(state, 'tank:${t.name}', t.name, '%',
                         digits: 0),
-                    state: state),
+                    state: state,
+                    history: history),
             ],
             if (state.seakeeperStabilizing != null ||
                 state.acVolts != null) ...[
@@ -150,12 +160,14 @@ class _GraphSpec {
 }
 
 class _Row extends StatelessWidget {
-  const _Row(this.label, this.value, {this.spark, this.graph, this.state});
+  const _Row(this.label, this.value,
+      {this.spark, this.graph, this.state, this.history});
   final String label;
   final String value;
   final List<double>? spark;
   final _GraphSpec? graph;
   final BoatState? state;
+  final HistoryService? history;
   @override
   Widget build(BuildContext context) {
     final s = spark;
@@ -195,6 +207,7 @@ class _Row extends StatelessWidget {
           label: g.label,
           unit: g.unit,
           digits: g.digits,
+          history: history,
         ),
       )),
       child: row,
