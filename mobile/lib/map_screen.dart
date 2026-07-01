@@ -13,7 +13,6 @@ import 'debug_screen.dart';
 import 'tile_sources.dart';
 import 'viam_connection.dart';
 import 'weather.dart';
-import 'wind_layer.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
 /// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
@@ -37,6 +36,7 @@ class _MapScreenState extends State<MapScreen> {
   WindField? _wind;
   bool _windOn = false;
   bool _windLoading = false;
+  LatLngBounds? _bounds; // current viewport, for sampling wind arrows
 
   Future<void> _toggleWind() async {
     if (_windOn) {
@@ -57,6 +57,7 @@ class _MapScreenState extends State<MapScreen> {
         _wind = f;
         _windOn = true;
         _windLoading = false;
+        _bounds = _map.camera.visibleBounds; // seed so arrows show immediately
       });
       widget.state
           .setWindInfo('loaded ${f.nx}×${f.ny} grid (${f.u.length} cells)');
@@ -90,6 +91,46 @@ class _MapScreenState extends State<MapScreen> {
       _map.move(pos, 13);
     }
     if (mounted) setState(() {});
+  }
+
+  /// Wind arrows sampled across the visible bounds. Uses MarkerLayer (which is
+  /// proven to render here) rather than a CustomPainter. Each arrow points the
+  /// way the wind blows and is coloured by speed.
+  List<Marker> _windMarkers(WindField f, LatLngBounds b) {
+    final markers = <Marker>[];
+    final span = math.max(b.east - b.west, b.north - b.south);
+    final step = math.max(f.dx, span / 14);
+    if (step <= 0) return markers;
+    for (double lat = b.north; lat >= b.south; lat -= step) {
+      for (double lon = b.west; lon <= b.east; lon += step) {
+        final nlon = ((lon + 540) % 360) - 180;
+        final s = f.sample(nlon, lat);
+        if (s == null) continue;
+        final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
+        // Bearing (clockwise from north) the wind blows toward.
+        final ang = math.atan2(s.u, s.v);
+        markers.add(Marker(
+          point: LatLng(lat, nlon),
+          width: 24,
+          height: 24,
+          child: Transform.rotate(
+            angle: ang,
+            child: Icon(Icons.navigation, size: 16, color: _windColor(knots)),
+          ),
+        ));
+        if (markers.length >= 1500) return markers;
+      }
+    }
+    return markers;
+  }
+
+  Color _windColor(double kn) {
+    if (kn < 5) return const Color(0xFFabd9e9);
+    if (kn < 12) return const Color(0xFF74add1);
+    if (kn < 18) return const Color(0xFF66bd63);
+    if (kn < 25) return const Color(0xFFfdae61);
+    if (kn < 34) return const Color(0xFFf46d43);
+    return const Color(0xFFd73027);
   }
 
   void _showAisDetails(AisBoat b) {
@@ -160,9 +201,13 @@ class _MapScreenState extends State<MapScreen> {
         children: [
           FlutterMap(
             mapController: _map,
-            options: const MapOptions(
-              initialCenter: LatLng(41.3, -72.0), // Long Island Sound-ish
+            options: MapOptions(
+              initialCenter: const LatLng(41.3, -72.0), // Long Island Sound-ish
               initialZoom: 9,
+              onPositionChanged: (camera, _) {
+                _bounds = camera.visibleBounds;
+                if (_windOn && mounted) setState(() {});
+              },
             ),
             children: [
               TileLayer(
@@ -176,8 +221,9 @@ class _MapScreenState extends State<MapScreen> {
                 errorTileCallback: (tile, error, stackTrace) =>
                     debugPrint('tile load failed (${_base.id}): $error'),
               ),
-              // Wind overlay (over the chart, under markers).
-              if (_windOn && _wind != null) WindLayer(field: _wind!),
+              // Wind overlay (arrow markers, over the chart, under boat markers).
+              if (_windOn && _wind != null && _bounds != null)
+                MarkerLayer(markers: _windMarkers(_wind!, _bounds!)),
               // Active route: line from the boat to the destination.
               if (s.position != null && s.destination != null)
                 PolylineLayer(

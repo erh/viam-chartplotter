@@ -106,15 +106,19 @@ class ViamConnection {
     return null;
   }
 
-  /// All camera components on the robot, sorted by name.
+  /// Camera components on the robot, sorted, with the web app's filtered-camera
+  /// rule: drop "<name>" when a "<name>-filtered" sibling exists (prefer the
+  /// filtered feed). (chartplotter-hide needs the machine config; not yet done.)
   List<String> _discoverCameras(RobotClient robot) {
-    final out = <String>[];
+    final all = <String>[];
     try {
       for (final rn in robot.resourceNames) {
-        if (rn.subtype == 'camera') out.add(rn.name);
+        if (rn.subtype == 'camera') all.add(rn.name);
       }
     } catch (_) {}
-    out.sort();
+    final names = all.toSet();
+    final out = all.where((n) => !names.contains('$n-filtered')).toList()
+      ..sort();
     return out;
   }
 
