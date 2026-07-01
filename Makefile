@@ -168,3 +168,49 @@ backfill-lowzoom: mapsync
 # when it's absent.
 backfill-noaa-lowzoom: mapsync
 	./mapsync backfill-noaa-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
+
+
+# -- mobile (Flutter) app ----------------------------------------------------
+# Run/build the native chartplotter in mobile/ (see mobile/README.md). Needs
+# Flutter (version pinned in mobile/.fvmrc); override FLUTTER to pin via FVM:
+#   make mobile-run FLUTTER="fvm flutter"
+# Target a specific device with DEVICE=<id from `flutter devices`>. Boat/login
+# config is forwarded as --dart-define only when set, so bare `make mobile-run`
+# is chart-only (hosted tiles, no boat):
+#   make mobile-run                                              # chart-only
+#   make mobile-run VIAM_HOST=… VIAM_API_KEY_ID=… VIAM_API_KEY=…  # a boat
+#   make mobile-run VIAM_OAUTH_ISSUER=… VIAM_OAUTH_CLIENT_ID=…    # app.viam.com login
+FLUTTER ?= flutter
+MOBILE_DEVICE := $(if $(DEVICE),-d $(DEVICE))
+MOBILE_DART_DEFINES := \
+	$(if $(VIAM_HOST),--dart-define=VIAM_HOST=$(VIAM_HOST)) \
+	$(if $(VIAM_API_KEY_ID),--dart-define=VIAM_API_KEY_ID=$(VIAM_API_KEY_ID)) \
+	$(if $(VIAM_API_KEY),--dart-define=VIAM_API_KEY=$(VIAM_API_KEY)) \
+	$(if $(TILE_BASE),--dart-define=TILE_BASE=$(TILE_BASE)) \
+	$(if $(DEPTH_SENSOR),--dart-define=DEPTH_SENSOR=$(DEPTH_SENSOR)) \
+	$(if $(VIAM_OAUTH_ISSUER),--dart-define=VIAM_OAUTH_ISSUER=$(VIAM_OAUTH_ISSUER)) \
+	$(if $(VIAM_OAUTH_CLIENT_ID),--dart-define=VIAM_OAUTH_CLIENT_ID=$(VIAM_OAUTH_CLIENT_ID)) \
+	$(if $(VIAM_OAUTH_REDIRECT),--dart-define=VIAM_OAUTH_REDIRECT=$(VIAM_OAUTH_REDIRECT))
+
+.PHONY: mobile-setup mobile-run mobile-apk mobile-analyze mobile-test
+
+# One-time (or after changing platform config): generate the gitignored
+# android/ ios/ folders, inject the flutter_appauth manifest placeholder, and
+# resolve packages. Idempotent — safe to re-run.
+mobile-setup:
+	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && $(FLUTTER) pub get
+
+# Run on a connected device/emulator (auto-runs mobile-setup first).
+mobile-run: mobile-setup
+	cd mobile && $(FLUTTER) run $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
+
+# Build a debug APK (mirrors CI's build-android job).
+mobile-apk: mobile-setup
+	cd mobile && $(FLUTTER) build apk --debug $(MOBILE_DART_DEFINES)
+
+# Static analysis + unit tests (mirror CI's analyze job). No platform folders
+# needed, so these skip mobile-setup.
+mobile-analyze:
+	cd mobile && $(FLUTTER) analyze
+mobile-test:
+	cd mobile && $(FLUTTER) test
