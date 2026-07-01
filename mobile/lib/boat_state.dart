@@ -16,6 +16,7 @@ class BoatState extends ChangeNotifier {
   double? windSpeedKn; // true wind
   double? windAngleDeg; // true wind angle
   List<AisBoat> aisBoats = const [];
+  List<String> cameraNames = const [];
   LatLng? destination; // active route destination (from the `route` sensor)
   // Which component each reading came from (for the drawer's Sources section).
   Map<String, String?> sources = const {};
@@ -36,6 +37,11 @@ class BoatState extends ChangeNotifier {
 
   void setSources(Map<String, String?> s) {
     sources = s;
+    notifyListeners();
+  }
+
+  void setCameras(List<String> names) {
+    cameraNames = names;
     notifyListeners();
   }
 

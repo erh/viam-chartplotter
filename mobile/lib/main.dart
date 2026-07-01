@@ -70,7 +70,7 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
   Widget _home() {
     // API-key / chart-only path.
     if (!OAuthConfig.configured) {
-      return MapScreen(state: _state);
+      return MapScreen(state: _state, connection: _conn);
     }
     // Login path.
     switch (_session.status) {
@@ -81,7 +81,7 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
       case AuthStatus.error:
         return LoginScreen(session: _session);
       case AuthStatus.signedIn:
-        if (_boatConnected) return MapScreen(state: _state);
+        if (_boatConnected) return MapScreen(state: _state, connection: _conn);
         return MachinePickerScreen(
           session: _session,
           onConnected: _onRobotConnected,

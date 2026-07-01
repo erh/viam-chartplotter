@@ -6,16 +6,19 @@ import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
 import 'boat_state.dart';
+import 'camera_screen.dart';
 import 'data_drawer.dart';
 import 'debug_screen.dart';
 import 'tile_sources.dart';
+import 'viam_connection.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
 /// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
 /// map *controls* (layer switcher, dashboard button, recenter) sit on top.
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key, required this.state});
+  const MapScreen({super.key, required this.state, required this.connection});
   final BoatState state;
+  final ViamConnection connection;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -226,6 +229,22 @@ class _MapScreenState extends State<MapScreen> {
                       tooltip: 'Boat data',
                       onTap: () => _scaffoldKey.currentState?.openEndDrawer(),
                     ),
+                    if (s.cameraNames.isNotEmpty &&
+                        widget.connection.robot != null) ...[
+                      const SizedBox(height: 8),
+                      _RoundButton(
+                        icon: Icons.videocam,
+                        tooltip: 'Cameras',
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => CameraScreen(
+                              robot: widget.connection.robot!,
+                              names: s.cameraNames,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

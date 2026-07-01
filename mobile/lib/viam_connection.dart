@@ -25,6 +25,9 @@ class ViamConnection {
 
   final BoatState state;
   RobotClient? _robot;
+
+  /// The live robot connection, for features that fetch on demand (cameras).
+  RobotClient? get robot => _robot;
   String? _movementSensorName;
   String? _depthSensorName;
   String? _windSensorName;
@@ -70,6 +73,8 @@ class ViamConnection {
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
     _routeSensorName = _discoverSensorEndingWith(robot, 'route');
+    final cameras = _discoverCameras(robot);
+    state.setCameras(cameras);
     state.setSources({
       'Movement': _movementSensorName,
       'Depth': _depthSensorName,
@@ -77,6 +82,7 @@ class ViamConnection {
       'Sea temp': _seatempSensorName,
       'AIS': _aisSensorName,
       'Route': _routeSensorName,
+      'Cameras': cameras.isEmpty ? null : cameras.length.toString(),
     });
     state.setStatus(
         _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
@@ -98,6 +104,18 @@ class ViamConnection {
       }
     } catch (_) {}
     return null;
+  }
+
+  /// All camera components on the robot, sorted by name.
+  List<String> _discoverCameras(RobotClient robot) {
+    final out = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'camera') out.add(rn.name);
+      }
+    } catch (_) {}
+    out.sort();
+    return out;
   }
 
   /// Like [_discoverSensorByName] but suffix-matched — used for the `ais`
