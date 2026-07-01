@@ -36,8 +36,11 @@ class _MapScreenState extends State<MapScreen> {
   WindField? _wind;
   bool _windOn = false;
   bool _windLoading = false;
+  int _windFh = 0; // forecast hour (0 = latest analysis)
   LatLngBounds? _bounds; // current viewport, for sampling wind arrows
   List<Marker> _windMarkerCache = const [];
+
+  static const int _windMaxFh = 240; // GFS: 0..240h, 3h steps
 
   Future<void> _toggleWind() async {
     if (_windOn) {
@@ -46,18 +49,24 @@ class _MapScreenState extends State<MapScreen> {
     }
     if (_wind != null) {
       setState(() => _windOn = true);
+      _rebuildWindMarkers();
       return;
     }
+    await _loadWind(_windFh);
+  }
+
+  /// Fetch the wind field at forecast hour [fh] and show it.
+  Future<void> _loadWind(int fh) async {
     setState(() => _windLoading = true);
-    widget.state
-        .setWindInfo('fetching ${Config.tileBase}/noaa-weather/data/gfs/…');
+    widget.state.setWindInfo('fetching gfs fh=$fh …');
     try {
-      final f = await fetchWindField(Config.tileBase, 'gfs');
+      final f = await fetchWindField(Config.tileBase, 'gfs', fh: fh);
       if (!mounted) return;
       _bounds = _map.camera.visibleBounds; // seed so arrows show immediately
       _wind = f;
       _windOn = true;
       _windLoading = false;
+      _windFh = fh;
       _rebuildWindMarkers(); // also updates the Debug wind row with the count
       setState(() {});
     } catch (e) {
@@ -395,6 +404,56 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          // Bottom: wind forecast-time slider (only while wind is on).
+          if (_windOn)
+            Positioned(
+              left: 12,
+              right: 76, // clear the center-on-boat FAB
+              bottom: 12,
+              child: SafeArea(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: _windLoading
+                            ? const CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white)
+                            : const Icon(Icons.air,
+                                color: Colors.white, size: 18),
+                      ),
+                      SizedBox(
+                        width: 48,
+                        child: Text(
+                          _windFh == 0 ? 'now' : '+${_windFh}h',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                      Expanded(
+                        child: Slider(
+                          value: _windFh.toDouble(),
+                          max: _windMaxFh.toDouble(),
+                          divisions: _windMaxFh ~/ 3,
+                          label: _windFh == 0 ? 'now' : '+${_windFh}h',
+                          onChanged: (v) =>
+                              setState(() => _windFh = (v / 3).round() * 3),
+                          onChangeEnd: (v) => _loadWind((v / 3).round() * 3),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
       floatingActionButton: s.position == null

@@ -115,9 +115,12 @@ class WindField {
   }
 }
 
-/// Fetch + decode the wind field for [model] (e.g. "gfs") from the tile server.
-Future<WindField> fetchWindField(String tileBase, String model) async {
-  final uri = Uri.parse('$tileBase/noaa-weather/data/$model/latest.json');
+/// Fetch + decode the wind field for [model] (e.g. "gfs") at forecast hour
+/// [fh] (0 = latest analysis). The server snaps fh to the model's step.
+Future<WindField> fetchWindField(String tileBase, String model,
+    {int fh = 0}) async {
+  final uri =
+      Uri.parse('$tileBase/noaa-weather/data/$model/latest.json?fh=$fh');
   // Without a timeout a non-responsive weather server leaves the toggle
   // spinning forever ("nothing happens"); surface it as an error instead.
   final resp = await http.get(uri).timeout(const Duration(seconds: 15));
