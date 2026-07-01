@@ -74,16 +74,7 @@ jobs:
       # manifest merge fails. The platform folder is regenerated each run, so
       # inject it here (idempotent; handles Groovy and Kotlin DSL).
       - name: Configure AppAuth redirect scheme
-        run: |
-          set -e
-          SCHEME=com.viam.chartplotter
-          if [ -f android/app/build.gradle ]; then
-            grep -q appAuthRedirectScheme android/app/build.gradle || \
-              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders += [appAuthRedirectScheme: \"$SCHEME\"]/" android/app/build.gradle
-          elif [ -f android/app/build.gradle.kts ]; then
-            grep -q appAuthRedirectScheme android/app/build.gradle.kts || \
-              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders[\"appAuthRedirectScheme\"] += \"$SCHEME\"/" android/app/build.gradle.kts
-          fi
+        run: bash tool/ci-android-appauth.sh
 
       - name: Resolve dependencies
         run: flutter pub get
