@@ -33,18 +33,28 @@ class BoatState extends ChangeNotifier {
   String status = 'Starting…';
   DateTime? lastUpdate;
 
-  // Rolling live-value history for sparklines, keyed by metric
-  // (depth/seatemp/sog/wind/tank:<name>). Live-accumulated as values arrive.
-  final Map<String, List<double>> history = {};
-  static const int _histCap = 150;
+  // Timestamped live history per metric (depth/seatemp/sog/wind/tank:<name>),
+  // for the inline sparklines and the detail graph. ~4h at 1 Hz.
+  final Map<String, List<({DateTime t, double v})>> history = {};
+  static const int _histCap = 15000;
 
   bool get connected => status.startsWith('Connected');
 
-  List<double>? spark(String key) => history[key];
+  /// Last ~60 values for the inline sparkline glance.
+  List<double> spark(String key) {
+    final l = history[key];
+    if (l == null) return const [];
+    final start = l.length > 60 ? l.length - 60 : 0;
+    return [for (var i = start; i < l.length; i++) l[i].v];
+  }
+
+  /// Full timestamped series for the detail graph.
+  List<({DateTime t, double v})> series(String key) =>
+      history[key] ?? const [];
 
   void _push(String key, double v) {
-    final list = history.putIfAbsent(key, () => <double>[]);
-    list.add(v);
+    final list = history.putIfAbsent(key, () => []);
+    list.add((t: DateTime.now(), v: v));
     if (list.length > _histCap) list.removeAt(0);
   }
 

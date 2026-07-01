@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'boat_state.dart';
+import 'graph_screen.dart';
 import 'sparkline.dart';
 
 /// The dashboard: all the boat readouts that used to be overlaid on the chart,
@@ -12,6 +13,13 @@ class DataDrawer extends StatelessWidget {
 
   String _fmt(double? v, String unit, {int digits = 1}) =>
       v == null ? '—' : '${v.toStringAsFixed(digits)} $unit';
+
+  /// A graph spec for a row, or null when there's no history to plot yet.
+  _GraphSpec? _graph(BoatState state, String metric, String label, String unit,
+      {int digits = 1}) {
+    if (state.series(metric).length < 2) return null;
+    return _GraphSpec(metric, label, unit, digits);
+  }
 
   String _seakeeper(BoatState s) {
     if (s.seakeeperStabilizing == true) {
@@ -61,16 +69,26 @@ class DataDrawer extends StatelessWidget {
                   : '${pos.latitude.toStringAsFixed(5)}, '
                       '${pos.longitude.toStringAsFixed(5)}',
             ),
-            _Row('SOG', _fmt(state.speedKn, 'kn'), spark: state.spark('sog')),
+            _Row('SOG', _fmt(state.speedKn, 'kn'),
+                spark: state.spark('sog'),
+                graph: _graph(state, 'sog', 'SOG', 'kn'),
+                state: state),
             _Row('COG', _fmt(state.cogDeg, '°', digits: 0)),
             _Row('Heading', _fmt(state.headingDeg, '°', digits: 0)),
             const SizedBox(height: 16),
             const _Section('Environment'),
             _Row('Depth', _fmt(state.depthFt, 'ft'),
-                spark: state.spark('depth')),
+                spark: state.spark('depth'),
+                graph: _graph(state, 'depth', 'Depth', 'ft'),
+                state: state),
             _Row('Water temp', _fmt(state.seaTempF, '°F'),
-                spark: state.spark('seatemp')),
-            _Row('Wind', wind, spark: state.spark('wind')),
+                spark: state.spark('seatemp'),
+                graph: _graph(state, 'seatemp', 'Water temp', '°F'),
+                state: state),
+            _Row('Wind', wind,
+                spark: state.spark('wind'),
+                graph: _graph(state, 'wind', 'Wind speed', 'kn'),
+                state: state),
             if (state.spotZeroFwGph != null || state.spotZeroSwGph != null) ...[
               const SizedBox(height: 16),
               const _Section('Watermaker'),
@@ -84,7 +102,10 @@ class DataDrawer extends StatelessWidget {
               const _Section('Tanks'),
               for (final t in state.tanks)
                 _Row(t.name, '${t.level.toStringAsFixed(0)}%',
-                    spark: state.spark('tank:${t.name}')),
+                    spark: state.spark('tank:${t.name}'),
+                    graph: _graph(state, 'tank:${t.name}', t.name, '%',
+                        digits: 0),
+                    state: state),
             ],
             if (state.seakeeperStabilizing != null ||
                 state.acVolts != null) ...[
@@ -120,15 +141,27 @@ class _Section extends StatelessWidget {
       );
 }
 
+class _GraphSpec {
+  const _GraphSpec(this.metric, this.label, this.unit, this.digits);
+  final String metric;
+  final String label;
+  final String unit;
+  final int digits;
+}
+
 class _Row extends StatelessWidget {
-  const _Row(this.label, this.value, {this.spark});
+  const _Row(this.label, this.value, {this.spark, this.graph, this.state});
   final String label;
   final String value;
   final List<double>? spark;
+  final _GraphSpec? graph;
+  final BoatState? state;
   @override
   Widget build(BuildContext context) {
     final s = spark;
-    return Padding(
+    final g = graph;
+    final st = state;
+    final row = Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
@@ -145,8 +178,26 @@ class _Row extends StatelessWidget {
                     fontWeight: FontWeight.w600)),
           ),
           if (s != null && s.length >= 2) Sparkline(data: s),
+          if (g != null)
+            const Padding(
+              padding: EdgeInsets.only(left: 6),
+              child: Icon(Icons.show_chart, size: 16, color: Colors.white38),
+            ),
         ],
       ),
+    );
+    if (g == null || st == null) return row;
+    return InkWell(
+      onTap: () => Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => GraphScreen(
+          state: st,
+          metric: g.metric,
+          label: g.label,
+          unit: g.unit,
+          digits: g.digits,
+        ),
+      )),
+      child: row,
     );
   }
 }
