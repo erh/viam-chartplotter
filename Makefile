@@ -194,10 +194,13 @@ MOBILE_DART_DEFINES := \
 
 .PHONY: mobile-setup mobile-run mobile-apk mobile-analyze mobile-test
 
-# One-time (or after changing platform config): generate the gitignored
-# android/ ios/ folders, inject the flutter_appauth manifest placeholder, and
-# resolve packages. Idempotent — safe to re-run.
+# One-time (or after changing platform config): install Flutter via Homebrew if
+# it's missing, generate the gitignored android/ ios/ folders, inject the
+# flutter_appauth manifest placeholder, and resolve packages. Idempotent — safe
+# to re-run. Note: brew installs the latest stable; for the exact version pinned
+# in mobile/.fvmrc, use FVM instead (make mobile-setup FLUTTER="fvm flutter").
 mobile-setup:
+	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
 	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && $(FLUTTER) pub get
 
 # Run on a connected device/emulator (auto-runs mobile-setup first).
