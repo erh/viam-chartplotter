@@ -25,6 +25,7 @@ class ViamConnection {
   final BoatState state;
   RobotClient? _robot;
   String? _movementSensorName;
+  String? _depthSensorName;
   Timer? _timer;
   bool _polling = false;
   bool _ownsRobot = false; // close it on dispose only if we dialed it
@@ -58,10 +59,28 @@ class ViamConnection {
     final robot = _robot;
     if (robot == null) return;
     _movementSensorName = await _discoverMovementSensor(robot);
+    _depthSensorName = _discoverSensorByName(robot, 'depth', Config.depthSensor);
     state.setStatus(_movementSensorName == null
         ? 'Connected, but no movement_sensor found'
         : 'Connected ($_movementSensorName)');
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  /// Find a sensor component whose name contains [needle] (case-insensitive),
+  /// mirroring the web app's name-regex discovery (e.g. /depth/). An explicit
+  /// [override] (from --dart-define) wins.
+  String? _discoverSensorByName(
+      RobotClient robot, String needle, String override) {
+    if (override.isNotEmpty) return override;
+    try {
+      final lower = needle.toLowerCase();
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && rn.name.toLowerCase().contains(lower)) {
+          return rn.name;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// Mirror of setupMovementSensor: pick the first component whose subtype is
@@ -106,10 +125,11 @@ class ViamConnection {
         state.update(headingDeg: h);
       } catch (_) {}
 
-      if (Config.depthSensor.isNotEmpty) {
+      final depthName = _depthSensorName;
+      if (depthName != null) {
         try {
-          final s = Sensor.fromRobot(robot, Config.depthSensor);
-          final r = await s.readings();
+          final r = await Sensor.fromRobot(robot, depthName).readings();
+          // Sensor reports Depth in metres (matches the web app); → feet.
           final d = r['Depth'];
           if (d is num) state.update(depthFt: d.toDouble() * 3.28084);
         } catch (_) {}
