@@ -48,6 +48,8 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
     setState(() => _windLoading = true);
+    widget.state
+        .setWindInfo('fetching ${Config.tileBase}/noaa-weather/data/gfs/…');
     try {
       final f = await fetchWindField(Config.tileBase, 'gfs');
       if (!mounted) return;
@@ -56,9 +58,12 @@ class _MapScreenState extends State<MapScreen> {
         _windOn = true;
         _windLoading = false;
       });
+      widget.state
+          .setWindInfo('loaded ${f.nx}×${f.ny} grid (${f.u.length} cells)');
     } catch (e) {
       if (!mounted) return;
       setState(() => _windLoading = false);
+      widget.state.setWindInfo('error: $e');
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Wind unavailable: $e')));
     }

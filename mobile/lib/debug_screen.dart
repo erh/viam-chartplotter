@@ -24,6 +24,7 @@ class DebugScreen extends StatelessWidget {
             _Row('Status', state.status),
             _Row('Last update', state.lastUpdate?.toLocal().toString() ?? '—'),
             _Row('AIS targets', '${state.aisBoats.length}'),
+            _Row('Wind', state.windInfo),
             const SizedBox(height: 16),
             const _Section('Discovered sources'),
             if (state.sources.isEmpty)

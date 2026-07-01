@@ -20,6 +20,7 @@ class BoatState extends ChangeNotifier {
   LatLng? destination; // active route destination (from the `route` sensor)
   // Which component each reading came from (for the drawer's Sources section).
   Map<String, String?> sources = const {};
+  String windInfo = 'off'; // wind-overlay fetch state, shown in Debug
   String status = 'Starting…';
   DateTime? lastUpdate;
 
@@ -42,6 +43,11 @@ class BoatState extends ChangeNotifier {
 
   void setCameras(List<String> names) {
     cameraNames = names;
+    notifyListeners();
+  }
+
+  void setWindInfo(String s) {
+    windInfo = s;
     notifyListeners();
   }
 

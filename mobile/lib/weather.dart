@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -77,7 +78,9 @@ class WindField {
 /// Fetch + decode the wind field for [model] (e.g. "gfs") from the tile server.
 Future<WindField> fetchWindField(String tileBase, String model) async {
   final uri = Uri.parse('$tileBase/noaa-weather/data/$model/latest.json');
-  final resp = await http.get(uri);
+  // Without a timeout a non-responsive weather server leaves the toggle
+  // spinning forever ("nothing happens"); surface it as an error instead.
+  final resp = await http.get(uri).timeout(const Duration(seconds: 15));
   if (resp.statusCode != 200) {
     throw http.ClientException('weather ${resp.statusCode}', uri);
   }
