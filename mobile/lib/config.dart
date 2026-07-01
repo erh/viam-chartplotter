@@ -17,11 +17,13 @@ class Config {
 
   /// Base URL of the existing Go tile/weather server (the chartplotter
   /// module). Tiles are fetched as {z}/{x}/{y}.png from here — no rendering
-  /// happens on the phone. Defaults to the public hosted server so the map
-  /// works even before a boat is wired up.
+  /// happens on the phone. Defaults to the same public hosted map+weather
+  /// server the web app falls back to (see HOSTED_TILE_FALLBACK in
+  /// src/marineMap.svelte / DefaultHostedTileServer in module.go), so the map
+  /// works even before a boat is wired up. No trailing slash.
   static const String tileBase = String.fromEnvironment(
     'TILE_BASE',
-    defaultValue: 'https://chartplotter.viam.cloud',
+    defaultValue: 'https://nycmaps.checkmatemaps.com',
   );
 
   /// Optional: a depth sensor name to demonstrate the SensorClient path.
