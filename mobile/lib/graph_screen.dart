@@ -161,7 +161,7 @@ class _GraphPainter extends CustomPainter {
 
     // Axes.
     canvas.drawLine(
-        Offset(leftPad, 0), Offset(leftPad, plotH), axis);
+        const Offset(leftPad, 0), Offset(leftPad, plotH), axis);
     canvas.drawLine(
         Offset(leftPad, plotH), Offset(size.width, plotH), axis);
 
