@@ -20,7 +20,12 @@ if [ ! -d "$PROJECT_DIR/mobile" ]; then
   exit 0
 fi
 
-FLUTTER_VERSION="3.29.3"
+# Single source of truth for the Flutter version: mobile/.fvmrc (the same file
+# CI reads via subosito/flutter-action's flutter-version-file). Falls back to a
+# default if the file is missing or unparseable.
+FLUTTER_VERSION="$(sed -n 's/.*"flutter"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$PROJECT_DIR/mobile/.fvmrc" 2>/dev/null)"
+FLUTTER_VERSION="${FLUTTER_VERSION:-3.29.3}"
 FLUTTER_DIR="$HOME/flutter"
 
 # Install Flutter (idempotent: skip the clone if it's already there so

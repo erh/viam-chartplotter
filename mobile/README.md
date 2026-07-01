@@ -114,6 +114,13 @@ beta `viam_sdk` symbol drift or dependency-resolution issues), with `dart format
 advisory. It builds without any credentials — the app compiles and runs
 chart-only when no dart-defines are set — so no secrets are needed.
 
+The Flutter version is pinned once in [`mobile/.fvmrc`](.fvmrc) (the FVM
+convention) and read from there by CI (`subosito/flutter-action`'s
+`flutter-version-file`), the SessionStart hook, and local FVM users — so a
+version bump is a one-line change in that single file. `pubspec.yaml`'s
+`environment: flutter:` stays a separate `>=` *floor* (minimum supported),
+not the exact pin.
+
 ## Files
 
 | File | Role |
