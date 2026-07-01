@@ -16,6 +16,8 @@ class BoatState extends ChangeNotifier {
   double? windSpeedKn; // true wind
   double? windAngleDeg; // true wind angle
   List<AisBoat> aisBoats = const [];
+  // Which component each reading came from (for the drawer's Sources section).
+  Map<String, String?> sources = const {};
   String status = 'Starting…';
   DateTime? lastUpdate;
 
@@ -23,6 +25,11 @@ class BoatState extends ChangeNotifier {
 
   void setAis(List<AisBoat> boats) {
     aisBoats = boats;
+    notifyListeners();
+  }
+
+  void setSources(Map<String, String?> s) {
+    sources = s;
     notifyListeners();
   }
 

@@ -68,9 +68,15 @@ class ViamConnection {
     _windSensorName = _discoverSensorByName(robot, 'wind', '');
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
-    state.setStatus(_movementSensorName == null
-        ? 'Connected, but no movement_sensor found'
-        : 'Connected ($_movementSensorName)');
+    state.setSources({
+      'Movement': _movementSensorName,
+      'Depth': _depthSensorName,
+      'Wind': _windSensorName,
+      'Sea temp': _seatempSensorName,
+      'AIS': _aisSensorName,
+    });
+    state.setStatus(
+        _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
@@ -106,20 +112,39 @@ class ViamConnection {
     return null;
   }
 
-  /// Mirror of setupMovementSensor: pick the first component whose subtype is
-  /// movement_sensor, unless an explicit name was provided via --dart-define.
+  /// Mirror of setupMovementSensor: score each movement_sensor by how many of
+  /// position / linear-velocity / compass-heading it supports and pick the
+  /// best, so we don't grab a position-only GPS and end up with no SOG or
+  /// heading. An explicit --dart-define name still wins. Tie-break to the
+  /// shorter name, matching the web app.
   Future<String?> _discoverMovementSensor(RobotClient robot) async {
     if (Config.movementSensor.isNotEmpty) return Config.movementSensor;
+    String? best;
+    var bestScore = -1;
     try {
-      // resourceNames is a synchronous getter (not a Future) in viam_sdk.
-      final names = robot.resourceNames;
-      for (final rn in names) {
-        if (rn.subtype == 'movement_sensor') return rn.name;
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype != 'movement_sensor') continue;
+        var score = 0;
+        try {
+          final p = await MovementSensor.fromRobot(robot, rn.name).properties();
+          if (p.positionSupported) score++;
+          if (p.linearVelocitySupported) score++;
+          if (p.compassHeadingSupported) score++;
+        } catch (_) {
+          // properties() failed — keep it as a low-priority candidate.
+        }
+        if (score > bestScore ||
+            (score == bestScore &&
+                best != null &&
+                rn.name.length < best!.length)) {
+          best = rn.name;
+          bestScore = score;
+        }
       }
     } catch (_) {
       // resourceNames shape can vary across SDK versions; fall through.
     }
-    return null;
+    return best;
   }
 
   Future<void> _tick() async {
