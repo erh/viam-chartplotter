@@ -38,6 +38,46 @@ class WindField {
     return (u: u[idx], v: v[idx]);
   }
 
+  /// Bilinearly-interpolated (u, v) for a lon/lat — smooth between grid cells
+  /// so arrows can be drawn finer than the 0.25° data. Falls back to nearest at
+  /// the grid edges. Null if fully out of range.
+  ({double u, double v})? sampleInterp(double lon, double lat) {
+    if (dx <= 0 || dy <= 0) return null;
+    final l = ((lon - lo1) % 360 + 360) % 360;
+    final fx = l / dx;
+    final fy = (la1 - lat) / dy;
+    final ix = fx.floor(), iy = fy.floor();
+    final tx = fx - ix, ty = fy - iy;
+    double? g(int gx, int gy, List<double> a) {
+      if (gy < 0 || gy >= ny) return null;
+      final wx = ((gx % nx) + nx) % nx;
+      final idx = gy * nx + wx;
+      if (idx < 0 || idx >= a.length) return null;
+      return a[idx];
+    }
+
+    final u00 = g(ix, iy, u), u10 = g(ix + 1, iy, u);
+    final u01 = g(ix, iy + 1, u), u11 = g(ix + 1, iy + 1, u);
+    final v00 = g(ix, iy, v), v10 = g(ix + 1, iy, v);
+    final v01 = g(ix, iy + 1, v), v11 = g(ix + 1, iy + 1, v);
+    if (u00 == null ||
+        u10 == null ||
+        u01 == null ||
+        u11 == null ||
+        v00 == null ||
+        v10 == null ||
+        v01 == null ||
+        v11 == null) {
+      return sample(lon, lat); // fall back to nearest at edges
+    }
+    double bil(double a, double b, double c, double d) =>
+        a * (1 - tx) * (1 - ty) +
+        b * tx * (1 - ty) +
+        c * (1 - tx) * ty +
+        d * tx * ty;
+    return (u: bil(u00, u10, u01, u11), v: bil(v00, v10, v01, v11));
+  }
+
   /// Wind speed in knots for a lon/lat, or null.
   double? speedKnots(double lon, double lat) {
     final s = sample(lon, lat);

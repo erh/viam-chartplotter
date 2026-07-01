@@ -110,12 +110,17 @@ class _MapScreenState extends State<MapScreen> {
     }
     final markers = <Marker>[];
     final span = math.max(b.east - b.west, b.north - b.south);
-    final step = math.max(f.dx, span / 14);
+    // ~12 arrows across the view at any zoom (not tied to the 0.25° grid).
+    final step = (span / 12).clamp(0.02, 5.0).toDouble();
     if (step > 0) {
-      for (double lat = b.north; lat >= b.south; lat -= step) {
-        for (double lon = b.west; lon <= b.east; lon += step) {
+      // Snap the lattice to multiples of `step` so arrows stay anchored to the
+      // ground and scroll with the map when panning (instead of the viewport).
+      final lat0 = (b.south / step).floorToDouble() * step;
+      final lon0 = (b.west / step).floorToDouble() * step;
+      for (double lat = lat0; lat <= b.north; lat += step) {
+        for (double lon = lon0; lon <= b.east; lon += step) {
           final nlon = ((lon + 540) % 360) - 180;
-          final s = f.sample(nlon, lat);
+          final s = f.sampleInterp(nlon, lat);
           if (s == null) continue;
           final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
           final ang = math.atan2(s.u, s.v); // bearing wind blows toward
