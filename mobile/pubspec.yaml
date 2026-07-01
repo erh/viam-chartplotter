@@ -5,7 +5,9 @@ version: 0.0.1
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
-  flutter: ">=3.22.0"
+  # >=3.27 required: viam_sdk's flutter_webrtc uses the newer engine
+  # SurfaceProducer API (onSurfaceAvailable), which older Flutter lacks.
+  flutter: ">=3.27.0"
 
 dependencies:
   flutter:

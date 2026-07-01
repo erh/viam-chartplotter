@@ -27,7 +27,7 @@ those are Phases 1–3.
 
 ## Run it
 
-No Flutter toolchain is bundled here. On a machine with Flutter ≥ 3.22:
+No Flutter toolchain is bundled here. On a machine with Flutter ≥ 3.27:
 
 ```bash
 cd mobile

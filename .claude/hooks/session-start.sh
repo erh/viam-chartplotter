@@ -20,7 +20,7 @@ if [ ! -d "$PROJECT_DIR/mobile" ]; then
   exit 0
 fi
 
-FLUTTER_VERSION="3.24.5"
+FLUTTER_VERSION="3.29.3"
 FLUTTER_DIR="$HOME/flutter"
 
 # Install Flutter (idempotent: skip the clone if it's already there so
