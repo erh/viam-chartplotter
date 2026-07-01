@@ -63,8 +63,13 @@ class _MapScreenState extends State<MapScreen> {
               TileLayer(
                 key: ValueKey(_base.id),
                 urlTemplate: _base.urlTemplate,
+                minZoom: _base.minZoom.toDouble(),
                 maxNativeZoom: _base.maxZoom,
                 userAgentPackageName: 'com.viam.chartplotter.mobile',
+                // flutter_map shows nothing for a failed tile, so a broken
+                // URL/host reads as a blank map — log it instead.
+                errorTileCallback: (tile, error, stackTrace) =>
+                    debugPrint('tile load failed (${_base.id}): $error'),
               ),
               if (s.position != null)
                 MarkerLayer(

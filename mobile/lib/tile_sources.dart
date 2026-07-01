@@ -5,17 +5,36 @@ import 'config.dart';
 /// the phone renders nothing — it just points flutter_map's TileLayer at the
 /// same endpoints the OpenLayers web app uses (src/marineMap.svelte).
 class TileSource {
-  const TileSource(this.id, this.label, this.urlTemplate, {this.maxZoom = 19});
+  const TileSource(
+    this.id,
+    this.label,
+    this.urlTemplate, {
+    this.minZoom = 0,
+    this.maxZoom = 19,
+  });
   final String id;
   final String label;
   final String urlTemplate;
+  final int minZoom;
   final int maxZoom;
 }
 
 final List<TileSource> baseLayers = [
-  // NOAA ENC vector charts rendered to PNG server-side, depth-shaded by the
-  // configured draft. The `?` style params from the web app can be appended
-  // here later; default style is fine for the spike.
+  // Checkmate — the merged ENC + OSM chart, and the web app's DEFAULT base
+  // layer (the "checkmate" layer in src/marineMap.svelte). Same /noaa-enc/tile
+  // endpoint, but with the overview render params the web app uses: ECDIS style
+  // + landfill=0 so the composited OSM land shows through. Navaids/structures
+  // are baked into the tile (mobile has no interactive vector overlays yet).
+  // Like the web app, the chart is only shown at z>=7.
+  const TileSource(
+    'checkmate',
+    'Checkmate',
+    '${Config.tileBase}/noaa-enc/tile/{z}/{x}/{y}.png?style=ecdis&landfill=0',
+    minZoom: 7,
+    maxZoom: 16,
+  ),
+  // Plain NOAA ENC render (default WMS style, solid land fills) — a fallback if
+  // the merged Checkmate tiles look off on a given tile server.
   const TileSource(
     'noaa-enc',
     'NOAA ENC',
