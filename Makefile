@@ -201,6 +201,7 @@ MOBILE_DART_DEFINES := \
 # in mobile/.fvmrc, use FVM instead (make mobile-setup FLUTTER="fvm flutter").
 mobile-setup:
 	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
+	command -v pod >/dev/null 2>&1 || brew install cocoapods
 	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && $(FLUTTER) pub get
 
 # Run on a connected device/emulator (auto-runs mobile-setup first).
