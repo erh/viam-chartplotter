@@ -112,39 +112,18 @@ class ViamConnection {
     return null;
   }
 
-  /// Mirror of setupMovementSensor: score each movement_sensor by how many of
-  /// position / linear-velocity / compass-heading it supports and pick the
-  /// best, so we don't grab a position-only GPS and end up with no SOG or
-  /// heading. An explicit --dart-define name still wins. Tie-break to the
-  /// shorter name, matching the web app.
+  /// Pick the first movement_sensor, unless an explicit name was provided via
+  /// --dart-define.
   Future<String?> _discoverMovementSensor(RobotClient robot) async {
     if (Config.movementSensor.isNotEmpty) return Config.movementSensor;
-    String? best;
-    var bestScore = -1;
     try {
       for (final rn in robot.resourceNames) {
-        if (rn.subtype != 'movement_sensor') continue;
-        var score = 0;
-        try {
-          final p = await MovementSensor.fromRobot(robot, rn.name).properties();
-          if (p.positionSupported) score++;
-          if (p.linearVelocitySupported) score++;
-          if (p.compassHeadingSupported) score++;
-        } catch (_) {
-          // properties() failed — keep it as a low-priority candidate.
-        }
-        if (score > bestScore ||
-            (score == bestScore &&
-                best != null &&
-                rn.name.length < best.length)) {
-          best = rn.name;
-          bestScore = score;
-        }
+        if (rn.subtype == 'movement_sensor') return rn.name;
       }
     } catch (_) {
       // resourceNames shape can vary across SDK versions; fall through.
     }
-    return best;
+    return null;
   }
 
   Future<void> _tick() async {
