@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'boat_state.dart';
+import 'sparkline.dart';
 
 /// The dashboard: all the boat readouts that used to be overlaid on the chart,
 /// grouped into sections. Opened from the map's dashboard button. Rebuilds live
@@ -60,14 +61,16 @@ class DataDrawer extends StatelessWidget {
                   : '${pos.latitude.toStringAsFixed(5)}, '
                       '${pos.longitude.toStringAsFixed(5)}',
             ),
-            _Row('SOG', _fmt(state.speedKn, 'kn')),
+            _Row('SOG', _fmt(state.speedKn, 'kn'), spark: state.spark('sog')),
             _Row('COG', _fmt(state.cogDeg, '°', digits: 0)),
             _Row('Heading', _fmt(state.headingDeg, '°', digits: 0)),
             const SizedBox(height: 16),
             const _Section('Environment'),
-            _Row('Depth', _fmt(state.depthFt, 'ft')),
-            _Row('Water temp', _fmt(state.seaTempF, '°F')),
-            _Row('Wind', wind),
+            _Row('Depth', _fmt(state.depthFt, 'ft'),
+                spark: state.spark('depth')),
+            _Row('Water temp', _fmt(state.seaTempF, '°F'),
+                spark: state.spark('seatemp')),
+            _Row('Wind', wind, spark: state.spark('wind')),
             if (state.spotZeroFwGph != null || state.spotZeroSwGph != null) ...[
               const SizedBox(height: 16),
               const _Section('Watermaker'),
@@ -80,7 +83,8 @@ class DataDrawer extends StatelessWidget {
               const SizedBox(height: 16),
               const _Section('Tanks'),
               for (final t in state.tanks)
-                _Row(t.name, '${t.level.toStringAsFixed(0)}%'),
+                _Row(t.name, '${t.level.toStringAsFixed(0)}%',
+                    spark: state.spark('tank:${t.name}')),
             ],
             if (state.seakeeperStabilizing != null ||
                 state.acVolts != null) ...[
@@ -117,29 +121,32 @@ class _Section extends StatelessWidget {
 }
 
 class _Row extends StatelessWidget {
-  const _Row(this.label, this.value);
+  const _Row(this.label, this.value, {this.spark});
   final String label;
   final String value;
+  final List<double>? spark;
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
-          children: [
-            SizedBox(
-              width: 96,
-              child: Text(label,
-                  style: const TextStyle(color: Colors.white60, fontSize: 13)),
-            ),
-            Expanded(
-              child: Text(value,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600)),
-            ),
-          ],
-        ),
-      );
+  Widget build(BuildContext context) {
+    final s = spark;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(label,
+                style: const TextStyle(color: Colors.white60, fontSize: 13)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600)),
+          ),
+          if (s != null && s.length >= 2) Sparkline(data: s),
+        ],
+      ),
+    );
+  }
 }

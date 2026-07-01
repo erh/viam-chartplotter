@@ -81,8 +81,8 @@ class ViamConnection {
     _spotZeroFwName = _discoverSensorByName(robot, 'spotzero-fw', '');
     _spotZeroSwName = _discoverSensorByName(robot, 'spotzero-sw', '');
     _seakeeperName = _discoverSensorByName(robot, 'seakeeper', '');
-    _tankNames = _discoverSensorsWhere(
-        robot, (n) => n.contains('fuel') || n.contains('freshwater'));
+    _tankNames = _tankSort(_discoverSensorsWhere(
+        robot, (n) => n.contains('fuel') || n.contains('freshwater')));
     _acPowerNames =
         _discoverSensorsWhere(robot, (n) => RegExp(r'ac-\d-\d$').hasMatch(n));
     final cameras = _discoverCameras(robot);
@@ -134,6 +134,27 @@ class ViamConnection {
   }
 
   bool _boolish(dynamic v) => v == true || (v is num && v != 0);
+
+  /// Port of the web app's tankSort: freshwater first, then fwd/mid/aft, main
+  /// later; ties broken by name.
+  List<String> _tankSort(List<String> names) {
+    int score(String raw) {
+      final n = raw.toLowerCase();
+      var s = 0;
+      if (n.contains('freshwater')) s -= 10000;
+      if (n.contains('fwd')) s -= 1000;
+      if (n.contains('mid')) s -= 500;
+      if (n.contains('aft')) s -= 250;
+      if (n.contains('main')) s += 50;
+      return s;
+    }
+
+    return List.of(names)
+      ..sort((a, b) {
+        final d = score(a) - score(b);
+        return d != 0 ? d : a.toLowerCase().compareTo(b.toLowerCase());
+      });
+  }
 
   /// Camera components on the robot, sorted, with the web app's filtered-camera
   /// rule: drop "<name>" when a "<name>-filtered" sibling exists (prefer the

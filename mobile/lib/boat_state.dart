@@ -33,7 +33,20 @@ class BoatState extends ChangeNotifier {
   String status = 'Starting…';
   DateTime? lastUpdate;
 
+  // Rolling live-value history for sparklines, keyed by metric
+  // (depth/seatemp/sog/wind/tank:<name>). Live-accumulated as values arrive.
+  final Map<String, List<double>> history = {};
+  static const int _histCap = 150;
+
   bool get connected => status.startsWith('Connected');
+
+  List<double>? spark(String key) => history[key];
+
+  void _push(String key, double v) {
+    final list = history.putIfAbsent(key, () => <double>[]);
+    list.add(v);
+    if (list.length > _histCap) list.removeAt(0);
+  }
 
   void setAis(List<AisBoat> boats) {
     aisBoats = boats;
@@ -77,7 +90,12 @@ class BoatState extends ChangeNotifier {
     }
     if (seakeeperPower != null) this.seakeeperPower = seakeeperPower;
     if (seakeeperProgress != null) this.seakeeperProgress = seakeeperProgress;
-    if (tanks != null) this.tanks = tanks;
+    if (tanks != null) {
+      this.tanks = tanks;
+      for (final t in tanks) {
+        _push('tank:${t.name}', t.level);
+      }
+    }
     if (acVolts != null) this.acVolts = acVolts;
     if (acWatts != null) this.acWatts = acWatts;
     notifyListeners();
@@ -99,12 +117,24 @@ class BoatState extends ChangeNotifier {
     double? windAngleDeg,
   }) {
     if (position != null) this.position = position;
-    if (speedKn != null) this.speedKn = speedKn;
+    if (speedKn != null) {
+      this.speedKn = speedKn;
+      _push('sog', speedKn);
+    }
     if (cogDeg != null) this.cogDeg = cogDeg;
     if (headingDeg != null) this.headingDeg = headingDeg;
-    if (depthFt != null) this.depthFt = depthFt;
-    if (seaTempF != null) this.seaTempF = seaTempF;
-    if (windSpeedKn != null) this.windSpeedKn = windSpeedKn;
+    if (depthFt != null) {
+      this.depthFt = depthFt;
+      _push('depth', depthFt);
+    }
+    if (seaTempF != null) {
+      this.seaTempF = seaTempF;
+      _push('seatemp', seaTempF);
+    }
+    if (windSpeedKn != null) {
+      this.windSpeedKn = windSpeedKn;
+      _push('wind', windSpeedKn);
+    }
     if (windAngleDeg != null) this.windAngleDeg = windAngleDeg;
     lastUpdate = DateTime.now();
     notifyListeners();
