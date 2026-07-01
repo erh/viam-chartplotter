@@ -35,11 +35,9 @@ class _CameraScreenState extends State<CameraScreen> {
     _busy = true;
     for (final name in widget.names) {
       try {
-        final res = await Camera.fromRobot(widget.robot, name).getImages();
-        if (res.images.isNotEmpty) {
-          _frames[name] = Uint8List.fromList(res.images.first.image.raw);
-          _errors.remove(name);
-        }
+        final img = await Camera.fromRobot(widget.robot, name).image();
+        _frames[name] = Uint8List.fromList(img.raw);
+        _errors.remove(name);
       } catch (e) {
         _errors[name] = '$e';
       }
