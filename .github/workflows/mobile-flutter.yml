@@ -81,10 +81,10 @@ jobs:
           SCHEME=com.viam.chartplotter
           if [ -f android/app/build.gradle ]; then
             grep -q appAuthRedirectScheme android/app/build.gradle || \
-              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders = [appAuthRedirectScheme: \"$SCHEME\"]/" android/app/build.gradle
+              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders += [appAuthRedirectScheme: \"$SCHEME\"]/" android/app/build.gradle
           elif [ -f android/app/build.gradle.kts ]; then
             grep -q appAuthRedirectScheme android/app/build.gradle.kts || \
-              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders[\"appAuthRedirectScheme\"] = \"$SCHEME\"/" android/app/build.gradle.kts
+              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders[\"appAuthRedirectScheme\"] += \"$SCHEME\"/" android/app/build.gradle.kts
           fi
 
       - name: Resolve dependencies
