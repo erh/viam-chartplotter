@@ -108,17 +108,11 @@ behavior on flaky cellular, and tile fetch latency at chart zoom levels.
 
 ## CI
 
-The Flutter CI workflow runs `flutter analyze` + a debug-APK build on changes
-under `mobile/` (these compiler-check the Dart and surface any beta `viam_sdk`
-symbol drift or dependency-resolution issues), with `dart format` advisory. It
-builds without any credentials — the app compiles and runs chart-only when no
-dart-defines are set — so no secrets are needed.
-
-> ⚠️ **Activation needed.** The workflow lives at
-> [`ci/mobile-flutter.yml`](ci/mobile-flutter.yml), not yet `.github/workflows/`,
-> because the automation that authored it lacked GitHub's `workflow` token
-> scope. Move it to `.github/workflows/mobile-flutter.yml` to turn it on — see
-> [`ci/README.md`](ci/README.md) (one copy-paste via the GitHub web UI).
+`.github/workflows/mobile-flutter.yml` runs `flutter analyze` + a debug-APK
+build on changes under `mobile/` (these compiler-check the Dart and surface any
+beta `viam_sdk` symbol drift or dependency-resolution issues), with `dart format`
+advisory. It builds without any credentials — the app compiles and runs
+chart-only when no dart-defines are set — so no secrets are needed.
 
 ## Files
 
