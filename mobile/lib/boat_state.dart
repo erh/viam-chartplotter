@@ -15,6 +15,15 @@ class BoatState extends ChangeNotifier {
   double? seaTempF;
   double? windSpeedKn; // true wind
   double? windAngleDeg; // true wind angle
+  // Boat systems (from the web app's data panel).
+  double? spotZeroFwGph; // watermaker fresh-water product flow
+  double? spotZeroSwGph; // watermaker sea-water flow
+  bool? seakeeperStabilizing;
+  bool? seakeeperPower;
+  double? seakeeperProgress; // spool-up %
+  List<({String name, double level})> tanks = const []; // fuel / fresh water
+  double? acVolts; // average line-neutral voltage
+  double? acWatts; // total AC load
   List<AisBoat> aisBoats = const [];
   List<String> cameraNames = const [];
   LatLng? destination; // active route destination (from the `route` sensor)
@@ -48,6 +57,29 @@ class BoatState extends ChangeNotifier {
 
   void setWindInfo(String s) {
     windInfo = s;
+    notifyListeners();
+  }
+
+  void setSystems({
+    double? spotZeroFwGph,
+    double? spotZeroSwGph,
+    bool? seakeeperStabilizing,
+    bool? seakeeperPower,
+    double? seakeeperProgress,
+    List<({String name, double level})>? tanks,
+    double? acVolts,
+    double? acWatts,
+  }) {
+    if (spotZeroFwGph != null) this.spotZeroFwGph = spotZeroFwGph;
+    if (spotZeroSwGph != null) this.spotZeroSwGph = spotZeroSwGph;
+    if (seakeeperStabilizing != null) {
+      this.seakeeperStabilizing = seakeeperStabilizing;
+    }
+    if (seakeeperPower != null) this.seakeeperPower = seakeeperPower;
+    if (seakeeperProgress != null) this.seakeeperProgress = seakeeperProgress;
+    if (tanks != null) this.tanks = tanks;
+    if (acVolts != null) this.acVolts = acVolts;
+    if (acWatts != null) this.acWatts = acWatts;
     notifyListeners();
   }
 

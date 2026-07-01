@@ -12,6 +12,16 @@ class DataDrawer extends StatelessWidget {
   String _fmt(double? v, String unit, {int digits = 1}) =>
       v == null ? '—' : '${v.toStringAsFixed(digits)} $unit';
 
+  String _seakeeper(BoatState s) {
+    if (s.seakeeperStabilizing == true) {
+      final p = s.seakeeperProgress;
+      if (p != null && p < 100) return 'Spooling ${p.toStringAsFixed(0)}%';
+      return 'Stabilizing';
+    }
+    if (s.seakeeperPower == true) return 'On (idle)';
+    return 'Off';
+  }
+
   @override
   Widget build(BuildContext context) {
     final pos = state.position;
@@ -58,6 +68,32 @@ class DataDrawer extends StatelessWidget {
             _Row('Depth', _fmt(state.depthFt, 'ft')),
             _Row('Water temp', _fmt(state.seaTempF, '°F')),
             _Row('Wind', wind),
+            if (state.spotZeroFwGph != null || state.spotZeroSwGph != null) ...[
+              const SizedBox(height: 16),
+              const _Section('Watermaker'),
+              if (state.spotZeroFwGph != null)
+                _Row('Fresh water', _fmt(state.spotZeroFwGph, 'gph')),
+              if (state.spotZeroSwGph != null)
+                _Row('Sea water', _fmt(state.spotZeroSwGph, 'gph')),
+            ],
+            if (state.tanks.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const _Section('Tanks'),
+              for (final t in state.tanks)
+                _Row(t.name, '${t.level.toStringAsFixed(0)}%'),
+            ],
+            if (state.seakeeperStabilizing != null ||
+                state.acVolts != null) ...[
+              const SizedBox(height: 16),
+              const _Section('Systems'),
+              if (state.seakeeperStabilizing != null)
+                _Row('Seakeeper', _seakeeper(state)),
+              if (state.acVolts != null)
+                _Row(
+                    'AC power',
+                    '${state.acWatts?.toStringAsFixed(0) ?? "—"} W '
+                        '@ ${state.acVolts!.toStringAsFixed(0)} V'),
+            ],
           ],
         ),
       ),

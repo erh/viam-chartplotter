@@ -34,6 +34,11 @@ class ViamConnection {
   String? _seatempSensorName;
   String? _aisSensorName;
   String? _routeSensorName;
+  String? _spotZeroFwName;
+  String? _spotZeroSwName;
+  String? _seakeeperName;
+  List<String> _tankNames = const [];
+  List<String> _acPowerNames = const [];
   Timer? _timer;
   int _tickN = 0;
   bool _polling = false;
@@ -73,6 +78,13 @@ class ViamConnection {
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
     _routeSensorName = _discoverSensorEndingWith(robot, 'route');
+    _spotZeroFwName = _discoverSensorByName(robot, 'spotzero-fw', '');
+    _spotZeroSwName = _discoverSensorByName(robot, 'spotzero-sw', '');
+    _seakeeperName = _discoverSensorByName(robot, 'seakeeper', '');
+    _tankNames = _discoverSensorsWhere(
+        robot, (n) => n.contains('fuel') || n.contains('freshwater'));
+    _acPowerNames =
+        _discoverSensorsWhere(robot, (n) => RegExp(r'ac-\d-\d$').hasMatch(n));
     final cameras = _discoverCameras(robot);
     state.setCameras(cameras);
     state.setSources({
@@ -105,6 +117,23 @@ class ViamConnection {
     } catch (_) {}
     return null;
   }
+
+  /// All sensor components whose (lower-cased) name matches [pred], sorted.
+  List<String> _discoverSensorsWhere(
+      RobotClient robot, bool Function(String) pred) {
+    final out = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && pred(rn.name.toLowerCase())) {
+          out.add(rn.name);
+        }
+      }
+    } catch (_) {}
+    out.sort();
+    return out;
+  }
+
+  bool _boolish(dynamic v) => v == true || (v is num && v != 0);
 
   /// Camera components on the robot, sorted, with the web app's filtered-camera
   /// rule: drop "<name>" when a "<name>-filtered" sibling exists (prefer the
@@ -248,8 +277,80 @@ class ViamConnection {
               : null);
         } catch (_) {}
       }
+
+      // Boat systems (watermaker / seakeeper / tanks / AC power) change slowly;
+      // poll on the slow cadence, offset from AIS+route.
+      if (_tickN % 5 == 2) await _pollSystems(robot);
     } finally {
       _polling = false;
+    }
+  }
+
+  /// Poll the boat-systems sensors (all generic Sensor readings), mirroring the
+  /// web app's data panel: watermaker flow, seakeeper, tank levels, AC power.
+  Future<void> _pollSystems(RobotClient robot) async {
+    final fwName = _spotZeroFwName;
+    if (fwName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, fwName).readings();
+        final f = r['Product Water Flow'];
+        if (f is num) {
+          state.setSystems(spotZeroFwGph: f.toDouble() * 0.00440287);
+        }
+      } catch (_) {}
+    }
+    final swName = _spotZeroSwName;
+    if (swName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, swName).readings();
+        final f = r['Product Water Flow'];
+        if (f is num) {
+          state.setSystems(spotZeroSwGph: f.toDouble() * 0.00440287);
+        }
+      } catch (_) {}
+    }
+    final skName = _seakeeperName;
+    if (skName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, skName).readings();
+        final prog = r['progress_bar_percentage'];
+        state.setSystems(
+          seakeeperStabilizing: _boolish(r['stabilize_enabled']),
+          seakeeperPower: _boolish(r['power_enabled']),
+          seakeeperProgress: prog is num ? prog.toDouble() : null,
+        );
+      } catch (_) {}
+    }
+    if (_tankNames.isNotEmpty) {
+      final tanks = <({String name, double level})>[];
+      for (final tn in _tankNames) {
+        try {
+          final r = await Sensor.fromRobot(robot, tn).readings();
+          final lvl = r['Level'];
+          if (lvl is num) {
+            tanks.add((name: tn.split(':').last, level: lvl.toDouble()));
+          }
+        } catch (_) {}
+      }
+      if (tanks.isNotEmpty) state.setSystems(tanks: tanks);
+    }
+    if (_acPowerNames.isNotEmpty) {
+      double vSum = 0;
+      int vN = 0;
+      double wSum = 0;
+      for (final an in _acPowerNames) {
+        try {
+          final r = await Sensor.fromRobot(robot, an).readings();
+          final v = r['Line-Neutral AC RMS Voltage'];
+          final a = r['AC RMS Current'];
+          if (v is num) {
+            vSum += v.toDouble();
+            vN++;
+            if (a is num) wSum += v.toDouble() * a.toDouble();
+          }
+        } catch (_) {}
+      }
+      if (vN > 0) state.setSystems(acVolts: vSum / vN, acWatts: wSum);
     }
   }
 
