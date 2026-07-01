@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'ais.dart';
 import 'boat_state.dart';
 import 'data_drawer.dart';
 import 'tile_sources.dart';
@@ -48,6 +49,64 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  void _showAisDetails(AisBoat b) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(b.displayName, style: Theme.of(ctx).textTheme.titleLarge),
+              const SizedBox(height: 2),
+              Text('MMSI ${b.mmsi}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12)),
+              const SizedBox(height: 12),
+              _aisRow('SOG', '${b.sogKn.toStringAsFixed(1)} kn'),
+              _aisRow('COG',
+                  b.cogDeg == null ? '—' : '${b.cogDeg!.toStringAsFixed(0)}°'),
+              _aisRow(
+                  'Heading',
+                  b.headingDeg == null
+                      ? '—'
+                      : '${b.headingDeg!.toStringAsFixed(0)}°'),
+              if (b.lengthM != null)
+                _aisRow('Length', '${b.lengthM!.toStringAsFixed(0)} m'),
+              if (b.beamM != null)
+                _aisRow('Beam', '${b.beamM!.toStringAsFixed(0)} m'),
+              if (b.destination != null) _aisRow('Destination', b.destination!),
+              _aisRow(
+                  'Position',
+                  '${b.location.latitude.toStringAsFixed(5)}, '
+                      '${b.location.longitude.toStringAsFixed(5)}'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _aisRow(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 96,
+              child: Text(k,
+                  style: const TextStyle(color: Colors.white60, fontSize: 13)),
+            ),
+            Expanded(
+              child: Text(v,
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final s = widget.state;
@@ -74,6 +133,26 @@ class _MapScreenState extends State<MapScreen> {
                 errorTileCallback: (tile, error, stackTrace) =>
                     debugPrint('tile load failed (${_base.id}): $error'),
               ),
+              // AIS targets (drawn under the own-boat marker).
+              if (s.aisBoats.isNotEmpty)
+                MarkerLayer(
+                  markers: [
+                    for (final b in s.aisBoats)
+                      Marker(
+                        point: b.location,
+                        width: 30,
+                        height: 30,
+                        child: GestureDetector(
+                          onTap: () => _showAisDetails(b),
+                          child: Transform.rotate(
+                            angle: b.orientationDeg * math.pi / 180.0,
+                            child: const Icon(Icons.navigation,
+                                color: Colors.cyanAccent, size: 22),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               if (s.position != null)
                 MarkerLayer(
                   markers: [

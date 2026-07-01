@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'ais.dart';
+
 /// Snapshot of the live boat readings the app polls. A ChangeNotifier so the
 /// UI rebuilds on each 1 Hz tick. Grows as more of the web app's readouts are
 /// ported (AIS, gauges, routes, …).
@@ -13,10 +15,16 @@ class BoatState extends ChangeNotifier {
   double? seaTempF;
   double? windSpeedKn; // true wind
   double? windAngleDeg; // true wind angle
+  List<AisBoat> aisBoats = const [];
   String status = 'Starting…';
   DateTime? lastUpdate;
 
   bool get connected => status.startsWith('Connected');
+
+  void setAis(List<AisBoat> boats) {
+    aisBoats = boats;
+    notifyListeners();
+  }
 
   void setStatus(String s) {
     status = s;

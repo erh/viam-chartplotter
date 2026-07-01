@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:latlong2/latlong.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
+import 'ais.dart';
 import 'boat_state.dart';
 import 'config.dart';
 
@@ -28,7 +29,9 @@ class ViamConnection {
   String? _depthSensorName;
   String? _windSensorName;
   String? _seatempSensorName;
+  String? _aisSensorName;
   Timer? _timer;
+  int _tickN = 0;
   bool _polling = false;
   bool _ownsRobot = false; // close it on dispose only if we dialed it
 
@@ -64,6 +67,7 @@ class ViamConnection {
     _depthSensorName = _discoverSensorByName(robot, 'depth', Config.depthSensor);
     _windSensorName = _discoverSensorByName(robot, 'wind', '');
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
+    _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
     state.setStatus(_movementSensorName == null
         ? 'Connected, but no movement_sensor found'
         : 'Connected ($_movementSensorName)');
@@ -80,6 +84,21 @@ class ViamConnection {
       final lower = needle.toLowerCase();
       for (final rn in robot.resourceNames) {
         if (rn.subtype == 'sensor' && rn.name.toLowerCase().contains(lower)) {
+          return rn.name;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Like [_discoverSensorByName] but suffix-matched — used for the `ais`
+  /// sensor (web regex /\bais$/) so we don't accidentally match unrelated
+  /// names that merely contain the substring.
+  String? _discoverSensorEndingWith(RobotClient robot, String suffix) {
+    try {
+      final s = suffix.toLowerCase();
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && rn.name.toLowerCase().endsWith(s)) {
           return rn.name;
         }
       }
@@ -108,6 +127,7 @@ class ViamConnection {
     final msName = _movementSensorName;
     if (robot == null || msName == null || _polling) return;
     _polling = true;
+    _tickN++;
     try {
       final ms = MovementSensor.fromRobot(robot, msName);
 
@@ -173,6 +193,16 @@ class ViamConnection {
           // Sensor reports Depth in metres (matches the web app); → feet.
           final d = r['Depth'];
           if (d is num) state.update(depthFt: d.toDouble() * 3.28084);
+        } catch (_) {}
+      }
+
+      // AIS targets move continuously but the feed is heavy, so poll it at
+      // ~5 s rather than every 1 s tick (matches the web app's slower cadence).
+      final aisName = _aisSensorName;
+      if (aisName != null && _tickN % 5 == 0) {
+        try {
+          final r = await Sensor.fromRobot(robot, aisName).readings();
+          state.setAis(parseAisReadings(r));
         } catch (_) {}
       }
     } finally {
