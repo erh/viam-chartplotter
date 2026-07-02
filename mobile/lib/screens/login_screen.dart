@@ -36,7 +36,9 @@ class LoginScreen extends StatelessWidget {
               ),
               if (session.error != null) ...[
                 const SizedBox(height: 16),
-                Text(
+                // Selectable so the full error can be copied out of the app
+                // (plain Text can't be selected).
+                SelectableText(
                   session.error!,
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Theme.of(context).colorScheme.error),

@@ -27,14 +27,22 @@ class OAuthConfig {
     defaultValue: 'com.viam.chartplotter:/oauthredirect',
   );
 
-  /// offline_access yields a refresh token so the session survives token
-  /// expiry without forcing the user back through the browser.
-  static const List<String> scopes = [
-    'openid',
-    'profile',
-    'email',
-    'offline_access',
-  ];
+  /// Requested OAuth scopes. Kept minimal: `openid` for the OIDC flow and
+  /// `offline_access` for a refresh token (so the session survives token expiry
+  /// without a fresh browser round-trip). We deliberately do NOT request
+  /// `profile`/`email` — the app consumes no user-profile claims, and Viam's
+  /// FusionAuth tenant rejects scopes that aren't enabled for the OAuth app
+  /// ("invalid scope"). Override via --dart-define=VIAM_OAUTH_SCOPES=a,b,c if a
+  /// given deployment needs a different set.
+  static const String _scopesRaw = String.fromEnvironment(
+    'VIAM_OAUTH_SCOPES',
+    defaultValue: 'openid,offline_access',
+  );
+
+  static List<String> get scopes => [
+        for (final s in _scopesRaw.split(','))
+          if (s.trim().isNotEmpty) s.trim(),
+      ];
 
   static bool get configured => issuer.isNotEmpty && clientId.isNotEmpty;
 }

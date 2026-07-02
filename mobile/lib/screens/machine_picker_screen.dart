@@ -158,7 +158,7 @@ class _ErrorRetry extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.all(24),
-            child: Text(message, textAlign: TextAlign.center),
+            child: SelectableText(message, textAlign: TextAlign.center),
           ),
           OutlinedButton(onPressed: onRetry, child: const Text('Retry')),
         ],
