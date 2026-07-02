@@ -32,6 +32,18 @@ class _MapScreenState extends State<MapScreen> {
   TileSource _base = baseLayers.first;
   bool _followedFirstFix = false;
 
+  // Chart orientation. north-up = rotation locked to 0; course-up = the chart
+  // rotates so the boat's course-over-ground points to the top of the screen.
+  bool _courseUp = false;
+  double _rotationDeg = 0; // live map rotation, mirrored from the camera
+
+  // Touch devices pinch-to-zoom, so the on-screen +/- buttons are redundant
+  // there; keep them for mouse/trackpad (desktop, web).
+  bool get _isTouch =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
+
   // Wind overlay (fetched lazily on first toggle-on).
   WindField? _wind;
   bool _windOn = false;
@@ -95,6 +107,22 @@ class _MapScreenState extends State<MapScreen> {
     _map.move(c.center, (c.zoom + delta).clamp(3.0, 20.0));
   }
 
+  void _toggleOrientation() {
+    setState(() => _courseUp = !_courseUp);
+    if (_courseUp) {
+      _applyCourseUp();
+    } else {
+      _map.rotate(0); // snap back to north-up
+    }
+  }
+
+  /// In course-up mode, rotate the chart so the boat's course points up.
+  /// flutter_map's heading-up convention is rotate(-course).
+  void _applyCourseUp() {
+    final cog = widget.state.cogDeg;
+    if (_courseUp && cog != null) _map.rotate(-cog);
+  }
+
   void _onState() {
     // Recenter once when the first GPS fix arrives, then leave the user in
     // control of the viewport.
@@ -103,6 +131,7 @@ class _MapScreenState extends State<MapScreen> {
       _followedFirstFix = true;
       _map.move(pos, 13);
     }
+    _applyCourseUp(); // keep the chart aligned as the course changes
     if (mounted) setState(() {});
   }
 
@@ -132,7 +161,10 @@ class _MapScreenState extends State<MapScreen> {
           final s = f.sampleInterp(nlon, lat);
           if (s == null) continue;
           final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
-          final ang = math.atan2(s.u, s.v); // bearing wind blows toward
+          // bearing wind blows toward, offset by the chart rotation so arrows
+          // stay aligned in course-up mode.
+          final ang =
+              math.atan2(s.u, s.v) + _rotationDeg * math.pi / 180.0;
           markers.add(Marker(
             point: LatLng(lat, nlon),
             width: 24,
@@ -239,6 +271,7 @@ class _MapScreenState extends State<MapScreen> {
               initialZoom: 9,
               onPositionChanged: (camera, _) {
                 _bounds = camera.visibleBounds;
+                _rotationDeg = camera.rotation;
                 if (_windOn && mounted) {
                   _rebuildWindMarkers();
                   setState(() {});
@@ -295,7 +328,9 @@ class _MapScreenState extends State<MapScreen> {
                         child: GestureDetector(
                           onTap: () => _showAisDetails(b),
                           child: Transform.rotate(
-                            angle: b.orientationDeg * math.pi / 180.0,
+                            angle: (b.orientationDeg + _rotationDeg) *
+                                math.pi /
+                                180.0,
                             child: const Icon(Icons.navigation,
                                 color: Colors.cyanAccent, size: 22),
                           ),
@@ -310,7 +345,8 @@ class _MapScreenState extends State<MapScreen> {
                       point: s.position!,
                       width: 40,
                       height: 40,
-                      child: _BoatMarker(headingDeg: s.headingDeg ?? 0),
+                      child: _BoatMarker(
+                          headingDeg: (s.headingDeg ?? 0) + _rotationDeg),
                     ),
                   ],
                 ),
@@ -354,6 +390,13 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                     const SizedBox(height: 8),
                     _RoundButton(
+                      icon: _courseUp ? Icons.navigation : Icons.explore,
+                      tooltip: _courseUp ? 'Course up' : 'North up',
+                      active: _courseUp,
+                      onTap: _toggleOrientation,
+                    ),
+                    const SizedBox(height: 8),
+                    _RoundButton(
                       icon: Icons.air,
                       tooltip: 'Wind',
                       active: _windOn,
@@ -381,29 +424,30 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-          // Center-right: zoom controls.
-          SafeArea(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _RoundButton(
-                        icon: Icons.add,
-                        tooltip: 'Zoom in',
-                        onTap: () => _zoom(1)),
-                    const SizedBox(height: 8),
-                    _RoundButton(
-                        icon: Icons.remove,
-                        tooltip: 'Zoom out',
-                        onTap: () => _zoom(-1)),
-                  ],
+          // Center-right: zoom controls. Hidden on touch devices (pinch-zoom).
+          if (!_isTouch)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _RoundButton(
+                          icon: Icons.add,
+                          tooltip: 'Zoom in',
+                          onTap: () => _zoom(1)),
+                      const SizedBox(height: 8),
+                      _RoundButton(
+                          icon: Icons.remove,
+                          tooltip: 'Zoom out',
+                          onTap: () => _zoom(-1)),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
           // Bottom: wind forecast-time slider (only while wind is on).
           if (_windOn)
             Positioned(
