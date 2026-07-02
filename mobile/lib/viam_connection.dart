@@ -343,11 +343,18 @@ class ViamConnection {
       if (routeName != null && _tickN % 5 == 0) {
         try {
           final r = await Sensor.fromRobot(robot, routeName).readings();
-          final lat = r['destinationLatitude'];
-          final lon = r['destinationLongitude'];
-          state.setDestination((lat is num && lon is num)
-              ? LatLng(lat.toDouble(), lon.toDouble())
-              : null);
+          // Keys match the web app's route sensor (spaced/capitalised).
+          final lat = r['Destination Latitude'];
+          final lon = r['Destination Longitude'];
+          final dist = r['Distance to Waypoint']; // metres
+          final closing = r['Waypoint Closing Velocity']; // m/s
+          state.setRoute(
+            destination: (lat is num && lon is num)
+                ? LatLng(lat.toDouble(), lon.toDouble())
+                : null,
+            wpDistanceM: dist is num ? dist.toDouble() : null,
+            wpClosingMs: closing is num ? closing.toDouble() : null,
+          );
         } catch (_) {}
       }
 

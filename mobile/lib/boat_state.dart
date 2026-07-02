@@ -27,6 +27,8 @@ class BoatState extends ChangeNotifier {
   List<AisBoat> aisBoats = const [];
   List<String> cameraNames = const [];
   LatLng? destination; // active route destination (from the `route` sensor)
+  double? wpDistanceM; // distance to next waypoint, metres
+  double? wpClosingMs; // closing velocity toward the waypoint, m/s
   // Which component each reading came from (for the drawer's Sources section).
   Map<String, String?> sources = const {};
   String windInfo = 'off'; // wind-overlay fetch state, shown in Debug
@@ -39,6 +41,28 @@ class BoatState extends ChangeNotifier {
   static const int _histCap = 15000;
 
   bool get connected => status.startsWith('Connected');
+
+  /// True when there's an active waypoint to navigate to.
+  bool get navigating => (wpDistanceM ?? 0) > 0;
+
+  /// Distance to the next waypoint in nautical miles.
+  double? get wpDistanceNm =>
+      wpDistanceM == null ? null : wpDistanceM! * 0.000539957;
+
+  /// Minutes to the next waypoint at the current closing velocity, or null when
+  /// not closing (stationary / opening). Mirrors the web app's calc.
+  double? get wpEtaMinutes =>
+      (wpDistanceM != null && wpClosingMs != null && wpClosingMs! > 0)
+          ? wpDistanceM! / wpClosingMs! / 60
+          : null;
+
+  /// Wall-clock arrival time, or null when ETA is unknown.
+  DateTime? get wpEta {
+    final m = wpEtaMinutes;
+    return m == null
+        ? null
+        : DateTime.now().add(Duration(seconds: (m * 60).round()));
+  }
 
   /// Last ~60 values for the inline sparkline glance.
   List<double> spark(String key) {
@@ -63,8 +87,14 @@ class BoatState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setDestination(LatLng? d) {
-    destination = d;
+  void setRoute({
+    LatLng? destination,
+    double? wpDistanceM,
+    double? wpClosingMs,
+  }) {
+    this.destination = destination;
+    this.wpDistanceM = wpDistanceM;
+    this.wpClosingMs = wpClosingMs;
     notifyListeners();
   }
 

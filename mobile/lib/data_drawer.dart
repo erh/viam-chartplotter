@@ -26,6 +26,15 @@ class DataDrawer extends StatelessWidget {
     return _GraphSpec(metric, label, unit, digits);
   }
 
+  String _eta(BoatState s) {
+    final m = s.wpEtaMinutes;
+    if (m == null) return '—';
+    final t = s.wpEta!;
+    final hh = t.hour.toString().padLeft(2, '0');
+    final mm = t.minute.toString().padLeft(2, '0');
+    return '${m.toStringAsFixed(0)} min ($hh:$mm)';
+  }
+
   String _seakeeper(BoatState s) {
     if (s.seakeeperStabilizing == true) {
       final p = s.seakeeperProgress;
@@ -81,6 +90,14 @@ class DataDrawer extends StatelessWidget {
                 history: history),
             _Row('COG', _fmt(state.cogDeg, '°', digits: 0)),
             _Row('Heading', _fmt(state.headingDeg, '°', digits: 0)),
+            if (state.navigating) ...[
+              _Row(
+                  'Next WP',
+                  state.wpDistanceNm == null
+                      ? '—'
+                      : '${state.wpDistanceNm!.toStringAsFixed(2)} nm'),
+              _Row('ETA', _eta(state)),
+            ],
             const SizedBox(height: 16),
             const _Section('Environment'),
             _Row('Depth', _fmt(state.depthFt, 'ft'),

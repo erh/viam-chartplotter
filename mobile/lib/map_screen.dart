@@ -369,6 +369,17 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          // Top-center: glanceable next-waypoint distance + ETA while navigating.
+          if (s.navigating)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: _EtaPill(state: s),
+                ),
+              ),
+            ),
           // Top-right: map controls (layer switcher + dashboard opener).
           SafeArea(
             child: Align(
@@ -520,6 +531,45 @@ class _BoatMarker extends StatelessWidget {
     return Transform.rotate(
       angle: headingDeg * math.pi / 180.0,
       child: const Icon(Icons.navigation, color: Colors.red, size: 36),
+    );
+  }
+}
+
+/// Top-center pill shown while a route is active: distance to the next
+/// waypoint and estimated time, from the `route` sensor.
+class _EtaPill extends StatelessWidget {
+  const _EtaPill({required this.state});
+  final BoatState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final nm = state.wpDistanceNm;
+    final mins = state.wpEtaMinutes;
+    final parts = <String>[
+      if (nm != null) '${nm.toStringAsFixed(2)} nm',
+      if (mins != null) '${mins.toStringAsFixed(0)} min',
+    ];
+    if (parts.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.flag, size: 14, color: Colors.purpleAccent),
+          const SizedBox(width: 6),
+          Text(
+            parts.join('  ·  '),
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
     );
   }
 }
