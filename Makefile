@@ -202,7 +202,7 @@ MOBILE_DART_DEFINES := \
 mobile-setup:
 	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
 	command -v pod >/dev/null 2>&1 || brew install cocoapods
-	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
+	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
 
 # Run on a connected device/emulator (auto-runs mobile-setup first).
 mobile-run: mobile-setup
