@@ -27,7 +27,10 @@ fi
 "$PB" -c "Print :CFBundleURLTypes" "$PLIST" >/dev/null 2>&1 \
   || "$PB" -c "Add :CFBundleURLTypes array" "$PLIST"
 
-idx=$("$PB" -c "Print :CFBundleURLTypes" "$PLIST" 2>/dev/null | grep -c "Dict {")
+# Count existing URL-type entries → the index to append at. `grep -c` exits
+# non-zero on zero matches, which would trip `set -e`; `|| true` guards it.
+idx=$("$PB" -c "Print :CFBundleURLTypes" "$PLIST" 2>/dev/null | grep -c "Dict {" || true)
+idx=${idx:-0}
 
 "$PB" -c "Add :CFBundleURLTypes:$idx dict" "$PLIST"
 "$PB" -c "Add :CFBundleURLTypes:$idx:CFBundleTypeRole string Editor" "$PLIST"
