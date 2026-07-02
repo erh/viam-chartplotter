@@ -181,6 +181,10 @@ backfill-noaa-lowzoom: mapsync
 #   make mobile-run VIAM_HOST=… VIAM_API_KEY_ID=… VIAM_API_KEY=…  # a boat
 #   make mobile-run VIAM_OAUTH_ISSUER=… VIAM_OAUTH_CLIENT_ID=…    # app.viam.com login
 FLUTTER ?= flutter
+# Reverse-domain org for the generated platform projects (bundle id = <org>.mobile).
+# Pinned so `flutter create` is deterministic — otherwise stale platform folders
+# generated with different orgs make it fail with "Ambiguous organization".
+MOBILE_ORG ?= com.viam
 MOBILE_DEVICE := $(if $(DEVICE),-d $(DEVICE))
 MOBILE_DART_DEFINES := \
 	$(if $(VIAM_HOST),--dart-define=VIAM_HOST=$(VIAM_HOST)) \
@@ -202,7 +206,7 @@ MOBILE_DART_DEFINES := \
 mobile-setup:
 	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
 	command -v pod >/dev/null 2>&1 || brew install cocoapods
-	cd mobile && $(FLUTTER) create . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
+	cd mobile && $(FLUTTER) create --org $(MOBILE_ORG) . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
 
 # Run on a connected device/emulator (auto-runs mobile-setup first).
 mobile-run: mobile-setup
