@@ -209,8 +209,11 @@ mobile-setup:
 	cd mobile && $(FLUTTER) create --org $(MOBILE_ORG) . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
 
 # Run on a connected device/emulator (auto-runs mobile-setup first).
+# MODE=release runs without the Dart VM service — faster, and it sidesteps the
+# debug-mode local-network handshake that can hang on a physical iPhone
+# ("Dart VM Service was not discovered"). Use debug (default) for hot reload.
 mobile-run: mobile-setup
-	cd mobile && $(FLUTTER) run $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
+	cd mobile && $(FLUTTER) run $(if $(MODE),--$(MODE)) $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
 
 # Build a debug APK (mirrors CI's build-android job).
 mobile-apk: mobile-setup
