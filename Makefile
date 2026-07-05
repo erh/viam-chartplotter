@@ -221,7 +221,10 @@ mobile-setup:
 $(MOBILE_SETUP_STAMP): $(MOBILE_SETUP_DEPS)
 	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
 	command -v pod >/dev/null 2>&1 || brew install cocoapods
-	cd mobile && $(FLUTTER) create --org $(MOBILE_ORG) . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
+	cd mobile && \
+		if [ ! -d ios ] || [ ! -d android ] || [ ! -d macos ]; then $(FLUTTER) create --org $(MOBILE_ORG) . ; fi && \
+		bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && \
+		$(FLUTTER) pub get
 	@mkdir -p $(@D) && touch $@
 
 # Run on a connected device/emulator (sets up first, only when inputs changed).
