@@ -198,25 +198,41 @@ MOBILE_DART_DEFINES := \
 
 .PHONY: mobile-setup mobile-run mobile-apk mobile-analyze mobile-test
 
-# One-time (or after changing platform config): install Flutter via Homebrew if
-# it's missing, generate the gitignored android/ ios/ folders, inject the
-# flutter_appauth manifest placeholder, and resolve packages. Idempotent — safe
-# to re-run. Note: brew installs the latest stable; for the exact version pinned
-# in mobile/.fvmrc, use FVM instead (make mobile-setup FLUTTER="fvm flutter").
+# Sentinel for the platform setup. Rebuilt only when its inputs change — the
+# pinned Flutter version, pubspec, or the platform-config scripts — so a plain
+# `make mobile-run` does NOT re-run flutter create / pod / entitlements every
+# time. (Re-touching macos/*.entitlements on every build makes Xcode fail with
+# "Entitlements file was modified during the build".)
+MOBILE_SETUP_STAMP := mobile/.dart_tool/chartplotter-setup.stamp
+MOBILE_SETUP_DEPS := mobile/pubspec.yaml mobile/.fvmrc \
+	mobile/tool/ci-android-appauth.sh mobile/tool/ios-appauth.sh \
+	mobile/tool/macos-entitlements.sh
+
+# Force the platform setup to re-run: use after deleting the generated
+# android/ ios/ macos/ folders (make can't detect those on its own).
 mobile-setup:
+	rm -f $(MOBILE_SETUP_STAMP)
+	$(MAKE) $(MOBILE_SETUP_STAMP)
+
+# The actual setup: install Flutter/CocoaPods if missing, generate the
+# gitignored platform folders, inject the appauth/plist/entitlements config,
+# and resolve packages. brew installs the latest stable; for the exact version
+# pinned in mobile/.fvmrc use FVM (make mobile-setup FLUTTER="fvm flutter").
+$(MOBILE_SETUP_STAMP): $(MOBILE_SETUP_DEPS)
 	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
 	command -v pod >/dev/null 2>&1 || brew install cocoapods
 	cd mobile && $(FLUTTER) create --org $(MOBILE_ORG) . && bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && $(FLUTTER) pub get
+	@mkdir -p $(@D) && touch $@
 
-# Run on a connected device/emulator (auto-runs mobile-setup first).
+# Run on a connected device/emulator (sets up first, only when inputs changed).
 # MODE=release runs without the Dart VM service — faster, and it sidesteps the
 # debug-mode local-network handshake that can hang on a physical iPhone
 # ("Dart VM Service was not discovered"). Use debug (default) for hot reload.
-mobile-run: mobile-setup
+mobile-run: $(MOBILE_SETUP_STAMP)
 	cd mobile && $(FLUTTER) run $(if $(MODE),--$(MODE)) $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
 
 # Build a debug APK (mirrors CI's build-android job).
-mobile-apk: mobile-setup
+mobile-apk: $(MOBILE_SETUP_STAMP)
 	cd mobile && $(FLUTTER) build apk --debug $(MOBILE_DART_DEFINES)
 
 # Static analysis + unit tests (mirror CI's analyze job). No platform folders
