@@ -196,23 +196,28 @@ MOBILE_DART_DEFINES := \
 	$(if $(VIAM_OAUTH_CLIENT_ID),--dart-define=VIAM_OAUTH_CLIENT_ID=$(VIAM_OAUTH_CLIENT_ID)) \
 	$(if $(VIAM_OAUTH_REDIRECT),--dart-define=VIAM_OAUTH_REDIRECT=$(VIAM_OAUTH_REDIRECT))
 
-.PHONY: mobile-setup mobile-run mobile-apk mobile-analyze mobile-test
+.PHONY: mobile-setup mobile-setup-force mobile-run mobile-apk mobile-analyze mobile-test
 
-# Sentinel for the platform setup. Rebuilt only when its inputs change — the
-# pinned Flutter version, pubspec, or the platform-config scripts — so a plain
-# `make mobile-run` does NOT re-run flutter create / pod / entitlements every
-# time. (Re-touching macos/*.entitlements on every build makes Xcode fail with
+# The setup work lives behind a stamp file so it obeys normal make timestamp
+# rules: it re-runs only when one of its inputs changes — the pinned Flutter
+# version, pubspec, or the platform-config scripts. `mobile-setup` is just the
+# friendly name that depends on it, so `make mobile-run` (which depends on
+# mobile-setup) does no setup work when nothing changed. (Re-running the setup
+# needlessly rewrites macos/*.entitlements and makes Xcode fail with
 # "Entitlements file was modified during the build".)
 MOBILE_SETUP_STAMP := mobile/.dart_tool/chartplotter-setup.stamp
 MOBILE_SETUP_DEPS := mobile/pubspec.yaml mobile/.fvmrc \
 	mobile/tool/ci-android-appauth.sh mobile/tool/ios-appauth.sh \
 	mobile/tool/macos-entitlements.sh
 
-# Force the platform setup to re-run: use after deleting the generated
-# android/ ios/ macos/ folders (make can't detect those on its own).
-mobile-setup:
+# Incremental setup: a no-op when the stamp is up to date.
+mobile-setup: $(MOBILE_SETUP_STAMP)
+
+# Force a full re-setup: use after deleting the generated android/ ios/ macos/
+# folders, which make can't detect on its own.
+mobile-setup-force:
 	rm -f $(MOBILE_SETUP_STAMP)
-	$(MAKE) $(MOBILE_SETUP_STAMP)
+	$(MAKE) mobile-setup
 
 # The actual setup: install Flutter/CocoaPods if missing, generate the
 # gitignored platform folders, inject the appauth/plist/entitlements config,
@@ -227,15 +232,16 @@ $(MOBILE_SETUP_STAMP): $(MOBILE_SETUP_DEPS)
 		$(FLUTTER) pub get
 	@mkdir -p $(@D) && touch $@
 
-# Run on a connected device/emulator (sets up first, only when inputs changed).
+# Run on a connected device/emulator. Depends on mobile-setup, which only does
+# work when its inputs changed.
 # MODE=release runs without the Dart VM service — faster, and it sidesteps the
 # debug-mode local-network handshake that can hang on a physical iPhone
 # ("Dart VM Service was not discovered"). Use debug (default) for hot reload.
-mobile-run: $(MOBILE_SETUP_STAMP)
+mobile-run: mobile-setup
 	cd mobile && $(FLUTTER) run $(if $(MODE),--$(MODE)) $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
 
 # Build a debug APK (mirrors CI's build-android job).
-mobile-apk: $(MOBILE_SETUP_STAMP)
+mobile-apk: mobile-setup
 	cd mobile && $(FLUTTER) build apk --debug $(MOBILE_DART_DEFINES)
 
 # Static analysis + unit tests (mirror CI's analyze job). No platform folders
