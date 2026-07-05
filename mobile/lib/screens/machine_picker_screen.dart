@@ -82,7 +82,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   Future<void> _connect(dynamic robot) async {
     setState(() => _connecting = true);
     try {
-      final client = await _viam.getRobotClient(robot);
+      final client = await _connectRobot(robot);
       widget.onConnected(client);
     } catch (e) {
       if (mounted) {
@@ -92,6 +92,20 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         });
       }
     }
+  }
+
+  /// Connect to the machine's main part like `viam.getRobotClient` does, but
+  /// with mDNS disabled. The SDK otherwise tries the machine's `<fqdn>.local`
+  /// endpoint on the LAN first and, when that direct dial is refused, does NOT
+  /// fall back to the cloud — so a connect that works in the browser (which has
+  /// no mDNS) fails on native. Skipping mDNS uses the same app.viam.com WebRTC
+  /// path the web app uses, which works from anywhere.
+  Future<RobotClient> _connectRobot(dynamic robot) async {
+    final parts = await _viam.appClient.listRobotParts(robot.id);
+    final part = parts.firstWhere((p) => p.mainPart);
+    final options = RobotClientOptions.withRobotSecret(part.secret);
+    options.dialOptions.attemptMdns = false;
+    return RobotClient.atAddress(part.fqdn, options);
   }
 
   void _onTap(dynamic item) {
