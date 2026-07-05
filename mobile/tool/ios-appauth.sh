@@ -33,6 +33,20 @@ set_str NSCameraUsageDescription "Shows the boat's camera feeds."
 set_str NSMicrophoneUsageDescription "Required by the Viam robot connection."
 echo "ensured camera/microphone usage descriptions in $PLIST"
 
+# --- Local network / mDNS ---------------------------------------------------
+# The Viam SDK finds the machine on the LAN via Bonsoir mDNS browsing for the
+# `_rpc._tcp` service (the fast on-boat direct connection). iOS silently blocks
+# this unless the app declares a local-network usage description AND lists the
+# Bonjour service type it browses — otherwise the `<machine>.local` connection
+# fails. Add both (idempotent).
+set_str NSLocalNetworkUsageDescription "Connects to your Viam machine on the local network."
+if ! "$PB" -c "Print :NSBonjourServices" "$PLIST" 2>/dev/null | grep -q "_rpc._tcp"; then
+  "$PB" -c "Print :NSBonjourServices" "$PLIST" >/dev/null 2>&1 \
+    || "$PB" -c "Add :NSBonjourServices array" "$PLIST"
+  "$PB" -c "Add :NSBonjourServices: string _rpc._tcp" "$PLIST"
+fi
+echo "ensured local-network / mDNS keys in $PLIST"
+
 # --- OAuth redirect scheme --------------------------------------------------
 if "$PB" -c "Print :CFBundleURLTypes" "$PLIST" 2>/dev/null | grep -q "$SCHEME"; then
   echo "iOS URL scheme $SCHEME already present in $PLIST"
