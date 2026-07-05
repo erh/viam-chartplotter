@@ -6,9 +6,14 @@
 #   - com.apple.security.network.client : outgoing connections (tiles, weather,
 #     Viam cloud). The App Sandbox blocks these by default → "Operation not
 #     permitted (errno 1)".
-#   - keychain-access-groups : flutter_secure_storage keeps the Viam session in
-#     the keychain; a sandboxed app without this fails with errSecMissingEntitlement
-#     (-34018), which crashes the app on launch ("Failed to foreground app").
+#   - keychain-access-groups is deliberately NOT added: it's a restricted
+#     entitlement that forces signing with a development certificate ("Runner
+#     has entitlements that require signing with a development certificate"),
+#     which a local "Sign to Run Locally" build doesn't have. Without it
+#     flutter_secure_storage can't reach the keychain, but ViamSession now
+#     degrades gracefully (the session just isn't persisted across restarts on
+#     macOS) instead of crashing. So we actively remove it if a previous run
+#     added it.
 #
 #  Info.plist (macos/Runner/Info.plist):
 #   - NSLocalNetworkUsageDescription + NSBonjourServices (_rpc._tcp) : macOS 15+
@@ -35,22 +40,19 @@ grant_bool() { # file key
   echo "granted $key in $f"
 }
 
-# Idempotent keychain-access-group. The $(AppIdentifierPrefix)/$(CFBundleIdentifier)
-# build variables are substituted by Xcode at sign time, so this tracks whatever
-# team/bundle id the build uses.
-grant_keychain() { # file
-  local f="$1" grp='$(AppIdentifierPrefix)$(CFBundleIdentifier)'
+# Idempotent removal of a key (used to undo the keychain-access-groups entry a
+# previous version of this script added, which broke local signing).
+remove_key() { # file key
+  local f="$1" key="$2"
   [ -f "$f" ] || return 0
-  "$PB" -c "Print :keychain-access-groups" "$f" 2>/dev/null | grep -q 'CFBundleIdentifier' && return 0
-  "$PB" -c "Print :keychain-access-groups" "$f" >/dev/null 2>&1 \
-    || "$PB" -c "Add :keychain-access-groups array" "$f"
-  "$PB" -c "Add :keychain-access-groups: string $grp" "$f"
-  echo "granted keychain-access-groups in $f"
+  "$PB" -c "Print :$key" "$f" >/dev/null 2>&1 || return 0 # not present
+  "$PB" -c "Delete :$key" "$f"
+  echo "removed $key from $f"
 }
 
 for f in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
   grant_bool "$f" "com.apple.security.network.client"
-  grant_keychain "$f"
+  remove_key "$f" "keychain-access-groups"
 done
 
 # --- Info.plist: local network / mDNS --------------------------------------
