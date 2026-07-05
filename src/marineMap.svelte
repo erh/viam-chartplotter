@@ -507,6 +507,27 @@
     return eta.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
+  // Distance in meters from the start of a polyline to `target`, a point that
+  // lies on (or very near) the line — e.g. LineString.getClosestPoint(cursor).
+  // Walks the segments and picks the one the target sits on (where the split
+  // distances add back up to the segment length), returning the run-up distance
+  // to that segment plus the leg into it. coords are [lng, lat] (useGeographic).
+  function distanceAlongLine(coords: number[][], target: number[]): number {
+    let cum = 0;
+    let best = { err: Infinity, along: 0 };
+    for (let i = 1; i < coords.length; i++) {
+      const a = coords[i - 1];
+      const b = coords[i];
+      const segLen = getDistance(a, b);
+      const dA = getDistance(a, target);
+      const dB = getDistance(b, target);
+      const err = Math.abs(dA + dB - segLen); // ~0 on the segment holding target
+      if (err < best.err) best = { err, along: cum + dA };
+      cum += segLen;
+    }
+    return best.along;
+  }
+
   // Derived overlay stats for the active route. Recomputes whenever the boat
   // pose or waypoint list changes.
   let routeStats = $derived.by(() => {
@@ -3687,6 +3708,16 @@
     });
     mapGlobal.map.addOverlay(aisTooltipOverlay);
 
+    // Active-route ETA tooltip — hovering the nav route line shows the
+    // distance + ETA from the boat to that point along the route.
+    const routeEtaTooltipElement = document.getElementById("route-eta-tooltip");
+    const routeEtaTooltipOverlay = new Overlay({
+      element: routeEtaTooltipElement || undefined,
+      positioning: "bottom-center",
+      offset: [0, -12],
+    });
+    mapGlobal.map.addOverlay(routeEtaTooltipOverlay);
+
     // Setup measure layer
     measureSource = new VectorSource();
     const measureLayer = new Vector({
@@ -3989,6 +4020,38 @@
         trackTimeTooltipOverlay.setPosition(undefined);
       }
 
+      // Active-route ETA: hovering the nav route line shows how far that spot
+      // is along the route from the boat, and — with a usable speed — the
+      // travel time + clock ETA to reach it. The tooltip snaps to the line.
+      let routeEtaFound = false;
+      if (myBoat && isValidCoordinate(myBoat.location[0], myBoat.location[1])) {
+        mapGlobal.map!.forEachFeatureAtPixel(
+          evt.pixel,
+          (feature) => {
+            if (routeEtaFound) return;
+            if (feature.get("type") !== "navRoute") return;
+            const geom = (feature as Feature).getGeometry();
+            if (!geom || geom.getType() !== "LineString") return;
+            routeEtaFound = true;
+            const line = geom as LineString;
+            const target = line.getClosestPoint(evt.coordinate);
+            const nm = distanceAlongLine(line.getCoordinates(), target) / 1852;
+            const speedKn = myBoat!.speed ?? 0;
+            const min = speedKn > 0.1 ? (nm / speedKn) * 60 : Infinity;
+            if (routeEtaTooltipElement) {
+              const parts = [`${nm.toFixed(2)} nm`];
+              if (isFinite(min)) parts.push(formatDurationMin(min), `ETA ${formatEta(min)}`);
+              routeEtaTooltipElement.textContent = parts.join(" · ");
+            }
+            routeEtaTooltipOverlay.setPosition(target);
+          },
+          { hitTolerance: 4 }
+        );
+      }
+      if (!routeEtaFound) {
+        routeEtaTooltipOverlay.setPosition(undefined);
+      }
+
       // Cursor-info: GPS position of the mouse, plus distance + bearing
       // from boat to mouse position when we have a usable boat fix.
       // evt.coordinate is [lng, lat] under useGeographic(); our helpers
@@ -4039,6 +4102,7 @@
     if (target) {
       target.addEventListener("pointerleave", () => {
         cursorInfo = null;
+        routeEtaTooltipOverlay.setPosition(undefined);
       });
     }
 
@@ -4771,6 +4835,9 @@
 
   <!-- My-boat track-time Tooltip -->
   <div id="track-time-tooltip" class="track-time-tooltip"></div>
+
+  <!-- Active-route ETA hover tooltip -->
+  <div id="route-eta-tooltip" class="route-eta-tooltip"></div>
 
   <!-- AIS flag/country hover tooltip -->
   <div id="ais-tooltip" class="ais-tooltip"></div>
@@ -5541,6 +5608,21 @@
     pointer-events: none;
   }
   .track-time-tooltip:empty {
+    display: none;
+  }
+
+  .route-eta-tooltip {
+    background: rgba(0, 0, 0, 0.82);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .route-eta-tooltip:empty {
     display: none;
   }
 
