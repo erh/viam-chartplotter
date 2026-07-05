@@ -68,3 +68,17 @@ if [ -f "$PLIST" ]; then
   fi
   echo "ensured local-network keys in $PLIST"
 fi
+
+# --- Xcode: tolerate entitlements rewrites ----------------------------------
+# Whenever this script updates an entitlements file (e.g. on a fresh
+# `flutter create`, or when the script itself changes), the next incremental
+# build sees the changed mtime and Xcode aborts with "Entitlements file was
+# modified during the build". Setting this build variable — exactly what that
+# error message recommends — makes the local dev build tolerate it. Applied via
+# the Runner xcconfigs (idempotent append).
+for cfg in macos/Runner/Configs/Debug.xcconfig macos/Runner/Configs/Release.xcconfig; do
+  [ -f "$cfg" ] || continue
+  grep -q 'CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION' "$cfg" && continue
+  printf '\nCODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES\n' >> "$cfg"
+  echo "set CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION in $cfg"
+done
