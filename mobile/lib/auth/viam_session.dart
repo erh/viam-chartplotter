@@ -40,10 +40,18 @@ class ViamSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    _accessToken = await _store.read(key: _kAccess);
-    _refreshToken = await _store.read(key: _kRefresh);
-    final exp = await _store.read(key: _kExpiry);
-    _expiry = exp == null ? null : DateTime.tryParse(exp);
+    try {
+      _accessToken = await _store.read(key: _kAccess);
+      _refreshToken = await _store.read(key: _kRefresh);
+      final exp = await _store.read(key: _kExpiry);
+      _expiry = exp == null ? null : DateTime.tryParse(exp);
+    } catch (_) {
+      // Secure storage unavailable (e.g. macOS keychain entitlement missing on
+      // a locally-signed build) — treat as no stored session rather than
+      // crashing/hanging startup.
+      _accessToken = _refreshToken = null;
+      _expiry = null;
+    }
 
     if (_accessToken == null) {
       _set(AuthStatus.signedOut);
@@ -150,19 +158,25 @@ class ViamSession extends ChangeNotifier {
     _accessToken = access;
     _refreshToken = refresh;
     _expiry = expiry;
-    if (access != null) await _store.write(key: _kAccess, value: access);
-    if (refresh != null) await _store.write(key: _kRefresh, value: refresh);
-    if (expiry != null) {
-      await _store.write(key: _kExpiry, value: expiry.toIso8601String());
-    }
+    // Persist best-effort: if storage is unavailable the in-memory session
+    // still works for this run, it just won't survive a restart.
+    try {
+      if (access != null) await _store.write(key: _kAccess, value: access);
+      if (refresh != null) await _store.write(key: _kRefresh, value: refresh);
+      if (expiry != null) {
+        await _store.write(key: _kExpiry, value: expiry.toIso8601String());
+      }
+    } catch (_) {}
   }
 
   Future<void> _clear() async {
     _accessToken = _refreshToken = null;
     _expiry = null;
-    await _store.delete(key: _kAccess);
-    await _store.delete(key: _kRefresh);
-    await _store.delete(key: _kExpiry);
+    try {
+      await _store.delete(key: _kAccess);
+      await _store.delete(key: _kRefresh);
+      await _store.delete(key: _kExpiry);
+    } catch (_) {}
   }
 
   void _set(AuthStatus s) {
