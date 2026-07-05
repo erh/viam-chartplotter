@@ -62,6 +62,7 @@ UI's waypoints/route persistently and reports progress to the next waypoint.
 |-----------|------|---------|-------------|
 | `movement_sensor` | string | — | name of a movement sensor for position (becomes a dependency) |
 | `data_path` | string | — | file path to persist waypoints across restarts |
+| `n2k_sender` | string | — | name of a generic component whose DoCommand sends raw NMEA 2000 PGNs (e.g. a `viam-labs:viamboat:sender`; becomes a dependency). Enables `send_waypoints_n2k`. |
 
 ```json
 {
@@ -69,9 +70,18 @@ UI's waypoints/route persistently and reports progress to the next waypoint.
   "namespace": "rdk",
   "type": "navigation",
   "model": "erh:viam-chartplotter:nav",
-  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json" }
+  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json", "n2k_sender": "n2k-sender" }
 }
 ```
+
+With `n2k_sender` configured, the DoCommand
+`{"send_waypoints_n2k": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
+pushes the current waypoint list onto the NMEA 2000 bus as a Route and WP
+Service transfer — one PGN 130066 (Route/WP-List Attributes) followed by PGN
+130067 (Route – WP Name & Position) messages, chunked to fit fast-packets — so
+a chartplotter (e.g. Garmin) on the same backbone can pick the route up. All
+payload fields are optional; pass `true` for the defaults (route name
+"Chartplotter", broadcast).
 
 ---
 
