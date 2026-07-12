@@ -117,6 +117,11 @@
 
     navWaypoints: [] as { id: string; lat: number; lng: number }[],
 
+    // Regions loaded from `area` components on the machine (see
+    // discoverAreas). Each carries a normalized GeoJSON FeatureCollection and
+    // a display color; MarineMap draws them as a toggleable overlay.
+    areas: [] as { name: string; color?: string; geojson: any }[],
+
     numUpdates: 0,
     status: "Not connected yet",
     statusLastError: new Date(),
@@ -934,6 +939,69 @@
     );
 
     console.log("globalConfig", $state.snapshot(globalConfig));
+
+    await discoverAreas(client, resources);
+  }
+
+  // Discover `area` components on the machine and load their region
+  // definitions. The model isn't exposed via resourceNames, so we probe every
+  // generic component with {"get_area": true}: real area components answer with
+  // a normalized GeoJSON FeatureCollection + color; anything else errors or
+  // returns no geojson and is skipped. Areas are config-driven and static, so
+  // this only needs to run on (re)discovery, not every poll tick.
+  async function discoverAreas(client: VIAM.RobotClient, resources) {
+    const generics = filterResources(resources, "component", "generic", null);
+    const found: { name: string; color?: string; geojson: any }[] = [];
+    let hiddenByDate = 0;
+    for (const r of generics) {
+      try {
+        const resp = (await new VIAM.GenericComponentClient(client, r.name).doCommand(
+          VIAM.Struct.fromJson({ get_area: true })
+        )) as Record<string, any>;
+        if (resp && resp.geojson) {
+          // Optional inclusive month-day window (MM-DD, recurring yearly): skip
+          // areas whose range doesn't include today so they only draw in season.
+          if (!areaVisibleToday(resp.start_date, resp.end_date)) {
+            hiddenByDate++;
+            continue;
+          }
+          found.push({ name: r.name, color: resp.color, geojson: resp.geojson });
+        }
+      } catch (e) {
+        // Not an area component (DoCommand unimplemented or unrelated) — skip.
+      }
+    }
+    globalData.areas = found;
+    if (found.length || hiddenByDate) {
+      console.log(
+        `loaded ${found.length} area(s)${hiddenByDate ? `, ${hiddenByDate} hidden by date` : ""}`,
+        $state.snapshot(globalData.areas)
+      );
+    }
+  }
+
+  // Today's local month-day as MM-DD, for comparing against area date windows.
+  function localTodayMMDD(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  // Whether an area with the given inclusive month-day window should show today.
+  // Dates are MM-DD strings (or empty for open-ended); lexicographic comparison
+  // matches calendar order for that fixed-width format. When both are set and
+  // start > end the window wraps across the year end (e.g. 12-01..02-01), so
+  // today matches if it's on/after start OR on/before end.
+  function areaVisibleToday(startDate?: string, endDate?: string): boolean {
+    const today = localTodayMMDD();
+    if (startDate && endDate) {
+      return startDate <= endDate
+        ? today >= startDate && today <= endDate
+        : today >= startDate || today <= endDate;
+    }
+    if (startDate && today < startDate) return false;
+    if (endDate && today > endDate) return false;
+    return true;
   }
 
   async function setupMovementSensor(client: VIAM.RobotClient, resources) {
@@ -2217,6 +2285,7 @@
       {chartOnly}
       navWaypoints={globalData.navWaypoints}
       {routePreview}
+      areas={globalData.areas}
       leftOverlay={globalConfig.navServiceName ? routesOverlay : undefined}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}

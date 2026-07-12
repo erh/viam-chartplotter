@@ -34,6 +34,7 @@
   import { Vector } from "ol/layer.js";
   import XYZ from "ol/source/XYZ";
   import { Circle as CircleStyle, Fill, Icon, Stroke, Style } from "ol/style.js";
+  import { asArray as olColorAsArray } from "ol/color.js";
   import Overlay from "ol/Overlay.js";
   import { getDistance, offset as sphereOffset } from "ol/sphere.js";
   import Modify from "ol/interaction/Modify.js";
@@ -237,6 +238,10 @@
   // Display-only preview of a saved route (RoutesPanel "show on map" / track
   // capture preview). Not editable, not the active nav route.
   let routePreviewSource: VectorSource | null = null;
+
+  // Regions from `area` components on the machine (fed by the `areas` prop).
+  // Rendered as translucent filled polygons; toggled via the "areas" layer.
+  let areasSource: VectorSource | null = null;
 
   // Debug helper: when on, clicking the map prints + copies the checkmate
   // tile URL covering that point. Used for diffing our render against NOAA's
@@ -661,6 +666,7 @@
     chartOnly = false,
     navWaypoints,
     routePreview,
+    areas,
     onAddWaypoint,
     onMoveWaypoint,
     onInsertWaypoint,
@@ -714,6 +720,11 @@
      *  dashed polyline + vertex dots; an empty/undefined list draws nothing.
      *  Holds many when "show all on map" is on. Not editable. */
     routePreview?: { waypoints: { lat: number; lng: number }[]; color?: string }[] | null;
+    /** Regions loaded from `area` components on the machine. Each is a
+     *  normalized GeoJSON FeatureCollection (features carry a `color`
+     *  property) plus a fallback display color. Drawn as translucent filled
+     *  polygons under the "areas" layer toggle; shown by default. */
+    areas?: { name: string; color?: string; geojson: any }[] | null;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -797,6 +808,33 @@
       }
       for (const c of coords) {
         source.addFeature(new Feature({ geometry: new Point(c), color }));
+      }
+    }
+  });
+
+  // Redraw the area regions whenever the `areas` prop changes. Each area is a
+  // GeoJSON FeatureCollection; features carry their own `color` property (set
+  // by the Go area component), falling back to the area's color then a default.
+  $effect(() => {
+    const list = areas;
+    const source = areasSource;
+    if (!source) return;
+    source.clear();
+    if (!list?.length) return;
+    const fmt = new GeoJSON();
+    for (const area of list) {
+      if (!area?.geojson) continue;
+      let feats: Feature[];
+      try {
+        feats = fmt.readFeatures(area.geojson) as Feature[];
+      } catch (e) {
+        console.warn("area geojson parse failed", area.name, e);
+        continue;
+      }
+      const fallback = area.color || AREA_DEFAULT_COLOR;
+      for (const f of feats) {
+        if (!f.get("color")) f.set("color", fallback);
+        source.addFeature(f);
       }
     }
   });
@@ -1476,6 +1514,45 @@
       `<rect x="${ax - w / 2}" y="${ay - h}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${sw}"/>` +
       `<circle cx="${ax}" cy="${ay}" r="1" fill="${stroke}"/>`
     );
+  }
+
+  // Fallback color for area regions whose feature carries no `color` and whose
+  // parent area supplied none. Matches the Go area component's defaultAreaColor.
+  const AREA_DEFAULT_COLOR = "#ff3b30";
+  // Opacity of the translucent fill drawn inside an area polygon; the outline
+  // is drawn at full opacity in the same color.
+  const AREA_FILL_ALPHA = 0.2;
+
+  // areaFillColor turns a CSS color (hex or named) into an [r,g,b,a] fill with
+  // AREA_FILL_ALPHA, so the region interior is visible but the chart shows
+  // through. Falls back to a translucent default if the color can't be parsed.
+  function areaFillColor(color: string): number[] | string {
+    try {
+      const c = olColorAsArray(color).slice();
+      c[3] = AREA_FILL_ALPHA;
+      return c;
+    } catch {
+      return `rgba(255,59,48,${AREA_FILL_ALPHA})`;
+    }
+  }
+
+  // Style for area regions: a solid outline plus a translucent fill in the
+  // feature's color. Points (e.g. a degenerate area) render as a small dot.
+  function areaStyleFunction(feature: Feature<Geometry>): Style {
+    const color = (feature.get("color") as string) || AREA_DEFAULT_COLOR;
+    if (feature.getGeometry()?.getType() === "Point") {
+      return new Style({
+        image: new CircleStyle({
+          radius: 5,
+          fill: new Fill({ color: areaFillColor(color) }),
+          stroke: new Stroke({ color, width: 2 }),
+        }),
+      });
+    }
+    return new Style({
+      stroke: new Stroke({ color, width: 2 }),
+      fill: new Fill({ color: areaFillColor(color) }),
+    });
   }
 
   function navaidStyleFunction(feature: Feature<Geometry>): Style {
@@ -3306,6 +3383,24 @@
       displayName: "airstream",
       on: false,
       layer: new Vector({ source: new VectorSource() }),
+    });
+
+    // Areas: regions defined by `area` components on the machine, fed by the
+    // `areas` prop (see the $effect above). Always registered so the toggle
+    // exists even before discovery finishes; drawn under the boat/AIS vectors
+    // and above the chart tiles. On by default — the layer panel offers the
+    // hide toggle. The layer stays empty (nothing drawn) when no areas exist.
+    areasSource = new VectorSource();
+    const areasLayer = new Vector({
+      source: areasSource,
+      style: areaStyleFunction,
+      zIndex: 6,
+    });
+    mapGlobal.layerOptions.push({
+      name: "areas",
+      displayName: "areas",
+      on: true,
+      layer: areasLayer,
     });
   }
 
