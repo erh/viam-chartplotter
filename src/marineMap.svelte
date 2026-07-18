@@ -723,8 +723,22 @@
     /** Regions loaded from `area` components on the machine. Each is a
      *  normalized GeoJSON FeatureCollection (features carry a `color`
      *  property) plus a fallback display color. Drawn as translucent filled
-     *  polygons under the "areas" layer toggle; shown by default. */
-    areas?: { name: string; color?: string; geojson: any }[] | null;
+     *  polygons under the "areas" layer toggle. Every area also gets its own
+     *  row in the layer panel; `inSeason` (from the optional startDate/endDate
+     *  MM-DD window) only decides whether that row starts checked. */
+    areas?:
+      | {
+          name: string;
+          color?: string;
+          geojson: any;
+          startDate?: string;
+          endDate?: string;
+          inSeason?: boolean;
+          /** Viam config folder the component sits in, used to group the
+           *  layer-panel rows. Undefined for areas outside any folder. */
+          folder?: string;
+        }[]
+      | null;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -812,18 +826,88 @@
     }
   });
 
-  // Redraw the area regions whenever the `areas` prop changes. Each area is a
-  // GeoJSON FeatureCollection; features carry their own `color` property (set
-  // by the Go area component), falling back to the area's color then a default.
+  // The month-day window suffix for a panel row, so an area that starts
+  // unchecked shows why (out of season) without opening the config.
+  function areaDateSuffix(area: { startDate?: string; endDate?: string }): string {
+    const { startDate: s, endDate: e } = area;
+    if (s && e) return ` (${s} → ${e})`;
+    if (s) return ` (from ${s})`;
+    if (e) return ` (until ${e})`;
+    return "";
+  }
+
+  // Derive the per-area toggle rows straight from the `areas` prop. Deliberately
+  // NOT entries in mapGlobal.layerOptions: pushing runtime-discovered rows into
+  // that array from an effect wedges the whole component (blank map, no errors),
+  // since it drives the layer add/remove machinery. These rows only gate what the
+  // shared areas layer draws, so a plain derived list is enough. Whether a row
+  // starts checked comes from the area's date window on every load and is
+  // deliberately NOT persisted — otherwise a stale preference would leave a
+  // seasonal area switched on long after its window passed.
+  const areaToggles = $derived.by(() =>
+    (areas ?? [])
+      .filter((a) => a?.name)
+      .map((a) => ({
+        name: a.name,
+        dates: areaDateSuffix(a),
+        on: a.inSeason ?? true,
+        folder: a.folder,
+      }))
+  );
+
+  // Group the rows by the Viam config folder each area's component sits in, so
+  // the panel mirrors how the machine config is organised. Areas outside any
+  // folder render as plain top-level rows (folder: null). Falls back to no
+  // grouping when folders haven't loaded yet — the cloud config arrives on its
+  // own schedule, and this recomputes when it does.
+  const areaFolders = $derived.by(() => {
+    const out: { folder: string | null; rows: { name: string; label: string }[] }[] = [];
+    // Folder -> its bucket, so members scattered through the list still collect
+    // under a single header. Each folder appears where its first member did.
+    const byFolder = new Map<string, (typeof out)[number]>();
+    for (const a of areaToggles) {
+      const row = { name: a.name, label: a.name + a.dates };
+      if (!a.folder) {
+        out.push({ folder: null, rows: [row] });
+        continue;
+      }
+      let group = byFolder.get(a.folder);
+      if (!group) {
+        group = { folder: a.folder, rows: [] };
+        byFolder.set(a.folder, group);
+        out.push(group);
+      }
+      group.rows.push(row);
+    }
+    return out;
+  });
+
+  // Manual toggles on top of areaToggles' season defaults, applied by name.
+  // Session-only: a reload clears these and every area returns to its window.
+  let areaOverrides = $state<Record<string, boolean>>({});
+
+  function areaIsOn(name: string): boolean {
+    if (Object.prototype.hasOwnProperty.call(areaOverrides, name)) return areaOverrides[name];
+    return areaToggles.find((a) => a.name === name)?.on ?? true;
+  }
+
+  // Redraw the area regions whenever the `areas` prop or a toggle changes. Each
+  // area is a GeoJSON FeatureCollection; features carry their own `color`
+  // property (set by the Go area component), falling back to the area's color
+  // then a default.
   $effect(() => {
     const list = areas;
     const source = areasSource;
+    // Read both so toggling redraws immediately.
+    void areaOverrides;
+    void areaToggles;
     if (!source) return;
     source.clear();
     if (!list?.length) return;
     const fmt = new GeoJSON();
     for (const area of list) {
       if (!area?.geojson) continue;
+      if (!areaIsOn(area.name)) continue;
       let feats: Feature[];
       try {
         feats = fmt.readFeatures(area.geojson) as Feature[];
@@ -5080,6 +5164,38 @@
               </select>
             {/if}
           </label>
+          <!-- One row per discovered area, directly beneath the "areas" toggle
+               and disabled with it. Every area is listed regardless of its date
+               window; out-of-season ones simply start unchecked, with the
+               window shown in the label. Areas sharing a dash-prefix collapse
+               under a folder header (see areaFolders). -->
+          {#if l.name === "areas"}
+            {#each areaFolders as group}
+              {#if group.folder}
+                <div class="layer-section-header area-folder-header">{group.folder}</div>
+              {/if}
+              {#each group.rows as a (a.name)}
+                <label
+                  class="child-layer"
+                  class:area-folder-child={group.folder}
+                  class:disabled={!l.on}
+                >
+                  <input
+                    type="checkbox"
+                    checked={areaIsOn(a.name)}
+                    onchange={(e) => {
+                      areaOverrides = {
+                        ...areaOverrides,
+                        [a.name]: (e.currentTarget as HTMLInputElement).checked,
+                      };
+                    }}
+                    disabled={!l.on}
+                  />
+                  {a.label}
+                </label>
+              {/each}
+            {/each}
+          {/if}
         {/if}
       {/if}
     {/each}
@@ -6271,6 +6387,16 @@
 
   .layer-controls > label.child-layer {
     padding-left: 20px;
+  }
+
+  /* Area folders sit one level under the "areas" toggle, and their
+     rows one level under the folder header. */
+  .layer-controls > .area-folder-header {
+    padding-left: 20px;
+  }
+
+  .layer-controls > label.child-layer.area-folder-child {
+    padding-left: 36px;
   }
 
   .layer-controls > label.disabled {

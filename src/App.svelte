@@ -28,6 +28,9 @@
   let globalClientCloudMetaData = null;
 
   let globalCloudClient: VIAM.ViamClient;
+  // Fragment id -> its config (or null if it couldn't be fetched), so the
+  // once-a-second cloud loop doesn't re-request unchanged fragments.
+  const fragmentConfigCache = new Map<string, any>();
 
   // Saved-route preview polylines pushed to the map by RoutesPanel (display-only,
   // not the active nav route). Empty = nothing previewed; may hold many when
@@ -128,6 +131,8 @@
     lastData: new Date(),
 
     partConfig: {},
+    // Component name -> Viam config folder name (see updateComponentFolders).
+    componentFolders: {} as Record<string, string>,
     aisBoats: [] as BoatInfo[],
     // Module-side AIS position history, keyed by MMSI. Populated by
     // a 60-second poll of the viamboat AIS sensor's "all_history"
@@ -857,7 +862,12 @@
     globalData.machineStatus = machineStatus;
     console.log(globalData.machineStatus);
 
-    await setupMovementSensor(client, resources);
+    // Don't let a bad/absent GPS block the rest of resource discovery below.
+    try {
+      await setupMovementSensor(client, resources);
+    } catch (error) {
+      console.error("setupMovementSensor failed", error);
+    }
 
     globalConfig.aisSensorName = filterResourcesFirstMatchingName(
       resources,
@@ -951,34 +961,55 @@
   // this only needs to run on (re)discovery, not every poll tick.
   async function discoverAreas(client: VIAM.RobotClient, resources) {
     const generics = filterResources(resources, "component", "generic", null);
-    const found: { name: string; color?: string; geojson: any }[] = [];
-    let hiddenByDate = 0;
+    const found: {
+      name: string;
+      color?: string;
+      geojson: any;
+      startDate?: string;
+      endDate?: string;
+      inSeason: boolean;
+      folder?: string;
+    }[] = [];
     for (const r of generics) {
       try {
         const resp = (await new VIAM.GenericComponentClient(client, r.name).doCommand(
           VIAM.Struct.fromJson({ get_area: true })
         )) as Record<string, any>;
         if (resp && resp.geojson) {
-          // Optional inclusive month-day window (MM-DD, recurring yearly): skip
-          // areas whose range doesn't include today so they only draw in season.
-          if (!areaVisibleToday(resp.start_date, resp.end_date)) {
-            hiddenByDate++;
-            continue;
-          }
-          found.push({ name: r.name, color: resp.color, geojson: resp.geojson });
+          // Every discovered area is loaded and gets a layer toggle. The
+          // optional month-day window (MM-DD, recurring yearly) only decides
+          // whether that toggle starts checked, so out-of-season areas stay
+          // visible in the layer menu and can be turned on by hand.
+          found.push({
+            name: r.name,
+            color: resp.color,
+            geojson: resp.geojson,
+            startDate: resp.start_date,
+            endDate: resp.end_date,
+            inSeason: areaVisibleToday(resp.start_date, resp.end_date),
+          });
         }
       } catch (e) {
         // Not an area component (DoCommand unimplemented or unrelated) — skip.
       }
     }
     globalData.areas = found;
-    if (found.length || hiddenByDate) {
+    if (found.length) {
+      const offSeason = found.filter((a) => !a.inSeason).length;
       console.log(
-        `loaded ${found.length} area(s)${hiddenByDate ? `, ${hiddenByDate} hidden by date` : ""}`,
+        `loaded ${found.length} area(s)${offSeason ? `, ${offSeason} out of season` : ""}`,
         $state.snapshot(globalData.areas)
       );
     }
   }
+
+  // Areas joined to their config folder. Kept derived rather than baked in at
+  // discovery time: folders come from the cloud config loop, which is
+  // independent of the robot-connect path that discovers areas, so either can
+  // land first.
+  const areasWithFolders = $derived(
+    globalData.areas.map((a) => ({ ...a, folder: globalData.componentFolders[a.name] }))
+  );
 
   // Today's local month-day as MM-DD, for comparing against area date windows.
   function localTodayMMDD(): string {
@@ -1016,7 +1047,13 @@
 
     for (var r of resources) {
       const msClient = new VIAM.MovementSensorClient(client, r.name);
-      var prop = await msClient.getProperties();
+      var prop;
+      try {
+        prop = await msClient.getProperties();
+      } catch (error) {
+        console.error("getProperties failed for " + r.name, error);
+        continue;
+      }
 
       var score = 0;
       if (prop.positionSupported) {
@@ -1164,7 +1201,46 @@
 
     if (part.configJson) {
       globalData.partConfig = JSON.parse(part.configJson);
+      await updateComponentFolders(ac, globalData.partConfig);
     }
+  }
+
+  // Map component name -> config-folder name, from the Viam app's `ui_folder`
+  // marker. Folders are a cloud-config concept: viam-server strips them before
+  // modules see their config and they're absent from resource names, so the
+  // only way to learn them is the authored config we already fetch here.
+  // Components added by a fragment aren't in the part's own component list, so
+  // each referenced fragment is fetched and merged in too.
+  async function updateComponentFolders(ac, partConfig) {
+    const folders: Record<string, string> = {};
+
+    const collect = (cfg: any) => {
+      for (const c of cfg?.components ?? []) {
+        const folder = c?.ui_folder?.name;
+        if (c?.name && folder) folders[c.name] = folder;
+      }
+    };
+
+    collect(partConfig);
+
+    for (const f of partConfig?.fragments ?? []) {
+      if (!f?.id) continue;
+      // Fragment configs are immutable per version, so fetch each one once.
+      if (!fragmentConfigCache.has(f.id)) {
+        try {
+          const frag = await ac.getFragment(f.id);
+          // .fragment is a protobuf Struct; toJson() unwraps it to plain JSON.
+          const raw: any = frag?.fragment;
+          fragmentConfigCache.set(f.id, raw?.toJson ? raw.toJson() : (raw ?? null));
+        } catch (error) {
+          console.log("cannot load fragment " + f.id + ": " + error);
+          fragmentConfigCache.set(f.id, null);
+        }
+      }
+      collect(fragmentConfigCache.get(f.id));
+    }
+
+    globalData.componentFolders = folders;
   }
 
   function findComponentConfig(n) {
@@ -2285,7 +2361,7 @@
       {chartOnly}
       navWaypoints={globalData.navWaypoints}
       {routePreview}
-      areas={globalData.areas}
+      areas={areasWithFolders}
       leftOverlay={globalConfig.navServiceName ? routesOverlay : undefined}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
