@@ -2900,11 +2900,18 @@
           // opaque chart hides OSM anyway — so we only hit OSMF's tile servers
           // in foreign/uncharted waters. When OSM is the *selected* base
           // (no chart base active), load everything normally.
+          //
+          // The z>=7 test MUST use the view zoom, not the tile coord's z: OL
+          // rounds the view zoom to pick a tile z, so at view zoom 6.5..7 it
+          // requests tile z=7 while the chart layers (gated on the fractional
+          // view zoom >= 7 in applyZoomGates) are still hidden. Testing tc[0]
+          // there skipped OSM *and* hid the chart — an all-white map.
           tileUrlFunction: (tc) => {
             const z = tc[0],
               x = tc[1],
               y = tc[2];
-            if (z >= 7 && chartBaseActive() && tileFullyInUSWaters(z, x, y)) {
+            const viewZ = mapGlobal.view?.getZoom() ?? z;
+            if (viewZ >= 7 && chartBaseActive() && tileFullyInUSWaters(z, x, y)) {
               return undefined;
             }
             return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
@@ -3741,6 +3748,12 @@
       if (overview !== lastOverview) {
         lastOverview = overview;
         updateOnLayers();
+        // The OSM tileUrlFunction's skip test keys off the view zoom, so the
+        // same tile coord resolves to a URL below z7 and to undefined above it.
+        // Refresh so tiles cached as "skipped" on one side of the boundary are
+        // re-evaluated on the other — otherwise they stay blank.
+        const osmBase = mapGlobal.layerOptions.find((l) => l.name === "open street map");
+        (osmBase?.layer as TileLayer<XYZ> | undefined)?.getSource()?.refresh();
       }
     });
     const z0 = mapGlobal.view.getZoom();
