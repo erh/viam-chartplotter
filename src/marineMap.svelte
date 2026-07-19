@@ -2090,48 +2090,89 @@
   // `messages` is a decoder-internal counter and never worth showing.
   const AIRCRAFT_TOOLTIP_SKIP_FIELDS = new Set(["messages"]);
 
-  // Fields that identify the aircraft in human terms. `hex` (the raw ICAO
-  // address) is redundant when one of these is present, but it's the only
-  // field the module always emits — an aircraft heard before it transmits
-  // its identity has nothing else to go by — so it's kept as the fallback.
-  const AIRCRAFT_IDENTITY_FIELDS = ["callsign", "registration"];
-
   // `route` is a subdoc the module fills in from the callsign, carrying the
   // airline plus both endpoints in several codings (iata/icao/name/
-  // municipality/lat/lon). Only these are worth tooltip space — the rest
-  // would double the popup for little gain. Each is still optional.
-  const AIRCRAFT_ROUTE_FIELDS = [
-    "airline",
-    "destination_iata",
-    "destination_name",
-    "origin_iata",
-    "origin_name",
+  // municipality/lat/lon). The card uses the iata codes as the big
+  // origin→destination line and the names as the caption under each; every
+  // one of them is optional.
+  function routeEndpoint(
+    route: Record<string, any> | undefined,
+    side: "origin" | "destination"
+  ): { code: string; name: string } | null {
+    if (!route || typeof route !== "object") return null;
+    const str = (v: any) => (typeof v === "string" ? v.trim() : "");
+    const code = str(route[`${side}_iata`]) || str(route[`${side}_icao`]);
+    const name = str(route[`${side}_municipality`]) || str(route[`${side}_name`]);
+    if (!code && !name) return null;
+    return { code: code || "?", name };
+  }
+
+  // Altitude and vertical-rate arrive under whichever name the upstream
+  // decoder used, so each stat takes a list of aliases and uses the first
+  // one actually present.
+  const AIRCRAFT_ALT_FIELDS = [
+    "altitude_ft",
+    "altitude",
+    "alt_baro",
+    "baro_altitude_ft",
+    "geom_alt_ft",
+  ];
+  const AIRCRAFT_VRATE_FIELDS = [
+    "vertical_rate_fpm",
+    "vertical_rate",
+    "baro_rate",
   ];
 
-  // Sorted key/value pairs for one aircraft's hover tooltip.
-  function aircraftTooltipRows(reading: Record<string, any>): [string, any][] {
-    const hasIdentity = AIRCRAFT_IDENTITY_FIELDS.some((f) => {
+  function firstPresent(
+    reading: Record<string, any>,
+    fields: string[]
+  ): [string, any] | null {
+    for (const f of fields) {
       const v = reading[f];
-      return typeof v === "string" ? v.trim() !== "" : v != null;
-    });
-
-    const rows = Object.entries(reading)
-      // `route` is rendered as flattened route.* rows below; left in place it
-      // would stringify to "[object Object]".
-      .filter(([k]) => k !== "route")
-      .filter(([k]) => !AIRCRAFT_TOOLTIP_SKIP_FIELDS.has(k))
-      .filter(([k]) => k !== "hex" || !hasIdentity);
-
-    const route = reading.route;
-    if (route && typeof route === "object") {
-      for (const f of AIRCRAFT_ROUTE_FIELDS) {
-        const v = route[f];
-        if (v == null || (typeof v === "string" && v.trim() === "")) continue;
-        rows.push([`route.${f}`, v]);
-      }
+      if (v == null) continue;
+      if (typeof v === "string" && v.trim() === "") continue;
+      return [f, v];
     }
+    return null;
+  }
 
-    return rows.sort(([a], [b]) => a.localeCompare(b));
+  // Everything the card renders in its own dedicated slot; anything left over
+  // falls through to the generic detail grid at the bottom, so a field the
+  // module adds later still shows up without a code change here.
+  function aircraftHandledFields(reading: Record<string, any>): Set<string> {
+    const handled = new Set<string>([
+      "route",
+      "callsign",
+      "registration",
+      "hex",
+      "on_ground",
+      "ground_speed_kt",
+      "track_deg",
+      "latitude",
+      "longitude",
+      ...AIRCRAFT_TOOLTIP_SKIP_FIELDS,
+    ]);
+    const alt = firstPresent(reading, AIRCRAFT_ALT_FIELDS);
+    if (alt) handled.add(alt[0]);
+    const vrate = firstPresent(reading, AIRCRAFT_VRATE_FIELDS);
+    if (vrate) handled.add(vrate[0]);
+    return handled;
+  }
+
+  // Sorted key/value pairs that no dedicated slot claimed.
+  function aircraftDetailRows(reading: Record<string, any>): [string, any][] {
+    const handled = aircraftHandledFields(reading);
+    return Object.entries(reading)
+      .filter(([k, v]) => !handled.has(k) && v != null && v !== "")
+      .sort(([a], [b]) => a.localeCompare(b));
+  }
+
+  // "last_seen_sec" -> "last seen". Field names are snake_case with a unit
+  // suffix that the value formatter re-attaches, so the label drops it.
+  function aircraftFieldLabel(key: string): string {
+    return key
+      .replace(/_(sec|kt|ft|deg|nm|fpm)$/, "")
+      .replace(/_/g, " ");
   }
 
   // Render one ADS-B field value for the hover tooltip. Floats come off the
@@ -2144,6 +2185,165 @@
     }
     if (typeof v === "boolean") return v ? "yes" : "no";
     return String(v);
+  }
+
+  // Unit suffix implied by the field name, re-attached to the value in the
+  // detail grid now that the label has dropped it.
+  const AIRCRAFT_FIELD_UNITS: Record<string, string> = {
+    sec: "s",
+    kt: " kt",
+    ft: " ft",
+    deg: "°",
+    nm: " nm",
+    fpm: " fpm",
+  };
+  function formatAircraftDetail(key: string, v: any): string {
+    const m = key.match(/_(sec|kt|ft|deg|nm|fpm)$/);
+    const unit = m ? AIRCRAFT_FIELD_UNITS[m[1]] : "";
+    return `${formatAircraftValue(v)}${unit}`;
+  }
+
+  // Small DOM helper — textContent only, never innerHTML: callsigns and
+  // airport names come off the air and are not ours to trust as markup.
+  function el(cls: string, text?: string): HTMLElement {
+    const node = document.createElement("div");
+    node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  // Build the hover card for one aircraft: identity header, route strip,
+  // headline stats, then whatever fields are left over.
+  function buildAircraftCard(reading: Record<string, any>): HTMLElement[] {
+    const str = (v: any) => (typeof v === "string" ? v.trim() : "");
+    const out: HTMLElement[] = [];
+    const route = reading.route as Record<string, any> | undefined;
+    const onGround = reading.on_ground === true;
+
+    // --- header: callsign (or registration, or the raw hex) + status badge
+    const callsign = str(reading.callsign);
+    const registration = str(reading.registration);
+    const title = callsign || registration || str(reading.hex) || "unknown";
+    const header = el("ac-header");
+    const titleWrap = el("ac-title-wrap");
+    titleWrap.appendChild(el("ac-title", title));
+    // The secondary line carries whichever identifiers the title didn't use,
+    // so the ICAO hex stays reachable without crowding the headline.
+    const sub = [
+      callsign && registration ? registration : "",
+      str(route?.airline),
+      callsign || registration ? str(reading.hex) : "",
+    ].filter(Boolean);
+    if (sub.length) titleWrap.appendChild(el("ac-subtitle", sub.join(" · ")));
+    header.appendChild(titleWrap);
+    header.appendChild(
+      el(
+        onGround ? "ac-badge ac-badge-ground" : "ac-badge ac-badge-air",
+        onGround ? "on ground" : "airborne"
+      )
+    );
+    out.push(header);
+
+    // --- route strip: ORIGIN ✈ DESTINATION, with city/airport underneath
+    const origin = routeEndpoint(route, "origin");
+    const dest = routeEndpoint(route, "destination");
+    if (origin || dest) {
+      const strip = el("ac-route");
+      const endpoint = (
+        e: { code: string; name: string } | null,
+        align: string
+      ) => {
+        const wrap = el(`ac-route-end ${align}`);
+        wrap.appendChild(el("ac-route-code", e ? e.code : "—"));
+        if (e?.name) wrap.appendChild(el("ac-route-name", e.name));
+        return wrap;
+      };
+      strip.appendChild(endpoint(origin, "ac-left"));
+      strip.appendChild(el("ac-route-arrow", "✈"));
+      strip.appendChild(endpoint(dest, "ac-right"));
+      out.push(strip);
+    }
+
+    // --- headline stats: only the ones actually reported get a cell
+    const alt = firstPresent(reading, AIRCRAFT_ALT_FIELDS);
+    const vrate = firstPresent(reading, AIRCRAFT_VRATE_FIELDS);
+    const stats: [string, string][] = [];
+    if (alt && typeof alt[1] === "number") {
+      // Feet read better with a thousands separator at cruise altitude.
+      stats.push(["alt", `${Math.round(alt[1]).toLocaleString()} ft`]);
+    }
+    if (typeof reading.ground_speed_kt === "number") {
+      stats.push(["speed", `${Math.round(reading.ground_speed_kt)} kt`]);
+    }
+    if (typeof reading.track_deg === "number") {
+      stats.push(["track", `${Math.round(reading.track_deg)}°`]);
+    }
+    if (vrate && typeof vrate[1] === "number" && Math.round(vrate[1]) !== 0) {
+      const fpm = Math.round(vrate[1]);
+      stats.push(["v/s", `${fpm > 0 ? "▲" : "▼"} ${Math.abs(fpm)} fpm`]);
+    }
+    if (stats.length) {
+      const grid = el("ac-stats");
+      for (const [label, value] of stats) {
+        const cell = el("ac-stat");
+        cell.appendChild(el("ac-stat-label", label));
+        cell.appendChild(el("ac-stat-value", value));
+        grid.appendChild(cell);
+      }
+      out.push(grid);
+    }
+
+    // --- everything else the module supplied, so nothing is silently lost
+    const details = aircraftDetailRows(reading);
+    if (details.length) {
+      const grid = el("ac-details");
+      for (const [k, v] of details) {
+        grid.appendChild(el("ac-detail-key", aircraftFieldLabel(k)));
+        grid.appendChild(el("ac-detail-value", formatAircraftDetail(k, v)));
+      }
+      out.push(grid);
+    }
+
+    return out;
+  }
+
+  // Re-anchor a hover overlay so it stays inside the map viewport. OL's
+  // `positioning` names the corner of the *element* pinned to the coordinate,
+  // so "bottom-center" grows up, "top-center" grows down, "…-left" grows
+  // right. Default is up-and-centred; each axis flips only when that side
+  // has no room.
+  const TOOLTIP_GAP = 18;
+  function placeTooltipInView(
+    overlay: Overlay,
+    element: HTMLElement | null,
+    coord: number[]
+  ) {
+    if (!element || !mapGlobal.map) return;
+    const pixel = mapGlobal.map.getPixelFromCoordinate(coord);
+    const size = mapGlobal.map.getSize();
+    if (!pixel || !size) return;
+    const w = element.offsetWidth;
+    const h = element.offsetHeight;
+
+    let vertical = "bottom";
+    let dy = -TOOLTIP_GAP;
+    if (pixel[1] - h - TOOLTIP_GAP < 0) {
+      vertical = "top";
+      dy = TOOLTIP_GAP;
+    }
+
+    let horizontal = "center";
+    let dx = 0;
+    if (pixel[0] - w / 2 < 0) {
+      horizontal = "left";
+      dx = 8;
+    } else if (pixel[0] + w / 2 > size[0]) {
+      horizontal = "right";
+      dx = -8;
+    }
+
+    overlay.setPositioning(`${vertical}-${horizontal}` as any);
+    overlay.setOffset([dx, dy]);
   }
 
   // Airplane marker, cached per colour. Drawn nose-up (north) so an OL
@@ -4483,22 +4683,18 @@
           if (!reading) return;
           aircraftFound = true;
           if (aircraftTooltipElement) {
-            // textContent per row, not innerHTML — callsigns come off the
-            // air and are not ours to trust as markup.
-            aircraftTooltipElement.replaceChildren(
-              ...aircraftTooltipRows(reading).map(([k, v]) => {
-                const row = document.createElement("div");
-                row.textContent = `${k}: ${formatAircraftValue(v)}`;
-                return row;
-              })
-            );
+            aircraftTooltipElement.replaceChildren(...buildAircraftCard(reading));
           }
           const geom = (feature as Feature).getGeometry();
-          if (geom && geom.getType() === "Point") {
-            aircraftTooltipOverlay.setPosition((geom as Point).getCoordinates());
-          } else {
-            aircraftTooltipOverlay.setPosition(evt.coordinate);
-          }
+          const coord =
+            geom && geom.getType() === "Point"
+              ? (geom as Point).getCoordinates()
+              : evt.coordinate;
+          aircraftTooltipOverlay.setPosition(coord);
+          // The card is much taller and wider than the old text blob, so a
+          // plane near an edge would push it off-screen. Anchor it to
+          // whichever corner keeps it inside the viewport.
+          placeTooltipInView(aircraftTooltipOverlay, aircraftTooltipElement, coord);
         },
         { hitTolerance: 3 }
       );
@@ -6203,24 +6399,148 @@
   }
 
   .aircraft-tooltip {
-    background: rgba(0, 0, 0, 0.85);
-    color: white;
-    padding: 6px 10px;
-    border: 1px solid #d97706;
-    border-radius: 4px;
+    background: rgba(12, 16, 22, 0.94);
+    color: #e5e7eb;
+    padding: 0;
+    border: 1px solid rgba(217, 119, 6, 0.7);
+    border-radius: 8px;
     font-size: 12px;
-    line-height: 1.4;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    line-height: 1.35;
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      sans-serif;
     /* Airport names run long ("General Edward Lawrence Logan International
        Airport"), so unlike the AIS tooltip this one wraps inside a cap
        rather than stretching a single line across the chart. */
-    max-width: 22rem;
+    width: max-content;
+    max-width: 20rem;
     overflow-wrap: anywhere;
     pointer-events: none;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
   }
   .aircraft-tooltip:empty {
     display: none;
+  }
+
+  /* header */
+  .aircraft-tooltip :global(.ac-header) {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 10px;
+    background: linear-gradient(
+      to bottom,
+      rgba(217, 119, 6, 0.22),
+      rgba(217, 119, 6, 0.06)
+    );
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .aircraft-tooltip :global(.ac-title-wrap) {
+    min-width: 0;
+  }
+  .aircraft-tooltip :global(.ac-title) {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #fff;
+  }
+  .aircraft-tooltip :global(.ac-subtitle) {
+    font-size: 10.5px;
+    color: #9ca3af;
+    margin-top: 1px;
+  }
+  .aircraft-tooltip :global(.ac-badge) {
+    margin-left: auto;
+    flex: none;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .aircraft-tooltip :global(.ac-badge-air) {
+    background: rgba(217, 119, 6, 0.25);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.45);
+  }
+  .aircraft-tooltip :global(.ac-badge-ground) {
+    background: rgba(107, 114, 128, 0.25);
+    color: #d1d5db;
+    border: 1px solid rgba(209, 213, 219, 0.35);
+  }
+
+  /* origin → destination strip */
+  .aircraft-tooltip :global(.ac-route) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .aircraft-tooltip :global(.ac-route-end) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .aircraft-tooltip :global(.ac-right) {
+    text-align: right;
+  }
+  .aircraft-tooltip :global(.ac-route-code) {
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.05em;
+  }
+  .aircraft-tooltip :global(.ac-route-name) {
+    font-size: 10px;
+    color: #9ca3af;
+  }
+  .aircraft-tooltip :global(.ac-route-arrow) {
+    flex: none;
+    color: #d97706;
+    font-size: 13px;
+  }
+
+  /* headline stats */
+  .aircraft-tooltip :global(.ac-stats) {
+    display: flex;
+    padding: 7px 10px;
+    gap: 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .aircraft-tooltip :global(.ac-stat-label) {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #6b7280;
+  }
+  .aircraft-tooltip :global(.ac-stat-value) {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #f3f4f6;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* leftover fields */
+  .aircraft-tooltip :global(.ac-details) {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 1px 10px;
+    padding: 7px 10px;
+    font-size: 10.5px;
+  }
+  .aircraft-tooltip :global(.ac-detail-key) {
+    color: #6b7280;
+  }
+  .aircraft-tooltip :global(.ac-detail-value) {
+    color: #d1d5db;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .navaid-tooltip {
