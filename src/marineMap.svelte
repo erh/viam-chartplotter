@@ -2087,9 +2087,26 @@
     }
   }
 
-  // Fields omitted from the hover tooltip. `messages` is a decoder-internal
-  // counter, and `hex` is the ICAO address the feature is already keyed by.
-  const AIRCRAFT_TOOLTIP_SKIP_FIELDS = new Set(["messages", "hex"]);
+  // `messages` is a decoder-internal counter and never worth showing.
+  const AIRCRAFT_TOOLTIP_SKIP_FIELDS = new Set(["messages"]);
+
+  // Fields that identify the aircraft in human terms. `hex` (the raw ICAO
+  // address) is redundant when one of these is present, but it's the only
+  // field the module always emits — an aircraft heard before it transmits
+  // its identity has nothing else to go by — so it's kept as the fallback.
+  const AIRCRAFT_IDENTITY_FIELDS = ["callsign", "registration"];
+
+  // Sorted key/value pairs for one aircraft's hover tooltip.
+  function aircraftTooltipRows(reading: Record<string, any>): [string, any][] {
+    const hasIdentity = AIRCRAFT_IDENTITY_FIELDS.some((f) => {
+      const v = reading[f];
+      return typeof v === "string" ? v.trim() !== "" : v != null;
+    });
+    return Object.entries(reading)
+      .filter(([k]) => !AIRCRAFT_TOOLTIP_SKIP_FIELDS.has(k))
+      .filter(([k]) => k !== "hex" || !hasIdentity)
+      .sort(([a], [b]) => a.localeCompare(b));
+  }
 
   // Render one ADS-B field value for the hover tooltip. Floats come off the
   // decoder with full precision (last_seen_sec, range_nm, lat/lon), which is
@@ -4443,14 +4460,11 @@
             // textContent per row, not innerHTML — callsigns come off the
             // air and are not ours to trust as markup.
             aircraftTooltipElement.replaceChildren(
-              ...Object.entries(reading)
-                .filter(([k]) => !AIRCRAFT_TOOLTIP_SKIP_FIELDS.has(k))
-                .sort(([a], [b]) => a.localeCompare(b))
-                .map(([k, v]) => {
-                  const row = document.createElement("div");
-                  row.textContent = `${k}: ${formatAircraftValue(v)}`;
-                  return row;
-                })
+              ...aircraftTooltipRows(reading).map(([k, v]) => {
+                const row = document.createElement("div");
+                row.textContent = `${k}: ${formatAircraftValue(v)}`;
+                return row;
+              })
             );
           }
           const geom = (feature as Feature).getGeometry();
