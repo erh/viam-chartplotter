@@ -254,6 +254,7 @@
   const COOKIE_LAYERS = "mapLayers";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_AIS_PROJECTION_MIN = "mapAisProjectionMin";
+  const COOKIE_AIRCRAFT_PROJECTION_MIN = "mapAircraftProjectionMin";
   const COOKIE_BOAT_POSITION = "mapBoatPosition";
   const COOKIE_AUTO_ZOOM = "mapAutoZoom";
   const COOKIE_VIEW_ZOOM = "mapViewZoom";
@@ -297,6 +298,9 @@
 
   const HEADING_LINE_LENGTH_OPTIONS = [1, 2, 3, 5, 10, 15];
   const AIS_PROJECTION_OPTIONS = [1, 2, 5, 10];
+  // Shorter than the AIS set: airliners cover ~15 nm in 2 minutes, so the
+  // long end of the vessel scale would throw the line clean off the chart.
+  const AIRCRAFT_PROJECTION_OPTIONS = [1, 2, 5];
 
   // Cache-busting tile version. Appended as a `v=` query param on every tile
   // URL. Default is the build-time git short hash (injected by Vite via the
@@ -364,6 +368,19 @@
     // Force the AIS layer to redraw so the new projection length takes
     // effect immediately. OL caches feature renders until told otherwise.
     mapGlobal.aisLayer?.changed();
+  }
+
+  function loadAircraftProjectionMin(): number {
+    var raw = getCookie(COOKIE_AIRCRAFT_PROJECTION_MIN);
+    var parsed = raw ? Number(raw) : NaN;
+    return AIRCRAFT_PROJECTION_OPTIONS.includes(parsed) ? parsed : 2;
+  }
+  let aircraftProjectionMinutes = $state(loadAircraftProjectionMin());
+
+  function setAircraftProjectionMinutes(min: number) {
+    aircraftProjectionMinutes = min;
+    setCookie(COOKIE_AIRCRAFT_PROJECTION_MIN, String(min), COOKIE_OPTS);
+    mapGlobal.aircraftLayer?.changed();
   }
 
   function loadSavedLayerStates(): Record<string, boolean> {
@@ -679,6 +696,8 @@
     onBoatPopupOpen,
     detectionConfig,
     airstreamConfigured = false,
+    aircraft = [],
+    adsbConfigured = false,
     onAirstreamBboxChange,
     sog,
     hdg,
@@ -689,6 +708,14 @@
     myBoat?: BoatInfo;
     zoomModifier?: number;
     boats?: BoatInfo[];
+    /** Raw per-aircraft readings from an `adsb` sensor. Fields are sparse —
+     *  only hex/messages/last_seen_sec/seen_for_sec are guaranteed — so the
+     *  hover detail renders whatever keys are present. Entries without
+     *  latitude/longitude can't be placed and are skipped on the map. */
+    aircraft?: Record<string, any>[];
+    /** True when an `adsb` sensor is configured. Gates whether the
+     *  "aircraft" row is shown in the layers panel. */
+    adsbConfigured?: boolean;
     positionHistorical?: PositionPoint[];
     depthColorTrack?: boolean;
     /** True when a depth sensor is configured. Gates whether the
@@ -793,6 +820,9 @@
   let myBoatKey = $derived(
     myBoat ? JSON.stringify([myBoat.heading, myBoat.location, myBoat.speed, myBoat.route]) : null
   );
+  // Whole-payload key: aircraft readings are small and every field is shown
+  // in the hover detail, so any change to any field is a redraw.
+  let aircraftKey = $derived(JSON.stringify(aircraft ?? []));
   let navWaypointsKey = $derived(JSON.stringify(navWaypoints ?? []));
   let visibleBoatsKey = $derived(JSON.stringify([...visibleBoats]));
   let effectiveVisibleKey = $derived(JSON.stringify([...effectiveVisibleBoats]));
@@ -803,6 +833,7 @@
     const _myBoat = myBoatKey;
     const _visible = visibleBoatsKey;
     const _wps = navWaypointsKey;
+    const _aircraft = aircraftKey;
     updateFromData();
   });
 
@@ -1015,6 +1046,10 @@
     void states.find((s) => s.name === "ais-projection")?.on;
     mapGlobal.aisLayer?.changed();
 
+    // Same for the aircraft projection line — also a virtual layer.
+    void states.find((s) => s.name === "aircraft-projection")?.on;
+    mapGlobal.aircraftLayer?.changed();
+
     // Surface "do we need AIS history?" to the parent so it can stop
     // polling all_history when the user has the track layer turned
     // off. Both parents must be on — toggling the umbrella "ais" off
@@ -1037,6 +1072,7 @@
     view: null as View | null,
 
     aisFeatures: new Collection<Feature<Geometry>>(),
+    aircraftFeatures: new Collection<Feature<Geometry>>(),
     trackFeatures: new Collection<Feature<Geometry>>(),
     aisTrackFeatures: new Collection<Feature<Geometry>>(),
     routeFeatures: new Collection<Feature<Geometry>>(),
@@ -1049,6 +1085,7 @@
     // Track layer references for refreshing styles
     trackLayer: null as Vector<any> | null,
     aisLayer: null as Vector<any> | null,
+    aircraftLayer: null as Vector<any> | null,
     aisTrackLayer: null as Vector<any> | null,
     navaidLayer: null as Vector<any> | null,
     structureLayer: null as Vector<any> | null,
@@ -1288,6 +1325,8 @@
         }
       }
     }
+
+    updateAircraftFeatures();
 
     // Render historical tracks (clear and re-render when data changes to pick up depth)
     if (positionHistorical) {
@@ -1988,6 +2027,160 @@
         angle: 0,
       }),
     });
+  }
+
+  // Reconcile the aircraft layer against the latest ADS-B readings, keyed by
+  // ICAO hex. Same in-place mutate/prune shape as the AIS block above: move
+  // existing features rather than rebuilding the Collection, so OL isn't
+  // re-rendering every marker from scratch on each 10 s poll.
+  function updateAircraftFeatures() {
+    const list = aircraft ?? [];
+    const seen: Record<string, boolean> = {};
+
+    list.forEach((ac) => {
+      const hex = ac?.hex;
+      if (!hex) return;
+      // Position is optional in the readings — an aircraft heard but not yet
+      // located has no lat/lon. Skipping keeps it off the map entirely
+      // rather than dropping it at null island.
+      const lat = Number(ac.latitude);
+      const lon = Number(ac.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      seen[hex] = true;
+      const pos = [lon, lat];
+
+      for (var i = 0; i < mapGlobal.aircraftFeatures.getLength(); i++) {
+        var v = mapGlobal.aircraftFeatures.item(i) as Feature<Geometry>;
+        if (v.get("hex") == hex) {
+          v.setGeometry(new Point(pos));
+          v.set("track_deg", ac.track_deg);
+          v.set("ground_speed_kt", ac.ground_speed_kt);
+          v.set("on_ground", ac.on_ground);
+          v.set("reading", ac);
+          return;
+        }
+      }
+
+      mapGlobal.aircraftFeatures.push(
+        new Feature({
+          type: "aircraft",
+          hex,
+          track_deg: ac.track_deg,
+          ground_speed_kt: ac.ground_speed_kt,
+          on_ground: ac.on_ground,
+          // The whole reading rides along so the hover tooltip can render
+          // every field the module actually supplied.
+          reading: ac,
+          geometry: new Point(pos),
+        })
+      );
+    });
+
+    // Reverse iteration: removeAt() shifts later items down, so a forward
+    // loop would skip whichever aircraft took a removed slot.
+    for (var i = mapGlobal.aircraftFeatures.getLength() - 1; i >= 0; i--) {
+      var v = mapGlobal.aircraftFeatures.item(i) as Feature<Geometry>;
+      if (!seen[v.get("hex") as string]) {
+        mapGlobal.aircraftFeatures.removeAt(i);
+      }
+    }
+  }
+
+  // Render one ADS-B field value for the hover tooltip. Floats come off the
+  // decoder with full precision (last_seen_sec, range_nm, lat/lon), which is
+  // unreadable in a tooltip; integers and strings pass through as-is.
+  function formatAircraftValue(v: any): string {
+    if (v == null) return "";
+    if (typeof v === "number") {
+      return Number.isInteger(v) ? String(v) : v.toFixed(2);
+    }
+    if (typeof v === "boolean") return v ? "yes" : "no";
+    return String(v);
+  }
+
+  // Airplane marker, cached per colour. Drawn nose-up (north) so an OL
+  // `rotation` of track_deg in radians points it along the ground track.
+  //
+  // The chart background is unpredictable — white ocean, buff land, red
+  // hazard lines, dark satellite — so a single outline colour always loses
+  // somewhere. The icon is stroked three times, widest first: a dark halo
+  // that carries it on light/saturated ground, a white ring inside that for
+  // dark ground, then the fill. Whatever the background, one of the two
+  // rings is high-contrast against it.
+  const airplaneSrcCache: Record<string, string> = {};
+  function airplaneSrc(color: string): string {
+    if (airplaneSrcCache[color]) return airplaneSrcCache[color];
+    const d =
+      `M12 2 L13.4 9.2 L22 13.4 L22 15.4 L13.4 13.2 L13.4 19 L16 20.8 ` +
+      `L16 22 L12 21 L8 22 L8 20.8 L10.6 19 L10.6 13.2 L2 15.4 L2 13.4 L10.6 9.2 Z`;
+    // viewBox is padded past the 2..22 path extents so the widest stroke
+    // isn't clipped; width/height match the viewBox so the plane keeps its
+    // on-screen size.
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3 -3 30 30" width="30" height="30">` +
+      `<path d="${d}" fill="none" stroke="#101418" stroke-width="4.2" ` +
+      `stroke-linejoin="round" stroke-opacity="0.85"/>` +
+      `<path d="${d}" fill="none" stroke="#ffffff" stroke-width="2.2" ` +
+      `stroke-linejoin="round"/>` +
+      `<path d="${d}" fill="${color}" stroke="none"/></svg>`;
+    const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+    airplaneSrcCache[color] = src;
+    return src;
+  }
+
+  function aircraftStyleFunction(feature: Feature<Geometry>): Style[] {
+    const track = feature.get("track_deg") as number | null | undefined;
+    const onGround = feature.get("on_ground") === true;
+    // Grounded traffic is dimmed so airborne contacts stand out — but not
+    // as far as a light grey, which washes out inside the white ring.
+    const color = onGround ? "#6b7280" : "#d97706";
+    const styles = [
+      new Style({
+        image: new Icon({
+          src: airplaneSrc(color),
+          // Unknown track: leave it nose-up rather than inventing a heading.
+          rotation: Number.isFinite(track as number) ? ((track as number) * Math.PI) / 180 : 0,
+          rotateWithView: true,
+        }),
+      }),
+    ];
+
+    // Where this aircraft will be in N minutes at its current track and
+    // ground speed. Mirrors the AIS projection line. Skipped for anything
+    // on the ground or effectively stationary — a taxiing jet's track is
+    // noise, and a zero-length line is just a smudge under the icon.
+    const speed = feature.get("ground_speed_kt") as number | null | undefined;
+    if (
+      !onGround &&
+      track != null &&
+      Number.isFinite(track) &&
+      speed != null &&
+      Number.isFinite(speed) &&
+      speed > 40
+    ) {
+      const projOption = mapGlobal.layerOptions.find((l) => l.name === "aircraft-projection");
+      if (projOption?.on) {
+        const geom = feature.getGeometry();
+        if (geom && geom.getType() === "Point") {
+          const start = (geom as Point).getCoordinates();
+          const distMeters = speed * 1852 * (aircraftProjectionMinutes / 60);
+          const tip = sphereOffset(start, distMeters, (track * Math.PI) / 180);
+          styles.push(
+            new Style({
+              geometry: new LineString([start, tip]),
+              stroke: new Stroke({
+                color: "#d97706",
+                width: 2,
+                lineDash: [4, 4],
+              }),
+            })
+          );
+        }
+      }
+    }
+
+    return styles;
   }
 
   // Cache SVG data URLs keyed by length-scale bucket — Icon construction is
@@ -3463,6 +3656,38 @@
       parent: "ais",
     });
 
+    // Aircraft (ADS-B). Registered unconditionally because setupLayers runs
+    // at mount, before resource discovery has resolved — the panel rows are
+    // hidden instead when no adsb sensor is configured (see the layers
+    // panel), matching how airstream is handled.
+    //
+    // Registered *after* the whole ais group: the panel renders in
+    // layerOptions order, so slotting this between "ais" and its children
+    // would strand ais-track/ais-projection under the aircraft row.
+    var aircraftLayer = new Vector({
+      source: new VectorSource({
+        features: mapGlobal.aircraftFeatures,
+      }),
+      style: aircraftStyleFunction,
+      zIndex: 101,
+    });
+    mapGlobal.aircraftLayer = aircraftLayer;
+
+    mapGlobal.layerOptions.push({
+      name: "aircraft",
+      on: true,
+      layer: aircraftLayer,
+    });
+
+    // Same virtual-sub-layer trick as ais-projection: no OL layer, the line
+    // is drawn inline by aircraftStyleFunction and this toggle gates it.
+    mapGlobal.layerOptions.push({
+      name: "aircraft-projection",
+      displayName: "projection line",
+      on: true,
+      parent: "aircraft",
+    });
+
     // Airstream toggle layer. Always registered (resource discovery is
     // async and setupLayers only runs once at mount, so we can't gate
     // registration on airstreamConfigured being true at this moment).
@@ -3900,6 +4125,16 @@
     });
     mapGlobal.map.addOverlay(aisTooltipOverlay);
 
+    // Aircraft hover tooltip — dumps every field present in the ADS-B
+    // reading, since which fields exist varies per aircraft.
+    const aircraftTooltipElement = document.getElementById("aircraft-tooltip");
+    const aircraftTooltipOverlay = new Overlay({
+      element: aircraftTooltipElement || undefined,
+      positioning: "bottom-center",
+      offset: [0, -18],
+    });
+    mapGlobal.map.addOverlay(aircraftTooltipOverlay);
+
     // Active-route ETA tooltip — hovering the nav route line shows the
     // distance + ETA from the boat to that point along the route.
     const routeEtaTooltipElement = document.getElementById("route-eta-tooltip");
@@ -4187,6 +4422,42 @@
       );
       if (!aisFound) {
         aisTooltipOverlay.setPosition(undefined);
+      }
+
+      // Aircraft hover tooltip — every key/value the module gave us for
+      // this contact, in the module's own field order.
+      let aircraftFound = false;
+      mapGlobal.map!.forEachFeatureAtPixel(
+        evt.pixel,
+        (feature) => {
+          if (aircraftFound) return;
+          if (feature.get("type") !== "aircraft") return;
+          const reading = feature.get("reading") as Record<string, any> | undefined;
+          if (!reading) return;
+          aircraftFound = true;
+          if (aircraftTooltipElement) {
+            // textContent per row, not innerHTML — callsigns come off the
+            // air and are not ours to trust as markup.
+            aircraftTooltipElement.replaceChildren(
+              ...Object.entries(reading).map(([k, v]) => {
+                const row = document.createElement("div");
+                row.textContent = `${k}: ${formatAircraftValue(v)}`;
+                return row;
+              })
+            );
+          }
+          const geom = (feature as Feature).getGeometry();
+          if (geom && geom.getType() === "Point") {
+            aircraftTooltipOverlay.setPosition((geom as Point).getCoordinates());
+          } else {
+            aircraftTooltipOverlay.setPosition(evt.coordinate);
+          }
+        },
+        { hitTolerance: 3 }
+      );
+      if (!aircraftFound) {
+        if (aircraftTooltipElement) aircraftTooltipElement.replaceChildren();
+        aircraftTooltipOverlay.setPosition(undefined);
       }
 
       // My-boat track-time tooltip: if the cursor is on a segment of the
@@ -5034,6 +5305,9 @@
   <!-- AIS flag/country hover tooltip -->
   <div id="ais-tooltip" class="ais-tooltip"></div>
 
+  <!-- ADS-B aircraft hover tooltip: full reading, one field per row -->
+  <div id="aircraft-tooltip" class="aircraft-tooltip"></div>
+
   <!-- Tile-URL popup: shown when "Tile URL" mode is on and the user clicks
        the map. Plain absolutely-positioned div in the centre top, simple
        CSS — no OL overlay needed since the content isn't bound to a coord. -->
@@ -5084,7 +5358,9 @@
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {@const isHidden =
+        (l.name === "airstream" && !airstreamConfigured) ||
+        (l.name.startsWith("aircraft") && !adsbConfigured)}
       {@const isBaseLayer = BASE_LAYER_NAMES.includes(l.name)}
       {#if !isHidden && isBaseLayerGroup(l)}
         <label class:child-layer={l.parent} class:disabled={isParentOff}>
@@ -5121,7 +5397,9 @@
         ? mapGlobal.layerOptions.find((p) => p.name === l.parent)
         : null}
       {@const isParentOff = parentLayer && !parentLayer.on}
-      {@const isHidden = l.name === "airstream" && !airstreamConfigured}
+      {@const isHidden =
+        (l.name === "airstream" && !airstreamConfigured) ||
+        (l.name.startsWith("aircraft") && !adsbConfigured)}
       {#if !isHidden && !isBaseLayerGroup(l)}
         {#if l.name === "weather"}
           <!-- Folder-style section header: no checkbox, just labels the
@@ -5160,6 +5438,19 @@
               >
                 {#each HEADING_LINE_LENGTH_OPTIONS as nm}
                   <option value={nm}>{nm} nm</option>
+                {/each}
+              </select>
+            {:else if l.name === "aircraft-projection"}
+              <select
+                class="heading-line-length"
+                value={aircraftProjectionMinutes}
+                onchange={(e) => setAircraftProjectionMinutes(Number(e.currentTarget.value))}
+                disabled={isParentOff || !l.on}
+                onclick={(e) => e.stopPropagation()}
+                aria-label="aircraft projection length in minutes"
+              >
+                {#each AIRCRAFT_PROJECTION_OPTIONS as min}
+                  <option value={min}>{min} min</option>
                 {/each}
               </select>
             {:else if l.name === "ais-projection"}
@@ -5861,6 +6152,23 @@
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
   .ais-tooltip:empty {
+    display: none;
+  }
+
+  .aircraft-tooltip {
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    padding: 6px 10px;
+    border: 1px solid #d97706;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  .aircraft-tooltip:empty {
     display: none;
   }
 

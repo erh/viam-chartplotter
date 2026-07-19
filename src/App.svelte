@@ -147,6 +147,12 @@
     // when this is false; per-vessel history is still fetched on
     // popup-open via onBoatPopupOpen regardless of layer state.
     aisTracksNeeded: false,
+    // Aircraft from an `adsb` sensor (erh:adsb:rtlsdr-adsb), refreshed
+    // every 10s. Each entry is the raw per-aircraft reading map — fields
+    // are sparse (only `hex`/`messages`/`last_seen_sec`/`seen_for_sec` are
+    // always present), so MarineMap renders the hover detail by iterating
+    // whatever keys are actually there rather than a fixed list.
+    aircraft: [] as Record<string, any>[],
     enlargedImage: null,
     shortGraphRange:
       typeof window !== "undefined" &&
@@ -177,6 +183,7 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    adsbSensorName: "",
     airstreamName: "",
     navServiceName: "",
     routeSensorName: "",
@@ -209,6 +216,10 @@
       return errorHandler(e, m);
     };
   }
+
+  // Last ADS-B error text, so a persistently unavailable decoder is
+  // reported once rather than every 10 s. Cleared on the next success.
+  var adsbLastError = "";
 
   function errorHandler(e, context) {
     globalData.statusLastError = new Date();
@@ -490,6 +501,30 @@
           }));
         });
       }
+    }
+
+    // ADS-B aircraft, every 10 s (offset from the AIS fetch so the two
+    // don't share a tick). The module returns an *error* rather than an
+    // empty list when the decoder is down, so a dead dongle is
+    // distinguishable from empty skies — but that would otherwise pin the
+    // status bar to an error on every tick while it starts up, so we only
+    // surface a message when it changes.
+    if (loopNumber % 10 == 4 && globalConfig.adsbSensorName != "") {
+      new VIAM.SensorClient(client, globalConfig.adsbSensorName)
+        .getReadings()
+        .then((raw) => {
+          adsbLastError = "";
+          const list = raw?.aircraft;
+          globalData.aircraft = Array.isArray(list) ? (list as Record<string, any>[]) : [];
+        })
+        .catch((e) => {
+          globalData.aircraft = [];
+          const s = e?.toString() ?? "";
+          if (s !== adsbLastError) {
+            adsbLastError = s;
+            errorHandler(e, "adsb");
+          }
+        });
     }
 
     // Poll all_history every 10 s, on the same cadence as the AIS
@@ -874,6 +909,12 @@
       "component",
       "sensor",
       /\bais$/
+    );
+    globalConfig.adsbSensorName = filterResourcesFirstMatchingName(
+      resources,
+      "component",
+      "sensor",
+      /\badsb$/
     );
     globalConfig.airstreamName = filterResourcesFirstMatchingName(
       resources,
@@ -2351,6 +2392,8 @@
       }}
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
+      aircraft={globalData.aircraft}
+      adsbConfigured={globalConfig.adsbSensorName !== ""}
       positionHistorical={globalData.posHistory}
       {onBoatPopupOpen}
       bind:aisTracksNeeded={globalData.aisTracksNeeded}
