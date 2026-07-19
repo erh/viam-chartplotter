@@ -2087,6 +2087,10 @@
     }
   }
 
+  // Fields omitted from the hover tooltip. `messages` is a decoder-internal
+  // counter, and `hex` is the ICAO address the feature is already keyed by.
+  const AIRCRAFT_TOOLTIP_SKIP_FIELDS = new Set(["messages", "hex"]);
+
   // Render one ADS-B field value for the hover tooltip. Floats come off the
   // decoder with full precision (last_seen_sec, range_nm, lat/lon), which is
   // unreadable in a tooltip; integers and strings pass through as-is.
@@ -4439,11 +4443,14 @@
             // textContent per row, not innerHTML — callsigns come off the
             // air and are not ours to trust as markup.
             aircraftTooltipElement.replaceChildren(
-              ...Object.entries(reading).map(([k, v]) => {
-                const row = document.createElement("div");
-                row.textContent = `${k}: ${formatAircraftValue(v)}`;
-                return row;
-              })
+              ...Object.entries(reading)
+                .filter(([k]) => !AIRCRAFT_TOOLTIP_SKIP_FIELDS.has(k))
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([k, v]) => {
+                  const row = document.createElement("div");
+                  row.textContent = `${k}: ${formatAircraftValue(v)}`;
+                  return row;
+                })
             );
           }
           const geom = (feature as Feature).getGeometry();
