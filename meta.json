@@ -19,6 +19,12 @@
     },
     {
       "api": "rdk:component:generic",
+      "model": "erh:viam-chartplotter:area",
+      "description": "A geographic region drawn on the chart: GeoJSON geometry or center + radius (optionally a bearing-limited wedge), with a display color and an optional recurring MM-DD date window.",
+      "markdown_link": "README.md#area"
+    },
+    {
+      "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:datasync",
       "description": "Keeps the shared MongoDB 'noaa' collection current by periodically refreshing the NOAA ENC catalog and ingesting every published cell worldwide. Run on one machine; the chartplotter/tileserver read charts from Mongo.",
       "markdown_link": "README.md#datasync"
