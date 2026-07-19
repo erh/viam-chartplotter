@@ -2096,16 +2096,42 @@
   // its identity has nothing else to go by — so it's kept as the fallback.
   const AIRCRAFT_IDENTITY_FIELDS = ["callsign", "registration"];
 
+  // `route` is a subdoc the module fills in from the callsign, carrying the
+  // airline plus both endpoints in several codings (iata/icao/name/
+  // municipality/lat/lon). Only these are worth tooltip space — the rest
+  // would double the popup for little gain. Each is still optional.
+  const AIRCRAFT_ROUTE_FIELDS = [
+    "airline",
+    "destination_iata",
+    "destination_name",
+    "origin_iata",
+    "origin_name",
+  ];
+
   // Sorted key/value pairs for one aircraft's hover tooltip.
   function aircraftTooltipRows(reading: Record<string, any>): [string, any][] {
     const hasIdentity = AIRCRAFT_IDENTITY_FIELDS.some((f) => {
       const v = reading[f];
       return typeof v === "string" ? v.trim() !== "" : v != null;
     });
-    return Object.entries(reading)
+
+    const rows = Object.entries(reading)
+      // `route` is rendered as flattened route.* rows below; left in place it
+      // would stringify to "[object Object]".
+      .filter(([k]) => k !== "route")
       .filter(([k]) => !AIRCRAFT_TOOLTIP_SKIP_FIELDS.has(k))
-      .filter(([k]) => k !== "hex" || !hasIdentity)
-      .sort(([a], [b]) => a.localeCompare(b));
+      .filter(([k]) => k !== "hex" || !hasIdentity);
+
+    const route = reading.route;
+    if (route && typeof route === "object") {
+      for (const f of AIRCRAFT_ROUTE_FIELDS) {
+        const v = route[f];
+        if (v == null || (typeof v === "string" && v.trim() === "")) continue;
+        rows.push([`route.${f}`, v]);
+      }
+    }
+
+    return rows.sort(([a], [b]) => a.localeCompare(b));
   }
 
   // Render one ADS-B field value for the hover tooltip. Floats come off the
@@ -6185,7 +6211,11 @@
     font-size: 12px;
     line-height: 1.4;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: nowrap;
+    /* Airport names run long ("General Edward Lawrence Logan International
+       Airport"), so unlike the AIS tooltip this one wraps inside a cap
+       rather than stretching a single line across the chart. */
+    max-width: 22rem;
+    overflow-wrap: anywhere;
     pointer-events: none;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
