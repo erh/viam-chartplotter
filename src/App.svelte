@@ -2498,8 +2498,15 @@
                    than a flat line near the chart's top. Pad ±0.5°F so
                    the line never touches the edges. -->
                 {@const stValues = Object.values(stData) as number[]}
-                {@const stMin = Math.floor(Math.min(...stValues) - 0.5)}
-                {@const stMax = Math.ceil(Math.max(...stValues) + 0.5)}
+                {@const stLo = Math.floor(Math.min(...stValues) - 0.5)}
+                {@const stHi = Math.ceil(Math.max(...stValues) + 0.5)}
+                <!-- Enforce a minimum 10° vertical range so a nearly-flat
+                   temperature trace isn't exaggerated by autoscaling. When
+                   the data span is under 10°, center a 10° window on its
+                   midpoint. -->
+                {@const stMid = (stLo + stHi) / 2}
+                {@const stMin = stHi - stLo < 10 ? stMid - 5 : stLo}
+                {@const stMax = stHi - stLo < 10 ? stMid + 5 : stHi}
                 {@const stViewWidth = Math.max(100, Object.keys(stData).length * 4 + 4)}
                 <div class="relative mt-1">
                   <div
