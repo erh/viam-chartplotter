@@ -2064,6 +2064,11 @@
     var byType = {};
     for (var k of Object.keys(gauges)) {
       var v = gauges[k];
+      // Skip sensors that match the fuel/freshwater name filter but aren't
+      // tank-level readings (e.g. "freshwater-relay"). Tank rows read
+      // value.Level/value.Capacity and call .toFixed on them, so a relay
+      // whose readings lack a numeric Level would throw and blank the app.
+      if (!v || typeof v.Level !== "number") continue;
       var type = (v && v.Type) || "Other";
       if (!byType[type]) byType[type] = { items: [] };
       if (/-all$/i.test(k)) {
