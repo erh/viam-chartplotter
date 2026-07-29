@@ -481,12 +481,24 @@ func (h *ENCHandlers) handleTile(w http.ResponseWriter, r *http.Request) {
 	// coords even after a later prefetch fills in the cells. Re-rendering an
 	// empty tile is cheap, so it's safe to skip caching them.
 	const minCacheableTileBytes = 1024
-	if h.tileCache != nil && len(pngBytes) >= minCacheableTileBytes {
+	empty := len(pngBytes) < minCacheableTileBytes
+	if h.tileCache != nil && !empty {
 		if err := h.tileCache.Put(cacheKey, bucket, z, x, y, pngBytes); err != nil {
 			// Cache write failures shouldn't fail the request; the next render
 			// will just have to redo the work.
 			_ = err
 		}
+	}
+	if empty {
+		// Don't let the CDN (or the browser) pin an empty tile either — same
+		// reasoning as skipping our own cache above. Without this, an
+		// upstream cache holds the transparent PNG for tileMaxAge even after
+		// a later prefetch fills the cells, so the coords stay blank for a
+		// day. no-store keeps the render authoritative on every request.
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(pngBytes)
+		return
 	}
 	setTileCacheHeaders(w, etag)
 	_, _ = w.Write(pngBytes)

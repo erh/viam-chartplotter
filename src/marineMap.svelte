@@ -3481,8 +3481,6 @@
       // live WMS layer. navaids=0 strips buoys/beacons/lights/daymarks from
       // the tile PNG — those render in the noaa-navaids OL vector layer
       // below so they can be interactive (hover for metadata).
-      // landfill=0 drops LNDARE/BUAARE/BUISGL fills so the osm-detail
-      // tile layer (zIndex 4) shows through where the chart says "land".
       // Vector layer of structure features (bridges, overhead cables,
       // overhead pipes, conveyors). Same pattern as navaids: GeoJSON
       // loaded per visible bbox; hover popup formats clearance + name.
@@ -3535,11 +3533,13 @@
       // let the vector layer be the sole renderer.
       const VECTOR_TILE_STRUCTURE_MIN_Z = 14;
 
-      // Overview (z < navaidMin): ECDIS style, landfill off — everything
-      // baked into the tile so the chart reads at coastal scale.
+      // Overview (z < navaidMin): ECDIS style — everything baked into the
+      // tile so the chart reads at coastal scale. (We no longer pass
+      // landfill=0: the server composites OSM into the tile and forces ENC
+      // land fill on in the merge, so the flag is a no-op that only forks
+      // the tile cache into a redundant -noland shard.)
       const overviewParams = new URLSearchParams(sharedParams);
       overviewParams.set("style", "ecdis");
-      overviewParams.set("landfill", "0");
 
       // Mid (navaidMin <= z < structureMin): navaids handled by the
       // vector layer; bridges/cables still baked into the tile so
@@ -3548,7 +3548,6 @@
       const midParams = new URLSearchParams(sharedParams);
       midParams.set("style", "wms");
       midParams.set("navaids", "0");
-      midParams.set("landfill", "0");
 
       // Detail (z >= structureMin): both vector layers active; tile
       // skips both classes so the on-screen feature is exactly one
