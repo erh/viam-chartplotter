@@ -2517,12 +2517,32 @@
     const w = baseW;
     const h = baseH * lengthScale;
     const inset = sw / 2;
-    const points = `${w / 2},${inset} ` + `${w - inset},${h - inset} ` + `${inset},${h - inset}`;
+    const cx = w / 2;
+    // Hull outline: pointed bow flaring out to the beam, straight sides
+    // aft, flat transom. White stroke + translucent fill keeps it legible
+    // over both water and land tints.
+    const d =
+      `M ${cx},${inset} ` +
+      `Q ${w - inset},${h * 0.32} ${w - inset},${h * 0.62} ` +
+      `L ${w - inset},${h - inset} ` +
+      `L ${inset},${h - inset} ` +
+      `L ${inset},${h * 0.62} ` +
+      `Q ${inset},${h * 0.32} ${cx},${inset} Z`;
+    // Drop shadow keeps the white outline visible over light chart areas.
+    // Symmetric padding gives the blur room without clipping and keeps the
+    // icon's center anchor on the fix.
+    const pad = 3;
+    const tw = w + pad * 2;
+    const th = h + pad * 2;
     const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" ` +
-      `width="${w}" height="${h}">` +
-      `<polygon points="${points}" fill="none" stroke="#1e6fff" ` +
-      `stroke-width="${sw}" stroke-linejoin="round"/></svg>`;
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${tw} ${th}" ` +
+      `width="${tw}" height="${th}">` +
+      `<filter id="s" x="-50%" y="-50%" width="200%" height="200%">` +
+      `<feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#000" flood-opacity="0.5"/>` +
+      `</filter>` +
+      `<g transform="translate(${pad},${pad})">` +
+      `<path d="${d}" filter="url(#s)" fill="rgba(96,165,250,0.5)" stroke="#ffffff" ` +
+      `stroke-width="${sw}" stroke-linejoin="round"/></g></svg>`;
     const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
     aisTriangleSrcCache[key] = src;
     return src;
@@ -2541,7 +2561,7 @@
     const direction = heading != null && heading !== 0 ? heading : (cog ?? 0);
     const rotation = (direction * Math.PI) / 180;
 
-    // Triangle is always 2:1 (height:width) at the default vessel length;
+    // Icon is always 2:1 (height:width) at the default vessel length;
     // longer boats stretch the height further. Capped by myBoat's length
     // so no AIS target renders longer than the user's own boat.
     const lengthScale = dimScaleFactor(length, DEFAULT_BOAT_LENGTH_M);
