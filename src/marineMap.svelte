@@ -1154,6 +1154,10 @@
     // the last-10-minute window when realtime already has it covered,
     // while still painting historical wherever realtime has a gap.
     realtimeTrackTs: Record<string, number[]>;
+    // Per-AIS-boat live connector: one LineString from the newest history
+    // fix to the boat's current position, so the track reaches the icon
+    // between history refetches (history lags the live position).
+    aisConnectorFeatures: Record<string, Feature<LineString>>;
   } = {
     lastZoom: 0,
     lastCenter: null,
@@ -1164,6 +1168,7 @@
     lastPosHistoricalKey: "",
     aisHistoricalKeys: {},
     realtimeTrackTs: {},
+    aisConnectorFeatures: {},
   };
 
   // Realtime "wins" for the last realtimeWindowMs ms; historical paints
@@ -1399,8 +1404,16 @@
             clearHistoricalTrackFeatures(mmsi);
             delete mapInternalState.aisHistoricalKeys[mmsi];
           }
+          removeTrackConnector(mmsi);
           return;
         }
+
+        // Bridge the newest history fix to the live position — history is
+        // minute-aggregated and refetched on an interval, so without this
+        // the track ends visibly behind the moving icon. Runs every tick
+        // (unlike the memoized re-render below) because the live position
+        // changes far more often than the history does.
+        updateTrackConnector(mmsi, history[history.length - 1], boat.location);
 
         // Skip the re-walk when this boat's history is unchanged — any
         // boat moving re-runs updateFromData.
@@ -1420,6 +1433,11 @@
         if (!seenTrackBoats[mmsi]) {
           clearHistoricalTrackFeatures(mmsi);
           delete mapInternalState.aisHistoricalKeys[mmsi];
+        }
+      }
+      for (const mmsi of Object.keys(mapInternalState.aisConnectorFeatures)) {
+        if (!seenTrackBoats[mmsi]) {
+          removeTrackConnector(mmsi);
         }
       }
     }
@@ -2705,7 +2723,7 @@
       return new Style({
         stroke: new Stroke({
           color: color,
-          width: 2,
+          width: 1.5,
           lineDash: isGap ? [2, 6] : undefined,
         }),
       });
@@ -2726,6 +2744,42 @@
         features.removeAt(i);
       }
     }
+  }
+
+  // Live connector between a boat's newest history fix and its current
+  // position. One reused feature per boat — geometry is updated in place
+  // rather than re-created, since this runs on every update tick.
+  function updateTrackConnector(boatId: string, lastPoint: PositionPoint, location: [number, number]): void {
+    const [lat, lng] = location;
+    if (!isValidCoordinate(lat, lng)) return;
+    const coords = [
+      [lastPoint.lng, lastPoint.lat],
+      [lng, lat],
+    ];
+    // Same 10 NM rule as historical segments: a huge jump (stale history,
+    // bad fix) renders as a dashed gap instead of a bold straight line.
+    const isGap = calculateDistanceNM(lastPoint.lat, lastPoint.lng, lat, lng) >= 10;
+    const existing = mapInternalState.aisConnectorFeatures[boatId];
+    if (existing) {
+      existing.getGeometry()?.setCoordinates(coords);
+      existing.set("isGap", isGap);
+      return;
+    }
+    const f = new Feature({
+      type: "ais-track",
+      boatId: boatId,
+      geometry: new LineString(coords),
+      isGap: isGap,
+    });
+    mapInternalState.aisConnectorFeatures[boatId] = f;
+    mapGlobal.aisTrackFeatures.push(f);
+  }
+
+  function removeTrackConnector(boatId: string): void {
+    const f = mapInternalState.aisConnectorFeatures[boatId];
+    if (!f) return;
+    mapGlobal.aisTrackFeatures.remove(f);
+    delete mapInternalState.aisConnectorFeatures[boatId];
   }
 
   function addTrackFeature(
