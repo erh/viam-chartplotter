@@ -834,6 +834,13 @@
     const _visible = visibleBoatsKey;
     const _wps = navWaypointsKey;
     const _aircraft = aircraftKey;
+    // Popup target and the ais/ais-track toggles gate which AIS tracks get
+    // materialized (see updateFromData), so changes must re-run it.
+    const _popupVisible = popupState.visible;
+    const _popupMmsi = popupState.content.mmsi;
+    const _aisLayersOn = mapGlobal.layerOptions
+      .filter((l) => l.name === "ais" || l.name === "ais-track")
+      .map((l) => l.on);
     updateFromData();
   });
 
@@ -1119,6 +1126,10 @@
     trackFeatureIds: Record<string, boolean>;
     aisTrackFeatureIds: Record<string, boolean>;
     lastPosHistoricalKey: string;
+    // Per-AIS-boat memo of the last-rendered positionHistory: unchanged
+    // history skips the re-render, and key presence means the boat has
+    // materialized track features (cleared when its track is hidden).
+    aisHistoricalKeys: Record<string, string>;
     // Timestamps (ms) of realtime track points we've actually recorded,
     // per boat. Used by renderHistoricalTrack to avoid double-painting
     // the last-10-minute window when realtime already has it covered,
@@ -1132,6 +1143,7 @@
     trackFeatureIds: {},
     aisTrackFeatureIds: {},
     lastPosHistoricalKey: "",
+    aisHistoricalKeys: {},
     realtimeTrackTs: {},
   };
 
@@ -1342,11 +1354,55 @@
     }
 
     if (boats) {
+      // Materialize track features only for boats whose track can actually
+      // show: visible AND (ais-track layer on OR popup-selected target —
+      // updateOnLayers force-shows the layer for that case).
+      const aisOn = mapGlobal.layerOptions.find((l) => l.name === "ais")?.on ?? true;
+      const aisTrackOn = mapGlobal.layerOptions.find((l) => l.name === "ais-track")?.on ?? false;
+      const trackLayerShown = aisOn && aisTrackOn;
+      const selectedMmsi =
+        popupState.visible && !popupState.content.isMyBoat ? popupState.content.mmsi : null;
+
+      const seenTrackBoats: Record<string, boolean> = {};
       boats.forEach((boat) => {
-        if (boat.mmsi && boat.positionHistory && boat.positionHistory.length > 0) {
-          renderHistoricalTrack(boat.mmsi, boat.positionHistory, `ais-${boat.mmsi}`);
+        const mmsi = boat.mmsi;
+        if (!mmsi) return;
+        seenTrackBoats[mmsi] = true;
+        const history = boat.positionHistory;
+        const shouldShow =
+          history &&
+          history.length > 0 &&
+          effectiveVisibleBoats.has(mmsi) &&
+          (trackLayerShown || mmsi === selectedMmsi);
+
+        if (!shouldShow) {
+          if (mapInternalState.aisHistoricalKeys[mmsi] !== undefined) {
+            clearHistoricalTrackFeatures(mmsi);
+            delete mapInternalState.aisHistoricalKeys[mmsi];
+          }
+          return;
         }
+
+        // Skip the re-walk when this boat's history is unchanged — any
+        // boat moving re-runs updateFromData.
+        const first = history[0];
+        const last = history[history.length - 1];
+        const key = `${history.length}-${first.ts instanceof Date ? first.ts.getTime() : ""}-${
+          last.ts instanceof Date ? last.ts.getTime() : ""
+        }`;
+        if (mapInternalState.aisHistoricalKeys[mmsi] === key) return;
+        clearHistoricalTrackFeatures(mmsi);
+        mapInternalState.aisHistoricalKeys[mmsi] = key;
+        renderHistoricalTrack(mmsi, history, `ais-${mmsi}`);
       });
+
+      // Boats removed from the list leave no orphaned track features behind.
+      for (const mmsi of Object.keys(mapInternalState.aisHistoricalKeys)) {
+        if (!seenTrackBoats[mmsi]) {
+          clearHistoricalTrackFeatures(mmsi);
+          delete mapInternalState.aisHistoricalKeys[mmsi];
+        }
+      }
     }
   }
 
@@ -2619,17 +2675,18 @@
 
   function clearHistoricalTrackFeatures(boatId: string): void {
     const { featureIds, features } = getTrackCollections(boatId);
-    // Remove features that have a "myid" (historical) — keep live track features
-    const toRemove: Feature<Geometry>[] = [];
-    for (let i = 0; i < features.getLength(); i++) {
+    // Remove this boat's features that have a "myid" (historical) — keep live
+    // track features, and other boats' tracks (the AIS collection is shared
+    // by the whole fleet). Iterate backwards so removeAt doesn't shift
+    // unvisited items.
+    for (let i = features.getLength() - 1; i >= 0; i--) {
       const f = features.item(i);
       const myid = f.get("myid");
-      if (myid) {
-        toRemove.push(f);
+      if (myid && f.get("boatId") === boatId) {
         delete featureIds[myid];
+        features.removeAt(i);
       }
     }
-    toRemove.forEach((f) => features.remove(f));
   }
 
   function addTrackFeature(
@@ -2772,7 +2829,26 @@
   // the window historical paints unconditionally. Net effect: no
   // double-painting of the recent past, but disconnections / sensor blips
   // in realtime get filled in by historical.
+  //
+  // Cap on how many points a single AIS boat's track materializes — fleet
+  // tracks can run ~43k points (per-minute, 30 days), far past the feature
+  // cap in pruneOldTrackFeatures. myBoat is never decimated; its track
+  // carries per-point depth for depth coloring.
+  const maxAisTrackPoints = 4000;
+
   function renderHistoricalTrack(boatId: string, history: PositionPoint[], idPrefix: string): void {
+    if (boatId !== "myBoat" && history.length > maxAisTrackPoints) {
+      const stride = Math.ceil(history.length / maxAisTrackPoints);
+      const sampled: PositionPoint[] = [];
+      for (let i = 0; i < history.length; i += stride) {
+        sampled.push(history[i]);
+      }
+      if (sampled[sampled.length - 1] !== history[history.length - 1]) {
+        sampled.push(history[history.length - 1]);
+      }
+      history = sampled;
+    }
+
     const now = Date.now();
     const realtimeWindowStart = now - realtimeWindowMs;
 
