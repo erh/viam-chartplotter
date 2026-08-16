@@ -4411,13 +4411,12 @@
     });
 
     // Gesture policy for the helm touchscreen / touchpad:
-    //   zoom   — pinch only. Touchscreen pinch arrives as multi-touch and is
-    //            handled by the default PinchZoom (kept). Touchpad pinch
-    //            arrives as ctrl+wheel events, so we replace the default
-    //            MouseWheelZoom with a pinch-only (ctrlKey) boat-anchored
-    //            one below. Plain scroll, double-click, shift-drag and
-    //            keyboard zoom are stripped — they only fire from stray
-    //            contact on this screen.
+    //   zoom   — touchscreen pinch (default PinchZoom, kept) and any wheel
+    //            input: touchpad pinch (ctrl+wheel), two-finger swipe
+    //            (plain wheel), mouse scroll wheel — all via the
+    //            boat-anchored MouseWheelZoom below. Double-click,
+    //            shift-drag and keyboard zoom are stripped — they only
+    //            fire from stray contact on this screen.
     //   rotate — never from gestures; only the north-up/heads-up toggle.
     {
       const interactions = mapGlobal.map.getInteractions();
@@ -4435,7 +4434,7 @@
         }
       }
 
-      // Touchpad pinch-zoom, anchored at the boat while auto-tracking so the
+      // Wheel/touchpad zoom, anchored at the boat while auto-tracking so the
       // boat stays fixed on screen as the chart zooms around it (in pan mode
       // the default cursor anchor runs — "zoom toward what I'm pointing at").
       // We rewrite the event coordinate before super.handleEvent runs; that's
@@ -4460,13 +4459,10 @@
           return super.handleEvent(event);
         }
       }
-      mapGlobal.map.addInteraction(
-        new BoatAnchoredPinchWheelZoom({
-          // Touchpad pinch is delivered as a wheel event with ctrlKey set
-          // (both macOS and Windows); plain two-finger scroll is not.
-          condition: (e) => (e.originalEvent as WheelEvent).ctrlKey === true,
-        })
-      );
+      // No condition: both touchpad gestures zoom — pinch arrives as
+      // ctrl+wheel, two-finger swipe as plain wheel, and OL's built-in
+      // trackpad detection handles each with the right sensitivity.
+      mapGlobal.map.addInteraction(new BoatAnchoredPinchWheelZoom());
     }
 
     mapGlobal.map.on("moveend", () => {
