@@ -41,7 +41,6 @@
   import MouseWheelZoom from "ol/interaction/MouseWheelZoom.js";
   import PinchRotate from "ol/interaction/PinchRotate.js";
   import DragRotate from "ol/interaction/DragRotate.js";
-  import PinchZoom from "ol/interaction/PinchZoom.js";
   import DoubleClickZoom from "ol/interaction/DoubleClickZoom.js";
   import DragZoom from "ol/interaction/DragZoom.js";
   import KeyboardZoom from "ol/interaction/KeyboardZoom.js";
@@ -4346,18 +4345,17 @@
       controls: defaultControls({ rotate: false }).extend([scaleThing]),
     });
 
-    // Strip every gesture-driven zoom and rotate interaction. This runs on
-    // a helm touchscreen where stray pinches/twists/scrolls were spinning
-    // and zooming the chart (and zooming the browser page itself, causing
-    // scroll bars). Zoom only via the on-screen +/- buttons; rotation only
-    // via the north-up / heads-up toggle.
+    // Strip rotation gestures and non-touch zoom shortcuts. This runs on a
+    // helm touchscreen: pinch-zoom stays (it's the natural touch zoom), but
+    // twisting must not spin the chart — rotation only via the north-up /
+    // heads-up toggle. Wheel/double-click/shift-drag/keyboard zoom go too,
+    // since on this screen they only fire from stray contact.
     {
       const interactions = mapGlobal.map.getInteractions();
       const existing = interactions.getArray().slice();
       for (const item of existing) {
         if (
           item instanceof MouseWheelZoom ||
-          item instanceof PinchZoom ||
           item instanceof DoubleClickZoom ||
           item instanceof DragZoom ||
           item instanceof KeyboardZoom ||
