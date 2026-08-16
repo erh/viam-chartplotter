@@ -1154,6 +1154,9 @@
     // the last-10-minute window when realtime already has it covered,
     // while still painting historical wherever realtime has a gap.
     realtimeTrackTs: Record<string, number[]>;
+    // Per-boat LineString bridging the newest history fix to the live
+    // position, so the track reaches the icon between history refetches.
+    aisConnectorFeatures: Record<string, Feature<LineString>>;
   } = {
     lastZoom: 0,
     lastCenter: null,
@@ -1164,6 +1167,7 @@
     lastPosHistoricalKey: "",
     aisHistoricalKeys: {},
     realtimeTrackTs: {},
+    aisConnectorFeatures: {},
   };
 
   // Realtime "wins" for the last realtimeWindowMs ms; historical paints
@@ -1399,8 +1403,13 @@
             clearHistoricalTrackFeatures(mmsi);
             delete mapInternalState.aisHistoricalKeys[mmsi];
           }
+          removeTrackConnector(mmsi);
           return;
         }
+
+        // Runs every tick (not memoized like the re-render below): the
+        // live position changes far more often than the history does.
+        updateTrackConnector(mmsi, history[history.length - 1], boat.location);
 
         // Skip the re-walk when this boat's history is unchanged — any
         // boat moving re-runs updateFromData.
@@ -1420,6 +1429,11 @@
         if (!seenTrackBoats[mmsi]) {
           clearHistoricalTrackFeatures(mmsi);
           delete mapInternalState.aisHistoricalKeys[mmsi];
+        }
+      }
+      for (const mmsi of Object.keys(mapInternalState.aisConnectorFeatures)) {
+        if (!seenTrackBoats[mmsi]) {
+          removeTrackConnector(mmsi);
         }
       }
     }
@@ -2517,12 +2531,29 @@
     const w = baseW;
     const h = baseH * lengthScale;
     const inset = sw / 2;
-    const points = `${w / 2},${inset} ` + `${w - inset},${h - inset} ` + `${inset},${h - inset}`;
+    const cx = w / 2;
+    // Hull outline: pointed bow, straight sides aft, flat transom.
+    const d =
+      `M ${cx},${inset} ` +
+      `Q ${w - inset},${h * 0.32} ${w - inset},${h * 0.62} ` +
+      `L ${w - inset},${h - inset} ` +
+      `L ${inset},${h - inset} ` +
+      `L ${inset},${h * 0.62} ` +
+      `Q ${inset},${h * 0.32} ${cx},${inset} Z`;
+    // Drop shadow keeps the white outline visible over light chart areas;
+    // symmetric padding gives the blur room and keeps the anchor centered.
+    const pad = 3;
+    const tw = w + pad * 2;
+    const th = h + pad * 2;
     const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" ` +
-      `width="${w}" height="${h}">` +
-      `<polygon points="${points}" fill="none" stroke="#1e6fff" ` +
-      `stroke-width="${sw}" stroke-linejoin="round"/></svg>`;
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${tw} ${th}" ` +
+      `width="${tw}" height="${th}">` +
+      `<filter id="s" x="-50%" y="-50%" width="200%" height="200%">` +
+      `<feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#000" flood-opacity="0.5"/>` +
+      `</filter>` +
+      `<g transform="translate(${pad},${pad})">` +
+      `<path d="${d}" filter="url(#s)" fill="rgba(96,165,250,0.5)" stroke="#ffffff" ` +
+      `stroke-width="${sw}" stroke-linejoin="round"/></g></svg>`;
     const src = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
     aisTriangleSrcCache[key] = src;
     return src;
@@ -2541,7 +2572,7 @@
     const direction = heading != null && heading !== 0 ? heading : (cog ?? 0);
     const rotation = (direction * Math.PI) / 180;
 
-    // Triangle is always 2:1 (height:width) at the default vessel length;
+    // Icon is always 2:1 (height:width) at the default vessel length;
     // longer boats stretch the height further. Capped by myBoat's length
     // so no AIS target renders longer than the user's own boat.
     const lengthScale = dimScaleFactor(length, DEFAULT_BOAT_LENGTH_M);
@@ -2685,7 +2716,7 @@
       return new Style({
         stroke: new Stroke({
           color: color,
-          width: 2,
+          width: 1.5,
           lineDash: isGap ? [2, 6] : undefined,
         }),
       });
@@ -2706,6 +2737,40 @@
         features.removeAt(i);
       }
     }
+  }
+
+  // One reused feature per boat, geometry updated in place — this runs
+  // on every update tick.
+  function updateTrackConnector(boatId: string, lastPoint: PositionPoint, location: [number, number]): void {
+    const [lat, lng] = location;
+    if (!isValidCoordinate(lat, lng)) return;
+    const coords = [
+      [lastPoint.lng, lastPoint.lat],
+      [lng, lat],
+    ];
+    // Same 10 NM gap rule as historical segments.
+    const isGap = calculateDistanceNM(lastPoint.lat, lastPoint.lng, lat, lng) >= 10;
+    const existing = mapInternalState.aisConnectorFeatures[boatId];
+    if (existing) {
+      existing.getGeometry()?.setCoordinates(coords);
+      existing.set("isGap", isGap);
+      return;
+    }
+    const f = new Feature({
+      type: "ais-track",
+      boatId: boatId,
+      geometry: new LineString(coords),
+      isGap: isGap,
+    });
+    mapInternalState.aisConnectorFeatures[boatId] = f;
+    mapGlobal.aisTrackFeatures.push(f);
+  }
+
+  function removeTrackConnector(boatId: string): void {
+    const f = mapInternalState.aisConnectorFeatures[boatId];
+    if (!f) return;
+    mapGlobal.aisTrackFeatures.remove(f);
+    delete mapInternalState.aisConnectorFeatures[boatId];
   }
 
   function addTrackFeature(
