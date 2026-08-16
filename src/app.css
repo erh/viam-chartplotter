@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+html,
+body {
+  /* Helm touchscreen: allow panning gestures only — no pinch page-zoom
+     (desktop Chrome ignores the viewport meta's user-scalable=no), and no
+     page scroll bars if something zooms/overflows anyway. */
+  touch-action: pan-x pan-y;
+  overflow: hidden;
+}
+
 #map-container {
   position: relative;
   height: 100%;

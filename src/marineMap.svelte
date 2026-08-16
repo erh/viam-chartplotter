@@ -41,6 +41,10 @@
   import MouseWheelZoom from "ol/interaction/MouseWheelZoom.js";
   import PinchRotate from "ol/interaction/PinchRotate.js";
   import DragRotate from "ol/interaction/DragRotate.js";
+  import PinchZoom from "ol/interaction/PinchZoom.js";
+  import DoubleClickZoom from "ol/interaction/DoubleClickZoom.js";
+  import DragZoom from "ol/interaction/DragZoom.js";
+  import KeyboardZoom from "ol/interaction/KeyboardZoom.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
 
@@ -4342,57 +4346,27 @@
       controls: defaultControls({ rotate: false }).extend([scaleThing]),
     });
 
-    // Replace the default mouse-wheel zoom with one that anchors at the
-    // boat's current position (so the boat stays fixed on screen while
-    // surrounding chart zooms around it). We subclass OL's MouseWheelZoom
-    // and rewrite the event coordinate before super.handleEvent runs;
-    // that's the value the parent records as its lastAnchor_, so the
-    // wheel/trackpad detection, debouncing, and animation tweening all
-    // come along for free — we just point them at the boat instead of
-    // the cursor. Falls back to the original (cursor) coordinate when the
-    // user is in pan mode or has no usable boat fix.
+    // Strip every gesture-driven zoom and rotate interaction. This runs on
+    // a helm touchscreen where stray pinches/twists/scrolls were spinning
+    // and zooming the chart (and zooming the browser page itself, causing
+    // scroll bars). Zoom only via the on-screen +/- buttons; rotation only
+    // via the north-up / heads-up toggle.
     {
       const interactions = mapGlobal.map.getInteractions();
       const existing = interactions.getArray().slice();
       for (const item of existing) {
-        // Rotation is fixed to north-up or heads-up (via the toggle); no
-        // free-form spinning from two-finger twist or alt+shift+drag.
         if (
           item instanceof MouseWheelZoom ||
+          item instanceof PinchZoom ||
+          item instanceof DoubleClickZoom ||
+          item instanceof DragZoom ||
+          item instanceof KeyboardZoom ||
           item instanceof PinchRotate ||
           item instanceof DragRotate
         ) {
           interactions.remove(item);
         }
       }
-      class BoatAnchoredMouseWheelZoom extends MouseWheelZoom {
-        handleEvent(event: any) {
-          if (event && event.type === "wheel") {
-            // Boat-anchor when auto-tracking (not pan mode): the chart
-            // is following the boat, so zoom-around-boat keeps the boat
-            // visually fixed during the zoom rather than letting OL's
-            // default cursor anchor drag the boat off its anchor pixel
-            // for a frame before the next tick re-centers. In pan mode
-            // we let OL's default cursor anchor run — the user is
-            // exploring elsewhere and "zoom toward what I'm pointing
-            // at" is the expected behaviour for a normal map.
-            if (
-              !inPanMode &&
-              myBoat?.location &&
-              !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
-            ) {
-              const map = event.map ?? mapGlobal.map;
-              const px = map?.getPixelFromCoordinate([myBoat.location[1], myBoat.location[0]]);
-              const sz = map?.getSize();
-              if (px && sz && px[0] >= 0 && px[1] >= 0 && px[0] <= sz[0] && px[1] <= sz[1]) {
-                event.pixel = px;
-              }
-            }
-          }
-          return super.handleEvent(event);
-        }
-      }
-      mapGlobal.map.addInteraction(new BoatAnchoredMouseWheelZoom());
     }
 
     mapGlobal.map.on("moveend", () => {
