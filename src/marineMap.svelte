@@ -1154,9 +1154,8 @@
     // the last-10-minute window when realtime already has it covered,
     // while still painting historical wherever realtime has a gap.
     realtimeTrackTs: Record<string, number[]>;
-    // Per-AIS-boat live connector: one LineString from the newest history
-    // fix to the boat's current position, so the track reaches the icon
-    // between history refetches (history lags the live position).
+    // Per-boat LineString bridging the newest history fix to the live
+    // position, so the track reaches the icon between history refetches.
     aisConnectorFeatures: Record<string, Feature<LineString>>;
   } = {
     lastZoom: 0,
@@ -1408,11 +1407,8 @@
           return;
         }
 
-        // Bridge the newest history fix to the live position — history is
-        // minute-aggregated and refetched on an interval, so without this
-        // the track ends visibly behind the moving icon. Runs every tick
-        // (unlike the memoized re-render below) because the live position
-        // changes far more often than the history does.
+        // Runs every tick (not memoized like the re-render below): the
+        // live position changes far more often than the history does.
         updateTrackConnector(mmsi, history[history.length - 1], boat.location);
 
         // Skip the re-walk when this boat's history is unchanged — any
@@ -2536,9 +2532,7 @@
     const h = baseH * lengthScale;
     const inset = sw / 2;
     const cx = w / 2;
-    // Hull outline: pointed bow flaring out to the beam, straight sides
-    // aft, flat transom. White stroke + translucent fill keeps it legible
-    // over both water and land tints.
+    // Hull outline: pointed bow, straight sides aft, flat transom.
     const d =
       `M ${cx},${inset} ` +
       `Q ${w - inset},${h * 0.32} ${w - inset},${h * 0.62} ` +
@@ -2546,9 +2540,8 @@
       `L ${inset},${h - inset} ` +
       `L ${inset},${h * 0.62} ` +
       `Q ${inset},${h * 0.32} ${cx},${inset} Z`;
-    // Drop shadow keeps the white outline visible over light chart areas.
-    // Symmetric padding gives the blur room without clipping and keeps the
-    // icon's center anchor on the fix.
+    // Drop shadow keeps the white outline visible over light chart areas;
+    // symmetric padding gives the blur room and keeps the anchor centered.
     const pad = 3;
     const tw = w + pad * 2;
     const th = h + pad * 2;
@@ -2746,9 +2739,8 @@
     }
   }
 
-  // Live connector between a boat's newest history fix and its current
-  // position. One reused feature per boat — geometry is updated in place
-  // rather than re-created, since this runs on every update tick.
+  // One reused feature per boat, geometry updated in place — this runs
+  // on every update tick.
   function updateTrackConnector(boatId: string, lastPoint: PositionPoint, location: [number, number]): void {
     const [lat, lng] = location;
     if (!isValidCoordinate(lat, lng)) return;
@@ -2756,8 +2748,7 @@
       [lastPoint.lng, lastPoint.lat],
       [lng, lat],
     ];
-    // Same 10 NM rule as historical segments: a huge jump (stale history,
-    // bad fix) renders as a dashed gap instead of a bold straight line.
+    // Same 10 NM gap rule as historical segments.
     const isGap = calculateDistanceNM(lastPoint.lat, lastPoint.lng, lat, lng) >= 10;
     const existing = mapInternalState.aisConnectorFeatures[boatId];
     if (existing) {
