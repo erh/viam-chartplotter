@@ -226,6 +226,20 @@
   });
 
   let layersExpanded = $state(false);
+  // Auto-hide the layers panel 10 s after it was opened or last touched —
+  // on the helm touchscreen it's easy to open it and forget it, leaving a
+  // big panel covering the chart. Any interaction inside the panel bumps
+  // the timer so the user isn't cut off mid-toggle.
+  let layersHideTimer: ReturnType<typeof setTimeout> | undefined;
+  function bumpLayersHideTimer() {
+    clearTimeout(layersHideTimer);
+    layersHideTimer = setTimeout(() => (layersExpanded = false), 10_000);
+  }
+  $effect(() => {
+    if (!layersExpanded) return;
+    bumpLayersHideTimer();
+    return () => clearTimeout(layersHideTimer);
+  });
   let boatsExpanded = $state(false);
   let routesExpanded = $state(false);
   let mapLoaded = $state(false);
@@ -5668,7 +5682,7 @@
     <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
   {/if}
 
-  <div class="layer-controls">
+  <div class="layer-controls" onpointerdown={bumpLayersHideTimer}>
     <!--
       Layers are split into two groups:
         1. Base maps (open street map / noaa / checkmate / noaa-ecdis)
