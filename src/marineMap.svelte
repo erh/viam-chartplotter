@@ -39,6 +39,8 @@
   import { getDistance, offset as sphereOffset } from "ol/sphere.js";
   import Modify from "ol/interaction/Modify.js";
   import MouseWheelZoom from "ol/interaction/MouseWheelZoom.js";
+  import PinchRotate from "ol/interaction/PinchRotate.js";
+  import DragRotate from "ol/interaction/DragRotate.js";
   import type { Geometry } from "ol/geom";
   import type BaseLayer from "ol/layer/Base";
 
@@ -4321,7 +4323,9 @@
       target: "map",
       layers: mapGlobal.onLayers as Collection<BaseLayer>,
       view: mapGlobal.view,
-      controls: defaultControls().extend([scaleThing]),
+      // rotate: false — orientation is fixed to north-up or heads-up; the
+      // default reset-north control would fight the heads-up rotation.
+      controls: defaultControls({ rotate: false }).extend([scaleThing]),
     });
 
     // Replace the default mouse-wheel zoom with one that anchors at the
@@ -4337,7 +4341,13 @@
       const interactions = mapGlobal.map.getInteractions();
       const existing = interactions.getArray().slice();
       for (const item of existing) {
-        if (item instanceof MouseWheelZoom) {
+        // Rotation is fixed to north-up or heads-up (via the toggle); no
+        // free-form spinning from two-finger twist or alt+shift+drag.
+        if (
+          item instanceof MouseWheelZoom ||
+          item instanceof PinchRotate ||
+          item instanceof DragRotate
+        ) {
           interactions.remove(item);
         }
       }
