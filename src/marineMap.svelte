@@ -4345,11 +4345,15 @@
       controls: defaultControls({ rotate: false }).extend([scaleThing]),
     });
 
-    // Strip rotation gestures and non-touch zoom shortcuts. This runs on a
-    // helm touchscreen: pinch-zoom stays (it's the natural touch zoom), but
-    // twisting must not spin the chart — rotation only via the north-up /
-    // heads-up toggle. Wheel/double-click/shift-drag/keyboard zoom go too,
-    // since on this screen they only fire from stray contact.
+    // Gesture policy for the helm touchscreen / touchpad:
+    //   zoom   — pinch only. Touchscreen pinch arrives as multi-touch and is
+    //            handled by the default PinchZoom (kept). Touchpad pinch
+    //            arrives as ctrl+wheel events, so we replace the default
+    //            MouseWheelZoom with a pinch-only (ctrlKey) boat-anchored
+    //            one below. Plain scroll, double-click, shift-drag and
+    //            keyboard zoom are stripped — they only fire from stray
+    //            contact on this screen.
+    //   rotate — never from gestures; only the north-up/heads-up toggle.
     {
       const interactions = mapGlobal.map.getInteractions();
       const existing = interactions.getArray().slice();
@@ -4365,6 +4369,39 @@
           interactions.remove(item);
         }
       }
+
+      // Touchpad pinch-zoom, anchored at the boat while auto-tracking so the
+      // boat stays fixed on screen as the chart zooms around it (in pan mode
+      // the default cursor anchor runs — "zoom toward what I'm pointing at").
+      // We rewrite the event coordinate before super.handleEvent runs; that's
+      // the value the parent records as its lastAnchor_, so trackpad
+      // detection, debouncing, and animation tweening all come along free.
+      class BoatAnchoredPinchWheelZoom extends MouseWheelZoom {
+        handleEvent(event: any) {
+          if (event && event.type === "wheel") {
+            if (
+              !inPanMode &&
+              myBoat?.location &&
+              !(myBoat.location[0] === 0 && myBoat.location[1] === 0)
+            ) {
+              const map = event.map ?? mapGlobal.map;
+              const px = map?.getPixelFromCoordinate([myBoat.location[1], myBoat.location[0]]);
+              const sz = map?.getSize();
+              if (px && sz && px[0] >= 0 && px[1] >= 0 && px[0] <= sz[0] && px[1] <= sz[1]) {
+                event.pixel = px;
+              }
+            }
+          }
+          return super.handleEvent(event);
+        }
+      }
+      mapGlobal.map.addInteraction(
+        new BoatAnchoredPinchWheelZoom({
+          // Touchpad pinch is delivered as a wheel event with ctrlKey set
+          // (both macOS and Windows); plain two-finger scroll is not.
+          condition: (e) => (e.originalEvent as WheelEvent).ctrlKey === true,
+        })
+      );
     }
 
     mapGlobal.map.on("moveend", () => {
