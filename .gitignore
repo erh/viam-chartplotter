@@ -49,3 +49,4 @@ module.tar.gz
 # --- Local dev / test scratch ---
 test.make
 tile*.png
+/run-local-checkmate.sh

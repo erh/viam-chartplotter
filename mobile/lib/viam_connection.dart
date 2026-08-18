@@ -1,0 +1,631 @@
+import 'dart:async';
+
+import 'package:latlong2/latlong.dart';
+import 'package:viam_sdk/viam_sdk.dart';
+
+import 'ais.dart';
+import 'boat_state.dart';
+import 'config.dart';
+import 'history.dart';
+
+/// Owns the boat connection and the 1 Hz poll loop. This is the Dart
+/// re-implementation of the web app's `doUpdate` loop (src/App.svelte),
+/// trimmed to the spike's risk-proving subset: position, speed, heading,
+/// and (optionally) depth.
+///
+/// Two entry points:
+///  - [startWithRobot]   — an already-connected RobotClient handed over by the
+///                         logged-in session (viam.getRobotClient). The v1 path.
+///  - [startWithApiKey]  — direct dial via RobotClient.atAddress + API key, the
+///                         original spike path, kept for credential-free runs.
+///
+/// NOTE (beta SDK): the viam_sdk symbols used here are the documented ~0.3
+/// surface; re-verify when the dependency resolves (plan §4.4).
+class ViamConnection {
+  ViamConnection(this.state);
+
+  final BoatState state;
+  RobotClient? _robot;
+  Viam? _viam; // present on the login path; enables cloud-data backfill
+
+  /// The live robot connection, for features that fetch on demand (cameras).
+  RobotClient? get robot => _robot;
+
+  /// Cloud-data backfill for the detail graphs, or null in API-key mode.
+  HistoryService? _history;
+  HistoryService? get history => _history;
+  String? _movementSensorName;
+  String? _depthSensorName;
+  String? _windSensorName;
+  String? _seatempSensorName;
+  String? _aisSensorName;
+  String? _routeSensorName;
+  String? _spotZeroFwName;
+  String? _spotZeroSwName;
+  String? _seakeeperName;
+  List<String> _tankNames = const [];
+  List<String> _acPowerNames = const [];
+  Timer? _timer;
+  int _tickN = 0;
+  bool _polling = false;
+  bool _ownsRobot = false; // close it on dispose only if we dialed it
+
+  // ---- connection health ----------------------------------------------
+  // gRPC calls on a dead WebRTC connection (e.g. after the phone was locked)
+  // tend to HANG rather than fail, so "the poll loop stopped succeeding" is
+  // the only reliable death signal. Track the last successful poll and the
+  // consecutive fast-failure count; either tripping triggers a re-dial via
+  // [reconnector].
+  DateTime _lastGoodTick = DateTime.now();
+  int _tickFailures = 0;
+  bool _reconnecting = false;
+  DateTime? _lastReconnectAttempt;
+
+  /// Re-dials the robot after the connection dies. Set by whoever connected
+  /// us (main.dart via MachineConnector, or the API-key path internally);
+  /// without it a dead connection just shows "Connection lost".
+  Future<RobotClient> Function()? reconnector;
+
+  Future<void> startWithRobot(RobotClient robot, {Viam? viam}) async {
+    _robot = robot;
+    _viam = viam;
+    _ownsRobot = false; // owned by the session/picker that connected it
+    await _afterConnect();
+  }
+
+  Future<void> startWithApiKey() async {
+    if (!Config.hasBoat) {
+      state.setStatus('No boat configured — chart-only mode');
+      return;
+    }
+    state.setStatus('Connecting…');
+    try {
+      try {
+        _robot = await RobotClient.atAddress(
+          Config.host,
+          RobotClientOptions.withApiKey(Config.apiKeyId, Config.apiKey),
+        );
+      } catch (_) {
+        // The mDNS-discovered local endpoint can be dead (the boat's
+        // advertised ephemeral port isn't reachable) and the SDK's dial
+        // mutates its options on the mDNS attempt, so its own fallback
+        // redials the same dead endpoint. Retry with fresh options and mDNS
+        // off to force the app.viam.com cloud path.
+        state.setStatus('Local connect failed, retrying via cloud…');
+        final options = RobotClientOptions.withApiKey(
+          Config.apiKeyId,
+          Config.apiKey,
+        )..dialOptions.attemptMdns = false;
+        _robot = await RobotClient.atAddress(Config.host, options);
+      }
+      _ownsRobot = true;
+      // Dead-connection recovery redials the proven cloud path directly.
+      reconnector = () {
+        final options = RobotClientOptions.withApiKey(
+          Config.apiKeyId,
+          Config.apiKey,
+        )..dialOptions.attemptMdns = false;
+        return RobotClient.atAddress(Config.host, options);
+      };
+    } catch (e) {
+      state.setStatus('Connect failed: $e');
+      return;
+    }
+    await _afterConnect();
+  }
+
+  Future<void> _afterConnect() async {
+    final robot = _robot;
+    if (robot == null) return;
+    _movementSensorName = await _discoverMovementSensor(robot);
+    _depthSensorName = _discoverSensorByName(robot, 'depth', Config.depthSensor);
+    _windSensorName = _discoverSensorByName(robot, 'wind', '');
+    _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
+    _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
+    _routeSensorName = _discoverSensorEndingWith(robot, 'route');
+    _spotZeroFwName = _discoverSensorByName(robot, 'spotzero-fw', '');
+    _spotZeroSwName = _discoverSensorByName(robot, 'spotzero-sw', '');
+    _seakeeperName = _discoverSensorByName(robot, 'seakeeper', '');
+    _tankNames = _tankSort(_discoverSensorsWhere(
+        robot, (n) => n.contains('fuel') || n.contains('freshwater')));
+    _acPowerNames =
+        _discoverSensorsWhere(robot, (n) => RegExp(r'ac-\d-\d$').hasMatch(n));
+    final cameras = _discoverCameras(robot);
+    state.setCameras(cameras);
+    state.setSources({
+      'Movement': _movementSensorName,
+      'Depth': _depthSensorName,
+      'Wind': _windSensorName,
+      'Sea temp': _seatempSensorName,
+      'AIS': _aisSensorName,
+      'Route': _routeSensorName,
+      'Cameras': cameras.isEmpty ? null : cameras.length.toString(),
+    });
+    state.setStatus(
+        _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
+    await _buildHistory(robot);
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  /// Assemble the cloud-data backfill for the detail graphs: the machine's
+  /// cloud identity (from the robot) plus a capture spec per graphable metric.
+  /// Only possible on the login path, where we hold a [Viam] handle.
+  Future<void> _buildHistory(RobotClient robot) async {
+    final viam = _viam;
+    if (viam == null) return;
+    try {
+      final meta = await robot.getCloudMetadata();
+      String leaf(String? n) => (n ?? '').split(':').last;
+      final specs = <String, HistorySpec>{};
+      if (_depthSensorName != null) {
+        specs['depth'] = HistorySpec(
+            leaf(_depthSensorName), 'Depth', (v) => v * 3.28084);
+      }
+      if (_seatempSensorName != null) {
+        specs['seatemp'] = HistorySpec(
+            leaf(_seatempSensorName), 'Temperature', (v) => 32 + v * 1.8);
+      }
+      if (_windSensorName != null) {
+        specs['wind'] = HistorySpec(
+          leaf(_windSensorName),
+          'Wind Speed',
+          (v) => v * 1.94384,
+          extraMatch: const {
+            'data.readings.Reference': 'True (ground referenced to North)',
+          },
+        );
+      }
+      for (final tn in _tankNames) {
+        specs['tank:${leaf(tn)}'] =
+            HistorySpec(leaf(tn), 'Level', (v) => v);
+      }
+      _history = HistoryService(
+        dataClient: viam.dataClient,
+        orgId: meta.primaryOrgId,
+        locationId: meta.locationId,
+        robotId: meta.machineId,
+        specs: specs,
+      );
+    } catch (_) {
+      // No cloud metadata / data access → graphs stay live-only.
+    }
+  }
+
+  /// Find a sensor component whose name contains [needle] (case-insensitive),
+  /// mirroring the web app's name-regex discovery (e.g. /depth/). An explicit
+  /// [override] (from --dart-define) wins.
+  String? _discoverSensorByName(
+      RobotClient robot, String needle, String override) {
+    if (override.isNotEmpty) return override;
+    try {
+      final lower = needle.toLowerCase();
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && rn.name.toLowerCase().contains(lower)) {
+          return rn.name;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// All sensor components whose (lower-cased) name matches [pred], sorted.
+  List<String> _discoverSensorsWhere(
+      RobotClient robot, bool Function(String) pred) {
+    final out = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && pred(rn.name.toLowerCase())) {
+          out.add(rn.name);
+        }
+      }
+    } catch (_) {}
+    out.sort();
+    return out;
+  }
+
+  bool _boolish(dynamic v) => v == true || (v is num && v != 0);
+
+  /// Port of the web app's tankSort: freshwater first, then fwd/mid/aft, main
+  /// later; ties broken by name.
+  List<String> _tankSort(List<String> names) {
+    int score(String raw) {
+      final n = raw.toLowerCase();
+      var s = 0;
+      if (n.contains('freshwater')) s -= 10000;
+      if (n.contains('fwd')) s -= 1000;
+      if (n.contains('mid')) s -= 500;
+      if (n.contains('aft')) s -= 250;
+      if (n.contains('main')) s += 50;
+      return s;
+    }
+
+    return List.of(names)
+      ..sort((a, b) {
+        final d = score(a) - score(b);
+        return d != 0 ? d : a.toLowerCase().compareTo(b.toLowerCase());
+      });
+  }
+
+  /// Camera components on the robot, sorted, with the web app's filtered-camera
+  /// rule: drop "<name>" when a "<name>-filtered" sibling exists (prefer the
+  /// filtered feed). (chartplotter-hide needs the machine config; not yet done.)
+  List<String> _discoverCameras(RobotClient robot) {
+    final all = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'camera') all.add(rn.name);
+      }
+    } catch (_) {}
+    final names = all.toSet();
+    final out = all.where((n) => !names.contains('$n-filtered')).toList()
+      ..sort();
+    return out;
+  }
+
+  /// Like [_discoverSensorByName] but suffix-matched — used for the `ais`
+  /// sensor (web regex /\bais$/) so we don't accidentally match unrelated
+  /// names that merely contain the substring.
+  String? _discoverSensorEndingWith(RobotClient robot, String suffix) {
+    try {
+      final s = suffix.toLowerCase();
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'sensor' && rn.name.toLowerCase().endsWith(s)) {
+          return rn.name;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Pick the first movement_sensor, unless an explicit name was provided via
+  /// --dart-define.
+  Future<String?> _discoverMovementSensor(RobotClient robot) async {
+    if (Config.movementSensor.isNotEmpty) return Config.movementSensor;
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'movement_sensor') return rn.name;
+      }
+    } catch (_) {
+      // resourceNames shape can vary across SDK versions; fall through.
+    }
+    return null;
+  }
+
+  Future<void> _tick() async {
+    final robot = _robot;
+    final msName = _movementSensorName;
+    if (robot == null || msName == null) return;
+    if (_polling) {
+      // A previous tick is stuck in a hung RPC — the signature of a dead
+      // WebRTC connection. Declare it dead once nothing has succeeded for a
+      // while (the reconnect closes the robot, which unblocks the hung
+      // calls).
+      if (DateTime.now().difference(_lastGoodTick).inSeconds > 15) {
+        unawaited(_reconnect());
+      }
+      return;
+    }
+    _polling = true;
+    _tickN++;
+    var ok = false;
+    try {
+      final ms = MovementSensor.fromRobot(robot, msName);
+
+      try {
+        // Heartbeat call: bounded so a dead connection fails fast instead of
+        // wedging the poll loop forever.
+        final p = await ms.position().timeout(const Duration(seconds: 5));
+        // Position exposes `coordinates` (a GeoPoint), not `coordinate`.
+        state.update(
+          position: LatLng(p.coordinates.latitude, p.coordinates.longitude),
+        );
+        ok = true;
+      } catch (_) {}
+
+      try {
+        final v = await ms.linearVelocity();
+        state.update(speedKn: v.y * 1.94384);
+      } catch (_) {}
+
+      try {
+        final h = await ms.compassHeading();
+        state.update(headingDeg: h);
+      } catch (_) {}
+
+      // Course over ground lives in the movement sensor's generic readings
+      // under one of several key spellings (matches the web app).
+      try {
+        final rd = await ms.readings();
+        final cog = rd['Course Over Ground'] ??
+            rd['course_over_ground'] ??
+            rd['CourseOverGround'] ??
+            rd['cog'] ??
+            rd['COG'];
+        if (cog is num) state.update(cogDeg: cog.toDouble());
+      } catch (_) {}
+
+      final windName = _windSensorName;
+      if (windName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, windName).readings();
+          // Only the true (ground-referenced) wind, like the web app.
+          if (r['Reference'] == 'True (ground referenced to North)') {
+            final wa = r['Wind Angle'];
+            final ws = r['Wind Speed']; // m/s → knots
+            state.update(
+              windAngleDeg: wa is num ? wa.toDouble() : null,
+              windSpeedKn: ws is num ? ws.toDouble() * 1.94384 : null,
+            );
+          }
+        } catch (_) {}
+      }
+
+      final tempName = _seatempSensorName;
+      if (tempName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, tempName).readings();
+          final t = r['Temperature']; // °C → °F
+          if (t is num) state.update(seaTempF: 32 + t.toDouble() * 1.8);
+        } catch (_) {}
+      }
+
+      final depthName = _depthSensorName;
+      if (depthName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, depthName).readings();
+          // Sensor reports Depth in metres (matches the web app); → feet.
+          final d = r['Depth'];
+          if (d is num) state.update(depthFt: d.toDouble() * 3.28084);
+        } catch (_) {}
+      }
+
+      // AIS targets move continuously but the feed is heavy, so poll it at
+      // ~5 s rather than every 1 s tick (matches the web app's slower cadence).
+      final aisName = _aisSensorName;
+      if (aisName != null && _tickN % 5 == 0) {
+        try {
+          final r = await Sensor.fromRobot(robot, aisName).readings();
+          state.setAis(parseAisReadings(r));
+        } catch (_) {}
+      }
+
+      // Active route destination from the `route` sensor (rarely changes, so
+      // poll on the slow cadence). Cleared when there's no active route.
+      final routeName = _routeSensorName;
+      if (routeName != null && _tickN % 5 == 0) {
+        try {
+          final r = await Sensor.fromRobot(robot, routeName).readings();
+          // Keys match the web app's route sensor (spaced/capitalised).
+          final lat = r['Destination Latitude'];
+          final lon = r['Destination Longitude'];
+          final dist = r['Distance to Waypoint']; // metres
+          final closing = r['Waypoint Closing Velocity']; // m/s
+          state.setRoute(
+            destination: (lat is num && lon is num)
+                ? LatLng(lat.toDouble(), lon.toDouble())
+                : null,
+            wpDistanceM: dist is num ? dist.toDouble() : null,
+            wpClosingMs: closing is num ? closing.toDouble() : null,
+          );
+        } catch (_) {}
+      }
+
+      // Boat systems (watermaker / seakeeper / tanks / AC power) change slowly;
+      // poll on the slow cadence, offset from AIS+route.
+      if (_tickN % 5 == 2) await _pollSystems(robot);
+    } finally {
+      _polling = false;
+    }
+    if (ok) {
+      _lastGoodTick = DateTime.now();
+      if (_tickFailures > 0) _tickFailures = 0;
+    } else {
+      _tickFailures++;
+      // Three straight fast failures = the connection is gone (a healthy
+      // boat answers the heartbeat even when other sensors error).
+      if (_tickFailures >= 3) unawaited(_reconnect());
+    }
+  }
+
+  /// Probe the connection now — called on app resume, when a connection
+  /// killed while the phone was locked would otherwise sit around looking
+  /// "Connected" until the watchdog notices. Re-dials if the probe fails.
+  Future<void> checkNow() async {
+    final robot = _robot;
+    final msName = _movementSensorName;
+    if (robot == null || _reconnecting) return;
+    try {
+      if (msName != null) {
+        await MovementSensor.fromRobot(robot, msName)
+            .position()
+            .timeout(const Duration(seconds: 4));
+        return; // alive
+      }
+      // No movement sensor to probe — fall through and let a re-dial settle it.
+    } catch (_) {}
+    await _reconnect(force: true);
+  }
+
+  /// Close the (dead) robot and dial a fresh one via [reconnector]. Repeat
+  /// attempts are throttled; the poll loop keeps calling in on failure so a
+  /// long outage retries every ~10 s until the boat is back.
+  Future<void> _reconnect({bool force = false}) async {
+    final rec = reconnector;
+    if (rec == null || _reconnecting) return;
+    final last = _lastReconnectAttempt;
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last).inSeconds < 10) {
+      return;
+    }
+    _reconnecting = true;
+    _lastReconnectAttempt = DateTime.now();
+    state.setStatus('Connection lost — reconnecting…');
+    try {
+      final old = _robot;
+      _robot = null;
+      // Closing unblocks any RPCs hung on the dead connection.
+      try {
+        await old?.close();
+      } catch (_) {}
+      final fresh = await rec();
+      if (_timer == null) {
+        // stop() ran while we were dialing (switch-boat / dispose) — don't
+        // resurrect a connection nobody owns.
+        await fresh.close();
+        return;
+      }
+      _robot = fresh;
+      _tickFailures = 0;
+      _lastGoodTick = DateTime.now();
+      state.setStatus(
+          _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
+    } catch (e) {
+      state.setStatus('Reconnect failed — retrying: $e');
+    } finally {
+      _reconnecting = false;
+    }
+  }
+
+  /// Poll the boat-systems sensors (all generic Sensor readings), mirroring the
+  /// web app's data panel: watermaker flow, seakeeper, tank levels, AC power.
+  Future<void> _pollSystems(RobotClient robot) async {
+    final fwName = _spotZeroFwName;
+    if (fwName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, fwName).readings();
+        final f = r['Product Water Flow'];
+        if (f is num) {
+          state.setSystems(spotZeroFwGph: f.toDouble() * 0.00440287);
+        }
+      } catch (_) {}
+    }
+    final swName = _spotZeroSwName;
+    if (swName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, swName).readings();
+        final f = r['Product Water Flow'];
+        if (f is num) {
+          state.setSystems(spotZeroSwGph: f.toDouble() * 0.00440287);
+        }
+      } catch (_) {}
+    }
+    final skName = _seakeeperName;
+    if (skName != null) {
+      try {
+        final r = await Sensor.fromRobot(robot, skName).readings();
+        final prog = r['progress_bar_percentage'];
+        state.setSystems(
+          seakeeperStabilizing: _boolish(r['stabilize_enabled']),
+          seakeeperPower: _boolish(r['power_enabled']),
+          seakeeperProgress: prog is num ? prog.toDouble() : null,
+        );
+      } catch (_) {}
+    }
+    if (_tankNames.isNotEmpty) {
+      final prev = {for (final t in state.tanks) t.name: t};
+      final tanks = <TankStatus>[];
+      for (final tn in _tankNames) {
+        final name = tn.split(':').last;
+        final old = prev[name];
+        try {
+          final r = await Sensor.fromRobot(robot, tn).readings();
+          final lvl = r['Level'];
+          final cap = r['Capacity'];
+          // Boat-side data arrival time (viamboat's boat-sensor
+          // `_last_update`; absent on older module builds). A timestamp
+          // that's present but unparseable, absurdly old (Go zero time), or
+          // in the future (beyond a little clock skew) is flagged invalid
+          // rather than trusted.
+          DateTime? boatAt;
+          var boatInvalid = false;
+          final lu = r['_last_update'];
+          if (lu != null) {
+            final parsed = lu is String ? DateTime.tryParse(lu) : null;
+            if (parsed == null ||
+                parsed.year < 2000 ||
+                parsed.isAfter(
+                    DateTime.now().add(const Duration(seconds: 5)))) {
+              boatInvalid = true;
+            } else {
+              boatAt = parsed.toLocal();
+            }
+          }
+          final level = lvl is num ? lvl.toDouble() : old?.level;
+          if (level == null) continue; // not a tank (e.g. freshwater-relay)
+          // No `_last_update` (module build predates it): a successful read
+          // still proves the boat-side data is <60 s old — viamboat errors
+          // beyond that — so "now" keeps the staleness color correct.
+          tanks.add(TankStatus(
+            name: name,
+            level: level,
+            capacity: cap is num ? cap.toDouble() : old?.capacity,
+            fetchedAt: DateTime.now(),
+            boatUpdatedAt: boatInvalid ? null : (boatAt ?? DateTime.now()),
+            boatTimestampInvalid: boatInvalid,
+          ));
+        } catch (e) {
+          // viamboat fails Readings once boat-side data is >60 s old ("too
+          // old"). That RPC still reached the boat, so OUR fetch is fresh —
+          // only the boat-side age keeps growing. When the timestamp was
+          // never seen (older module build, or stale since before we
+          // connected), synthesize now-60 s so the age keeps counting from
+          // the threshold. Any other error means we couldn't reach the
+          // boat: leave both timestamps aging.
+          final reachedBoat = e.toString().contains('too old');
+          if (old == null && !reachedBoat) continue;
+          final wasInvalid = old?.boatTimestampInvalid ?? false;
+          tanks.add(TankStatus(
+            name: name,
+            level: old?.level,
+            capacity: old?.capacity,
+            fetchedAt: reachedBoat ? DateTime.now() : old?.fetchedAt,
+            // A previously-invalid timestamp stays invalid — synthesizing an
+            // age would launder the bad clock into a plausible-looking one.
+            boatUpdatedAt: wasInvalid
+                ? null
+                : reachedBoat
+                    ? (old?.boatUpdatedAt ??
+                        DateTime.now().subtract(const Duration(seconds: 60)))
+                    : old?.boatUpdatedAt,
+            boatTimestampInvalid: wasInvalid,
+          ));
+        }
+      }
+      if (tanks.isNotEmpty) state.setSystems(tanks: tanks);
+    }
+    if (_acPowerNames.isNotEmpty) {
+      double vSum = 0;
+      int vN = 0;
+      double wSum = 0;
+      for (final an in _acPowerNames) {
+        try {
+          final r = await Sensor.fromRobot(robot, an).readings();
+          final v = r['Line-Neutral AC RMS Voltage'];
+          final a = r['AC RMS Current'];
+          if (v is num) {
+            vSum += v.toDouble();
+            vN++;
+            if (a is num) wSum += v.toDouble() * a.toDouble();
+          }
+        } catch (_) {}
+      }
+      if (vN > 0) state.setSystems(acVolts: vSum / vN, acWatts: wSum);
+    }
+  }
+
+  /// Stop polling and close the robot connection unconditionally — used when
+  /// switching boats, where nothing else will close a picker-dialed robot.
+  Future<void> stop() async {
+    _timer?.cancel();
+    _timer = null;
+    final r = _robot;
+    _robot = null;
+    await r?.close();
+  }
+
+  Future<void> dispose() async {
+    _timer?.cancel();
+    if (_ownsRobot) await _robot?.close();
+  }
+}

@@ -64,8 +64,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
-          channel: stable
+          flutter-version-file: mobile/.fvmrc
           cache: true
 
       - name: Materialize platform folders
@@ -76,6 +75,9 @@ jobs:
       # manifest merge fails. The platform folder is regenerated each run, so
       # inject it here (idempotent; handles Groovy and Kotlin DSL).
       - name: Configure AppAuth redirect scheme
+<<<<<<< HEAD
+        run: bash tool/ci-android-appauth.sh
+=======
         run: |
           set -e
           SCHEME=com.viam.chartplotter
@@ -86,6 +88,7 @@ jobs:
             grep -q appAuthRedirectScheme android/app/build.gradle.kts || \
               sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders[\"appAuthRedirectScheme\"] += \"$SCHEME\"/" android/app/build.gradle.kts
           fi
+>>>>>>> origin/main
 
       - name: Resolve dependencies
         run: flutter pub get

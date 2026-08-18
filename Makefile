@@ -168,3 +168,85 @@ backfill-lowzoom: mapsync
 # when it's absent.
 backfill-noaa-lowzoom: mapsync
 	./mapsync backfill-noaa-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
+
+
+# -- mobile (Flutter) app ----------------------------------------------------
+# Run/build the native chartplotter in mobile/ (see mobile/README.md). Needs
+# Flutter (version pinned in mobile/.fvmrc); override FLUTTER to pin via FVM:
+#   make mobile-run FLUTTER="fvm flutter"
+# Target a specific device with DEVICE=<id from `flutter devices`>. Boat/login
+# config is forwarded as --dart-define only when set, so bare `make mobile-run`
+# is chart-only (hosted tiles, no boat):
+#   make mobile-run                                              # chart-only
+#   make mobile-run VIAM_HOST=… VIAM_API_KEY_ID=… VIAM_API_KEY=…  # a boat
+#   make mobile-run VIAM_OAUTH_ISSUER=… VIAM_OAUTH_CLIENT_ID=…    # app.viam.com login
+FLUTTER ?= flutter
+# Reverse-domain org for the generated platform projects (bundle id = <org>.mobile).
+# Pinned so `flutter create` is deterministic — otherwise stale platform folders
+# generated with different orgs make it fail with "Ambiguous organization".
+MOBILE_ORG ?= com.viam
+MOBILE_DEVICE := $(if $(DEVICE),-d $(DEVICE))
+MOBILE_DART_DEFINES := \
+	$(if $(VIAM_HOST),--dart-define=VIAM_HOST=$(VIAM_HOST)) \
+	$(if $(VIAM_API_KEY_ID),--dart-define=VIAM_API_KEY_ID=$(VIAM_API_KEY_ID)) \
+	$(if $(VIAM_API_KEY),--dart-define=VIAM_API_KEY=$(VIAM_API_KEY)) \
+	$(if $(TILE_BASE),--dart-define=TILE_BASE=$(TILE_BASE)) \
+	$(if $(DEPTH_SENSOR),--dart-define=DEPTH_SENSOR=$(DEPTH_SENSOR)) \
+	$(if $(VIAM_OAUTH_ISSUER),--dart-define=VIAM_OAUTH_ISSUER=$(VIAM_OAUTH_ISSUER)) \
+	$(if $(VIAM_OAUTH_CLIENT_ID),--dart-define=VIAM_OAUTH_CLIENT_ID=$(VIAM_OAUTH_CLIENT_ID)) \
+	$(if $(VIAM_OAUTH_REDIRECT),--dart-define=VIAM_OAUTH_REDIRECT=$(VIAM_OAUTH_REDIRECT))
+
+.PHONY: mobile-setup mobile-setup-force mobile-run mobile-apk mobile-analyze mobile-test
+
+# The setup work lives behind a stamp file so it obeys normal make timestamp
+# rules: it re-runs only when one of its inputs changes — the pinned Flutter
+# version, pubspec, or the platform-config scripts. `mobile-setup` is just the
+# friendly name that depends on it, so `make mobile-run` (which depends on
+# mobile-setup) does no setup work when nothing changed. (Re-running the setup
+# needlessly rewrites macos/*.entitlements and makes Xcode fail with
+# "Entitlements file was modified during the build".)
+MOBILE_SETUP_STAMP := mobile/.dart_tool/chartplotter-setup.stamp
+MOBILE_SETUP_DEPS := mobile/pubspec.yaml mobile/.fvmrc \
+	mobile/tool/ci-android-appauth.sh mobile/tool/ios-appauth.sh \
+	mobile/tool/macos-entitlements.sh
+
+# Incremental setup: a no-op when the stamp is up to date.
+mobile-setup: $(MOBILE_SETUP_STAMP)
+
+# Force a full re-setup: use after deleting the generated android/ ios/ macos/
+# folders, which make can't detect on its own.
+mobile-setup-force:
+	rm -f $(MOBILE_SETUP_STAMP)
+	$(MAKE) mobile-setup
+
+# The actual setup: install Flutter/CocoaPods if missing, generate the
+# gitignored platform folders, inject the appauth/plist/entitlements config,
+# and resolve packages. brew installs the latest stable; for the exact version
+# pinned in mobile/.fvmrc use FVM (make mobile-setup FLUTTER="fvm flutter").
+$(MOBILE_SETUP_STAMP): $(MOBILE_SETUP_DEPS)
+	command -v flutter >/dev/null 2>&1 || brew install --cask flutter
+	command -v pod >/dev/null 2>&1 || brew install cocoapods
+	cd mobile && \
+		if [ ! -d ios ] || [ ! -d android ] || [ ! -d macos ]; then $(FLUTTER) create --org $(MOBILE_ORG) . ; fi && \
+		bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && \
+		$(FLUTTER) pub get
+	@mkdir -p $(@D) && touch $@
+
+# Run on a connected device/emulator. Depends on mobile-setup, which only does
+# work when its inputs changed.
+# MODE=release runs without the Dart VM service — faster, and it sidesteps the
+# debug-mode local-network handshake that can hang on a physical iPhone
+# ("Dart VM Service was not discovered"). Use debug (default) for hot reload.
+mobile-run: mobile-setup
+	cd mobile && $(FLUTTER) run $(if $(MODE),--$(MODE)) $(MOBILE_DEVICE) $(MOBILE_DART_DEFINES)
+
+# Build a debug APK (mirrors CI's build-android job).
+mobile-apk: mobile-setup
+	cd mobile && $(FLUTTER) build apk --debug $(MOBILE_DART_DEFINES)
+
+# Static analysis + unit tests (mirror CI's analyze job). No platform folders
+# needed, so these skip mobile-setup.
+mobile-analyze:
+	cd mobile && $(FLUTTER) analyze
+mobile-test:
+	cd mobile && $(FLUTTER) test
