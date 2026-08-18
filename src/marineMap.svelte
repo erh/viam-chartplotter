@@ -6470,6 +6470,14 @@
               </span>
             </div>
           {/if}
+          {#if weatherInfo.moonriseLocal || weatherInfo.moonsetLocal}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Moon</span>
+              <span class="data-panel-value">
+                ↑ {weatherInfo.moonriseLocal ?? "—"} · ↓ {weatherInfo.moonsetLocal ?? "—"}
+              </span>
+            </div>
+          {/if}
         </a>
       {/if}
       {#if cursorInfo}
