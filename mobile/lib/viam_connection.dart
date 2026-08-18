@@ -294,7 +294,14 @@ class ViamConnection {
   Future<void> _tick() async {
     final robot = _robot;
     final msName = _movementSensorName;
-    if (robot == null || msName == null) return;
+    if (robot == null) {
+      // A failed reconnect leaves no robot — without this, the loop would
+      // go quiet forever. Keep re-dialing (throttled to ~10 s inside
+      // _reconnect) until the boat is back or stop() cancels the timer.
+      unawaited(_reconnect());
+      return;
+    }
+    if (msName == null) return;
     if (_polling) {
       // A previous tick is stuck in a hung RPC — the signature of a dead
       // WebRTC connection. Declare it dead once nothing has succeeded for a
@@ -446,9 +453,10 @@ class ViamConnection {
     await _reconnect(force: true);
   }
 
-  /// Close the (dead) robot and dial a fresh one via [reconnector]. Repeat
-  /// attempts are throttled; the poll loop keeps calling in on failure so a
-  /// long outage retries every ~10 s until the boat is back.
+  /// Close the (dead) robot and dial a fresh one via [reconnector]. The
+  /// 1 s poll timer keeps calling in while there's no robot, and the
+  /// [_lastReconnectAttempt] throttle spaces real dial attempts ~10 s
+  /// apart — so a long outage retries every 10 s until the boat is back.
   Future<void> _reconnect({bool force = false}) async {
     final rec = reconnector;
     if (rec == null || _reconnecting) return;

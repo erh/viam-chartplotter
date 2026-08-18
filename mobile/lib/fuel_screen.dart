@@ -80,15 +80,14 @@ class _FuelScreenState extends State<FuelScreen> {
   }
 }
 
-/// Fill prediction from the last 5 minutes of samples: the level delta over
-/// that window, extrapolated to when the tank reaches 95% (the stop-filling
-/// heads-up). Null when there's no meaningful upward trend or not enough
-/// history yet to trust one (at least half the window).
-({double ratePerMin, Duration toTarget})? predict95(
-    List<({DateTime t, double v})> series) {
+const double kLitersPerGallon = 3.78541;
+
+/// Level rate (%/min) from the delta over the last 5 minutes of samples.
+/// Null when there's not enough history to trust a trend (at least half the
+/// window).
+double? levelRatePerMin(List<({DateTime t, double v})> series) {
   if (series.length < 2) return null;
   final last = series.last;
-  if (last.v >= 95) return null; // already there — the card says so
   final cutoff = last.t.subtract(const Duration(minutes: 5));
   ({DateTime t, double v})? ref;
   for (final s in series) {
@@ -100,14 +99,36 @@ class _FuelScreenState extends State<FuelScreen> {
   if (ref == null) return null;
   final windowMin = last.t.difference(ref.t).inMilliseconds / 60000.0;
   if (windowMin < 2.5) return null; // too little history to extrapolate
-  final rate = (last.v - ref.v) / windowMin;
-  if (rate < 0.05) return null; // flat or draining — no fill ETA
-  final minutes = (95 - last.v) / rate;
-  if (minutes > 24 * 60) return null; // absurd horizon → noise, not a fill
-  return (
-    ratePerMin: rate,
-    toTarget: Duration(seconds: (minutes * 60).round()),
-  );
+  return (last.v - ref.v) / windowMin;
+}
+
+/// What the tank's rate line should report, or null for nothing.
+///
+/// Rates are in gallons/min (via the tank's liter capacity — without a
+/// capacity there's no gallon rate, so no report). Changes slower than
+/// 1 gal/min in either direction are ignored as noise. Filling faster than
+/// that predicts when the level hits 95% (the stop-pumping heads-up);
+/// draining faster than that reports the burn rate.
+({bool filling, double gpm, Duration? to95})? tankRateReport({
+  required List<({DateTime t, double v})> series,
+  required double? level,
+  required double? capacityL,
+}) {
+  final rate = levelRatePerMin(series);
+  if (rate == null || capacityL == null || capacityL <= 0) return null;
+  final gpm = rate / 100.0 * capacityL / kLitersPerGallon;
+  if (gpm >= 1) {
+    Duration? to95;
+    if (level != null && level < 95) {
+      final minutes = (95 - level) / rate;
+      if (minutes <= 24 * 60) {
+        to95 = Duration(seconds: (minutes * 60).round());
+      }
+    }
+    return (filling: true, gpm: gpm, to95: to95);
+  }
+  if (gpm <= -1) return (filling: false, gpm: -gpm, to95: null);
+  return null; // under 1 gal/min either way — noise, not a fill or a burn
 }
 
 class _TankCard extends StatelessWidget {
@@ -122,7 +143,8 @@ class _TankCard extends StatelessWidget {
     final liters = (level != null && capacity != null)
         ? capacity * level / 100.0
         : null;
-    final prediction = predict95(series);
+    final report =
+        tankRateReport(series: series, level: level, capacityL: capacity);
     final now = DateTime.now();
     final hour = [
       for (final s in series)
@@ -157,7 +179,8 @@ class _TankCard extends StatelessWidget {
             if (liters != null) ...[
               const SizedBox(height: 4),
               Text(
-                '${liters.toStringAsFixed(0)} / ${capacity!.toStringAsFixed(0)} L',
+                '${(liters / kLitersPerGallon).toStringAsFixed(0)} / '
+                '${(capacity! / kLitersPerGallon).toStringAsFixed(0)} gal',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
@@ -179,18 +202,28 @@ class _TankCard extends StatelessWidget {
                       .bodyMedium
                       ?.copyWith(color: Colors.amber),
                 ),
-              )
-            else if (prediction != null)
+              ),
+            if (report != null && report.filling)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
-                  'Filling ${_rateLabel(prediction.ratePerMin, capacity)} → '
-                  '95% ≈ ${_clock(now.add(prediction.toTarget))} '
-                  '(in ${_dur(prediction.toTarget)})',
+                  'Filling +${report.gpm.toStringAsFixed(1)} gal/min'
+                  '${report.to95 != null ? ' → 95% ≈ ${_clock(now.add(report.to95!))} (in ${_dur(report.to95!)})' : ''}',
                   style: Theme.of(context)
                       .textTheme
                       .bodyMedium
                       ?.copyWith(color: Colors.lightBlueAccent),
+                ),
+              )
+            else if (report != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'Using ${report.gpm.toStringAsFixed(1)} gal/min',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodyMedium
+                      ?.copyWith(color: Colors.orange),
                 ),
               ),
             const SizedBox(height: 12),
@@ -215,16 +248,6 @@ class _TankCard extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Fill rate for display: gallons/min when the tank's capacity (liters) is
-/// known, else the raw percent/min.
-String _rateLabel(double pctPerMin, double? capacityL) {
-  if (capacityL != null && capacityL > 0) {
-    final gpm = pctPerMin / 100.0 * capacityL / 3.78541;
-    return '+${gpm.toStringAsFixed(1)} gal/min';
-  }
-  return '+${pctPerMin.toStringAsFixed(1)}%/min';
 }
 
 String _clock(DateTime t) {
