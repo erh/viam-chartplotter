@@ -1,4 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
 import '../auth/viam_session.dart';
@@ -29,6 +33,8 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   String? _error;
   String _title = 'Select organization';
   bool _connecting = false;
+  String _orgId = ''; // org of the machine being connected (set on org tap)
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
 
   Viam get _viam => widget.session.viam!;
 
@@ -62,6 +68,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       });
 
   Future<void> _loadLocations(dynamic org) => _guard(() async {
+        _orgId = org.id;
         final locs = await _viam.appClient.listLocations(org.id);
         setState(() {
           _level = _Level.locations;
@@ -82,7 +89,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   Future<void> _connect(dynamic robot) async {
     setState(() => _connecting = true);
     try {
-      final client = await _viam.getRobotClient(robot);
+      final client = await _connectRobot(robot);
       widget.onConnected(client);
     } catch (e) {
       if (mounted) {
@@ -92,6 +99,107 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         });
       }
     }
+  }
+
+  /// Connect local-first, then fall back to the cloud with a machine API key.
+  ///
+  /// The SDK's `getRobotClient` dials with the part's robot secret and lets
+  /// mDNS pick a LAN endpoint. Ways that breaks:
+  ///  - The `_rpc._tcp` record can advertise a dead port (cm90 does), and
+  ///    because gRPC channels connect lazily — and dial() mutates its own
+  ///    options on the mDNS attempt — the SDK's internal fallback redials
+  ///    the same dead endpoint until the dial timeout.
+  ///  - Robot secrets are deprecated; on machines without one the secret is
+  ///    empty and authentication can't succeed.
+  ///  - app.viam.com's WebRTC signaling accepts machine API keys but hangs
+  ///    on our OAuth app's access token (the app API accepts that token,
+  ///    signaling does not).
+  /// So: attempt the local path only when a robot secret exists (it's the
+  /// only credential a viam-server accepts on a direct LAN dial). For the
+  /// cloud path, mint a robot-owner API key through the app API using the
+  /// OAuth session — cached per machine in secure storage, re-minted once
+  /// if a stored key stops working — and dial app.viam.com signaling with
+  /// it, mDNS off.
+  Future<RobotClient> _connectRobot(dynamic robot) async {
+    final parts = await _viam.appClient.listRobotParts(robot.id);
+    final part = parts.firstWhere((p) => p.mainPart);
+    // NOTE: no local/mDNS attempt. viam-server's `_rpc._tcp` advertisement
+    // here is its internal signaling listener bound to the MACHINE'S OWN
+    // loopback (utils/rpc server.go registers it with a 127.0.0.1 A-record
+    // and an ephemeral port that changes on restart) — usable only by
+    // clients on the boat itself, never from another device, so the Dart
+    // SDK's mDNS dial can't succeed from here. Attempting it also risks the
+    // SDK's poisoned-fallback bug (dial() mutates its options on the mDNS
+    // try, so its internal fallback redials the same dead endpoint) plus a
+    // robot-secret auth that hangs where the deprecated secret is disabled.
+    // Cloud signaling is only the handshake — ICE still picks a direct LAN
+    // path when both peers are on the boat network.
+    final stored = await _loadStoredKey(robot.id);
+    if (stored != null) {
+      try {
+        return await _dialWithKey(part.fqdn, stored);
+      } catch (_) {
+        // Key revoked/rotated server-side — discard and mint a fresh one.
+        try {
+          await _storage.delete(key: _storageKey(robot.id));
+        } catch (_) {}
+      }
+    }
+    final minted = await _mintKey(robot);
+    try {
+      return await _dialWithKey(part.fqdn, minted);
+    } on TimeoutException {
+      // Signaling/answerer hiccups showed up as one-off 10 s dial timeouts
+      // during testing while the identical dial succeeded moments later —
+      // one retry before surfacing the error.
+      return await _dialWithKey(part.fqdn, minted);
+    }
+  }
+
+  static String _storageKey(String robotId) => 'machine_api_key_$robotId';
+
+  Future<({String id, String key})?> _loadStoredKey(String robotId) async {
+    try {
+      final raw = await _storage.read(key: _storageKey(robotId));
+      if (raw == null) return null;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final id = m['id'];
+      final key = m['key'];
+      if (id is String && key is String) return (id: id, key: key);
+    } catch (_) {
+      // Unreadable storage or corrupt entry — treat as no stored key.
+    }
+    return null;
+  }
+
+  Future<({String id, String key})> _mintKey(dynamic robot) async {
+    final resp = await _viam.appClient.createKey(
+      [
+        ViamAuthorization(
+          authorizationId: AuthorizationId.robotOwner,
+          resourceType: ResourceType.robot,
+          resourceId: robot.id,
+          organizationId: _orgId,
+          identityType: IdentityType.apiKey,
+        ),
+      ],
+      'chartplotter-mobile',
+    );
+    try {
+      await _storage.write(
+        key: _storageKey(robot.id),
+        value: jsonEncode({'id': resp.id, 'key': resp.key}),
+      );
+    } catch (_) {
+      // Storage unavailable — the key still works for this run.
+    }
+    return (id: resp.id, key: resp.key);
+  }
+
+  Future<RobotClient> _dialWithKey(String fqdn, ({String id, String key}) k) {
+    final options = RobotClientOptions.withApiKey(k.id, k.key)
+      ..dialOptions.attemptMdns = false;
+    return RobotClient.atAddress(fqdn, options);
   }
 
   void _onTap(dynamic item) {

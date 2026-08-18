@@ -64,10 +64,24 @@ class ViamConnection {
     }
     state.setStatus('Connecting…');
     try {
-      _robot = await RobotClient.atAddress(
-        Config.host,
-        RobotClientOptions.withApiKey(Config.apiKeyId, Config.apiKey),
-      );
+      try {
+        _robot = await RobotClient.atAddress(
+          Config.host,
+          RobotClientOptions.withApiKey(Config.apiKeyId, Config.apiKey),
+        );
+      } catch (_) {
+        // The mDNS-discovered local endpoint can be dead (the boat's
+        // advertised ephemeral port isn't reachable) and the SDK's dial
+        // mutates its options on the mDNS attempt, so its own fallback
+        // redials the same dead endpoint. Retry with fresh options and mDNS
+        // off to force the app.viam.com cloud path.
+        state.setStatus('Local connect failed, retrying via cloud…');
+        final options = RobotClientOptions.withApiKey(
+          Config.apiKeyId,
+          Config.apiKey,
+        )..dialOptions.attemptMdns = false;
+        _robot = await RobotClient.atAddress(Config.host, options);
+      }
       _ownsRobot = true;
     } catch (e) {
       state.setStatus('Connect failed: $e');

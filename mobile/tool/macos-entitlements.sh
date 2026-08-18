@@ -6,6 +6,10 @@
 #   - com.apple.security.network.client : outgoing connections (tiles, weather,
 #     Viam cloud). The App Sandbox blocks these by default → "Operation not
 #     permitted (errno 1)".
+#   - com.apple.security.network.server : WebRTC ICE must bind listening UDP
+#     sockets; without this the robot dial silently hangs until timeout in
+#     RELEASE builds. (Debug builds worked by accident — Flutter's debug
+#     template grants it for the VM service, the release template doesn't.)
 #   - keychain-access-groups is deliberately NOT added: it's a restricted
 #     entitlement that forces signing with a development certificate ("Runner
 #     has entitlements that require signing with a development certificate"),
@@ -52,6 +56,7 @@ remove_key() { # file key
 
 for f in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
   grant_bool "$f" "com.apple.security.network.client"
+  grant_bool "$f" "com.apple.security.network.server"
   remove_key "$f" "keychain-access-groups"
 done
 
