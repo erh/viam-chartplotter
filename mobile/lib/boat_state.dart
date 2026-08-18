@@ -3,6 +3,36 @@ import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
 
+/// One tank's live reading plus the two freshness timestamps the fuel page
+/// color-codes: when the app last successfully fetched the sensor, and when
+/// the boat-side sensor last received data (viamboat's `_last_update`
+/// reading; absent on module builds that predate it).
+class TankStatus {
+  const TankStatus({
+    required this.name,
+    this.level,
+    this.capacity,
+    this.fetchedAt,
+    this.boatUpdatedAt,
+    this.boatTimestampInvalid = false,
+  });
+
+  final String name;
+  final double? level; // percent, last known (null = never read)
+  final double? capacity; // liters, when the sensor reports one
+  final DateTime? fetchedAt; // last successful app fetch from the boat
+  final DateTime? boatUpdatedAt; // last CAN data arrival at the boat sensor
+  // The sensor reported a `_last_update` that is garbage — unparseable,
+  // absurdly old (Go zero time), or in the future. Shown red as "invalid":
+  // a lying clock must not be trusted to claim the data is fresh.
+  final bool boatTimestampInvalid;
+
+  Duration? get fetchedAge =>
+      fetchedAt == null ? null : DateTime.now().difference(fetchedAt!);
+  Duration? get boatAge =>
+      boatUpdatedAt == null ? null : DateTime.now().difference(boatUpdatedAt!);
+}
+
 /// Snapshot of the live boat readings the app polls. A ChangeNotifier so the
 /// UI rebuilds on each 1 Hz tick. Grows as more of the web app's readouts are
 /// ported (AIS, gauges, routes, …).
@@ -21,7 +51,7 @@ class BoatState extends ChangeNotifier {
   bool? seakeeperStabilizing;
   bool? seakeeperPower;
   double? seakeeperProgress; // spool-up %
-  List<({String name, double level})> tanks = const []; // fuel / fresh water
+  List<TankStatus> tanks = const []; // fuel / fresh water
   double? acVolts; // average line-neutral voltage
   double? acWatts; // total AC load
   List<AisBoat> aisBoats = const [];
@@ -119,7 +149,7 @@ class BoatState extends ChangeNotifier {
     bool? seakeeperStabilizing,
     bool? seakeeperPower,
     double? seakeeperProgress,
-    List<({String name, double level})>? tanks,
+    List<TankStatus>? tanks,
     double? acVolts,
     double? acWatts,
   }) {
@@ -133,7 +163,8 @@ class BoatState extends ChangeNotifier {
     if (tanks != null) {
       this.tanks = tanks;
       for (final t in tanks) {
-        _push('tank:${t.name}', t.level);
+        final lvl = t.level;
+        if (lvl != null) _push('tank:${t.name}', lvl);
       }
     }
     if (acVolts != null) this.acVolts = acVolts;

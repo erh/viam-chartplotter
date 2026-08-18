@@ -127,7 +127,7 @@ class DataDrawer extends StatelessWidget {
               const SizedBox(height: 16),
               const _Section('Tanks'),
               for (final t in state.tanks)
-                _Row(t.name, '${t.level.toStringAsFixed(0)}%',
+                _Row(t.name, '${t.level?.toStringAsFixed(0) ?? "—"}%',
                     spark: state.spark('tank:${t.name}'),
                     graph: _graph(state, 'tank:${t.name}', t.name, '%',
                         digits: 0),

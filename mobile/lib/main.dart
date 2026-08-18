@@ -1,9 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
 import 'auth/oauth_config.dart';
+import 'auth/token_store.dart';
 import 'auth/viam_session.dart';
 import 'boat_state.dart';
+import 'connect.dart';
 import 'map_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/machine_picker_screen.dart';
@@ -20,7 +24,8 @@ class ChartplotterApp extends StatefulWidget {
   State<ChartplotterApp> createState() => _ChartplotterAppState();
 }
 
-class _ChartplotterAppState extends State<ChartplotterApp> {
+class _ChartplotterAppState extends State<ChartplotterApp>
+    with WidgetsBindingObserver {
   BoatState _state = BoatState();
   final ViamSession _session = ViamSession();
   late ViamConnection _conn = ViamConnection(_state);
@@ -36,8 +41,19 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _session.addListener(_onSession);
     _bootstrap();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Locking the phone kills the WebRTC connection but leaves the app
+    // showing its last status. Probe on resume so a dead connection is
+    // noticed (and re-dialed) immediately instead of silently lying.
+    if (state == AppLifecycleState.resumed && _boatConnected) {
+      _conn.checkNow();
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -59,6 +75,19 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
 
   void _onRobotConnected(RobotClient robot) {
     _conn.startWithRobot(robot, viam: _session.viam);
+    // Dead-connection recovery: re-dial the machine we're on via the shared
+    // connect path (cached machine API key), using the picker's stored
+    // last-machine record.
+    _conn.reconnector = () async {
+      final viam = _session.viam;
+      final raw = await TokenStore().read(key: kLastMachineKey);
+      if (viam == null || raw == null) {
+        throw StateError('no session or machine to reconnect to');
+      }
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      return MachineConnector(viam: viam)
+          .connect(m['robotId'] as String, m['orgId'] as String);
+    };
     setState(() {
       _boatConnected = true;
       _skipAutoConnect = false;
@@ -81,6 +110,7 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _session.removeListener(_onSession);
     _conn.dispose();
     _session.dispose();

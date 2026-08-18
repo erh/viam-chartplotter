@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -6,6 +5,7 @@ import 'package:viam_sdk/viam_sdk.dart';
 
 import '../auth/token_store.dart';
 import '../auth/viam_session.dart';
+import '../connect.dart';
 
 /// After login, walk the user's org → location → machine and open a
 /// RobotClient for the chosen boat via `viam.getRobotClient`. Hands the
@@ -60,7 +60,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   /// loading behind it, so "Pick a different boat" is instant.
   Future<void> _tryAutoConnect() async {
     try {
-      final raw = await _storage.read(key: _kLastMachine);
+      final raw = await _storage.read(key: kLastMachineKey);
       if (raw == null) return;
       final m = jsonDecode(raw) as Map<String, dynamic>;
       final robotId = m['robotId'];
@@ -148,7 +148,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       // without walking the picker.
       try {
         await _storage.write(
-          key: _kLastMachine,
+          key: kLastMachineKey,
           value: jsonEncode({
             'robotId': robot.id,
             'orgId': _orgId,
@@ -168,94 +168,10 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     }
   }
 
-  /// Dial the machine's main part via app.viam.com signaling with a
-  /// per-machine robot-owner API key, minted through the app API on first
-  /// connect and cached (re-minted once if the stored key stops working,
-  /// one retry on a dial timeout). Machine API keys are the credential
-  /// signaling reliably accepts: it hangs on our OAuth app's access token,
-  /// and robot secrets are deprecated (empty/disabled on newer machines).
-  Future<RobotClient> _connectRobot(String robotId) async {
-    final parts = await _viam.appClient.listRobotParts(robotId);
-    final part = parts.firstWhere((p) => p.mainPart);
-    // NOTE: no local/mDNS attempt. viam-server's `_rpc._tcp` advertisement
-    // here is its internal signaling listener bound to the MACHINE'S OWN
-    // loopback (utils/rpc server.go registers it with a 127.0.0.1 A-record
-    // and an ephemeral port that changes on restart) — usable only by
-    // clients on the boat itself, never from another device, so the Dart
-    // SDK's mDNS dial can't succeed from here. Attempting it also risks the
-    // SDK's poisoned-fallback bug (dial() mutates its options on the mDNS
-    // try, so its internal fallback redials the same dead endpoint) plus a
-    // robot-secret auth that hangs where the deprecated secret is disabled.
-    // Cloud signaling is only the handshake — ICE still picks a direct LAN
-    // path when both peers are on the boat network.
-    final stored = await _loadStoredKey(robotId);
-    if (stored != null) {
-      try {
-        return await _dialWithKey(part.fqdn, stored);
-      } catch (_) {
-        // Key revoked/rotated server-side — discard and mint a fresh one.
-        try {
-          await _storage.delete(key: _storageKey(robotId));
-        } catch (_) {}
-      }
-    }
-    final minted = await _mintKey(robotId);
-    try {
-      return await _dialWithKey(part.fqdn, minted);
-    } on TimeoutException {
-      // Signaling/answerer hiccups showed up as one-off 10 s dial timeouts
-      // during testing while the identical dial succeeded moments later —
-      // one retry before surfacing the error.
-      return await _dialWithKey(part.fqdn, minted);
-    }
-  }
-
-  static const _kLastMachine = 'last_machine';
-  static String _storageKey(String robotId) => 'machine_api_key_$robotId';
-
-  Future<({String id, String key})?> _loadStoredKey(String robotId) async {
-    try {
-      final raw = await _storage.read(key: _storageKey(robotId));
-      if (raw == null) return null;
-      final m = jsonDecode(raw) as Map<String, dynamic>;
-      final id = m['id'];
-      final key = m['key'];
-      if (id is String && key is String) return (id: id, key: key);
-    } catch (_) {
-      // Unreadable storage or corrupt entry — treat as no stored key.
-    }
-    return null;
-  }
-
-  Future<({String id, String key})> _mintKey(String robotId) async {
-    final resp = await _viam.appClient.createKey(
-      [
-        ViamAuthorization(
-          authorizationId: AuthorizationId.robotOwner,
-          resourceType: ResourceType.robot,
-          resourceId: robotId,
-          organizationId: _orgId,
-          identityType: IdentityType.apiKey,
-        ),
-      ],
-      'chartplotter-mobile',
-    );
-    try {
-      await _storage.write(
-        key: _storageKey(robotId),
-        value: jsonEncode({'id': resp.id, 'key': resp.key}),
-      );
-    } catch (_) {
-      // Storage unavailable — the key still works for this run.
-    }
-    return (id: resp.id, key: resp.key);
-  }
-
-  Future<RobotClient> _dialWithKey(String fqdn, ({String id, String key}) k) {
-    final options = RobotClientOptions.withApiKey(k.id, k.key)
-      ..dialOptions.attemptMdns = false;
-    return RobotClient.atAddress(fqdn, options);
-  }
+  /// Dial via [MachineConnector] — the shared cloud/API-key connect path,
+  /// also used for launch auto-connect and dead-connection re-dials.
+  Future<RobotClient> _connectRobot(String robotId) =>
+      MachineConnector(viam: _viam).connect(robotId, _orgId);
 
   void _onTap(dynamic item) {
     switch (_level) {

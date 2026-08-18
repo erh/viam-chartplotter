@@ -50,6 +50,22 @@ class ViamConnection {
   bool _polling = false;
   bool _ownsRobot = false; // close it on dispose only if we dialed it
 
+  // ---- connection health ----------------------------------------------
+  // gRPC calls on a dead WebRTC connection (e.g. after the phone was locked)
+  // tend to HANG rather than fail, so "the poll loop stopped succeeding" is
+  // the only reliable death signal. Track the last successful poll and the
+  // consecutive fast-failure count; either tripping triggers a re-dial via
+  // [reconnector].
+  DateTime _lastGoodTick = DateTime.now();
+  int _tickFailures = 0;
+  bool _reconnecting = false;
+  DateTime? _lastReconnectAttempt;
+
+  /// Re-dials the robot after the connection dies. Set by whoever connected
+  /// us (main.dart via MachineConnector, or the API-key path internally);
+  /// without it a dead connection just shows "Connection lost".
+  Future<RobotClient> Function()? reconnector;
+
   Future<void> startWithRobot(RobotClient robot, {Viam? viam}) async {
     _robot = robot;
     _viam = viam;
@@ -83,6 +99,14 @@ class ViamConnection {
         _robot = await RobotClient.atAddress(Config.host, options);
       }
       _ownsRobot = true;
+      // Dead-connection recovery redials the proven cloud path directly.
+      reconnector = () {
+        final options = RobotClientOptions.withApiKey(
+          Config.apiKeyId,
+          Config.apiKey,
+        )..dialOptions.attemptMdns = false;
+        return RobotClient.atAddress(Config.host, options);
+      };
     } catch (e) {
       state.setStatus('Connect failed: $e');
       return;
@@ -270,18 +294,32 @@ class ViamConnection {
   Future<void> _tick() async {
     final robot = _robot;
     final msName = _movementSensorName;
-    if (robot == null || msName == null || _polling) return;
+    if (robot == null || msName == null) return;
+    if (_polling) {
+      // A previous tick is stuck in a hung RPC — the signature of a dead
+      // WebRTC connection. Declare it dead once nothing has succeeded for a
+      // while (the reconnect closes the robot, which unblocks the hung
+      // calls).
+      if (DateTime.now().difference(_lastGoodTick).inSeconds > 15) {
+        unawaited(_reconnect());
+      }
+      return;
+    }
     _polling = true;
     _tickN++;
+    var ok = false;
     try {
       final ms = MovementSensor.fromRobot(robot, msName);
 
       try {
-        final p = await ms.position();
+        // Heartbeat call: bounded so a dead connection fails fast instead of
+        // wedging the poll loop forever.
+        final p = await ms.position().timeout(const Duration(seconds: 5));
         // Position exposes `coordinates` (a GeoPoint), not `coordinate`.
         state.update(
           position: LatLng(p.coordinates.latitude, p.coordinates.longitude),
         );
+        ok = true;
       } catch (_) {}
 
       try {
@@ -378,6 +416,75 @@ class ViamConnection {
     } finally {
       _polling = false;
     }
+    if (ok) {
+      _lastGoodTick = DateTime.now();
+      if (_tickFailures > 0) _tickFailures = 0;
+    } else {
+      _tickFailures++;
+      // Three straight fast failures = the connection is gone (a healthy
+      // boat answers the heartbeat even when other sensors error).
+      if (_tickFailures >= 3) unawaited(_reconnect());
+    }
+  }
+
+  /// Probe the connection now — called on app resume, when a connection
+  /// killed while the phone was locked would otherwise sit around looking
+  /// "Connected" until the watchdog notices. Re-dials if the probe fails.
+  Future<void> checkNow() async {
+    final robot = _robot;
+    final msName = _movementSensorName;
+    if (robot == null || _reconnecting) return;
+    try {
+      if (msName != null) {
+        await MovementSensor.fromRobot(robot, msName)
+            .position()
+            .timeout(const Duration(seconds: 4));
+        return; // alive
+      }
+      // No movement sensor to probe — fall through and let a re-dial settle it.
+    } catch (_) {}
+    await _reconnect(force: true);
+  }
+
+  /// Close the (dead) robot and dial a fresh one via [reconnector]. Repeat
+  /// attempts are throttled; the poll loop keeps calling in on failure so a
+  /// long outage retries every ~10 s until the boat is back.
+  Future<void> _reconnect({bool force = false}) async {
+    final rec = reconnector;
+    if (rec == null || _reconnecting) return;
+    final last = _lastReconnectAttempt;
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last).inSeconds < 10) {
+      return;
+    }
+    _reconnecting = true;
+    _lastReconnectAttempt = DateTime.now();
+    state.setStatus('Connection lost — reconnecting…');
+    try {
+      final old = _robot;
+      _robot = null;
+      // Closing unblocks any RPCs hung on the dead connection.
+      try {
+        await old?.close();
+      } catch (_) {}
+      final fresh = await rec();
+      if (_timer == null) {
+        // stop() ran while we were dialing (switch-boat / dispose) — don't
+        // resurrect a connection nobody owns.
+        await fresh.close();
+        return;
+      }
+      _robot = fresh;
+      _tickFailures = 0;
+      _lastGoodTick = DateTime.now();
+      state.setStatus(
+          _movementSensorName == null ? 'Connected — no GPS' : 'Connected');
+    } catch (e) {
+      state.setStatus('Reconnect failed — retrying: $e');
+    } finally {
+      _reconnecting = false;
+    }
   }
 
   /// Poll the boat-systems sensors (all generic Sensor readings), mirroring the
@@ -416,15 +523,74 @@ class ViamConnection {
       } catch (_) {}
     }
     if (_tankNames.isNotEmpty) {
-      final tanks = <({String name, double level})>[];
+      final prev = {for (final t in state.tanks) t.name: t};
+      final tanks = <TankStatus>[];
       for (final tn in _tankNames) {
+        final name = tn.split(':').last;
+        final old = prev[name];
         try {
           final r = await Sensor.fromRobot(robot, tn).readings();
           final lvl = r['Level'];
-          if (lvl is num) {
-            tanks.add((name: tn.split(':').last, level: lvl.toDouble()));
+          final cap = r['Capacity'];
+          // Boat-side data arrival time (viamboat's boat-sensor
+          // `_last_update`; absent on older module builds). A timestamp
+          // that's present but unparseable, absurdly old (Go zero time), or
+          // in the future (beyond a little clock skew) is flagged invalid
+          // rather than trusted.
+          DateTime? boatAt;
+          var boatInvalid = false;
+          final lu = r['_last_update'];
+          if (lu != null) {
+            final parsed = lu is String ? DateTime.tryParse(lu) : null;
+            if (parsed == null ||
+                parsed.year < 2000 ||
+                parsed.isAfter(
+                    DateTime.now().add(const Duration(seconds: 5)))) {
+              boatInvalid = true;
+            } else {
+              boatAt = parsed.toLocal();
+            }
           }
-        } catch (_) {}
+          final level = lvl is num ? lvl.toDouble() : old?.level;
+          if (level == null) continue; // not a tank (e.g. freshwater-relay)
+          // No `_last_update` (module build predates it): a successful read
+          // still proves the boat-side data is <60 s old — viamboat errors
+          // beyond that — so "now" keeps the staleness color correct.
+          tanks.add(TankStatus(
+            name: name,
+            level: level,
+            capacity: cap is num ? cap.toDouble() : old?.capacity,
+            fetchedAt: DateTime.now(),
+            boatUpdatedAt: boatInvalid ? null : (boatAt ?? DateTime.now()),
+            boatTimestampInvalid: boatInvalid,
+          ));
+        } catch (e) {
+          // viamboat fails Readings once boat-side data is >60 s old ("too
+          // old"). That RPC still reached the boat, so OUR fetch is fresh —
+          // only the boat-side age keeps growing. When the timestamp was
+          // never seen (older module build, or stale since before we
+          // connected), synthesize now-60 s so the age keeps counting from
+          // the threshold. Any other error means we couldn't reach the
+          // boat: leave both timestamps aging.
+          final reachedBoat = e.toString().contains('too old');
+          if (old == null && !reachedBoat) continue;
+          final wasInvalid = old?.boatTimestampInvalid ?? false;
+          tanks.add(TankStatus(
+            name: name,
+            level: old?.level,
+            capacity: old?.capacity,
+            fetchedAt: reachedBoat ? DateTime.now() : old?.fetchedAt,
+            // A previously-invalid timestamp stays invalid — synthesizing an
+            // age would launder the bad clock into a plausible-looking one.
+            boatUpdatedAt: wasInvalid
+                ? null
+                : reachedBoat
+                    ? (old?.boatUpdatedAt ??
+                        DateTime.now().subtract(const Duration(seconds: 60)))
+                    : old?.boatUpdatedAt,
+            boatTimestampInvalid: wasInvalid,
+          ));
+        }
       }
       if (tanks.isNotEmpty) state.setSystems(tanks: tanks);
     }

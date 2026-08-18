@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import 'ais.dart';
 import 'boat_state.dart';
 import 'camera_screen.dart';
+import 'fuel_screen.dart';
 import 'config.dart';
 import 'data_drawer.dart';
 import 'debug_screen.dart';
@@ -444,6 +445,18 @@ class _MapScreenState extends State<MapScreen> {
                               robot: widget.connection.robot!,
                               names: s.cameraNames,
                             ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (s.tanks.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      _RoundButton(
+                        icon: Icons.local_gas_station,
+                        tooltip: 'Fuel',
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => FuelScreen(state: widget.state),
                           ),
                         ),
                       ),
