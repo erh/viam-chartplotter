@@ -5780,7 +5780,15 @@
     <button class="stop-panning-btn" onclick={stopPanning}>Stop Panning</button>
   {/if}
 
-  <div class="layer-controls" onpointerdown={bumpLayersHideTimer}>
+  <!-- onscroll/onwheel also bump the auto-hide timer: scrolling the list
+       with a wheel fires no pointerdown, and the panel closing out from
+       under a scroll is worse than one that lingers. -->
+  <div
+    class="layer-controls"
+    onpointerdown={bumpLayersHideTimer}
+    onwheel={bumpLayersHideTimer}
+    onscroll={bumpLayersHideTimer}
+  >
     <!--
       Layers are split into two groups:
         1. Base maps (open street map / noaa / checkmate / noaa-ecdis)
@@ -7239,6 +7247,17 @@
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
     border: 1px solid #ccc;
     display: none;
+    /* The layer list grows with the machine's config (base maps, weather
+       children, area folders, ...) and can easily be taller than the
+       chart. Cap it to the map and scroll inside so the bottom rows stay
+       reachable instead of running off the edge. Matches .left-overlay. */
+    max-height: calc(100% - 110px);
+    overflow-y: auto;
+    /* Don't let a scroll that hits the end of the list chain out to the
+       page/map behind the panel. */
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
   }
 
   /* Show when expanded */
@@ -7907,6 +7926,13 @@
       left: 48px;
       width: calc(100vw - 60px);
       max-width: 320px;
+      max-height: 60vh;
+    }
+
+    /* On phones the map itself is short (aspect-video), so
+       `100% - 110px` leaves almost nothing. Let the panel spill past the
+       map instead and cap it against the viewport. */
+    .layer-controls {
       max-height: 60vh;
     }
   }
