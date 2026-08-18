@@ -3,11 +3,16 @@
 What the Svelte/OpenLayers web app (`src/`) does that the Flutter app
 (`mobile/`) does not, and a sequenced plan to close it.
 
-Companion to [`MOBILE_FLUTTER_PLAN.md`](MOBILE_FLUTTER_PLAN.md), which scoped
-the port before any Dart existed. This document is the *post-Phase-0* audit:
-the spike shipped more than its README claims (AIS, wind, cameras, tanks,
-graphs, OAuth login all landed), so the remaining work is re-derived from the
-code as it stands today, not from the original phase plan.
+This is the *post-Phase-0* audit. The spike shipped more than its README
+claims (AIS, wind, cameras, tanks, graphs, OAuth login all landed), so the
+remaining work is re-derived from the code as it stands today rather than from
+the original scoping doc (`MOBILE_FLUTTER_PLAN.md`, now retired — its
+architecture notes, locked decisions and endpoint table live in
+[`mobile-todo.md`](mobile-todo.md)).
+
+**The sequenced, agent-ready plan for closing these gaps is
+[`mobile-todo.md`](mobile-todo.md).** This document is the analysis behind it;
+gap IDs (`A1`, `E2`, …) are shared between the two.
 
 Both apps talk to the same Go module (`module.go`, `render/`, `weather/`,
 `nav_routes.go`) over the same HTTP + Viam RPC contracts. **Nothing in this
@@ -38,7 +43,7 @@ Code read for this audit:
 | Systems (AC/Victron/Seakeeper) | detail tables, yacht page, Seakeeper control | 2 summary rows, read-only | ◑ partial |
 | Cameras | inline grid + full-screen enlarge | separate 1 Hz screen | ◑ partial |
 | Map interaction | measure, auto-zoom, pan-mode, tile debug, layers panel | pinch/zoom, course-up | ◑ partial |
-| Persistence | layer states, view, tool settings in localStorage | nothing persisted | ○ missing |
+| Persistence | layer states, view, tool settings in cookies | nothing persisted | ○ missing |
 | Auth & onboarding | URL/cookie handed in | **OAuth + machine picker** | ▲ mobile ahead |
 | Marine hardening | n/a (shore browser) | reconnect watchdog only | ○ missing |
 
@@ -156,7 +161,7 @@ Priority: **P0** helm-critical · **P1** expected of a chartplotter · **P2** ni
 | J3 | **Auto-zoom** with speed. | `marineMap.svelte:3450-3459` | S | P2 |
 | J4 | **Pan mode + "Stop Panning"** — manual pan suspends follow, one tap re-anchors. Mobile recentres only on first fix and via the FAB, and never auto-follows. | `marineMap.svelte:3430-3449,4229` | S | P0 |
 | J5 | **Layers panel** with hierarchy, per-layer sub-toggles and auto-hide. Mobile has a 4-item dropdown that won't scale past ~6 layers. | `marineMap.svelte:186-236` + panel markup | M | P1 |
-| J6 | **Persistence** of layer states, view centre/zoom, heading-line length, projection minutes (localStorage). Mobile persists nothing — every launch resets to Long Island Sound at z9. | `marineMap.svelte:292-420` | S | P0 |
+| J6 | **Persistence** of layer states, view centre/zoom, heading-line length, projection minutes (cookies — 9 keys, all validated on load). Mobile persists nothing — every launch resets to Long Island Sound at z9. | `marineMap.svelte:292-420` | S | P0 |
 | J7 | **Scale line** control. | `marineMap.svelte` ScaleLine | S | P1 |
 | J8 | **Tile-URL debug mode** + render-compare links. | `marineMap.svelte:3460-3499` | S | P2 |
 
@@ -202,97 +207,24 @@ Fix as part of M0.
 
 ## 4. Plan
 
-Sequenced so each milestone leaves the app *shippable*, and so the P0 gaps —
-the ones that make the mobile app unsafe or annoying to actually navigate
-with — land first. Estimates are for one engineer.
+The sequenced plan lives in **[`mobile-todo.md`](mobile-todo.md)** — one card
+per gap ID, with web references, implementation steps, acceptance criteria and
+dependencies, sized so a card can be handed to one agent as a single PR.
 
-### M0 — Correctness quick-wins (2–3 days)
-**A1, A2, A3, D10, J6, H6** + README fix.
+Milestone map (see that file for cards, estimates and status):
 
-Small, high-leverage, no new subsystems: the chart renders what the web chart
-renders, tiles aren't stale, AIS stops melting the frame budget in a harbour,
-and the app reopens where you left it. *Exit:* a side-by-side screenshot at
-z9/z13/z15 matches the web chart; 300 AIS targets hold 60 fps.
+| # | Milestone | Gaps |
+|---|-----------|------|
+| M0 | Correctness quick-wins | A1 A2 A3 D10 J6 H6 |
+| M1 | Helm fundamentals | A5 A6 C1 C2 C4 J1 J2 J4 J7 K1 L5 |
+| M2 | Safety overlays | B1 B2 B4 D1 D2 D3 G1 |
+| M3 | Routes & waypoints | E1 E2 E3 E4 E5 |
+| M4 | Marine hardening | C3 L1 L3 L4 L6 |
+| M5 | Weather & environment | F2 F3 F4 F7 F8 G2 G3 G4 |
+| M6 | Systems, cameras, polish | H1 H2 H4 I1 I2 J3 J5 J8 |
+| M7 | Long tail | A4 B3 D4–D9 F1 H3 H5 H7 L2 |
 
-### M1 — Helm fundamentals (1.5 wk)
-**A5, A6, C1, C2, C4, J1, J2, J4, J7, K1, L5.**
-
-Follow-the-boat behaviour, a real boat icon, the track behind you, heading
-line, measure, scale, and a tile base that follows the machine's config.
-*Exit:* a full run out and back is navigable without touching the web app.
-
-### M2 — Safety overlays (1.5 wk)
-**B1, B2, B4, D3, D1, D2, G1.**
-
-Navaids and structures as tappable vectors, CPA/TCPA on AIS targets, AIS
-tracks and projections, tides. This is the milestone that makes it a
-chartplotter rather than a boat dashboard. *Exit:* every navaid on the chart
-is tappable with its light characteristic; a crossing target shows CPA/TCPA.
-
-### M3 — Routes & waypoints (2 wk)
-**E1, E2, E5, E3, E4.**
-
-The largest single missing subsystem and the last P0. Port `routeStore.ts` to
-Dart with its tests mirrored, then build waypoint editing (long-press to add,
-drag to move, tap-to-insert/delete) and the routes sheet.
-*Exit:* a route created on the phone loads on the web app and vice versa.
-
-### M4 — Marine hardening (1.5 wk)
-**L1, L3, L4, L6, C3.**
-
-Tile disk cache, adaptive polling and background pause, night mode,
-tablet layout, recorded track from the cloud. *Exit:* a 4 h offshore run on
-cellular stays usable and inside a stated data budget.
-
-### M5 — Weather & environment (2 wk)
-**F2, F3, F8, G2, G3, G4, F4, F7.**
-
-Model picker, waves, zoom gates, local forecast, sun/moon. Isobars if the
-`isobarLayer.ts` port goes cleanly. *Exit:* the weather sheet answers "what's
-it doing here in 6 hours" without leaving the app.
-
-### M6 — Systems, cameras, panel polish (1 wk)
-**H1, H2, H4, I1, I2, J5, J3, J8.**
-
-Gauge grouping and gallons, Seakeeper control, camera enlarge, a layers panel
-that scales past six entries.
-
-### M7 — Long tail (as demanded, 2–3 wk)
-**F1** animated wind · **B3** areas · **D6** airstream/web senders · **D7**
-boats panel · **D8** ADS-B · **D9** detections · **A4** extra bases · **D4,
-D5** flags and scaled triangles · **H3** Victron/yacht page · **H5** remote
-data scoping · **H7** GPS alternates · **L2** offline pre-fetch.
-
-Everything here is either fleet/tinkerer-facing or explicitly deferred; pull
-items forward only on demand.
-
-**Timeline:** P0 complete end of M3 (~5.5 wk). Full parity minus the long tail
-~10 wk. Long tail takes it to ~13 wk.
-
-### Cross-cutting work (fold into the milestones above)
-
-1. **Port the pure logic, mirror the tests.** `mmsi.ts` (D4), `simplify.ts`
-   (E3), `gpx.ts` (E4), `moon.ts` (G3), `routeStore.ts` (E2), `computeCpa`
-   (D3) are all dependency-free and already have Vitest suites — port each
-   with its tests to Dart so the two clients can't drift silently. (L7)
-2. **One reading-parse layer.** Sensor key spellings (`Course Over Ground` /
-   `cog` / `COG`, `Sog`/`SOG`/`Speed`) are duplicated in both apps and already
-   differ in coverage. Centralise per side and cover with table tests.
-3. **A parity checklist in CI.** A markdown table keyed by the gap IDs here,
-   updated per PR, so "what's still missing" doesn't need re-deriving.
-4. **Extend the mobile CI** (`.github/workflows/mobile-flutter.yml`) to run
-   `flutter test` alongside `analyze`, once M0 lands.
-
-### Risks
-
-- **Vector-overlay volume (B1/B2).** OpenLayers' bbox strategy + feature cap
-  has no `flutter_map` equivalent; expect to hand-roll load-by-viewport and
-  eviction. Budget the full **L**, and test in a busy harbour.
-- **Waypoint editing UX (E1).** Drag-to-move and tap-to-insert are mouse
-  idioms; the touch design (long-press, drag handles, undo) is real design
-  work, not just a port.
-- **`viam_sdk` beta drift.** E1/E2 depend on `NavigationClient` DoCommand and
-  H5 on `getRobotPart(...).configJson` — verify both are exposed in Dart
-  before committing to M3's estimate.
-- **Battery/data (L3).** 1 Hz polling plus tiles plus camera frames is a shore
-  Wi-Fi budget. Measure before offshore testing, not after.
+All P0 gaps are closed at the end of M3 (~5.5 wk for one engineer); parity
+minus the long tail ~10 wk. Cross-cutting work (porting the pure-logic modules
+with their tests, centralising reading parsing) and the risk register are in
+the same file.
