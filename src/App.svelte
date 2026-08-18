@@ -183,6 +183,7 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    aisWebSenderNames: [] as string[],
     adsbSensorName: "",
     airstreamName: "",
     navServiceName: "",
@@ -471,6 +472,9 @@
       if (globalConfig.aisSensorName != "") {
         aisFetches.push(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"));
       }
+      for (const senderName of globalConfig.aisWebSenderNames) {
+        aisFetches.push(fetchBoatsFromWebSender(client, senderName, "ais-web-sender"));
+      }
       // Airstream is gated on the layer toggle: only fetch when the user
       // has selected it, since the airstream sensor itself is idle until
       // we send it a bounding box.
@@ -610,11 +614,82 @@
     fetchAisBoatHistory(boatId);
   }
 
+  // parseAisReadings converts a map<mmsi, {Timestamp, Location, Heading,
+  // COG, SOG, Name, ...}> of AIS-shaped readings into boat entries.
+  // Non-object values (like the ais-web-sender's "total" count) are
+  // skipped. Returned entries carry the parsed Timestamp ms so the caller
+  // can dedupe across multiple sources by recency.
+  function parseAisReadings(raw: any): { boat: any; ts: number }[] {
+    const out: { boat: any; ts: number }[] = [];
+    for (const mmsi in raw) {
+      const rawBoat = raw[mmsi];
+      if (
+        rawBoat == null ||
+        typeof rawBoat !== "object" ||
+        rawBoat.Location == null ||
+        rawBoat.Location.length != 2 ||
+        rawBoat.Location[0] == null
+      ) {
+        continue;
+      }
+      // Both sources serialize Timestamp as RFC822Z. new Date() handles
+      // it; on parse failure fall back to 0 so any other source wins.
+      let ts = 0;
+      if (typeof rawBoat.Timestamp === "string") {
+        const parsed = Date.parse(rawBoat.Timestamp);
+        if (!Number.isNaN(parsed)) ts = parsed;
+      }
+      // Field names vary slightly between AIS sources (Cog vs COG, etc).
+      // Try the common variants and skip whatever the sensor doesn't set.
+      const cog =
+        typeof rawBoat.Cog === "number"
+          ? rawBoat.Cog
+          : typeof rawBoat.COG === "number"
+            ? rawBoat.COG
+            : typeof rawBoat.Course === "number"
+              ? rawBoat.Course
+              : undefined;
+      const sog =
+        typeof rawBoat.Sog === "number"
+          ? rawBoat.Sog
+          : typeof rawBoat.SOG === "number"
+            ? rawBoat.SOG
+            : typeof rawBoat.Speed === "number"
+              ? rawBoat.Speed
+              : 0;
+      const length =
+        typeof rawBoat.Length === "number" && rawBoat.Length > 0 ? rawBoat.Length : undefined;
+      const beam =
+        typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
+          ? rawBoat.Beam
+          : typeof rawBoat.Width === "number" && rawBoat.Width > 0
+            ? rawBoat.Width
+            : undefined;
+      const destination =
+        typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
+          ? rawBoat.Destination.trim()
+          : undefined;
+      out.push({
+        boat: {
+          name: rawBoat.Name || "",
+          location: rawBoat.Location,
+          speed: sog,
+          heading: rawBoat.Heading || 0,
+          cog,
+          length,
+          beam,
+          destination,
+          mmsi: mmsi,
+        },
+        ts,
+      });
+    }
+    return out;
+  }
+
   // fetchBoatsFromSensor pulls AIS-shaped readings from a viamboat sensor
   // (either the local `ais` model or the `aisstream` model — both return
-  // the same map<mmsi, {Timestamp, Location, Heading, COG, SOG, Name, ...}>
-  // shape). Returned entries carry the parsed Timestamp ms so the caller
-  // can dedupe across multiple sources by recency.
+  // the same map<mmsi, {...}> shape).
   function fetchBoatsFromSensor(
     client: any,
     name: string,
@@ -622,73 +697,26 @@
   ): Promise<{ boat: any; ts: number }[]> {
     return new VIAM.SensorClient(client, name)
       .getReadings()
-      .then((raw: any) => {
-        const out: { boat: any; ts: number }[] = [];
-        for (const mmsi in raw) {
-          const rawBoat = raw[mmsi];
-          if (
-            rawBoat == null ||
-            typeof rawBoat !== "object" ||
-            rawBoat.Location == null ||
-            rawBoat.Location.length != 2 ||
-            rawBoat.Location[0] == null
-          ) {
-            continue;
-          }
-          // Both sources serialize Timestamp as RFC822Z. new Date() handles
-          // it; on parse failure fall back to 0 so any other source wins.
-          let ts = 0;
-          if (typeof rawBoat.Timestamp === "string") {
-            const parsed = Date.parse(rawBoat.Timestamp);
-            if (!Number.isNaN(parsed)) ts = parsed;
-          }
-          // Field names vary slightly between AIS sources (Cog vs COG, etc).
-          // Try the common variants and skip whatever the sensor doesn't set.
-          const cog =
-            typeof rawBoat.Cog === "number"
-              ? rawBoat.Cog
-              : typeof rawBoat.COG === "number"
-                ? rawBoat.COG
-                : typeof rawBoat.Course === "number"
-                  ? rawBoat.Course
-                  : undefined;
-          const sog =
-            typeof rawBoat.Sog === "number"
-              ? rawBoat.Sog
-              : typeof rawBoat.SOG === "number"
-                ? rawBoat.SOG
-                : typeof rawBoat.Speed === "number"
-                  ? rawBoat.Speed
-                  : 0;
-          const length =
-            typeof rawBoat.Length === "number" && rawBoat.Length > 0 ? rawBoat.Length : undefined;
-          const beam =
-            typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
-              ? rawBoat.Beam
-              : typeof rawBoat.Width === "number" && rawBoat.Width > 0
-                ? rawBoat.Width
-                : undefined;
-          const destination =
-            typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
-              ? rawBoat.Destination.trim()
-              : undefined;
-          out.push({
-            boat: {
-              name: rawBoat.Name || "",
-              location: rawBoat.Location,
-              speed: sog,
-              heading: rawBoat.Heading || 0,
-              cog,
-              length,
-              beam,
-              destination,
-              mmsi: mmsi,
-            },
-            ts,
-          });
-        }
-        return out;
-      })
+      .then(parseAisReadings)
+      .catch((e: any) => {
+        errorHandler(e, label);
+        return [] as { boat: any; ts: number }[];
+      });
+  }
+
+  // fetchBoatsFromWebSender pulls the boats a viamboat ais-web-sender
+  // (generic component) is currently rebroadcasting, via its "sending"
+  // DoCommand. Entries come back in the same aisFormat shape as the ais
+  // sensor readings, keyed by user id, plus a "total" count that
+  // parseAisReadings skips as a non-object.
+  function fetchBoatsFromWebSender(
+    client: any,
+    name: string,
+    label: string
+  ): Promise<{ boat: any; ts: number }[]> {
+    return new VIAM.GenericComponentClient(client, name)
+      .doCommand(VIAM.Struct.fromJson({ command: "sending" }))
+      .then(parseAisReadings)
       .catch((e: any) => {
         errorHandler(e, label);
         return [] as { boat: any; ts: number }[];
@@ -989,9 +1017,34 @@
       /vic-doors/
     );
 
+    await discoverAisWebSenders(client, resources);
+
     console.log("globalConfig", $state.snapshot(globalConfig));
 
     await discoverAreas(client, resources);
+  }
+
+  // Discover viamboat ais-web-senders on the machine. Like areas, the model
+  // isn't exposed via resourceNames, so we probe generic components with the
+  // "sending" DoCommand: real senders answer with a numeric "total" (plus
+  // the boats they're rebroadcasting); anything else errors or returns a map
+  // without it and is skipped. Every match is kept — each one's boats are
+  // then polled every AIS tick and merged into aisBoats like any other source.
+  async function discoverAisWebSenders(client: VIAM.RobotClient, resources) {
+    const found: string[] = [];
+    for (const r of filterResources(resources, "component", "generic", null)) {
+      try {
+        const resp = (await new VIAM.GenericComponentClient(client, r.name).doCommand(
+          VIAM.Struct.fromJson({ command: "sending" })
+        )) as Record<string, any>;
+        if (resp && typeof resp.total === "number") {
+          found.push(r.name);
+        }
+      } catch (e) {
+        // Not an ais-web-sender (DoCommand unimplemented or unrelated) — skip.
+      }
+    }
+    globalConfig.aisWebSenderNames = found.sort();
   }
 
   // Discover `area` components on the machine and load their region
