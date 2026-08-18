@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
+import '../auth/token_store.dart';
 import '../auth/viam_session.dart';
 
 /// After login, walk the user's org → location → machine and open a
@@ -15,10 +15,15 @@ class MachinePickerScreen extends StatefulWidget {
     super.key,
     required this.session,
     required this.onConnected,
+    this.autoConnect = true,
   });
 
   final ViamSession session;
   final void Function(RobotClient robot) onConnected;
+
+  /// Reconnect to the last-connected machine automatically on open. The
+  /// "switch boat" flow passes false so the user actually gets the list.
+  final bool autoConnect;
 
   @override
   State<MachinePickerScreen> createState() => _MachinePickerScreenState();
@@ -33,8 +38,13 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   String? _error;
   String _title = 'Select organization';
   bool _connecting = false;
+  String _connectingName = ''; // shown while dialing ('' = no name known)
+  // Bumped on every connect attempt and on cancel; an in-flight dial whose
+  // generation is stale closes its client instead of taking the screen, so
+  // cancel + pick-another can't race into two live connections.
+  int _connectGen = 0;
   String _orgId = ''; // org of the machine being connected (set on org tap)
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  final TokenStore _storage = TokenStore();
 
   Viam get _viam => widget.session.viam!;
 
@@ -42,6 +52,42 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   void initState() {
     super.initState();
     _loadOrgs();
+    if (widget.autoConnect) _tryAutoConnect();
+  }
+
+  /// Reconnect to the machine the user was on last run, so launching the app
+  /// on the boat goes straight to the map. The org/machine list keeps
+  /// loading behind it, so "Pick a different boat" is instant.
+  Future<void> _tryAutoConnect() async {
+    try {
+      final raw = await _storage.read(key: _kLastMachine);
+      if (raw == null) return;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final robotId = m['robotId'];
+      final orgId = m['orgId'];
+      if (robotId is! String || orgId is! String) return;
+      if (!mounted || _connecting) return;
+      final gen = ++_connectGen;
+      setState(() {
+        _connecting = true;
+        _connectingName = (m['name'] is String) ? m['name'] as String : '';
+      });
+      _orgId = orgId;
+      final client = await _connectRobot(robotId);
+      if (gen != _connectGen) {
+        await client.close();
+        return;
+      }
+      if (mounted) widget.onConnected(client);
+    } catch (_) {
+      // Stale machine, revoked access, offline — fall back to the list.
+      if (mounted && _connecting) {
+        setState(() {
+          _connecting = false;
+          _connectingName = '';
+        });
+      }
+    }
   }
 
   Future<void> _guard(Future<void> Function() body) async {
@@ -87,41 +133,49 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       });
 
   Future<void> _connect(dynamic robot) async {
-    setState(() => _connecting = true);
+    final gen = ++_connectGen;
+    setState(() {
+      _connecting = true;
+      _connectingName = robot.name?.toString() ?? '';
+    });
     try {
-      final client = await _connectRobot(robot);
+      final client = await _connectRobot(robot.id);
+      if (gen != _connectGen) {
+        await client.close();
+        return;
+      }
+      // Remember this machine so the next launch can reconnect to it
+      // without walking the picker.
+      try {
+        await _storage.write(
+          key: _kLastMachine,
+          value: jsonEncode({
+            'robotId': robot.id,
+            'orgId': _orgId,
+            'name': robot.name?.toString() ?? '',
+          }),
+        );
+      } catch (_) {}
       widget.onConnected(client);
     } catch (e) {
-      if (mounted) {
+      if (mounted && gen == _connectGen) {
         setState(() {
           _connecting = false;
+          _connectingName = '';
           _error = 'Connect failed: $e';
         });
       }
     }
   }
 
-  /// Connect local-first, then fall back to the cloud with a machine API key.
-  ///
-  /// The SDK's `getRobotClient` dials with the part's robot secret and lets
-  /// mDNS pick a LAN endpoint. Ways that breaks:
-  ///  - The `_rpc._tcp` record can advertise a dead port (cm90 does), and
-  ///    because gRPC channels connect lazily — and dial() mutates its own
-  ///    options on the mDNS attempt — the SDK's internal fallback redials
-  ///    the same dead endpoint until the dial timeout.
-  ///  - Robot secrets are deprecated; on machines without one the secret is
-  ///    empty and authentication can't succeed.
-  ///  - app.viam.com's WebRTC signaling accepts machine API keys but hangs
-  ///    on our OAuth app's access token (the app API accepts that token,
-  ///    signaling does not).
-  /// So: attempt the local path only when a robot secret exists (it's the
-  /// only credential a viam-server accepts on a direct LAN dial). For the
-  /// cloud path, mint a robot-owner API key through the app API using the
-  /// OAuth session — cached per machine in secure storage, re-minted once
-  /// if a stored key stops working — and dial app.viam.com signaling with
-  /// it, mDNS off.
-  Future<RobotClient> _connectRobot(dynamic robot) async {
-    final parts = await _viam.appClient.listRobotParts(robot.id);
+  /// Dial the machine's main part via app.viam.com signaling with a
+  /// per-machine robot-owner API key, minted through the app API on first
+  /// connect and cached (re-minted once if the stored key stops working,
+  /// one retry on a dial timeout). Machine API keys are the credential
+  /// signaling reliably accepts: it hangs on our OAuth app's access token,
+  /// and robot secrets are deprecated (empty/disabled on newer machines).
+  Future<RobotClient> _connectRobot(String robotId) async {
+    final parts = await _viam.appClient.listRobotParts(robotId);
     final part = parts.firstWhere((p) => p.mainPart);
     // NOTE: no local/mDNS attempt. viam-server's `_rpc._tcp` advertisement
     // here is its internal signaling listener bound to the MACHINE'S OWN
@@ -134,18 +188,18 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     // robot-secret auth that hangs where the deprecated secret is disabled.
     // Cloud signaling is only the handshake — ICE still picks a direct LAN
     // path when both peers are on the boat network.
-    final stored = await _loadStoredKey(robot.id);
+    final stored = await _loadStoredKey(robotId);
     if (stored != null) {
       try {
         return await _dialWithKey(part.fqdn, stored);
       } catch (_) {
         // Key revoked/rotated server-side — discard and mint a fresh one.
         try {
-          await _storage.delete(key: _storageKey(robot.id));
+          await _storage.delete(key: _storageKey(robotId));
         } catch (_) {}
       }
     }
-    final minted = await _mintKey(robot);
+    final minted = await _mintKey(robotId);
     try {
       return await _dialWithKey(part.fqdn, minted);
     } on TimeoutException {
@@ -156,6 +210,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     }
   }
 
+  static const _kLastMachine = 'last_machine';
   static String _storageKey(String robotId) => 'machine_api_key_$robotId';
 
   Future<({String id, String key})?> _loadStoredKey(String robotId) async {
@@ -172,13 +227,13 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     return null;
   }
 
-  Future<({String id, String key})> _mintKey(dynamic robot) async {
+  Future<({String id, String key})> _mintKey(String robotId) async {
     final resp = await _viam.appClient.createKey(
       [
         ViamAuthorization(
           authorizationId: AuthorizationId.robotOwner,
           resourceType: ResourceType.robot,
-          resourceId: robot.id,
+          resourceId: robotId,
           organizationId: _orgId,
           identityType: IdentityType.apiKey,
         ),
@@ -187,7 +242,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     );
     try {
       await _storage.write(
-        key: _storageKey(robot.id),
+        key: _storageKey(robotId),
         value: jsonEncode({'id': resp.id, 'key': resp.key}),
       );
     } catch (_) {
@@ -227,7 +282,32 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         ],
       ),
       body: _connecting
-          ? const Center(child: Text('Connecting to boat…'))
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text(_connectingName.isEmpty
+                      ? 'Connecting to boat…'
+                      : 'Connecting to $_connectingName…'),
+                  const SizedBox(height: 16),
+                  OutlinedButton(
+                    onPressed: () {
+                      // Back out to the list (loaded in the background); if
+                      // the in-flight connect still lands, its stale
+                      // generation closes it instead of taking the screen.
+                      _connectGen++;
+                      setState(() {
+                        _connecting = false;
+                        _connectingName = '';
+                      });
+                    },
+                    child: const Text('Pick a different boat'),
+                  ),
+                ],
+              ),
+            )
           : _loading
               ? const Center(child: CircularProgressIndicator())
               : _error != null

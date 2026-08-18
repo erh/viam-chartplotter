@@ -21,13 +21,17 @@ class ChartplotterApp extends StatefulWidget {
 }
 
 class _ChartplotterAppState extends State<ChartplotterApp> {
-  final BoatState _state = BoatState();
+  BoatState _state = BoatState();
   final ViamSession _session = ViamSession();
-  late final ViamConnection _conn = ViamConnection(_state);
+  late ViamConnection _conn = ViamConnection(_state);
 
   // True once we have a live RobotClient (either via login→picker or the
   // API-key fallback), meaning we can show the map.
   bool _boatConnected = false;
+
+  // True right after "switch boat": the picker should show the list instead
+  // of auto-reconnecting to the boat the user just left.
+  bool _skipAutoConnect = false;
 
   @override
   void initState() {
@@ -55,7 +59,24 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
 
   void _onRobotConnected(RobotClient robot) {
     _conn.startWithRobot(robot, viam: _session.viam);
-    setState(() => _boatConnected = true);
+    setState(() {
+      _boatConnected = true;
+      _skipAutoConnect = false;
+    });
+  }
+
+  /// "Switch boat": drop the live connection and return to the picker with
+  /// fresh state (so the old boat's readings don't linger on the new one).
+  void _onSwitchBoat() {
+    final oldConn = _conn;
+    final oldState = _state;
+    _state = BoatState();
+    _conn = ViamConnection(_state);
+    setState(() {
+      _boatConnected = false;
+      _skipAutoConnect = true;
+    });
+    oldConn.stop().then((_) => oldState.dispose());
   }
 
   @override
@@ -81,10 +102,17 @@ class _ChartplotterAppState extends State<ChartplotterApp> {
       case AuthStatus.error:
         return LoginScreen(session: _session);
       case AuthStatus.signedIn:
-        if (_boatConnected) return MapScreen(state: _state, connection: _conn);
+        if (_boatConnected) {
+          return MapScreen(
+            state: _state,
+            connection: _conn,
+            onSwitchBoat: _onSwitchBoat,
+          );
+        }
         return MachinePickerScreen(
           session: _session,
           onConnected: _onRobotConnected,
+          autoConnect: !_skipAutoConnect,
         );
     }
   }

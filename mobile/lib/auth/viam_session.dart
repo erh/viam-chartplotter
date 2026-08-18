@@ -1,9 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_appauth/flutter_appauth.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
 import 'oauth_config.dart';
+import 'token_store.dart';
 
 enum AuthStatus { unknown, signedOut, signingIn, signedIn, error }
 
@@ -20,7 +20,7 @@ class ViamSession extends ChangeNotifier {
   static const _kExpiry = 'viam_token_expiry';
 
   final FlutterAppAuth _appAuth = const FlutterAppAuth();
-  final FlutterSecureStorage _store = const FlutterSecureStorage();
+  final TokenStore _store = TokenStore();
 
   AuthStatus status = AuthStatus.unknown;
   String? error;

@@ -448,6 +448,16 @@ class ViamConnection {
     }
   }
 
+  /// Stop polling and close the robot connection unconditionally — used when
+  /// switching boats, where nothing else will close a picker-dialed robot.
+  Future<void> stop() async {
+    _timer?.cancel();
+    _timer = null;
+    final r = _robot;
+    _robot = null;
+    await r?.close();
+  }
+
   Future<void> dispose() async {
     _timer?.cancel();
     if (_ownsRobot) await _robot?.close();

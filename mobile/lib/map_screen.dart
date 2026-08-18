@@ -20,9 +20,18 @@ import 'weather.dart';
 /// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
 /// map *controls* (layer switcher, dashboard button, recenter) sit on top.
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key, required this.state, required this.connection});
+  const MapScreen({
+    super.key,
+    required this.state,
+    required this.connection,
+    this.onSwitchBoat,
+  });
   final BoatState state;
   final ViamConnection connection;
+
+  /// Disconnect and return to the machine picker. Null on the API-key /
+  /// chart-only path, where there is no boat list to go back to.
+  final VoidCallback? onSwitchBoat;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -271,6 +280,13 @@ class _MapScreenState extends State<MapScreen> {
             options: MapOptions(
               initialCenter: const LatLng(41.3, -72.0), // Long Island Sound-ish
               initialZoom: 9,
+              // No free rotation: chart orientation is only ever north-up or
+              // course-up via the toggle, so the two-finger rotate gesture is
+              // disabled (an accidental rotate at the helm is disorienting
+              // and there'd be no way to know your bearing).
+              interactionOptions: const InteractionOptions(
+                flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+              ),
               onPositionChanged: (camera, _) {
                 _bounds = camera.visibleBounds;
                 _rotationDeg = camera.rotation;
@@ -430,6 +446,14 @@ class _MapScreenState extends State<MapScreen> {
                             ),
                           ),
                         ),
+                      ),
+                    ],
+                    if (widget.onSwitchBoat != null) ...[
+                      const SizedBox(height: 8),
+                      _RoundButton(
+                        icon: Icons.sailing,
+                        tooltip: 'Switch boat',
+                        onTap: widget.onSwitchBoat!,
                       ),
                     ],
                   ],
