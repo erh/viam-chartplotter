@@ -70,6 +70,30 @@ class BoatState extends ChangeNotifier {
   final Map<String, List<({DateTime t, double v})>> history = {};
   static const int _histCap = 15000;
 
+  // Metrics already backfilled from the cloud data store this session, so a
+  // page re-open doesn't refetch what we're now accumulating live.
+  final Set<String> backfilled = {};
+
+  /// Prepend cloud-recorded samples (hot/cold data store) older than anything
+  /// sampled live, so a graph shows real history the moment it opens; the
+  /// live poll keeps appending from there. Marks [key] done even on an empty
+  /// result — no point re-asking the store every page open.
+  void backfill(String key, List<({DateTime t, double v})> points) {
+    backfilled.add(key);
+    if (points.isEmpty) return;
+    final list = history.putIfAbsent(key, () => []);
+    final firstLive = list.isEmpty ? null : list.first.t;
+    final older = firstLive == null
+        ? points
+        : [
+            for (final p in points)
+              if (p.t.isBefore(firstLive)) p
+          ];
+    if (older.isEmpty) return;
+    list.insertAll(0, older);
+    notifyListeners();
+  }
+
   bool get connected => status.startsWith('Connected');
 
   /// True when there's an active waypoint to navigate to.

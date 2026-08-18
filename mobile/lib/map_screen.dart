@@ -456,7 +456,10 @@ class _MapScreenState extends State<MapScreen> {
                         tooltip: 'Fuel',
                         onTap: () => Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) => FuelScreen(state: widget.state),
+                            builder: (_) => FuelScreen(
+                              state: widget.state,
+                              history: widget.connection.history,
+                            ),
                           ),
                         ),
                       ),
