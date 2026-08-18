@@ -1,29 +1,39 @@
-# Viam Chartplotter — Mobile (Phase 0 spike)
+# Viam Chartplotter — Mobile
 
 A native iOS/Android chartplotter built on the [Viam Flutter SDK](https://flutter.viam.dev/),
-per [`../MOBILE_FLUTTER_PLAN.md`](../MOBILE_FLUTTER_PLAN.md). **This is the
-Phase 0 spike**, not the product. Its only job is to de-risk the two riskiest
-integrations in one runnable app:
+reusing the Go module's chart/weather server unchanged: the phone renders no
+ENC, it points `flutter_map` at the same `{z}/{x}/{y}.png` endpoints the web app
+uses.
 
-1. **`viam_sdk` connects to a real boat over WebRTC** and polls live readings.
-2. **`flutter_map` renders the existing server's chart tiles** — proving we
-   reuse the Go tile/weather server unchanged and render nothing on the phone.
+**Roadmap and open work: [`../mobile-todo.md`](../mobile-todo.md)** (task cards),
+backed by [`../MOBILE_PARITY_GAPS.md`](../MOBILE_PARITY_GAPS.md) (what the web
+app does that this doesn't, and why it matters).
 
 ## What it does
 
-- Connects to a robot via `RobotClient.atAddress` + API key.
-- Auto-discovers the first `movement_sensor` and polls position / SOG / heading
-  at 1 Hz (the Dart port of the web app's `doUpdate` loop), plus optional depth.
-- Shows a full-screen map with a switchable base layer (NOAA ENC / OSM /
-  satellite), a boat marker rotated to heading, and a live data panel.
-- Recenters on the first GPS fix; a FAB recenters on demand.
+- **Login** — `app.viam.com` OAuth + PKCE with token persistence/refresh, then
+  an org → location → machine picker (see [OAuth setup](#oauth-setup-login-path)).
+  An API-key path is kept for credential-only testing and CI.
+- **Chart** — full-screen map with a switchable base layer (Checkmate ENC / NOAA
+  ENC / OSM / satellite), north-up or course-up, boat marker rotated to heading,
+  recentre-on-boat.
+- **Live boat data** — 1 Hz poll loop (the Dart port of the web app's `doUpdate`):
+  position, SOG, COG, heading, depth, sea temp, true wind, watermaker, Seakeeper,
+  tank levels, AC power. Shown in a dashboard drawer with inline sparklines.
+- **Graphs** — tap any metric for a detail graph (15 m / 1 h / 4 h / all),
+  backfilled from Viam's tabular data store on open, then live-updating.
+- **Fuel mode** — every tank with two freshness ages: when the app last fetched,
+  and when the boat-side sensor last received CAN data.
+- **AIS** — targets from the `ais` sensor with a detail sheet (SOG, COG, heading,
+  dimensions, destination).
+- **Wind** — GFS wind field as grid-sampled arrows with a forecast-hour slider.
+- **Cameras** — the boat's cameras at ~1 Hz, polled only while the screen is open.
+- **Connection health** — bounded RPCs, a hung-tick watchdog, and re-dial on
+  resume from lock.
 
-It now also implements the **app.viam.com login** (the decided v1 auth model):
-OAuth + PKCE, token persistence/refresh, and a machine picker — see
-[OAuth setup](#oauth-setup-login-path).
-
-It deliberately does **not** yet do AIS, weather, routes, camera, or history —
-those are Phases 1–3.
+Not yet: routes and waypoint editing, vector navaids/structures, tides, recorded
+track, offline caching. Those are the cards in
+[`../mobile-todo.md`](../mobile-todo.md).
 
 ## Run it
 
@@ -92,10 +102,11 @@ Two things are required and are **external dependencies**, not code:
 
    The scheme must match `VIAM_OAUTH_REDIRECT`.
 
-## Things to verify during the spike (beta-SDK parity, plan §4.4)
+## Beta-SDK parity checks
 
-The `viam_sdk` symbols used in `lib/viam_connection.dart` are the documented
-~0.3 surface but the SDK is beta — confirm against the resolved version:
+`viam_sdk` is beta — confirm symbols against the resolved version when they
+drift. The current parity checklist (including the unverified symbols that
+block specific tasks) is in [`../mobile-todo.md`](../mobile-todo.md).
 
 - `RobotClient.atAddress`, `RobotClientOptions.withApiKey`
 - `MovementSensor.fromRobot` → `.position()`, `.linearVelocity()`,
@@ -133,5 +144,15 @@ not the exact pin.
 | `lib/viam_connection.dart` | connect + 1 Hz poll loop (port of `doUpdate`); takes a session robot or API key |
 | `lib/boat_state.dart` | observable reading snapshot |
 | `lib/tile_sources.dart` | base-layer XYZ URLs into the Go server |
-| `lib/map_screen.dart` | `flutter_map` UI: layers, boat marker, data panel |
+| `lib/map_screen.dart` | `flutter_map` UI: layers, boat marker, wind, AIS, map controls |
+| `lib/data_drawer.dart` | dashboard drawer: grouped readouts + sparklines |
+| `lib/graph_screen.dart` | full-screen detail graph with time windows |
+| `lib/history.dart` | cloud tabular backfill (hot→cold) per metric |
+| `lib/sparkline.dart` | inline sparkline widget |
+| `lib/ais.dart` | AIS reading parser (`ais`/`airstream` field variants) |
+| `lib/weather.dart` | GFS wind-field fetch + bilinear sampling |
+| `lib/fuel_screen.dart` | fuel mode: tanks with dual freshness ages |
+| `lib/camera_screen.dart` | camera grid, polled only while open |
+| `lib/debug_screen.dart` | connection/discovery diagnostics |
+| `lib/connect.dart` | machine connect helper (shared by picker + reconnect) |
 | `lib/main.dart` | app entry + login/picker/map routing |
