@@ -160,15 +160,6 @@
     hideDataPanel: getCookie("hideDataPanel") === "1",
   });
 
-  // When the depth-colour-track toggle flips (now controlled from the
-  // map's layers panel), force a refetch of the position history so
-  // the depth field is filled in (or cleared) on every track point.
-  // Fires once on mount too — harmless, the next poll just refetches.
-  $effect(() => {
-    void globalData.showDepthOnTrack;
-    globalData.posHistoryLastCheck = 0;
-  });
-
   const SETTINGS_COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
 
   function toggleHideDataPanel() {
@@ -1809,7 +1800,9 @@
       ],
       { startTime }
     );
-    return runTabularQuery("depth", built.scope, built.query, { hot: false });
+    // Hot store only — this runs on the position-history poll path, and
+    // cold queries are far too slow for it.
+    return runTabularQuery("depth", built.scope, built.query);
   }
 
   // 24h history at 15-min resolution → 96 points. Returns rows of
@@ -1859,6 +1852,10 @@
     if (timeSince < 120 * 1000) {
       return;
     }
+    // Stamp before the awaits, not after: updateGaugeGraphs fires this
+    // every poll tick without awaiting it, so a slow fetch would
+    // otherwise let overlapping ticks pile up duplicate queries.
+    globalData.posHistoryLastCheck = new Date();
 
     // HACK HACK
     const urlParams = new URLSearchParams(window.location.search);
@@ -1881,19 +1878,6 @@
       data = await positionHistoryMQL(dc, startTime);
     }
 
-    // Try to get depth history to color-code track
-    var depthLookup = {};
-    if (globalConfig.depthSensorName != "" && globalData.showDepthOnTrack) {
-      try {
-        var depthData = await depthHistoryMQL(dc, startTime);
-        depthData.forEach((d) => {
-          depthLookup[d._id] = d.depth * 3.28084; // convert to feet
-        });
-      } catch (e) {
-        console.log("failed to get depth history", e);
-      }
-    }
-
     data = data.map((raw) => {
       // raw.ts comes from the MQL `$min: "$time_received"` aggregation. BSON
       // deserialization typically returns a Date; the legacy albertboat fetch
@@ -1909,13 +1893,13 @@
         ts = new Date(raw.ts);
       }
       var point: any = {
+        // Kept for the depth join below — depth rows bucket on the same
+        // MQL _id as position rows.
+        _id: raw._id,
         lat: raw.pos.coordinate.latitude,
         lng: raw.pos.coordinate.longitude,
         ts,
       };
-      if (raw._id && depthLookup[raw._id] !== undefined) {
-        point.depth = depthLookup[raw._id];
-      }
       return point;
     });
 
@@ -1925,8 +1909,28 @@
       data = data.slice(-MAX_HISTORY_POINTS);
     }
 
-    globalData.posHistoryLastCheck = new Date();
+    // Publish the track before the depth join so the line shows even if
+    // the depth query is slow or fails.
     globalData.posHistory = data;
+
+    // Depth history — colors the track when the depth toggle is on, and
+    // feeds the track hover tooltip either way.
+    if (globalConfig.depthSensorName != "") {
+      try {
+        var depthData = await depthHistoryMQL(dc, startTime);
+        if (depthData.length > 0) {
+          var depthLookup = {};
+          depthData.forEach((d) => {
+            depthLookup[d._id] = d.depth * 3.28084; // convert to feet
+          });
+          globalData.posHistory = data.map((p) =>
+            p._id && depthLookup[p._id] !== undefined ? { ...p, depth: depthLookup[p._id] } : p
+          );
+        }
+      } catch (e) {
+        console.log("failed to get depth history", e);
+      }
+    }
   }
 
   async function updateGaugeGraphs(dc, robotName) {
@@ -2522,9 +2526,9 @@
         <div id="navData" class="flex flex-col divide-y">
           <!-- SOG / Depth / Heading / COG render in the map's top-right
              overlay (MarineMap's data-panel). The "color track by
-             depth" toggle moved into MarineMap's layers panel — the
-             $effect on showDepthOnTrack handles the cache reset
-             whichever side flips it. -->
+             depth" toggle moved into MarineMap's layers panel; depth
+             history is fetched regardless so the track hover tooltip
+             always has it. -->
           {#if globalData.route && globalData.route["Distance to Waypoint"] > 0}
             <div class="flex gap-2 p-2 text-lg">
               <div class="min-w-32">Next Waypoint</div>

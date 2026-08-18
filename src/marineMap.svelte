@@ -1375,10 +1375,14 @@
 
     // Render historical tracks (clear and re-render when data changes to pick up depth)
     if (positionHistorical) {
-      const posKey =
-        positionHistorical.length +
-        "-" +
-        (positionHistorical.length > 0 ? (positionHistorical[0].depth ?? "n") : "");
+      // Depth arrives in a second publish after the positions (see
+      // updatePositionHistory), so key on how many points carry it —
+      // the first point alone often has no depth reading.
+      let depthCount = 0;
+      for (const p of positionHistorical) {
+        if (p.depth !== undefined) depthCount++;
+      }
+      const posKey = positionHistorical.length + "-" + depthCount;
       if (mapInternalState.lastPosHistoricalKey !== posKey) {
         clearHistoricalTrackFeatures("myBoat");
         mapInternalState.lastPosHistoricalKey = posKey;
@@ -2795,7 +2799,8 @@
     boatId: string = "myBoat",
     isGap: boolean = false,
     depth?: number,
-    ts?: number
+    ts?: number,
+    speedKn?: number
   ) {
     const { featureIds, features, type } = getTrackCollections(boatId);
 
@@ -2816,6 +2821,8 @@
         // Millis. Records when the boat arrived at the *end* of this
         // segment so the hover tooltip can answer "what time was I here?"
         ts: ts,
+        // Average speed over the segment (knots), for the hover tooltip.
+        speedKn: speedKn,
       })
     );
 
@@ -2847,10 +2854,16 @@
           type: type,
           boatId: boatId,
           geometry: new LineString([lastPos, position]),
-          // Time the boat arrived at `position`. Powers the hover-time
+          // Time the boat arrived at `position`. Powers the hover
           // tooltip; the realtime tail array tracked just below is for
           // a different purpose (deduping vs historical render).
           ts: Date.now(),
+          // Live sensor values at the moment the segment was laid down,
+          // for the hover tooltip (and depth coloring). Only myBoat is
+          // recorded through here, so the own-boat props are the right
+          // source.
+          depth: depth ?? undefined,
+          speedKn: sog ?? undefined,
         })
       );
 
@@ -2954,20 +2967,22 @@
 
     let prev: number[] | null = null;
     let prevPoint: PositionPoint | null = null;
+    let prevTs: number | null = null;
 
     history.forEach((p) => {
       const pp = [p.lng, p.lat];
 
+      // Some history sources (e.g. legacy AIS positionHistory, or albertboat
+      // fetch) don't carry per-point timestamps. Without a ts we can't run
+      // the realtime hand-off check, so paint unconditionally — same
+      // behaviour as before the hand-off rule existed.
+      let ts: number | null = null;
+      if (p.ts instanceof Date) {
+        const t = p.ts.getTime();
+        if (!Number.isNaN(t)) ts = t;
+      }
+
       if (prev && prevPoint) {
-        // Some history sources (e.g. legacy AIS positionHistory, or albertboat
-        // fetch) don't carry per-point timestamps. Without a ts we can't run
-        // the realtime hand-off check, so paint unconditionally — same
-        // behaviour as before the hand-off rule existed.
-        let ts: number | null = null;
-        if (p.ts instanceof Date) {
-          const t = p.ts.getTime();
-          if (!Number.isNaN(t)) ts = t;
-        }
         let skip = false;
         if (ts !== null && ts >= realtimeWindowStart && realtimeCoversTs(boatId, ts)) {
           skip = true;
@@ -2980,19 +2995,30 @@
           // Mark as gap if points are more than 10 nautical miles apart
           const isGap = distanceNM >= 10;
 
+          // Average speed over the segment, for the hover tooltip. Gap
+          // segments (offline stretches) would report a meaningless
+          // crawl-across-the-gap number, so they get none. History
+          // arrives newest-first, so take the time delta's magnitude.
+          let speedKn: number | undefined;
+          if (!isGap && ts !== null && prevTs !== null && ts !== prevTs) {
+            speedKn = distanceNM / (Math.abs(ts - prevTs) / 3600000);
+          }
+
           addTrackFeature(
             `${idPrefix}-line-${p.lng}-${p.lat}`,
             new LineString([prev, pp]),
             boatId,
             isGap,
             p.depth,
-            ts ?? undefined
+            ts ?? undefined,
+            speedKn
           );
         }
       }
 
       prev = pp;
       prevPoint = p;
+      prevTs = ts;
     });
   }
 
@@ -4529,15 +4555,6 @@
     });
     mapGlobal.map.addOverlay(editPopupState.overlay);
 
-    // Setup depth tooltip overlay
-    const depthTooltipElement = document.getElementById("depth-tooltip");
-    const depthTooltipOverlay = new Overlay({
-      element: depthTooltipElement || undefined,
-      positioning: "bottom-center",
-      offset: [0, -10],
-    });
-    mapGlobal.map.addOverlay(depthTooltipOverlay);
-
     // Setup navaid hover tooltip overlay
     const navaidTooltipElement = document.getElementById("navaid-tooltip");
     const navaidTooltipOverlay = new Overlay({
@@ -4547,9 +4564,9 @@
     });
     mapGlobal.map.addOverlay(navaidTooltipOverlay);
 
-    // Setup my-boat track-time tooltip overlay (mirrors depth tooltip).
-    // Hovering over a my-boat track segment shows when the boat passed
-    // through that point.
+    // Setup my-boat track tooltip overlay. Hovering over a my-boat track
+    // segment shows when the boat passed through that point, plus the
+    // depth and speed recorded there.
     const trackTimeTooltipElement = document.getElementById("track-time-tooltip");
     const trackTimeTooltipOverlay = new Overlay({
       element: trackTimeTooltipElement || undefined,
@@ -4770,28 +4787,6 @@
       mapGlobal.map!.getTargetElement()!.style.cursor =
         measureActive || addWaypointActive ? "crosshair" : hit ? "pointer" : "";
 
-      // Depth tooltip on track hover
-      let depthFound = false;
-      if (depthColorTrack) {
-        mapGlobal.map!.forEachFeatureAtPixel(
-          evt.pixel,
-          (feature) => {
-            const depth = feature.get("depth");
-            if (depth !== undefined && depth !== null && !depthFound) {
-              depthFound = true;
-              if (depthTooltipElement) {
-                depthTooltipElement.textContent = depth.toFixed(1) + " ft";
-              }
-              depthTooltipOverlay.setPosition(evt.coordinate);
-            }
-          },
-          { hitTolerance: 3 }
-        );
-      }
-      if (!depthFound) {
-        depthTooltipOverlay.setPosition(undefined);
-      }
-
       // Navaid + structure hover tooltip. Both layers share one tooltip
       // element so they don't fight for screen space; the layer the
       // feature came from selects which formatter (navaid vs bridge/
@@ -4900,26 +4895,37 @@
         aircraftTooltipOverlay.setPosition(undefined);
       }
 
-      // My-boat track-time tooltip: if the cursor is on a segment of the
-      // user's own track, show when the boat was at that point. AIS
+      // My-boat track tooltip: if the cursor is on a segment of the
+      // user's own track, show when the boat was at that point plus the
+      // depth and speed recorded there (whichever are available). AIS
       // tracks are skipped — the user asked for "my track line" only.
-      let timeFound = false;
+      let trackDetailFound = false;
       mapGlobal.map!.forEachFeatureAtPixel(
         evt.pixel,
         (feature) => {
-          if (timeFound) return;
+          if (trackDetailFound) return;
           if (feature.get("boatId") !== "myBoat") return;
           const ts = feature.get("ts");
-          if (typeof ts !== "number") return;
-          timeFound = true;
+          const segDepth = feature.get("depth");
+          const segSpeed = feature.get("speedKn");
+          const parts: string[] = [];
+          if (typeof ts === "number") parts.push(formatTrackTime(ts));
+          if (typeof segDepth === "number" && isFinite(segDepth)) {
+            parts.push(`${segDepth.toFixed(1)} ft`);
+          }
+          if (typeof segSpeed === "number" && isFinite(segSpeed)) {
+            parts.push(`${segSpeed.toFixed(1)} kn`);
+          }
+          if (parts.length === 0) return;
+          trackDetailFound = true;
           if (trackTimeTooltipElement) {
-            trackTimeTooltipElement.textContent = formatTrackTime(ts);
+            trackTimeTooltipElement.textContent = parts.join(" · ");
           }
           trackTimeTooltipOverlay.setPosition(evt.coordinate);
         },
         { hitTolerance: 3 }
       );
-      if (!timeFound) {
+      if (!trackDetailFound) {
         trackTimeTooltipOverlay.setPosition(undefined);
       }
 
@@ -5729,9 +5735,6 @@
     </div>
     <div class="popup-arrow"></div>
   </div>
-
-  <!-- Depth Tooltip -->
-  <div id="depth-tooltip" class="depth-tooltip"></div>
 
   <!-- Navaid Hover Tooltip -->
   <div id="navaid-tooltip" class="navaid-tooltip"></div>
@@ -6561,16 +6564,6 @@
 </div>
 
 <style>
-  .depth-tooltip {
-    background: rgba(0, 0, 0, 0.8);
-    color: white;
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-size: 12px;
-    white-space: nowrap;
-    pointer-events: none;
-  }
-
   .track-time-tooltip {
     background: rgba(0, 0, 0, 0.8);
     color: white;
