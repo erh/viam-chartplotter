@@ -157,6 +157,92 @@ around it.
 
 ---
 
+## Running this backlog (for the human)
+
+### Where a card can run
+
+The Flutter toolchain **cannot be provisioned in Claude Code web sessions** for
+this org: the SessionStart hook clones Flutter, but the Dart SDK download from
+`storage.googleapis.com` is refused by egress policy (403). So a web-session
+agent can't run `pub get`, `analyze` or `test` — its only feedback is CI, which
+takes about a minute for analyze+test. That splits the backlog in two:
+
+- **Remote-safe** — pure-logic cards: a new file, translated tests, no UI to
+  eyeball. A green CI run *is* the acceptance. These are also conflict-free.
+  → **D3** (cpa), **D4** (mmsi), **E4** (gpx), **G3** (moon), the `simplify`
+  half of **E3**, the `route_store` half of **E2**, the `tileFullyInUSWaters`
+  helper of **A5**, the scale helpers of **C1**.
+- **Local only** — everything with map or UI behaviour, i.e. most cards. Run
+  these where there's a toolchain and a device.
+
+(If someone allowlists `storage.googleapis.com` for session egress, this
+distinction goes away and the whole backlog can run remotely.)
+
+### Local agents in worktrees
+
+One worktree per card. Several branches stay checked out at once, each directly
+`flutter run`-able, so you can flip between candidate builds on the phone
+without stashing:
+
+```bash
+git worktree add ../cp-A1 -b claude/A1-tile-params origin/main
+cd ../cp-A1 && claude          # then: /card A1
+```
+
+When it's done and merged:
+
+```bash
+git worktree remove ../cp-A1 && git branch -d claude/A1-tile-params
+```
+
+`.claude/settings.json` already sets `worktree.bgIsolation: none`, and
+`/card <id>` (`.claude/commands/card.md`) carries the per-card instructions, so
+the only thing you type per agent is the card ID.
+
+**Run 3–4 concurrently, not a dozen.** The bottleneck is not agent throughput,
+it's how many PRs you can load onto a device and actually judge — realistically
+2–4 a day.
+
+### Pick cards that don't collide
+
+`map_screen.dart` has been split into `mobile/lib/map/` so parallel work lands
+in different files. That halved the worst pile-up (22 cards on one file) but did
+not remove it: layer-adding cards inherently converge on the layer stack.
+Check a card's `Files:` line before running two agents together. Current hot
+spots:
+
+| File | Cards |
+|------|-------|
+| `map/map_layers.dart` | A1 A5 B1 B2 C2 C4 D2 D10 E1 F3 F4 F8 J7 L4 |
+| `map_screen.dart` | E1 F7 J1 J2 J3 J4 J6 L4 L6 |
+| `viam_connection.dart` | D1 H1 H4 H6 L3 L5 |
+| `map/map_controls.dart` | E5 J1 J2 J3 J4 J5 |
+| `data_drawer.dart` | G1 H1 H4 K1 L6 |
+| `tile_sources.dart` | A1 A2 A3 A5 L1 |
+| `map/wind_overlay.dart` | F2 F3 F7 F8 |
+
+A good parallel batch takes one card from each row — e.g. **A1** (layers) +
+**H6** (connection) + **J5** (controls) + **D3** (new file) run cleanly
+together. Two cards from the `map_layers.dart` row do not; run those in
+sequence, or accept a merge.
+
+### Batch by test session, not by milestone
+
+Some cards simply cannot be judged at the dock. Group them by what one sitting
+can verify:
+
+| Wave | Verified how | Cards |
+|------|--------------|-------|
+| 1 | At the dock, chart-only, web app open beside it | A1 A2 A3 A5 J6 J7 |
+| 2 | At the slip, boat connected | D10 H6 K1 C1 L5 |
+| 3 | Underway | C2 C4 J1 J2 J4 |
+
+Each card's **Accept** list says what to look for. Agents can't check any of it
+on hardware, so their PRs should tick only what they verified (analyze, tests,
+logic) and leave the rest for you.
+
+---
+
 ## Milestone status
 
 | # | Milestone | Cards | Est. | Status |
@@ -181,7 +267,7 @@ the app stops forgetting everything on launch.
 
 ### A1 · Zoom-tiered chart tile params `S` `P0`
 
-**Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:3730-3795`
 
 **Problem.** Mobile pins one URL — `?style=ecdis&landfill=0` — at every zoom.
@@ -283,7 +369,7 @@ cache" action alongside it when L1 lands.
 
 ### D10 · Bound the AIS marker layer `S` `P0`
 
-**Files:** `mobile/lib/map_screen.dart`, `mobile/lib/boat_state.dart`
+**Files:** `mobile/lib/map/map_layers.dart`, `mobile/lib/boat_state.dart`
 **Web ref:** `src/marineMap.svelte:2582-2637` (style fn), `4082` (layer)
 
 **Problem.** `map_screen.dart` builds a `Marker` for **every** AIS target in
@@ -402,7 +488,7 @@ After M1 a full run out and back is navigable without opening the web app.
 
 ### A5 · Under-chart OSM fallback `M` `P0`
 
-**Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:101-131` (coverage boxes + tile test),
 `3531-3563` (layer + `tileUrlFunction`)
 
@@ -469,7 +555,7 @@ only ever talk to one tile server. The web app fetches `/app-config` at runtime:
 
 ### C1 · Real boat icon, scaled `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart` (`_BoatMarker`), assets
+**Files:** `mobile/lib/map/boat_marker.dart`, assets
 **Web ref:** `src/marineMap.svelte:155-184` (`dimScaleFactor`, `boatScaleAxes`),
 `3025-3055` (`probeMyBoatIcon`), `3056-3101` (`createBoatStyle`)
 
@@ -498,7 +584,7 @@ any failure. Apply to the own-boat marker only — AIS markers keep their own ic
 
 ### C2 · Live track behind the boat `M` `P0`
 
-**Files:** new `mobile/lib/track.dart`, `mobile/lib/map_screen.dart`
+**Files:** new `mobile/lib/track.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:2696-2703` (`depthToColor`), `2704-2745`
 (style), `2796-2900` (`addTrackFeature`, `recordTrackPoint`), `1463`
 (pruning)
@@ -533,7 +619,7 @@ obvious); old features are pruned to bound memory.
 
 ### C4 · Heading line `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:3328-3376`, layer `3961`, length options
 `:317`
 
@@ -551,7 +637,7 @@ layer controls.
 
 ### J1 · Measure tool `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_controls.dart`, `mobile/lib/map_screen.dart` (gesture mode)
 **Web ref:** `src/marineMap.svelte:3102-3121`, `3381-3429` (`handleMeasureClick`),
 `511-523` (`bearingDeg`)
 
@@ -570,7 +656,7 @@ Reuse the same distance helper as C4/E5 (`getDistance` equivalent — use
 
 ### J2 · Boat position on screen `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map_screen.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:3318-3327`, applied in `updateFromData:1216`
 and `maybeReanchorOnBoat:4229`
 
@@ -588,7 +674,7 @@ offset the camera target by the equivalent screen delta. Persist via J6.
 
 ### J4 · Follow mode with pan-to-suspend `S` `P0`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map_screen.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:3430-3448` (`stopPanning`), `4229-4246`
 (`maybeReanchorOnBoat`), `1188-1245` (`updateFromData`)
 **Depends on:** J2
@@ -618,7 +704,7 @@ Panning"** button while suspended, and resumes on tap.
 
 ### J7 · Scale line `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte` — OL's `ScaleLine` control
 
 **Do.** Add a scale bar (`flutter_map`'s `Scalebar`), in nautical miles, placed
@@ -680,7 +766,7 @@ chart's features become tappable, and traffic gets a collision readout.
 
 ### B1 · Navaids vector layer `L` `P0`
 
-**Files:** new `mobile/lib/chart/navaids.dart`, `mobile/lib/map_screen.dart`
+**Files:** new `mobile/lib/chart/navaids.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:1512-1543` (`s57ColourToCss`), `1545-1623`
 (colours + icon src), `1624-1760` (`buoyBody`, `beaconBody`), `1790-1804`
 (style), `1805-1959` (`navaidClassLabel`, `lightCharLabel`, `colourLetters`,
@@ -732,7 +818,7 @@ long tail of rare classes second.
 
 ### B2 · Structures vector layer `M` `P1`
 
-**Files:** `mobile/lib/chart/structures.dart`
+**Files:** `mobile/lib/chart/structures.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:1960-1990` (`bridgeCategoryLabel`),
 `1991-2036` (labels + icons), `2037-2097` (style), `2098-2127` (tooltip),
 layer `3688-3716`
@@ -778,7 +864,7 @@ where the bugs are.
 
 ### D3 · CPA / TCPA `S` `P0`
 
-**Files:** new `mobile/lib/cpa.dart`, `mobile/lib/map_screen.dart`
+**Files:** new `mobile/lib/cpa.dart`, `mobile/lib/map/ais_sheet.dart`
 **Web ref:** `src/marineMap.svelte:5147-5180` (`computeCpa`), rendered in the
 popup at the `CPA` label
 
@@ -838,7 +924,7 @@ Render as polylines under the AIS markers, subject to D10's viewport cull.
 
 ### D2 · AIS projection vectors `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:377-391` (persisted minutes), `4101-4111`
 (virtual layer), drawn inline by `aisStyleFunction`
 
@@ -855,7 +941,7 @@ traffic situation at a glance.
 
 ### G1 · Tides `M` `P0`
 
-**Files:** new `mobile/lib/tides.dart`, drawer/panel UI
+**Files:** new `mobile/lib/tides.dart`, `mobile/lib/data_drawer.dart`
 **Web ref:** `src/marineMap.svelte:5281-5313` (station list + cache),
 `5315-5340` (`nearestTideStation`), `5341-5386` (`fmtNoaaDate`,
 `fetchTidePredictions`), `5387-5465` (clip/interp/synth), `5466-5550`
@@ -947,7 +1033,7 @@ before the backend rejects.
 
 ### E1 · Waypoint editing `L` `P0`
 
-**Files:** `mobile/lib/routes/`, `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/routes/`, `mobile/lib/map/map_layers.dart` (rendering), `mobile/lib/map_screen.dart` (gestures)
 **Web ref:** `src/App.svelte:2241-2331` (CRUD), `2332-2348` (`loadNavRoute`),
 `src/marineMap.svelte:3122-3162` (add/clear), `3163-3262` (feature sync +
 drag-modify), `3263-3311` (insert/delete popups)
@@ -994,7 +1080,7 @@ unimplemented"). Check the Dart SDK's equivalent requirement before assuming a
 
 ### E5 · Full route stats `S` `P1`
 
-**Files:** `mobile/lib/boat_state.dart`, map overlay
+**Files:** `mobile/lib/boat_state.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:556-612` (`distanceAlongLine`), `537-555`
 (`formatDurationMin`, `formatEta`), panel at the `Next` / `Final` labels
 **Depends on:** E1
@@ -1106,7 +1192,7 @@ spent on a cellular or satellite link, and a battery being drained in a pocket.
 
 ### L4 · Night mode + keep-awake helm mode `M` `P1`
 
-**Files:** theming, `mobile/lib/map_screen.dart`
+**Files:** theming, `mobile/lib/map_screen.dart`, `mobile/lib/map/map_layers.dart`
 
 **Problem.** A white-ish chart at night destroys night vision, and the screen
 sleeping at the helm makes the app useless exactly when you need it.
@@ -1185,7 +1271,7 @@ track on connect. Feed E3's window fetch from the same code path.
 
 ### F2 · Weather model picker `M` `P1`
 
-**Files:** `mobile/lib/weather.dart`, `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/weather.dart`, `mobile/lib/map/wind_overlay.dart`
 **Web ref:** `src/lib/WeatherOverlays.svelte:1020-1082`
 **Server:** `weather/noaa_weather_cache.go:126,135-139`,
 `weather/weather_models.go:961-977`
@@ -1214,7 +1300,7 @@ J6.
 
 ### F3 · Wave overlay `M` `P1`
 
-**Files:** `mobile/lib/weather.dart`, map layer
+**Files:** `mobile/lib/weather.dart`, `mobile/lib/map/wind_overlay.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/lib/WeatherOverlays.svelte:483-494`, `src/lib/windLayer.ts`
 (`WAVE_COLOR_SCALE`, `colorForValue`), legend at `:958`
 **Depends on:** F2
@@ -1232,7 +1318,7 @@ or contour band with the web's `WAVE_COLOR_SCALE`, plus a legend in feet
 
 ### F8 · Weather overlay zoom gates `S` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_layers.dart`, `mobile/lib/map/wind_overlay.dart`
 **Web ref:** `LayerOption.maxZoom` (`src/marineMap.svelte:70-79`)
 
 **Do.** Hide the 0.25° wind/wave fields past the zoom where one model cell spans
@@ -1301,7 +1387,7 @@ forecast the app doesn't render itself.
 
 ### F4 · Isobars `M` `P2`
 
-**Files:** `mobile/lib/weather.dart`, map layer
+**Files:** `mobile/lib/weather.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/lib/isobarLayer.ts` (284 lines), layer at
 `WeatherOverlays.svelte:495-505`
 **Depends on:** F2
@@ -1317,7 +1403,7 @@ fiddly on a small screen — label sparsely.
 
 ### F7 · Point weather sample `S` `P2`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/wind_overlay.dart`, `mobile/lib/map_screen.dart` (long-press)
 **Web ref:** the `cursorInfo` readout (`src/marineMap.svelte`, `Cursor` label)
 **Depends on:** F3
 
@@ -1419,7 +1505,7 @@ that pattern is already right in this codebase.
 
 ### J3 · Auto-zoom by speed `S` `P2`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map_screen.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:3450-3453`, formula in `updateFromData:1218`
 **Depends on:** J4
 
@@ -1436,7 +1522,7 @@ the user's chosen zoom.
 
 ### J5 · Scalable layers panel `M` `P1`
 
-**Files:** `mobile/lib/map_screen.dart`
+**Files:** `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:186-236` (grouping, auto-hide), panel markup
 
 **Problem.** Today's `DropdownButton` lists 4 base layers. After M2/M5 there
