@@ -715,6 +715,7 @@
     onBoatPopupOpen,
     detectionConfig,
     airstreamConfigured = false,
+    webSendersConfigured = false,
     aircraft = [],
     adsbConfigured = false,
     onAirstreamBboxChange,
@@ -823,6 +824,10 @@
      *  When false (default) it's hidden — the host machine has no airstream
      *  component to drive. */
     airstreamConfigured?: boolean;
+    /** When true, show the "web senders" sub-row under ais in the layer
+     *  panel. When false (default) it's hidden — the machine has no
+     *  ais-web-sender components, so there's nothing to filter. */
+    webSendersConfigured?: boolean;
     /** Called by the map when the airstream layer's bbox changes: bbox=null
      *  means the layer was toggled off, otherwise bbox is the current
      *  viewport in lon/lat. App.svelte uses this to hit airstream's DoCommand
@@ -858,7 +863,7 @@
     const _popupVisible = popupState.visible;
     const _popupMmsi = popupState.content.mmsi;
     const _aisLayersOn = mapGlobal.layerOptions
-      .filter((l) => l.name === "ais" || l.name === "ais-track")
+      .filter((l) => l.name === "ais" || l.name === "ais-track" || l.name === "ais-web")
       .map((l) => l.on);
     updateFromData();
   });
@@ -1297,6 +1302,11 @@
     if (boats == null) {
       mapGlobal.aisFeatures.clear();
     } else {
+      // Web-senders toggle: hides boats reported ONLY by ais-web-sender
+      // components. Boats regular AIS (or airstream) also saw keep showing.
+      const webOn = mapGlobal.layerOptions.find((l) => l.name === "ais-web")?.on ?? true;
+      const isWebOnly = (b: BoatInfo) =>
+        Array.isArray(b.sources) && b.sources.length > 0 && b.sources.every((s) => s === "web");
       var seen: Record<string, boolean> = {};
       boats.forEach((boat) => {
         var mmsi = boat.mmsi;
@@ -1304,7 +1314,7 @@
           return;
         }
         seen[mmsi] = true;
-        const isVisible = effectiveVisibleBoats.has(mmsi);
+        const isVisible = effectiveVisibleBoats.has(mmsi) && (webOn || !isWebOnly(boat));
 
         const boatPos = [boat.location[1], boat.location[0]];
 
@@ -1385,6 +1395,11 @@
       const trackLayerShown = aisOn && aisTrackOn;
       const selectedMmsi =
         popupState.visible && !popupState.content.isMyBoat ? popupState.content.mmsi : null;
+      // Same web-senders gating as the position markers above: no track for
+      // a boat whose marker is hidden by the ais-web toggle.
+      const webOn = mapGlobal.layerOptions.find((l) => l.name === "ais-web")?.on ?? true;
+      const isWebOnly = (b: BoatInfo) =>
+        Array.isArray(b.sources) && b.sources.length > 0 && b.sources.every((s) => s === "web");
 
       const seenTrackBoats: Record<string, boolean> = {};
       boats.forEach((boat) => {
@@ -1396,6 +1411,7 @@
           history &&
           history.length > 0 &&
           effectiveVisibleBoats.has(mmsi) &&
+          (webOn || !isWebOnly(boat)) &&
           (trackLayerShown || mmsi === selectedMmsi);
 
         if (!shouldShow) {
@@ -4062,6 +4078,18 @@
       parent: "ais",
     });
 
+    // ais-web: virtual sub-layer like ais-projection (no OL layer). Gates
+    // boats that ONLY came from ais-web-sender components — boats also seen
+    // by regular AIS (or airstream) are unaffected. Registered
+    // unconditionally (setupLayers runs before resource discovery); the
+    // panel hides the row when webSendersConfigured is false.
+    mapGlobal.layerOptions.push({
+      name: "ais-web",
+      displayName: "web senders",
+      on: true,
+      parent: "ais",
+    });
+
     // Aircraft (ADS-B). Registered unconditionally because setupLayers runs
     // at mount, before resource discovery has resolved — the panel rows are
     // hidden instead when no adsb sensor is configured (see the layers
@@ -5772,6 +5800,7 @@
       {@const isParentOff = parentLayer && !parentLayer.on}
       {@const isHidden =
         (l.name === "airstream" && !airstreamConfigured) ||
+        (l.name === "ais-web" && !webSendersConfigured) ||
         (l.name.startsWith("aircraft") && !adsbConfigured)}
       {@const isBaseLayer = BASE_LAYER_NAMES.includes(l.name)}
       {#if !isHidden && isBaseLayerGroup(l)}
@@ -5811,6 +5840,7 @@
       {@const isParentOff = parentLayer && !parentLayer.on}
       {@const isHidden =
         (l.name === "airstream" && !airstreamConfigured) ||
+        (l.name === "ais-web" && !webSendersConfigured) ||
         (l.name.startsWith("aircraft") && !adsbConfigured)}
       {#if !isHidden && !isBaseLayerGroup(l)}
         {#if l.name === "weather"}

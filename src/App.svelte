@@ -468,30 +468,54 @@
     // boat positions move continuously and the airstream feed accumulates
     // websocket messages between fetches.
     if (loopNumber % 10 == 2) {
-      const aisFetches: Promise<{ boat: any; ts: number }[]>[] = [];
+      // Each fetch is tagged with a source label ("ais" / "web" /
+      // "airstream") so the map's layer panel can filter web-sender boats
+      // independently of regular AIS.
+      const withSource = (p: Promise<{ boat: any; ts: number }[]>, source: string) =>
+        p.then((list) => list.map((e) => ({ ...e, source })));
+      const aisFetches: Promise<{ boat: any; ts: number; source: string }[]>[] = [];
       if (globalConfig.aisSensorName != "") {
-        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"));
+        aisFetches.push(
+          withSource(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"), "ais")
+        );
       }
       for (const senderName of globalConfig.aisWebSenderNames) {
-        aisFetches.push(fetchBoatsFromWebSender(client, senderName, "ais-web-sender"));
+        aisFetches.push(
+          withSource(fetchBoatsFromWebSender(client, senderName, "ais-web-sender"), "web")
+        );
       }
       // Airstream is gated on the layer toggle: only fetch when the user
       // has selected it, since the airstream sensor itself is idle until
       // we send it a bounding box.
       if (globalConfig.airstreamName != "" && airstreamLayerActive) {
-        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream"));
+        aisFetches.push(
+          withSource(
+            fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream"),
+            "airstream"
+          )
+        );
       }
       if (aisFetches.length === 0) {
         globalData.aisBoats = [];
       } else {
         Promise.all(aisFetches).then((sources) => {
-          // Merge sources by mmsi, keeping the entry with the latest Timestamp.
-          const byMmsi = new Map<string, { boat: any; ts: number }>();
+          // Merge sources by mmsi, keeping the entry with the latest
+          // Timestamp but remembering every source that reported the boat —
+          // the map needs the full set so a boat seen by both regular AIS
+          // and a web sender stays visible when only the web-senders layer
+          // is toggled off.
+          const byMmsi = new Map<string, { boat: any; ts: number; from: Set<string> }>();
           for (const src of sources) {
             for (const e of src) {
               const existing = byMmsi.get(e.boat.mmsi);
-              if (!existing || e.ts > existing.ts) {
-                byMmsi.set(e.boat.mmsi, e);
+              if (!existing) {
+                byMmsi.set(e.boat.mmsi, { boat: e.boat, ts: e.ts, from: new Set([e.source]) });
+              } else {
+                existing.from.add(e.source);
+                if (e.ts > existing.ts) {
+                  existing.boat = e.boat;
+                  existing.ts = e.ts;
+                }
               }
             }
           }
@@ -501,6 +525,7 @@
           // those, matching the previous "no track yet" behaviour.
           globalData.aisBoats = Array.from(byMmsi.values()).map((v) => ({
             ...v.boat,
+            sources: Array.from(v.from),
             positionHistory: globalData.aisHistoryByMmsi[v.boat.mmsi],
           }));
         });
@@ -2470,6 +2495,7 @@
       onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
       airstreamConfigured={globalConfig.airstreamName !== ""}
+      webSendersConfigured={globalConfig.aisWebSenderNames.length > 0}
       onAirstreamBboxChange={globalConfig.airstreamName !== "" ? onAirstreamBboxChange : undefined}
       sog={globalConfig.movementSensorProps.linearVelocitySupported ? globalData.speed : null}
       hdg={globalConfig.movementSensorProps.compassHeadingSupported ? globalData.heading : null}
