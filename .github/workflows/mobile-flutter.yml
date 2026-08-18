@@ -27,7 +27,8 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version-file: mobile/.fvmrc
+          flutter-version: "3.29.3"
+          channel: stable
           cache: true
 
       - run: flutter --version
@@ -74,7 +75,20 @@ jobs:
       # manifest merge fails. The platform folder is regenerated each run, so
       # inject it here (idempotent; handles Groovy and Kotlin DSL).
       - name: Configure AppAuth redirect scheme
+<<<<<<< HEAD
         run: bash tool/ci-android-appauth.sh
+=======
+        run: |
+          set -e
+          SCHEME=com.viam.chartplotter
+          if [ -f android/app/build.gradle ]; then
+            grep -q appAuthRedirectScheme android/app/build.gradle || \
+              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders += [appAuthRedirectScheme: \"$SCHEME\"]/" android/app/build.gradle
+          elif [ -f android/app/build.gradle.kts ]; then
+            grep -q appAuthRedirectScheme android/app/build.gradle.kts || \
+              sed -i "0,/defaultConfig {/s//defaultConfig {\n        manifestPlaceholders[\"appAuthRedirectScheme\"] += \"$SCHEME\"/" android/app/build.gradle.kts
+          fi
+>>>>>>> origin/main
 
       - name: Resolve dependencies
         run: flutter pub get

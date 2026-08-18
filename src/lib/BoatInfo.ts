@@ -36,4 +36,8 @@ export interface BoatInfo {
     waypointClosingVelocity?: number;
   };
   positionHistory?: PositionPoint[];
+  // Which AIS feeds reported this boat ("ais", "web", "airstream"). Used by
+  // the map's layer panel to filter web-sender-only boats independently of
+  // regular AIS. Absent for non-AIS boats (fleet, detections).
+  sources?: string[];
 }

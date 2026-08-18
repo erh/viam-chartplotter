@@ -5,6 +5,7 @@
   // read lazily through a getter (the robot client is assigned asynchronously
   // and isn't a reactive prop), so the panel always sees the current value.
   import type { PositionPoint } from "./BoatInfo";
+  import { downloadGpx } from "./gpx";
   import { simplifyTrack, pathLengthMeters, type LatLng } from "./simplify";
   import {
     listRoutes,
@@ -364,6 +365,16 @@
     const d = new Date(iso);
     return isNaN(d.getTime()) ? "" : d.toLocaleDateString();
   }
+
+  // GPX export is client-side only (build the file, trigger a download) — for
+  // carrying a route to another plotter, e.g. Garmin/GPX/*.gpx on an SD card.
+  function exportCurrentGpx() {
+    const today = new Date().toISOString().slice(0, 10);
+    downloadGpx(
+      `Waypoints ${today}`,
+      currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng }))
+    );
+  }
 </script>
 
 <div class="flex flex-col gap-2 p-2 text-sm text-white">
@@ -467,6 +478,12 @@
                   disabled={busy}
                   title="Load this route in reverse (navigate the other way)">Reverse</button
                 >
+                <button
+                  class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark"
+                  onclick={() => downloadGpx(r.name, r.waypoints)}
+                  title="Download this route as a GPX file (e.g. for a Garmin memory card)"
+                  >GPX</button
+                >
                 <!-- Inherited (parent-location) routes are read-only here. -->
                 {#if r.scope !== "parent"}
                   <button
@@ -538,6 +555,17 @@
         Save current waypoints…
       </button>
     {/if}
+
+    <button
+      class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40 text-xs"
+      onclick={exportCurrentGpx}
+      disabled={currentWaypoints.length === 0}
+      title={currentWaypoints.length === 0
+        ? "No active waypoints"
+        : "Download the current waypoints as a GPX route file (e.g. for a Garmin memory card)"}
+    >
+      Download current as GPX
+    </button>
 
     <!-- Capture recorded track as a route. -->
     {#if trackFormOpen}

@@ -24,6 +24,7 @@
     setupIsobarLayer,
     type IsobarLayerHandle,
   } from "./isobarLayer";
+  import { getMoonTimes } from "./moon";
   import TileLayer from "ol/layer/Tile";
   import XYZ from "ol/source/XYZ";
   import TileWMS from "ol/source/TileWMS.js";
@@ -53,6 +54,8 @@
     rainHoursAny: number;
     sunriseLocal: string | null;
     sunsetLocal: string | null;
+    moonriseLocal: string | null;
+    moonsetLocal: string | null;
   }
 
   // Wind/wave sample at a lon/lat, published for the parent's cursor readout.
@@ -782,6 +785,28 @@
         return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       };
 
+      // Moonrise/moonset aren't in the Open-Meteo response, so compute them
+      // locally for the same day the sun row shows. Unlike the sun ISO
+      // strings these are true instants, so format them in the boat's tz
+      // (j.timezone from timezone=auto) to stay consistent with the sun row.
+      const moon = getMoonTimes(
+        new Date(nowMs + dayIdx * 24 * 60 * 60 * 1000),
+        lat,
+        lng
+      );
+      const fmtMoonTime = (d: Date | null): string | null => {
+        if (!d) return null;
+        try {
+          return d.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            timeZone: typeof j.timezone === "string" ? j.timezone : undefined,
+          });
+        } catch {
+          return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }
+      };
+
       weatherInfo = {
         tempNowF: typeof cur.temperature_2m === "number" ? cur.temperature_2m : null,
         tempMinF: temps.length ? Math.min(...temps) : 0,
@@ -794,6 +819,8 @@
         rainHoursAny: rains.filter((v) => v > 0).length,
         sunriseLocal: fmtLocalTime(sunriseArr[dayIdx]),
         sunsetLocal: fmtLocalTime(sunsetArr[dayIdx]),
+        moonriseLocal: fmtMoonTime(moon.rise),
+        moonsetLocal: fmtMoonTime(moon.set),
       };
     } catch (e) {
       console.warn("weather fetch failed", e);

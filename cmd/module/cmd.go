@@ -14,6 +14,9 @@ func main() {
 	module.ModularMain(
 		resource.APIModel{generic.API, vc.Model},
 		resource.APIModel{navigation.API, vc.NavModel},
+		// area: a generic component describing a region (geojson or
+		// center+radius) + color that the chartplotter draws as an overlay.
+		resource.APIModel{generic.API, vc.AreaModel},
 		// datasync keeps the noaa collection current (periodic catalog
 		// refresh + ENC sync→ingest of every cell worldwide); weathersync
 		// populates the weather collection from GRIB. Both write to the

@@ -28,6 +28,9 @@
   let globalClientCloudMetaData = null;
 
   let globalCloudClient: VIAM.ViamClient;
+  // Fragment id -> its config (or null if it couldn't be fetched), so the
+  // once-a-second cloud loop doesn't re-request unchanged fragments.
+  const fragmentConfigCache = new Map<string, any>();
 
   // Saved-route preview polylines pushed to the map by RoutesPanel (display-only,
   // not the active nav route). Empty = nothing previewed; may hold many when
@@ -117,12 +120,19 @@
 
     navWaypoints: [] as { id: string; lat: number; lng: number }[],
 
+    // Regions loaded from `area` components on the machine (see
+    // discoverAreas). Each carries a normalized GeoJSON FeatureCollection and
+    // a display color; MarineMap draws them as a toggleable overlay.
+    areas: [] as { name: string; color?: string; geojson: any }[],
+
     numUpdates: 0,
     status: "Not connected yet",
     statusLastError: new Date(),
     lastData: new Date(),
 
     partConfig: {},
+    // Component name -> Viam config folder name (see updateComponentFolders).
+    componentFolders: {} as Record<string, string>,
     aisBoats: [] as BoatInfo[],
     // Module-side AIS position history, keyed by MMSI. Populated by
     // a 60-second poll of the viamboat AIS sensor's "all_history"
@@ -137,6 +147,12 @@
     // when this is false; per-vessel history is still fetched on
     // popup-open via onBoatPopupOpen regardless of layer state.
     aisTracksNeeded: false,
+    // Aircraft from an `adsb` sensor (erh:adsb:rtlsdr-adsb), refreshed
+    // every 10s. Each entry is the raw per-aircraft reading map — fields
+    // are sparse (only `hex`/`messages`/`last_seen_sec`/`seen_for_sec` are
+    // always present), so MarineMap renders the hover detail by iterating
+    // whatever keys are actually there rather than a fixed list.
+    aircraft: [] as Record<string, any>[],
     enlargedImage: null,
     shortGraphRange:
       typeof window !== "undefined" &&
@@ -167,6 +183,8 @@
     movementSensorForQuery: "",
 
     aisSensorName: "",
+    aisWebSenderNames: [] as string[],
+    adsbSensorName: "",
     airstreamName: "",
     navServiceName: "",
     routeSensorName: "",
@@ -199,6 +217,10 @@
       return errorHandler(e, m);
     };
   }
+
+  // Last ADS-B error text, so a persistently unavailable decoder is
+  // reported once rather than every 10 s. Cleared on the next success.
+  var adsbLastError = "";
 
   function errorHandler(e, context) {
     globalData.statusLastError = new Date();
@@ -446,27 +468,54 @@
     // boat positions move continuously and the airstream feed accumulates
     // websocket messages between fetches.
     if (loopNumber % 10 == 2) {
-      const aisFetches: Promise<{ boat: any; ts: number }[]>[] = [];
+      // Each fetch is tagged with a source label ("ais" / "web" /
+      // "airstream") so the map's layer panel can filter web-sender boats
+      // independently of regular AIS.
+      const withSource = (p: Promise<{ boat: any; ts: number }[]>, source: string) =>
+        p.then((list) => list.map((e) => ({ ...e, source })));
+      const aisFetches: Promise<{ boat: any; ts: number; source: string }[]>[] = [];
       if (globalConfig.aisSensorName != "") {
-        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"));
+        aisFetches.push(
+          withSource(fetchBoatsFromSensor(client, globalConfig.aisSensorName, "ais"), "ais")
+        );
+      }
+      for (const senderName of globalConfig.aisWebSenderNames) {
+        aisFetches.push(
+          withSource(fetchBoatsFromWebSender(client, senderName, "ais-web-sender"), "web")
+        );
       }
       // Airstream is gated on the layer toggle: only fetch when the user
       // has selected it, since the airstream sensor itself is idle until
       // we send it a bounding box.
       if (globalConfig.airstreamName != "" && airstreamLayerActive) {
-        aisFetches.push(fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream"));
+        aisFetches.push(
+          withSource(
+            fetchBoatsFromSensor(client, globalConfig.airstreamName, "airstream"),
+            "airstream"
+          )
+        );
       }
       if (aisFetches.length === 0) {
         globalData.aisBoats = [];
       } else {
         Promise.all(aisFetches).then((sources) => {
-          // Merge sources by mmsi, keeping the entry with the latest Timestamp.
-          const byMmsi = new Map<string, { boat: any; ts: number }>();
+          // Merge sources by mmsi, keeping the entry with the latest
+          // Timestamp but remembering every source that reported the boat —
+          // the map needs the full set so a boat seen by both regular AIS
+          // and a web sender stays visible when only the web-senders layer
+          // is toggled off.
+          const byMmsi = new Map<string, { boat: any; ts: number; from: Set<string> }>();
           for (const src of sources) {
             for (const e of src) {
               const existing = byMmsi.get(e.boat.mmsi);
-              if (!existing || e.ts > existing.ts) {
-                byMmsi.set(e.boat.mmsi, e);
+              if (!existing) {
+                byMmsi.set(e.boat.mmsi, { boat: e.boat, ts: e.ts, from: new Set([e.source]) });
+              } else {
+                existing.from.add(e.source);
+                if (e.ts > existing.ts) {
+                  existing.boat = e.boat;
+                  existing.ts = e.ts;
+                }
               }
             }
           }
@@ -476,10 +525,35 @@
           // those, matching the previous "no track yet" behaviour.
           globalData.aisBoats = Array.from(byMmsi.values()).map((v) => ({
             ...v.boat,
+            sources: Array.from(v.from),
             positionHistory: globalData.aisHistoryByMmsi[v.boat.mmsi],
           }));
         });
       }
+    }
+
+    // ADS-B aircraft, every 10 s (offset from the AIS fetch so the two
+    // don't share a tick). The module returns an *error* rather than an
+    // empty list when the decoder is down, so a dead dongle is
+    // distinguishable from empty skies — but that would otherwise pin the
+    // status bar to an error on every tick while it starts up, so we only
+    // surface a message when it changes.
+    if (loopNumber % 10 == 4 && globalConfig.adsbSensorName != "") {
+      new VIAM.SensorClient(client, globalConfig.adsbSensorName)
+        .getReadings()
+        .then((raw) => {
+          adsbLastError = "";
+          const list = raw?.aircraft;
+          globalData.aircraft = Array.isArray(list) ? (list as Record<string, any>[]) : [];
+        })
+        .catch((e) => {
+          globalData.aircraft = [];
+          const s = e?.toString() ?? "";
+          if (s !== adsbLastError) {
+            adsbLastError = s;
+            errorHandler(e, "adsb");
+          }
+        });
     }
 
     // Poll all_history every 10 s, on the same cadence as the AIS
@@ -565,11 +639,82 @@
     fetchAisBoatHistory(boatId);
   }
 
+  // parseAisReadings converts a map<mmsi, {Timestamp, Location, Heading,
+  // COG, SOG, Name, ...}> of AIS-shaped readings into boat entries.
+  // Non-object values (like the ais-web-sender's "total" count) are
+  // skipped. Returned entries carry the parsed Timestamp ms so the caller
+  // can dedupe across multiple sources by recency.
+  function parseAisReadings(raw: any): { boat: any; ts: number }[] {
+    const out: { boat: any; ts: number }[] = [];
+    for (const mmsi in raw) {
+      const rawBoat = raw[mmsi];
+      if (
+        rawBoat == null ||
+        typeof rawBoat !== "object" ||
+        rawBoat.Location == null ||
+        rawBoat.Location.length != 2 ||
+        rawBoat.Location[0] == null
+      ) {
+        continue;
+      }
+      // Both sources serialize Timestamp as RFC822Z. new Date() handles
+      // it; on parse failure fall back to 0 so any other source wins.
+      let ts = 0;
+      if (typeof rawBoat.Timestamp === "string") {
+        const parsed = Date.parse(rawBoat.Timestamp);
+        if (!Number.isNaN(parsed)) ts = parsed;
+      }
+      // Field names vary slightly between AIS sources (Cog vs COG, etc).
+      // Try the common variants and skip whatever the sensor doesn't set.
+      const cog =
+        typeof rawBoat.Cog === "number"
+          ? rawBoat.Cog
+          : typeof rawBoat.COG === "number"
+            ? rawBoat.COG
+            : typeof rawBoat.Course === "number"
+              ? rawBoat.Course
+              : undefined;
+      const sog =
+        typeof rawBoat.Sog === "number"
+          ? rawBoat.Sog
+          : typeof rawBoat.SOG === "number"
+            ? rawBoat.SOG
+            : typeof rawBoat.Speed === "number"
+              ? rawBoat.Speed
+              : 0;
+      const length =
+        typeof rawBoat.Length === "number" && rawBoat.Length > 0 ? rawBoat.Length : undefined;
+      const beam =
+        typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
+          ? rawBoat.Beam
+          : typeof rawBoat.Width === "number" && rawBoat.Width > 0
+            ? rawBoat.Width
+            : undefined;
+      const destination =
+        typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
+          ? rawBoat.Destination.trim()
+          : undefined;
+      out.push({
+        boat: {
+          name: rawBoat.Name || "",
+          location: rawBoat.Location,
+          speed: sog,
+          heading: rawBoat.Heading || 0,
+          cog,
+          length,
+          beam,
+          destination,
+          mmsi: mmsi,
+        },
+        ts,
+      });
+    }
+    return out;
+  }
+
   // fetchBoatsFromSensor pulls AIS-shaped readings from a viamboat sensor
   // (either the local `ais` model or the `aisstream` model — both return
-  // the same map<mmsi, {Timestamp, Location, Heading, COG, SOG, Name, ...}>
-  // shape). Returned entries carry the parsed Timestamp ms so the caller
-  // can dedupe across multiple sources by recency.
+  // the same map<mmsi, {...}> shape).
   function fetchBoatsFromSensor(
     client: any,
     name: string,
@@ -577,73 +722,26 @@
   ): Promise<{ boat: any; ts: number }[]> {
     return new VIAM.SensorClient(client, name)
       .getReadings()
-      .then((raw: any) => {
-        const out: { boat: any; ts: number }[] = [];
-        for (const mmsi in raw) {
-          const rawBoat = raw[mmsi];
-          if (
-            rawBoat == null ||
-            typeof rawBoat !== "object" ||
-            rawBoat.Location == null ||
-            rawBoat.Location.length != 2 ||
-            rawBoat.Location[0] == null
-          ) {
-            continue;
-          }
-          // Both sources serialize Timestamp as RFC822Z. new Date() handles
-          // it; on parse failure fall back to 0 so any other source wins.
-          let ts = 0;
-          if (typeof rawBoat.Timestamp === "string") {
-            const parsed = Date.parse(rawBoat.Timestamp);
-            if (!Number.isNaN(parsed)) ts = parsed;
-          }
-          // Field names vary slightly between AIS sources (Cog vs COG, etc).
-          // Try the common variants and skip whatever the sensor doesn't set.
-          const cog =
-            typeof rawBoat.Cog === "number"
-              ? rawBoat.Cog
-              : typeof rawBoat.COG === "number"
-                ? rawBoat.COG
-                : typeof rawBoat.Course === "number"
-                  ? rawBoat.Course
-                  : undefined;
-          const sog =
-            typeof rawBoat.Sog === "number"
-              ? rawBoat.Sog
-              : typeof rawBoat.SOG === "number"
-                ? rawBoat.SOG
-                : typeof rawBoat.Speed === "number"
-                  ? rawBoat.Speed
-                  : 0;
-          const length =
-            typeof rawBoat.Length === "number" && rawBoat.Length > 0 ? rawBoat.Length : undefined;
-          const beam =
-            typeof rawBoat.Beam === "number" && rawBoat.Beam > 0
-              ? rawBoat.Beam
-              : typeof rawBoat.Width === "number" && rawBoat.Width > 0
-                ? rawBoat.Width
-                : undefined;
-          const destination =
-            typeof rawBoat.Destination === "string" && rawBoat.Destination.trim() !== ""
-              ? rawBoat.Destination.trim()
-              : undefined;
-          out.push({
-            boat: {
-              name: rawBoat.Name || "",
-              location: rawBoat.Location,
-              speed: sog,
-              heading: rawBoat.Heading || 0,
-              cog,
-              length,
-              beam,
-              destination,
-              mmsi: mmsi,
-            },
-            ts,
-          });
-        }
-        return out;
-      })
+      .then(parseAisReadings)
+      .catch((e: any) => {
+        errorHandler(e, label);
+        return [] as { boat: any; ts: number }[];
+      });
+  }
+
+  // fetchBoatsFromWebSender pulls the boats a viamboat ais-web-sender
+  // (generic component) is currently rebroadcasting, via its "sending"
+  // DoCommand. Entries come back in the same aisFormat shape as the ais
+  // sensor readings, keyed by user id, plus a "total" count that
+  // parseAisReadings skips as a non-object.
+  function fetchBoatsFromWebSender(
+    client: any,
+    name: string,
+    label: string
+  ): Promise<{ boat: any; ts: number }[]> {
+    return new VIAM.GenericComponentClient(client, name)
+      .doCommand(VIAM.Struct.fromJson({ command: "sending" }))
+      .then(parseAisReadings)
       .catch((e: any) => {
         errorHandler(e, label);
         return [] as { boat: any; ts: number }[];
@@ -852,13 +950,24 @@
     globalData.machineStatus = machineStatus;
     console.log(globalData.machineStatus);
 
-    await setupMovementSensor(client, resources);
+    // Don't let a bad/absent GPS block the rest of resource discovery below.
+    try {
+      await setupMovementSensor(client, resources);
+    } catch (error) {
+      console.error("setupMovementSensor failed", error);
+    }
 
     globalConfig.aisSensorName = filterResourcesFirstMatchingName(
       resources,
       "component",
       "sensor",
       /\bais$/
+    );
+    globalConfig.adsbSensorName = filterResourcesFirstMatchingName(
+      resources,
+      "component",
+      "sensor",
+      /\badsb$/
     );
     globalConfig.airstreamName = filterResourcesFirstMatchingName(
       resources,
@@ -933,7 +1042,116 @@
       /vic-doors/
     );
 
+    await discoverAisWebSenders(client, resources);
+
     console.log("globalConfig", $state.snapshot(globalConfig));
+
+    await discoverAreas(client, resources);
+  }
+
+  // Discover viamboat ais-web-senders on the machine. Like areas, the model
+  // isn't exposed via resourceNames, so we probe generic components with the
+  // "sending" DoCommand: real senders answer with a numeric "total" (plus
+  // the boats they're rebroadcasting); anything else errors or returns a map
+  // without it and is skipped. Every match is kept — each one's boats are
+  // then polled every AIS tick and merged into aisBoats like any other source.
+  async function discoverAisWebSenders(client: VIAM.RobotClient, resources) {
+    const found: string[] = [];
+    for (const r of filterResources(resources, "component", "generic", null)) {
+      try {
+        const resp = (await new VIAM.GenericComponentClient(client, r.name).doCommand(
+          VIAM.Struct.fromJson({ command: "sending" })
+        )) as Record<string, any>;
+        if (resp && typeof resp.total === "number") {
+          found.push(r.name);
+        }
+      } catch (e) {
+        // Not an ais-web-sender (DoCommand unimplemented or unrelated) — skip.
+      }
+    }
+    globalConfig.aisWebSenderNames = found.sort();
+  }
+
+  // Discover `area` components on the machine and load their region
+  // definitions. The model isn't exposed via resourceNames, so we probe every
+  // generic component with {"get_area": true}: real area components answer with
+  // a normalized GeoJSON FeatureCollection + color; anything else errors or
+  // returns no geojson and is skipped. Areas are config-driven and static, so
+  // this only needs to run on (re)discovery, not every poll tick.
+  async function discoverAreas(client: VIAM.RobotClient, resources) {
+    const generics = filterResources(resources, "component", "generic", null);
+    const found: {
+      name: string;
+      color?: string;
+      geojson: any;
+      startDate?: string;
+      endDate?: string;
+      inSeason: boolean;
+      folder?: string;
+    }[] = [];
+    for (const r of generics) {
+      try {
+        const resp = (await new VIAM.GenericComponentClient(client, r.name).doCommand(
+          VIAM.Struct.fromJson({ get_area: true })
+        )) as Record<string, any>;
+        if (resp && resp.geojson) {
+          // Every discovered area is loaded and gets a layer toggle. The
+          // optional month-day window (MM-DD, recurring yearly) only decides
+          // whether that toggle starts checked, so out-of-season areas stay
+          // visible in the layer menu and can be turned on by hand.
+          found.push({
+            name: r.name,
+            color: resp.color,
+            geojson: resp.geojson,
+            startDate: resp.start_date,
+            endDate: resp.end_date,
+            inSeason: areaVisibleToday(resp.start_date, resp.end_date),
+          });
+        }
+      } catch (e) {
+        // Not an area component (DoCommand unimplemented or unrelated) — skip.
+      }
+    }
+    globalData.areas = found;
+    if (found.length) {
+      const offSeason = found.filter((a) => !a.inSeason).length;
+      console.log(
+        `loaded ${found.length} area(s)${offSeason ? `, ${offSeason} out of season` : ""}`,
+        $state.snapshot(globalData.areas)
+      );
+    }
+  }
+
+  // Areas joined to their config folder. Kept derived rather than baked in at
+  // discovery time: folders come from the cloud config loop, which is
+  // independent of the robot-connect path that discovers areas, so either can
+  // land first.
+  const areasWithFolders = $derived(
+    globalData.areas.map((a) => ({ ...a, folder: globalData.componentFolders[a.name] }))
+  );
+
+  // Today's local month-day as MM-DD, for comparing against area date windows.
+  function localTodayMMDD(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  // Whether an area with the given inclusive month-day window should show today.
+  // Dates are MM-DD strings (or empty for open-ended); lexicographic comparison
+  // matches calendar order for that fixed-width format. When both are set and
+  // start > end the window wraps across the year end (e.g. 12-01..02-01), so
+  // today matches if it's on/after start OR on/before end.
+  function areaVisibleToday(startDate?: string, endDate?: string): boolean {
+    const today = localTodayMMDD();
+    if (startDate && endDate) {
+      return startDate <= endDate
+        ? today >= startDate && today <= endDate
+        : today >= startDate || today <= endDate;
+    }
+    if (startDate && today < startDate) return false;
+    if (endDate && today > endDate) return false;
+    return true;
   }
 
   async function setupMovementSensor(client: VIAM.RobotClient, resources) {
@@ -948,7 +1166,13 @@
 
     for (var r of resources) {
       const msClient = new VIAM.MovementSensorClient(client, r.name);
-      var prop = await msClient.getProperties();
+      var prop;
+      try {
+        prop = await msClient.getProperties();
+      } catch (error) {
+        console.error("getProperties failed for " + r.name, error);
+        continue;
+      }
 
       var score = 0;
       if (prop.positionSupported) {
@@ -1096,7 +1320,46 @@
 
     if (part.configJson) {
       globalData.partConfig = JSON.parse(part.configJson);
+      await updateComponentFolders(ac, globalData.partConfig);
     }
+  }
+
+  // Map component name -> config-folder name, from the Viam app's `ui_folder`
+  // marker. Folders are a cloud-config concept: viam-server strips them before
+  // modules see their config and they're absent from resource names, so the
+  // only way to learn them is the authored config we already fetch here.
+  // Components added by a fragment aren't in the part's own component list, so
+  // each referenced fragment is fetched and merged in too.
+  async function updateComponentFolders(ac, partConfig) {
+    const folders: Record<string, string> = {};
+
+    const collect = (cfg: any) => {
+      for (const c of cfg?.components ?? []) {
+        const folder = c?.ui_folder?.name;
+        if (c?.name && folder) folders[c.name] = folder;
+      }
+    };
+
+    collect(partConfig);
+
+    for (const f of partConfig?.fragments ?? []) {
+      if (!f?.id) continue;
+      // Fragment configs are immutable per version, so fetch each one once.
+      if (!fragmentConfigCache.has(f.id)) {
+        try {
+          const frag = await ac.getFragment(f.id);
+          // .fragment is a protobuf Struct; toJson() unwraps it to plain JSON.
+          const raw: any = frag?.fragment;
+          fragmentConfigCache.set(f.id, raw?.toJson ? raw.toJson() : (raw ?? null));
+        } catch (error) {
+          console.log("cannot load fragment " + f.id + ": " + error);
+          fragmentConfigCache.set(f.id, null);
+        }
+      }
+      collect(fragmentConfigCache.get(f.id));
+    }
+
+    globalData.componentFolders = folders;
   }
 
   function findComponentConfig(n) {
@@ -1879,6 +2142,11 @@
     var byType = {};
     for (var k of Object.keys(gauges)) {
       var v = gauges[k];
+      // Skip sensors that match the fuel/freshwater name filter but aren't
+      // tank-level readings (e.g. "freshwater-relay"). Tank rows read
+      // value.Level/value.Capacity and call .toFixed on them, so a relay
+      // whose readings lack a numeric Level would throw and blank the app.
+      if (!v || typeof v.Level !== "number") continue;
       var type = (v && v.Type) || "Other";
       if (!byType[type]) byType[type] = { items: [] };
       if (/-all$/i.test(k)) {
@@ -2207,6 +2475,8 @@
       }}
       zoomModifier={globalConfig.zoomModifier}
       boats={globalData.aisBoats}
+      aircraft={globalData.aircraft}
+      adsbConfigured={globalConfig.adsbSensorName !== ""}
       positionHistorical={globalData.posHistory}
       {onBoatPopupOpen}
       bind:aisTracksNeeded={globalData.aisTracksNeeded}
@@ -2217,6 +2487,7 @@
       {chartOnly}
       navWaypoints={globalData.navWaypoints}
       {routePreview}
+      areas={areasWithFolders}
       leftOverlay={globalConfig.navServiceName ? routesOverlay : undefined}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
@@ -2224,6 +2495,7 @@
       onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
       airstreamConfigured={globalConfig.airstreamName !== ""}
+      webSendersConfigured={globalConfig.aisWebSenderNames.length > 0}
       onAirstreamBboxChange={globalConfig.airstreamName !== "" ? onAirstreamBboxChange : undefined}
       sog={globalConfig.movementSensorProps.linearVelocitySupported ? globalData.speed : null}
       hdg={globalConfig.movementSensorProps.compassHeadingSupported ? globalData.heading : null}
@@ -2305,8 +2577,15 @@
                    than a flat line near the chart's top. Pad ±0.5°F so
                    the line never touches the edges. -->
                 {@const stValues = Object.values(stData) as number[]}
-                {@const stMin = Math.floor(Math.min(...stValues) - 0.5)}
-                {@const stMax = Math.ceil(Math.max(...stValues) + 0.5)}
+                {@const stLo = Math.floor(Math.min(...stValues) - 0.5)}
+                {@const stHi = Math.ceil(Math.max(...stValues) + 0.5)}
+                <!-- Enforce a minimum 10° vertical range so a nearly-flat
+                   temperature trace isn't exaggerated by autoscaling. When
+                   the data span is under 10°, center a 10° window on its
+                   midpoint. -->
+                {@const stMid = (stLo + stHi) / 2}
+                {@const stMin = stHi - stLo < 10 ? stMid - 5 : stLo}
+                {@const stMax = stHi - stLo < 10 ? stMid + 5 : stHi}
                 {@const stViewWidth = Math.max(100, Object.keys(stData).length * 4 + 4)}
                 <div class="relative mt-1">
                   <div

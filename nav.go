@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"go.viam.com/rdk/app"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -38,9 +39,14 @@ func init() {
 // DataPath, when set, is used as the JSON file that mirrors the waypoint
 // list across restarts. When empty, waypoints persist to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
+//
+// N2KSender is optional; when set it names a generic component (e.g. a
+// viam-labs:viamboat:sender) whose DoCommand sends raw NMEA 2000 PGNs, and it
+// enables the send_waypoints_n2k DoCommand (see nav_n2k.go).
 type NavConfig struct {
 	MovementSensor string `json:"movement_sensor,omitempty"`
 	DataPath       string `json:"data_path,omitempty"`
+	N2KSender      string `json:"n2k_sender,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -49,6 +55,9 @@ func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 	var deps []string
 	if cfg.MovementSensor != "" {
 		deps = append(deps, cfg.MovementSensor)
+	}
+	if cfg.N2KSender != "" {
+		deps = append(deps, cfg.N2KSender)
 	}
 	return deps, nil, nil
 }
@@ -144,6 +153,15 @@ func newNav(
 			arrivalDistanceMeters, nearWaypointMeters, arrivalCheckInterval)
 	}
 
+	if cfg.N2KSender != "" {
+		sender, err := generic.FromDependencies(deps, cfg.N2KSender)
+		if err != nil {
+			return nil, errors.Wrapf(err, "could not get n2k_sender %q", cfg.N2KSender)
+		}
+		svc.n2kSender = sender
+		logger.Infof("nav n2k waypoint export enabled via sender %q", cfg.N2KSender)
+	}
+
 	return svc, nil
 }
 
@@ -156,6 +174,10 @@ type navService struct {
 	mu    sync.Mutex
 	store navigation.NavStore
 	ms    movementsensor.MovementSensor
+
+	// Optional generic component that sends raw NMEA 2000 PGNs via its
+	// DoCommand (config `n2k_sender`); nil disables send_waypoints_n2k.
+	n2kSender resource.Resource
 
 	// mode is held atomically so reads don't need to take the mutex.
 	mode atomic.Uint32
@@ -421,10 +443,16 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 //	{"routes_delete":   {"id": "<id>"}}
 //	{"routes_rename":   {"id": "<id>", "name"?: ..., "notes"?: ..., "color"?: ..., "updatedAt"?: ...}}
 //	{"arrival_status":  true}
+//	{"send_waypoints_n2k": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
 //
 // The routes_* verbs read/write saved routes in the location metadata via the
 // Viam app API (see nav_routes.go), so the browser doesn't need its own cloud
 // credentials.
+//
+// send_waypoints_n2k pushes the current waypoint list onto the NMEA 2000 bus
+// as a Route and WP Service transfer (PGNs 130066 + 130067) via the
+// configured n2k_sender component (see nav_n2k.go). All payload fields are
+// optional; pass true for the defaults.
 //
 // move_waypoint updates an existing waypoint in place (preserving its ID and
 // order). insert_waypoint inserts a new waypoint immediately before the
@@ -458,6 +486,9 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 	if _, ok := cmd["arrival_status"]; ok {
 		return s.doArrivalStatus(ctx)
+	}
+	if raw, ok := cmd["send_waypoints_n2k"]; ok {
+		return s.doSendWaypointsN2K(ctx, raw)
 	}
 	return nil, resource.ErrDoUnimplemented
 }

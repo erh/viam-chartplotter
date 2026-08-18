@@ -8,6 +8,7 @@ several models — one serves the app, the others keep MongoDB populated.
 |-------|-----|------|
 | [`chartplotter`](#chartplotter) | generic | the web UI + tile/weather server (reads charts + weather from Mongo) |
 | [`nav`](#navigation) | navigation | persistent waypoint/route navigation service for the UI |
+| [`area`](#area) | generic | a region (GeoJSON or center+radius) + color the chartplotter draws as an overlay |
 | [`datasync`](#datasync) | generic | keeps the `noaa` collection current (whole NOAA ENC catalog) |
 | [`weathersync`](#weathersync) | generic | decodes weather forecasts into the `weather` collection |
 
@@ -62,6 +63,7 @@ UI's waypoints/route persistently and reports progress to the next waypoint.
 |-----------|------|---------|-------------|
 | `movement_sensor` | string | — | name of a movement sensor for position (becomes a dependency) |
 | `data_path` | string | — | file path to persist waypoints across restarts |
+| `n2k_sender` | string | — | name of a generic component whose DoCommand sends raw NMEA 2000 PGNs (e.g. a `viam-labs:viamboat:sender`; becomes a dependency). Enables `send_waypoints_n2k`. |
 
 ```json
 {
@@ -69,7 +71,108 @@ UI's waypoints/route persistently and reports progress to the next waypoint.
   "namespace": "rdk",
   "type": "navigation",
   "model": "erh:viam-chartplotter:nav",
-  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json" }
+  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json", "n2k_sender": "n2k-sender" }
+}
+```
+
+With `n2k_sender` configured, the DoCommand
+`{"send_waypoints_n2k": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
+pushes the current waypoint list onto the NMEA 2000 bus as a Route and WP
+Service transfer — one PGN 130066 (Route/WP-List Attributes) followed by PGN
+130067 (Route – WP Name & Position) messages, chunked to fit fast-packets — so
+a chartplotter (e.g. Garmin) on the same backbone can pick the route up. All
+payload fields are optional; pass `true` for the defaults (route name
+"Chartplotter", broadcast).
+
+---
+
+## area
+
+`erh:viam-chartplotter:area` — a generic component that describes a geographic
+region to draw on the chart. Define the region either with **GeoJSON** (a
+Geometry, Feature, or FeatureCollection) or with a **center + radius**, and give
+it a display **color**. The chartplotter discovers every `area` component on the
+machine and draws them as a single **"areas"** overlay, shown by default; the
+map's layers panel has an **areas** toggle to hide them.
+
+| attribute | type | default | description |
+|-----------|------|---------|-------------|
+| `geojson` | object | — | a GeoJSON Geometry, Feature, or FeatureCollection outlining the region |
+| `center` | [float, float] | — | `[lat, lng]` of a circular region's center (with `radius_nm`) |
+| `radius_nm` | float | — | radius (nautical miles) of the circular region |
+| `bearing_min` / `bearing_max` | float | — | optional compass sector (degrees, clockwise from north); draws a pie slice from min→max instead of a full circle |
+| `color` | string | `#ff3b30` | CSS color for the outline; drawn with a translucent fill |
+| `start_date` | string | — | inclusive start month-day `MM-DD` (no year/time); hidden before this day |
+| `end_date` | string | — | inclusive end month-day `MM-DD` (no year/time); hidden after this day |
+
+Supply `geojson`, or `center` + `radius_nm`, or both (at least one is required).
+Discovery works by probing each generic component with a `{"get_area": true}`
+DoCommand, so no naming convention is needed.
+
+`bearing_min` / `bearing_max` (set both, or neither) cut the circle down to a
+compass wedge — degrees clockwise from true north, drawn from `bearing_min`
+around to `bearing_max`. `bearing_min > bearing_max` wraps through north (e.g.
+`315`→`45` is the northern sector). Handy for "150 nm south of here" without
+hand-writing a polygon.
+
+`start_date` / `end_date` optionally limit *when* the area is drawn as recurring
+`MM-DD` month-days (no year), so the window repeats every year. Either can be set
+alone for an open-ended range, and a range may wrap across the year end (e.g.
+start `12-01`, end `02-01`). The chartplotter compares them against the local
+date and only shows the area on days inside the (inclusive) window, so seasonal
+regions appear and disappear on their own.
+
+```json
+{
+  "name": "restricted-zone",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:area",
+  "attributes": {
+    "center": [40.69, -74.04],
+    "radius_nm": 0.5,
+    "color": "#ff3b30"
+  }
+}
+```
+
+A compass wedge — 150 nm south (SE→S→SW) of a point, shown July 10–19:
+
+```json
+{
+  "name": "montauk-canyons",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:area",
+  "attributes": {
+    "center": [40.694, -72.048],
+    "radius_nm": 150,
+    "bearing_min": 135,
+    "bearing_max": 225,
+    "color": "#3b82f6",
+    "start_date": "07-10",
+    "end_date": "07-19"
+  }
+}
+```
+
+An explicit GeoJSON polygon, shown each summer:
+
+```json
+{
+  "name": "survey-box",
+  "namespace": "rdk",
+  "type": "generic",
+  "model": "erh:viam-chartplotter:area",
+  "attributes": {
+    "color": "#3b82f6",
+    "start_date": "06-01",
+    "end_date": "09-01",
+    "geojson": {
+      "type": "Polygon",
+      "coordinates": [[[-74.05,40.68],[-74.02,40.68],[-74.02,40.70],[-74.05,40.70],[-74.05,40.68]]]
+    }
+  }
 }
 ```
 
