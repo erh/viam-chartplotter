@@ -15,6 +15,7 @@ class TankStatus {
     this.fetchedAt,
     this.boatUpdatedAt,
     this.boatTimestampInvalid = false,
+    this.levelIsFresh = true,
   });
 
   final String name;
@@ -26,6 +27,16 @@ class TankStatus {
   // absurdly old (Go zero time), or in the future. Shown red as "invalid":
   // a lying clock must not be trusted to claim the data is fresh.
   final bool boatTimestampInvalid;
+
+  /// True when [level] came from a reading taken this cycle; false when it is
+  /// the last known value carried forward because the boat didn't answer.
+  ///
+  /// Only fresh levels are recorded into the history series. A carried-forward
+  /// level stamped with the current time would draw a flat line across an
+  /// outage and, worse, fill the fuel rate's five-minute window with samples
+  /// that were never measured — which computes as "burning nothing" and makes
+  /// the rate line vanish for minutes after every reconnect.
+  final bool levelIsFresh;
 
   Duration? get fetchedAge =>
       fetchedAt == null ? null : DateTime.now().difference(fetchedAt!);
@@ -193,7 +204,7 @@ class BoatState extends ChangeNotifier {
       this.tanks = tanks;
       for (final t in tanks) {
         final lvl = t.level;
-        if (lvl != null) _push('tank:${t.name}', lvl);
+        if (lvl != null && t.levelIsFresh) _push('tank:${t.name}', lvl);
       }
     }
     if (acVolts != null) this.acVolts = acVolts;

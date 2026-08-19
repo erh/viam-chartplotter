@@ -48,6 +48,16 @@ class ViamConnection {
   // never noticed at all.
   String? _fallbackSensorName;
   List<String> _tankNames = const [];
+  // Last known reading per tank, keyed by leaf name — the source of truth for
+  // carrying a tank's level and capacity across a failed read.
+  //
+  // Deliberately NOT `state.tanks`, which this used to read: that list is
+  // rebuilt from scratch every cycle, so a tank whose read failed before it
+  // had ever succeeded dropped out of it entirely. Once out, its carried
+  // capacity was gone, and the sensor only reports `Capacity` intermittently —
+  // so a tank that came back without one lost its fill/burn rate permanently
+  // (the rate is computed in gallons and needs the capacity to exist).
+  final Map<String, TankStatus> _tankLast = {};
   List<String> _acPowerNames = const [];
   Timer? _timer;
   int _tickN = 0;
@@ -487,6 +497,14 @@ class ViamConnection {
       }
     }
 
+    // Boat systems (watermaker / seakeeper / tanks / AC power) change slowly,
+    // so they poll on the slow cadence — but ahead of the per-tick sensors,
+    // not behind them. Sitting at the tail meant that on a link slow enough
+    // for each read to approach its deadline, the tick budget ran out first
+    // and the tank readings simply stopped arriving — taking the fuel rate
+    // with them, right after a reconnect when the link is at its worst.
+    if (_tickN % 5 == 2) await _pollSystems(robot);
+
     final windName = _windSensorName;
     if (windName != null) {
       try {
@@ -562,10 +580,6 @@ class ViamConnection {
         );
       } catch (_) {}
     }
-
-    // Boat systems (watermaker / seakeeper / tanks / AC power) change slowly;
-    // poll on the slow cadence, offset from AIS+route.
-    if (_tickN % 5 == 2) await _pollSystems(robot);
   }
 
   /// How long to wait before the next re-dial, given [attempts] failures so
@@ -743,6 +757,13 @@ class ViamConnection {
     }
   }
 
+  /// Record a tank reading as the carry-forward baseline and hand it back, so
+  /// the value survives a cycle in which its read fails.
+  TankStatus _rememberTank(TankStatus t) {
+    _tankLast[t.name] = t;
+    return t;
+  }
+
   /// Poll the boat-systems sensors (all generic Sensor readings), mirroring the
   /// web app's data panel: watermaker flow, seakeeper, tank levels, AC power.
   Future<void> _pollSystems(RobotClient robot) async {
@@ -785,11 +806,10 @@ class ViamConnection {
       } catch (_) {}
     }
     if (_tankNames.isNotEmpty) {
-      final prev = {for (final t in state.tanks) t.name: t};
       final tanks = <TankStatus>[];
       for (final tn in _tankNames) {
         final name = tn.split(':').last;
-        final old = prev[name];
+        final old = _tankLast[name];
         try {
           final r = await Sensor.fromRobot(robot, tn)
               .readings()
@@ -820,14 +840,14 @@ class ViamConnection {
           // No `_last_update` (module build predates it): a successful read
           // still proves the boat-side data is <60 s old — viamboat errors
           // beyond that — so "now" keeps the staleness color correct.
-          tanks.add(TankStatus(
+          tanks.add(_rememberTank(TankStatus(
             name: name,
             level: level,
             capacity: cap is num ? cap.toDouble() : old?.capacity,
             fetchedAt: DateTime.now(),
             boatUpdatedAt: boatInvalid ? null : (boatAt ?? DateTime.now()),
             boatTimestampInvalid: boatInvalid,
-          ));
+          )));
         } catch (e) {
           // viamboat fails Readings once boat-side data is >60 s old ("too
           // old"). That RPC still reached the boat, so OUR fetch is fresh —
@@ -839,7 +859,7 @@ class ViamConnection {
           final reachedBoat = e.toString().contains('too old');
           if (old == null && !reachedBoat) continue;
           final wasInvalid = old?.boatTimestampInvalid ?? false;
-          tanks.add(TankStatus(
+          tanks.add(_rememberTank(TankStatus(
             name: name,
             level: old?.level,
             capacity: old?.capacity,
@@ -853,7 +873,10 @@ class ViamConnection {
                         DateTime.now().subtract(const Duration(seconds: 60)))
                     : old?.boatUpdatedAt,
             boatTimestampInvalid: wasInvalid,
-          ));
+            // Nothing was measured this cycle — this level is the last known
+            // one carried forward, so it must not enter the history series.
+            levelIsFresh: false,
+          )));
         }
       }
       if (tanks.isNotEmpty) state.setSystems(tanks: tanks);
