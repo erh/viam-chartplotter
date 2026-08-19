@@ -1440,85 +1440,84 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-          // Measure readout (J1): top-center, clear of thumbs on the pins.
-          if (_measureMode)
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 56),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.yellowAccent),
-                    ),
-                    child: Text(
-                      _measureA == null
-                          ? 'Measure: tap the start point'
-                          : _measureB == null
-                              ? 'Measure: tap the far end'
-                              : measureLabel(_measureA!, _measureB!),
-                      style: const TextStyle(
-                          color: Colors.yellowAccent,
-                          fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          // Waypoint move/insert armed (E1): say what the next tap does.
-          if (_waypointModeArmed)
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 56),
-                  child: Container(
-                    padding: const EdgeInsets.only(left: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.purpleAccent),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _movingWaypointId != null
-                              ? 'Tap the waypoint’s new spot'
-                              : 'Tap where to insert the waypoint',
+          // Top-center stack: everything that used to sit here as separate
+          // absolutely-positioned chips (and overlapped whenever two were
+          // active) now stacks vertically. SOG/COG leads and is ALWAYS
+          // visible — the two numbers a helmsman glances at constantly.
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SogCogPill(state: s),
+                    // Next-waypoint / final ETAs while navigating (E5).
+                    if (s.navigating || s.navWaypoints.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      EtaPill(state: s),
+                    ],
+                    // Measure readout (J1).
+                    if (_measureMode) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.yellowAccent),
+                        ),
+                        child: Text(
+                          _measureA == null
+                              ? 'Measure: tap the start point'
+                              : _measureB == null
+                                  ? 'Measure: tap the far end'
+                                  : measureLabel(_measureA!, _measureB!),
                           style: const TextStyle(
-                              color: Colors.purpleAccent,
+                              color: Colors.yellowAccent,
                               fontWeight: FontWeight.bold),
                         ),
-                        TextButton(
-                          onPressed: () => setState(() {
-                            _movingWaypointId = null;
-                            _insertBeforeId = null;
-                          }),
-                          child: const Text('Cancel'),
+                      ),
+                    ],
+                    // Waypoint move/insert armed (E1): what the next tap does.
+                    if (_waypointModeArmed) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.only(left: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.purpleAccent),
                         ),
-                      ],
-                    ),
-                  ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _movingWaypointId != null
+                                  ? 'Tap the waypoint’s new spot'
+                                  : 'Tap where to insert the waypoint',
+                              style: const TextStyle(
+                                  color: Colors.purpleAccent,
+                                  fontWeight: FontWeight.bold),
+                            ),
+                            TextButton(
+                              onPressed: () => setState(() {
+                                _movingWaypointId = null;
+                                _insertBeforeId = null;
+                              }),
+                              child: const Text('Cancel'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
-          // Top-center: glanceable next-waypoint distance + ETA while
-          // navigating — via the route sensor or an active nav route (E5).
-          if (s.navigating || s.navWaypoints.isNotEmpty)
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: EtaPill(state: s),
-                ),
-              ),
-            ),
+          ),
           // Top-right: map controls (layer switcher + dashboard opener).
           SafeArea(
             child: Align(
