@@ -110,6 +110,11 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       _error = null;
     });
     try {
+      // Renew the session before any cloud call: the access token can expire
+      // while the app sits on this screen, and an unauthenticated failure
+      // reads to the user as "the app broke".
+      await widget.session.validAccessToken();
+      if (widget.session.viam == null) return; // signed out; the tree reroutes
       await body();
     } catch (e) {
       _error = '$e';
@@ -180,7 +185,12 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   /// Dial via [MachineConnector] — the shared cloud/API-key connect path,
   /// also used for launch auto-connect and dead-connection re-dials.
   Future<RobotClient> _connectRobot(String robotId, {String? cachedFqdn}) async {
-    final connector = MachineConnector(viam: _viam);
+    // Dialing needs app.viam.com (to resolve the address and verify or mint
+    // the machine key), so the session has to be current first.
+    await widget.session.validAccessToken();
+    final viam = widget.session.viam;
+    if (viam == null) throw StateError('signed out');
+    final connector = MachineConnector(viam: viam);
     final client =
         await connector.connect(robotId, _orgId, cachedFqdn: cachedFqdn);
     _lastFqdn = connector.fqdn;
@@ -223,6 +233,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final warning = widget.session.warning;
     return Scaffold(
       appBar: AppBar(
         title: Text(_title),
@@ -234,7 +245,17 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
           ),
         ],
       ),
-      body: _connecting
+      body: Column(
+        children: [
+          if (warning != null) _SessionWarning(message: warning),
+          Expanded(child: _body()),
+        ],
+      ),
+    );
+  }
+
+  Widget _body() {
+    return _connecting
           ? Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -281,7 +302,37 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
                           onTap: () => _onTap(item),
                         );
                       },
-                    ),
+                    );
+  }
+}
+
+/// Banner for a session that is signed in but won't survive — the two causes
+/// (no refresh token, unusable secure storage) both present to the user as
+/// "it made me log in again", so naming which one it is matters.
+class _SessionWarning extends StatelessWidget {
+  const _SessionWarning({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SelectableText(
+              message,
+              style: TextStyle(fontSize: 12, color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

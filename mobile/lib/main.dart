@@ -56,6 +56,12 @@ class _ChartplotterAppState extends State<ChartplotterApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // A restore that failed only because we were offline at launch should heal
+    // itself once the app comes back with a network, rather than sitting on
+    // the login screen waiting for a tap.
+    if (state == AppLifecycleState.resumed && _session.canRetryRestore) {
+      _session.retryRestore();
+    }
     if (!_boatConnected) return;
     // Locking the phone kills the WebRTC connection but leaves the app
     // showing its last status. Stop polling while we're away (the OS suspends

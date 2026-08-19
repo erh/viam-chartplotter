@@ -35,17 +35,24 @@ class TokenStore {
     return (await _load())[key];
   }
 
-  Future<void> write({required String key, required String? value}) async {
-    if (value == null) return delete(key: key);
+  /// Returns true when the value reached durable storage. A false here is why
+  /// a session silently fails to survive a restart, so callers that care (the
+  /// auth session) surface it rather than letting the user rediscover it at
+  /// every launch.
+  Future<bool> write({required String key, required String? value}) async {
+    if (value == null) {
+      await delete(key: key);
+      return true;
+    }
     try {
       await _secure.write(key: key, value: value);
-      return;
+      return true;
     } catch (_) {
       // Keychain unavailable — fall through to the file.
     }
     final m = await _load();
     m[key] = value;
-    await _save(m);
+    return _save(m);
   }
 
   Future<void> delete({required String key}) async {
@@ -81,15 +88,19 @@ class TokenStore {
     return m;
   }
 
-  Future<void> _save(Map<String, String> m) async {
+  /// Returns true when the map actually made it to disk. The in-memory cache
+  /// is updated either way so the value works for the rest of this run.
+  Future<bool> _save(Map<String, String> m) async {
     _fileCache = m;
     try {
       final f = _file;
-      if (f == null) return;
+      if (f == null) return false;
       f.parent.createSync(recursive: true);
       await f.writeAsString(jsonEncode(m));
+      return true;
     } catch (_) {
       // Best-effort: an unwritable disk just means no persistence this run.
+      return false;
     }
   }
 }
