@@ -30,6 +30,9 @@ List<Widget> buildMapLayers({
   List<List<LatLng>> aisProjections = const [],
   List<List<LatLng>> aisTracks = const [],
   List<LatLng> ownProjection = const [],
+  // Saved-route previews (E2): display-only, dashed so they can never be
+  // mistaken for the active (solid) route.
+  List<({List<LatLng> points, Color color})> routePreviews = const [],
   required List<({List<LatLng> points, Color color})> trackSegments,
   List<LatLng> headingLine = const [],
   List<List<LatLng>> headingTicks = const [],
@@ -140,6 +143,40 @@ List<Widget> buildMapLayers({
             Polyline(points: tick, color: Colors.redAccent, strokeWidth: 2),
         ],
       ),
+    // Saved-route previews (E2): dashed, in each route's colour, with a dot
+    // on the first waypoint so direction reads at a glance.
+    if (routePreviews.isNotEmpty) ...[
+      PolylineLayer(
+        polylines: [
+          for (final p in routePreviews)
+            if (p.points.length >= 2)
+              Polyline(
+                points: p.points,
+                color: p.color,
+                strokeWidth: 3,
+                pattern: StrokePattern.dashed(segments: const [10, 6]),
+              ),
+        ],
+      ),
+      MarkerLayer(
+        markers: [
+          for (final p in routePreviews)
+            if (p.points.isNotEmpty)
+              Marker(
+                point: p.points.first,
+                width: 14,
+                height: 14,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: p.color,
+                    border: Border.all(color: Colors.black54, width: 2),
+                  ),
+                ),
+              ),
+        ],
+      ),
+    ],
     // Wind overlay (arrow markers, over the chart, under boat markers).
     if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
     // Active route: line from the boat to the destination.

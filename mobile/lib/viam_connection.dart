@@ -9,6 +9,7 @@ import 'boat_state.dart';
 import 'chart/areas.dart';
 import 'config.dart';
 import 'history.dart';
+import 'routes/nav_api.dart';
 import 'settings.dart';
 
 /// Component names marked `chartplotter-hide: true` in a part's config JSON
@@ -70,6 +71,8 @@ class ViamConnection {
   String? _aisSensorName;
   List<String> _aisWebSenderNames = const []; // D6: ais-web-sender components
   String? _routeSensorName;
+  String? _navServiceName;
+  NavApi? _navApi;
   String? _spotZeroFwName;
   String? _spotZeroSwName;
   String? _seakeeperName;
@@ -272,6 +275,8 @@ class ViamConnection {
             _windSensorName ??
             _seatempSensorName ??
             (_tankNames.isEmpty ? null : _tankNames.first));
+    // After the sensor names: NavApi borrows a channel from one of them.
+    _discoverNavService(robot);
     final cameras = _discoverCameras(robot);
     state.setCameras(cameras);
     state.setSources({
@@ -281,6 +286,7 @@ class ViamConnection {
       'Sea temp': _seatempSensorName,
       'AIS': _aisSensorName,
       'Route': _routeSensorName,
+      'Navigation': _navServiceName,
       'Cameras': cameras.isEmpty ? null : cameras.length.toString(),
     });
   }
@@ -443,6 +449,59 @@ class ViamConnection {
       // resourceNames shape can vary across SDK versions; fall through.
     }
     return null;
+  }
+
+  /// Find the machine's navigation service and build the waypoint/routes
+  /// client (E1/E2). The Dart SDK has no high-level NavigationClient, so
+  /// NavApi wraps the generated stubs — it needs an existing resource client
+  /// to borrow a channel from (any sensor on the same robot works).
+  void _discoverNavService(RobotClient robot) {
+    _navServiceName = null;
+    _navApi = null;
+    try {
+      for (final rn in robot.resourceNames) {
+        if (rn.subtype == 'navigation') {
+          _navServiceName = rn.name;
+          break;
+        }
+      }
+    } catch (_) {}
+    final navName = _navServiceName;
+    if (navName == null) return;
+    final donorName = _movementSensorName ??
+        _fallbackSensorName ??
+        _aisSensorName ??
+        _routeSensorName;
+    if (donorName == null) return; // no resource to borrow a channel from
+    final donor = donorName == _movementSensorName
+        ? MovementSensor.fromRobot(robot, donorName) as Resource
+        : Sensor.fromRobot(robot, donorName) as Resource;
+    _navApi = NavApi.fromRobot(robot, navName, channelDonor: donor);
+  }
+
+  /// The nav-service client, or null when the machine has none. The routes
+  /// sheet and waypoint editing key their availability off this.
+  NavApi? get navApi => _navApi;
+
+  /// Fetch the active waypoint list now (also the 5 s poll body). Edits call
+  /// this right after their RPC so optimistic pending-ids become the
+  /// backend's real ObjectIDs as fast as possible.
+  Future<void> refreshNavWaypoints() async {
+    final nav = _navApi;
+    if (nav == null) return;
+    try {
+      final wps = await nav.getWaypoints().timeout(_sensorTimeout);
+      state.setNavWaypoints(wps);
+    } catch (_) {}
+  }
+
+  /// Load a saved route as the active route (E2): one atomic set_waypoints,
+  /// then a refetch so the ids are real. Throws so the sheet can show why.
+  Future<void> loadRouteWaypoints(List<LatLng> waypoints) async {
+    final nav = _navApi;
+    if (nav == null) throw StateError('No navigation service');
+    await nav.setWaypoints(waypoints).timeout(_sensorTimeout);
+    await refreshNavWaypoints();
   }
 
   Future<void> _tick() async {
@@ -687,6 +746,10 @@ class ViamConnection {
         );
       } catch (_) {}
     }
+
+    // Active nav-service waypoints (E1): slow cadence, offset from the AIS
+    // and systems ticks so the slow-cycle reads don't all pile into one tick.
+    if (_navApi != null && _tickN % 5 == 3) await refreshNavWaypoints();
   }
 
   /// How long to wait before the next re-dial, given [attempts] failures so

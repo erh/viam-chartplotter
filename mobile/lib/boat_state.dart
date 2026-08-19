@@ -3,6 +3,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
 import 'chart/areas.dart';
+import 'routes/route_store.dart';
 import 'tides.dart';
 import 'track.dart';
 
@@ -149,6 +150,16 @@ class BoatState extends ChangeNotifier {
     if (points.isEmpty) return;
     aisHistory = {...aisHistory, mmsi: points};
     notifyListeners();
+  }
+
+  // Active nav-service waypoints (E1/E2), refreshed by the 5 s poll and
+  // replaced optimistically by edits (pending-<ts> ids until the next poll
+  // brings back the backend's real ObjectIDs).
+  List<NavWaypoint> navWaypoints = const [];
+
+  void setNavWaypoints(List<NavWaypoint> wps) {
+    navWaypoints = wps;
+    _notify();
   }
 
   // Per-component health from GetMachineStatus (K1): leaf component name →

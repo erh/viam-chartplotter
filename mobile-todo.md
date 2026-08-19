@@ -1082,10 +1082,10 @@ before the backend rejects.
 3. Loading a route uses `set_waypoints` (see E1) — one atomic replace.
 
 **Accept.**
-- [ ] A route saved on the phone appears in the web app's routes panel and
+- [x] A route saved on the phone appears in the web app's routes panel and
       vice versa.
-- [ ] A `parent`-scoped route shows as read-only with no destructive actions.
-- [ ] Saving past the size warning shows the warning before the backend rejects.
+- [x] A `parent`-scoped route shows as read-only with no destructive actions.
+- [x] Saving past the size warning shows the warning before the backend rejects.
 
 ---
 

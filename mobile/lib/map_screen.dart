@@ -29,6 +29,7 @@ import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
 import 'map/wind_overlay.dart';
+import 'routes/routes_sheet.dart';
 import 'settings.dart';
 import 'tile_sources.dart';
 import 'track.dart';
@@ -132,6 +133,39 @@ class _MapScreenState extends State<MapScreen> {
       _trackSegsForDepthMode = depthMode;
     }
     return _trackSegs;
+  }
+
+  // Saved-route previews (E2): pushed up by the routes sheet, kept on the
+  // chart after it closes (the sheet covers the map, so previews are only
+  // visible once it's gone). The toggle state rides along so a reopened
+  // sheet shows what's previewed.
+  Map<String, RoutePreview> _routePreviews = const {};
+  Set<String> _previewedRouteIds = const {};
+  bool _previewShowAll = false;
+
+  void _openRoutesSheet() {
+    final api = widget.connection.navApi;
+    if (api == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => RoutesSheet(
+        state: widget.state,
+        api: api,
+        onLoad: widget.connection.loadRouteWaypoints,
+        previewedIds: _previewedRouteIds,
+        showAll: _previewShowAll,
+        onPreviews: (previews, ids, showAll) {
+          if (!mounted) return;
+          setState(() {
+            _routePreviews = previews;
+            _previewedRouteIds = ids;
+            _previewShowAll = showAll;
+          });
+        },
+      ),
+    );
   }
 
   // Per-area visibility (B3), seeded from the season window on every load
@@ -811,6 +845,7 @@ class _MapScreenState extends State<MapScreen> {
               structures: _structuresInView,
               aisProjections: _aisProjections,
               aisTracks: _aisTracks,
+              routePreviews: _routePreviews.values.toList(),
               ownProjection: (s.boatFixFresh && s.position != null)
                   ? (projectionPoints(s.position!, s.cogDeg, s.speedKn ?? 0,
                           _settings.aisProjectionMin) ??
@@ -996,6 +1031,14 @@ class _MapScreenState extends State<MapScreen> {
                       busy: _wind.loading,
                       onTap: _toggleWind,
                     ),
+                    if (widget.connection.navApi != null) ...[
+                      const SizedBox(height: 8),
+                      MapRoundButton(
+                        icon: Icons.route,
+                        tooltip: 'Routes',
+                        onTap: _openRoutesSheet,
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     MapRoundButton(
                       icon: Icons.straighten,
