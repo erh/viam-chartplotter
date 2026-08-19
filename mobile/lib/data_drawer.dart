@@ -5,11 +5,25 @@ import 'graph_screen.dart';
 import 'history.dart';
 import 'sparkline.dart';
 
-/// The dashboard: all the boat readouts that used to be overlaid on the chart,
-/// grouped into sections. Opened from the map's dashboard button. Rebuilds live
-/// while open because MapScreen setState()s on every BoatState tick.
+/// The dashboard as a Drawer — the phone presentation (L6): full-screen
+/// chart, data behind the dashboard button. Tablets embed [DataPanel]
+/// persistently instead.
 class DataDrawer extends StatelessWidget {
   const DataDrawer({super.key, required this.state, this.history});
+  final BoatState state;
+  final HistoryService? history;
+
+  @override
+  Widget build(BuildContext context) =>
+      Drawer(child: DataPanel(state: state, history: history));
+}
+
+/// The dashboard: all the boat readouts that used to be overlaid on the chart,
+/// grouped into sections. Rebuilds live while visible because MapScreen
+/// setState()s on every BoatState tick. Presentation-agnostic — a Drawer on
+/// phones, a persistent side panel on tablets (L6).
+class DataPanel extends StatelessWidget {
+  const DataPanel({super.key, required this.state, this.history});
   final BoatState state;
   final HistoryService? history;
 
@@ -55,9 +69,8 @@ class DataDrawer extends StatelessWidget {
         ? '—'
         : '${state.windSpeedKn!.toStringAsFixed(1)} kn @ '
             '${(state.windAngleDeg ?? 0).toStringAsFixed(0)}°';
-    return Drawer(
-      child: SafeArea(
-        child: ListView(
+    return SafeArea(
+      child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           children: [
             Text('Boat data', style: Theme.of(context).textTheme.titleLarge),
@@ -187,8 +200,7 @@ class DataDrawer extends StatelessWidget {
                     '${state.acWatts?.toStringAsFixed(0) ?? "—"} W '
                         '@ ${state.acVolts!.toStringAsFixed(0)} V'),
             ],
-          ],
-        ),
+        ],
       ),
     );
   }

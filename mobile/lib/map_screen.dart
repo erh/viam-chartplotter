@@ -1034,15 +1034,22 @@ class _MapScreenState extends State<MapScreen> {
         )
       : child;
 
+  // Lets the FlutterMap subtree reparent across the L6 breakpoint (phone
+  // stack ↔ tablet row, e.g. on rotation) without losing camera state.
+  final GlobalKey _mapKey = GlobalKey();
+
   @override
   Widget build(BuildContext context) {
     final s = widget.state;
-    return Scaffold(
-      key: _scaffoldKey,
-      endDrawer: DataDrawer(state: s, history: widget.connection.history),
-      body: _nightFilter(Stack(
+    // One adaptive layout (L6), breakpoint-driven — no forked screens.
+    // Phone: full-screen chart, data behind the drawer. ≥840 px (tablet
+    // landscape): the drawer's content becomes a persistent side panel.
+    return LayoutBuilder(builder: (context, box) {
+      final tablet = box.maxWidth >= 840;
+      final chart = Stack(
         children: [
           FlutterMap(
+            key: _mapKey,
             mapController: _map,
             options: MapOptions(
               // Resume the persisted view; Long Island Sound only on a truly
@@ -1323,12 +1330,17 @@ class _MapScreenState extends State<MapScreen> {
                         _settings.baseLayerId = t.id;
                       },
                     ),
-                    const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.dashboard,
-                      tooltip: 'Boat data',
-                      onTap: () => _scaffoldKey.currentState?.openEndDrawer(),
-                    ),
+                    // Phone only: on tablets the data panel is persistent
+                    // (L6), so there's no drawer to open.
+                    if (!tablet) ...[
+                      const SizedBox(height: 8),
+                      MapRoundButton(
+                        icon: Icons.dashboard,
+                        tooltip: 'Boat data',
+                        onTap: () =>
+                            _scaffoldKey.currentState?.openEndDrawer(),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     MapRoundButton(
                       icon: _courseUp ? Icons.navigation : Icons.explore,
@@ -1456,18 +1468,37 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
         ],
-      )),
-      // The follow affordance (J4): hidden while following (the boat is
-      // already anchored); after a drag suspends follow it appears as the
-      // way back.
-      floatingActionButton: (s.displayPosition == null || _followBoat)
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: _resumeFollow,
-              tooltip: 'Resume following the boat',
-              icon: const Icon(Icons.my_location),
-              label: const Text('Follow'),
-            ),
-    );
+      );
+      return Scaffold(
+        key: _scaffoldKey,
+        endDrawer: tablet
+            ? null
+            : DataDrawer(state: s, history: widget.connection.history),
+        body: _nightFilter(!tablet
+            ? chart
+            : Row(children: [
+                Expanded(child: chart),
+                SizedBox(
+                  width: 360,
+                  child: Material(
+                    elevation: 8,
+                    child: DataPanel(
+                        state: s, history: widget.connection.history),
+                  ),
+                ),
+              ])),
+        // The follow affordance (J4): hidden while following (the boat is
+        // already anchored); after a drag suspends follow it appears as the
+        // way back.
+        floatingActionButton: (s.displayPosition == null || _followBoat)
+            ? null
+            : FloatingActionButton.extended(
+                onPressed: _resumeFollow,
+                tooltip: 'Resume following the boat',
+                icon: const Icon(Icons.my_location),
+                label: const Text('Follow'),
+              ),
+      );
+    });
   }
 }
