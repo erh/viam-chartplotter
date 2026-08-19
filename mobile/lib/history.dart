@@ -33,7 +33,7 @@ class HistoryService {
     required this.locationId,
     required this.robotId,
     required Map<String, HistorySpec> specs,
-    this.positionComponent,
+    this.positionComponents = const [],
   }) : _specs = specs;
 
   final DataClient dataClient;
@@ -42,23 +42,46 @@ class HistoryService {
   final String robotId;
   final Map<String, HistorySpec> _specs;
 
-  /// Movement-sensor leaf name whose Position captures feed the recorded
-  /// track (E3 save-from-track). Null → no track window available.
-  final String? positionComponent;
+  /// Movement-sensor leaf names whose Position captures may hold the
+  /// recorded track (C3/E3): the configured/chosen sensor first, then every
+  /// alternate — the web app's movementSensorAlternates, which is how a
+  /// renamed GPS component still resolves history. The first name that
+  /// returns data is remembered and tried first afterwards.
+  final List<String> positionComponents;
+  String? _positionComponentInUse;
 
   bool hasMetric(String metric) => _specs.containsKey(metric);
 
-  bool get hasTrackWindow => positionComponent != null && orgId.isNotEmpty;
+  bool get hasTrackWindow => positionComponents.isNotEmpty && orgId.isNotEmpty;
 
   /// The recorded track for an explicit [t0, t1] window (web
-  /// fetchTrackWindow): bucketed Position captures, chronological. The hot
-  /// store only retains ~recent data, so it's only asked when the window's
-  /// NEWEST edge is within ~2 days — an older window goes straight to cold —
-  /// and an empty hot answer falls back to cold (the window's tail may
-  /// already have aged out).
-  Future<List<LatLng>> fetchTrackWindow(DateTime t0, DateTime t1) async {
-    final comp = positionComponent;
-    if (comp == null || orgId.isEmpty) return const [];
+  /// fetchTrackWindow): bucketed Position captures, chronological, with
+  /// their capture times (C3's seeding needs the timestamps; E3 drops them).
+  /// The hot store only retains ~recent data, so it's only asked when the
+  /// window's NEWEST edge is within ~2 days — an older window goes straight
+  /// to cold — and an empty hot answer falls back to cold (the window's
+  /// tail may already have aged out).
+  Future<List<({DateTime t, LatLng p})>> fetchTrackWindow(
+      DateTime t0, DateTime t1) async {
+    if (!hasTrackWindow) return const [];
+    final inUse = _positionComponentInUse;
+    final candidates = [
+      if (inUse != null) inUse,
+      for (final n in positionComponents)
+        if (n != inUse) n,
+    ];
+    for (final comp in candidates) {
+      final rows = await _fetchTrackWindowNamed(comp, t0, t1);
+      if (rows.isNotEmpty) {
+        _positionComponentInUse = comp;
+        return rows;
+      }
+    }
+    return const [];
+  }
+
+  Future<List<({DateTime t, LatLng p})>> _fetchTrackWindowNamed(
+      String comp, DateTime t0, DateTime t1) async {
     final windowMs = t1.difference(t0).inMilliseconds;
     if (windowMs <= 0) return const [];
     // ~2000 raw fixes across the window; simplify cuts from there.
@@ -112,11 +135,11 @@ class HistoryService {
       final lat = coord is Map ? coord['latitude'] : null;
       final lng = coord is Map ? coord['longitude'] : null;
       if (ts != null && lat is num && lng is num) {
-        out.add((t: ts, p: LatLng(lat.toDouble(), lng.toDouble())));
+        out.add((t: ts.toLocal(), p: LatLng(lat.toDouble(), lng.toDouble())));
       }
     }
     out.sort((a, b) => a.t.compareTo(b.t));
-    return [for (final e in out) e.p];
+    return out;
   }
 
   /// Fetch bucketed history for [metric] over the trailing [window], in

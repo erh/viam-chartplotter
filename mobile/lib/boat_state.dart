@@ -92,6 +92,12 @@ class BoatState extends ChangeNotifier {
   // Own-boat live track (C2), recorded as positions arrive.
   final Track track = Track();
 
+  /// Prepend the cloud-recorded track (C3) and repaint.
+  void seedTrack(List<TrackPoint> recorded) {
+    track.seed(recorded);
+    _notify();
+  }
+
   // Device-GPS fallback (L5): the phone knows where it is even when the
   // boat's GPS (or the connection) is down. Phone fixes live in their own
   // field — they must never pollute the boat's track or masquerade as the

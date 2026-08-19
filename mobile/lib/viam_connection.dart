@@ -10,6 +10,7 @@ import 'chart/areas.dart';
 import 'config.dart';
 import 'history.dart';
 import 'routes/nav_api.dart';
+import 'track.dart';
 import 'routes/route_store.dart';
 import 'settings.dart';
 
@@ -270,8 +271,31 @@ class ViamConnection {
     await _discover(robot);
     _setConnectedStatus();
     await _buildHistory(robot);
+    // Seed the last day's recorded track (C3) — off the connect path, so a
+    // slow data-store query never delays the first live readings.
+    unawaited(_seedTrack());
     _started = true;
     _startTimer();
+  }
+
+  // Once per session: a reconnect must not re-fetch (the live track is the
+  // truth from launch onward, and the seed only fills in what's older).
+  bool _trackSeeded = false;
+
+  Future<void> _seedTrack() async {
+    final history = _history;
+    if (_trackSeeded || history == null || !history.hasTrackWindow) return;
+    _trackSeeded = true;
+    try {
+      final now = DateTime.now();
+      final recorded = await history.fetchTrackWindow(
+          now.subtract(const Duration(days: 1)), now);
+      if (recorded.isEmpty) return;
+      state.seedTrack(
+          [for (final e in recorded) TrackPoint(pos: e.p, t: e.t)]);
+    } catch (_) {
+      // No recorded history → the track just starts at launch, as before.
+    }
   }
 
   /// Resolve the component names we poll. RPC-free (the SDK caches
@@ -365,10 +389,15 @@ class ViamConnection {
         locationId: meta.locationId,
         robotId: meta.machineId,
         specs: specs,
-        // Recorded Position captures back save-from-track (E3).
-        positionComponent: _movementSensorName == null
-            ? null
-            : leaf(_movementSensorName),
+        // Recorded Position captures back save-from-track (E3) and the
+        // connect-time track seed (C3): the chosen sensor first, then every
+        // other movement sensor as an alternate (web parity — how a renamed
+        // GPS component still resolves history).
+        positionComponents: [
+          if (_movementSensorName != null) leaf(_movementSensorName),
+          for (final n in _allMovementSensorNames(robot))
+            if (leaf(n) != leaf(_movementSensorName)) leaf(n),
+        ],
       );
     } catch (_) {
       // No cloud metadata / data access → graphs stay live-only.
@@ -463,6 +492,19 @@ class ViamConnection {
       }
     } catch (_) {}
     return null;
+  }
+
+  /// Every movement_sensor on the robot — the alternates list for resolving
+  /// recorded position history (C3).
+  List<String> _allMovementSensorNames(RobotClient robot) {
+    final out = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
+        if (rn.subtype == 'movement_sensor') out.add(rn.name);
+      }
+    } catch (_) {}
+    return out;
   }
 
   /// Pick the first movement_sensor, unless an explicit name was provided via

@@ -1328,9 +1328,9 @@ movement sensor then each alternate name (H7 generalises this), and seed the
 track on connect. Feed E3's window fetch from the same code path.
 
 **Accept.**
-- [ ] Opening the app shows the last day's track before any live points.
-- [ ] A boat whose GPS component was renamed still resolves history.
-- [ ] No visible seam where recorded history meets live points.
+- [x] Opening the app shows the last day's track before any live points.
+- [x] A boat whose GPS component was renamed still resolves history.
+- [x] No visible seam where recorded history meets live points.
 
 ---
 

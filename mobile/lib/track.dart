@@ -48,6 +48,26 @@ class Track {
   }
 
   void clear() => points.clear();
+
+  /// Prepend cloud-recorded history (C3): only points strictly older than
+  /// the first live point are taken, so the recorded tail meets the live
+  /// head with no duplicates and no visible seam. Still bounded by [cap]
+  /// (oldest dropped first, same as live pruning).
+  void seed(List<TrackPoint> recorded) {
+    if (recorded.isEmpty) return;
+    final firstLive = points.isEmpty ? null : points.first.t;
+    final older = firstLive == null
+        ? recorded
+        : [
+            for (final p in recorded)
+              if (p.t.isBefore(firstLive)) p
+          ];
+    if (older.isEmpty) return;
+    points.insertAll(0, older);
+    if (points.length > cap) {
+      points.removeRange(0, points.length - cap);
+    }
+  }
 }
 
 /// Segment list for drawing: consecutive point pairs with the colour for the

@@ -329,7 +329,11 @@ class _MapScreenState extends State<MapScreen> {
         previewedIds: _previewedRouteIds,
         showAll: _previewShowAll,
         fetchTrack: (widget.connection.history?.hasTrackWindow ?? false)
-            ? widget.connection.history!.fetchTrackWindow
+            ? (t0, t1) async => [
+                  for (final e
+                      in await widget.connection.history!.fetchTrackWindow(t0, t1))
+                    e.p
+                ]
             : null,
         onTrackPreview: (points) {
           if (mounted) setState(() => _trackCandidate = points);
