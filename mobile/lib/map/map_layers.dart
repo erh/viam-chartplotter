@@ -27,6 +27,11 @@ List<Widget> buildMapLayers({
     TileLayer(
       key: ValueKey(base.id),
       urlTemplate: base.urlTemplate,
+      // Chart tiles vary their query params by tile zoom (A1); other layers
+      // use the plain template with the default network provider.
+      tileProvider: base.paramsForZoom == null
+          ? null
+          : ZoomParamsTileProvider(base.paramsForZoom!),
       minZoom: base.minZoom.toDouble(),
       maxNativeZoom: base.maxZoom,
       userAgentPackageName: 'com.viam.chartplotter.mobile',

@@ -305,7 +305,7 @@ requested below z7.
 **Accept.**
 - [ ] Screenshots at z9 / z13 / z15 match the web app's chart at the same
       position and zoom.
-- [ ] No request contains `landfill=`.
+- [x] No request contains `landfill=`.
 - [ ] No tile request is issued below z7.
 
 **Watch out.** `flutter_map` `coords.z` is the *tile* z; the web app
