@@ -31,6 +31,31 @@ class MachinePickerScreen extends StatefulWidget {
 
 enum _Level { orgs, locations, robots }
 
+/// One machine found by the cross-org boat search: the robot plus where it
+/// lives, so a result can both label itself and connect directly.
+typedef BoatHit = ({dynamic robot, dynamic org, dynamic loc});
+
+/// Case-insensitive boat filter for the org-screen search: matches the
+/// machine, location, or org name (people often name the location after the
+/// boat), dedupes by machine id (a shared location is reachable through two
+/// orgs), and sorts by machine name. Pure, for tests.
+List<BoatHit> filterBoatHits(List<BoatHit> all, String query) {
+  final q = query.trim().toLowerCase();
+  if (q.isEmpty) return const [];
+  bool has(dynamic v) => (v?.toString().toLowerCase() ?? '').contains(q);
+  final seen = <String>{};
+  final out = [
+    for (final h in all)
+      if ((has(h.robot.name) || has(h.loc.name) || has(h.org.name)) &&
+          seen.add(h.robot.id?.toString() ??
+              identityHashCode(h.robot).toString()))
+        h
+  ];
+  out.sort((a, b) => (a.robot.name?.toString().toLowerCase() ?? '')
+      .compareTo(b.robot.name?.toString().toLowerCase() ?? ''));
+  return out;
+}
+
 class _MachinePickerScreenState extends State<MachinePickerScreen> {
   _Level _level = _Level.orgs;
   List<dynamic> _items = [];
@@ -141,6 +166,62 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   // Selection path, so back/refresh can rebuild the current or parent level.
   dynamic _selectedOrg;
   dynamic _selectedLoc;
+
+  // ---- boat search (org screen) ----------------------------------------
+  // Typing in the search box kicks off a one-time background walk of every
+  // org → location → machine; hits stream into the list as each location
+  // answers, so a match in the first org shows while later orgs still load.
+  // The index lives for the screen's lifetime — clearing and re-searching
+  // is instant.
+  final TextEditingController _searchCtl = TextEditingController();
+  String _query = '';
+  final List<BoatHit> _allBoats = [];
+  bool _indexStarted = false;
+  bool _indexing = false;
+  String _indexProgress = '';
+
+  Future<void> _buildBoatIndex() async {
+    if (_indexStarted) return;
+    _indexStarted = true;
+    _indexing = true;
+    try {
+      await widget.session.validAccessToken();
+      final orgs = _byName(await _viam.appClient.listOrganizations());
+      for (var i = 0; i < orgs.length; i++) {
+        if (!mounted) return;
+        final org = orgs[i];
+        setState(() => _indexProgress =
+            'searching ${org.name} (${i + 1}/${orgs.length})…');
+        try {
+          final locs = await _viam.appClient.listLocations(org.id);
+          for (final loc in locs) {
+            final robots = await _viam.appClient.listRobots(loc.id);
+            if (!mounted) return;
+            setState(() {
+              for (final r in robots) {
+                _allBoats.add((robot: r, org: org, loc: loc));
+              }
+            });
+          }
+        } catch (_) {
+          // An org we can list but not read into — skip it, keep searching.
+        }
+      }
+    } catch (e) {
+      // Total failure (offline): allow a retry on the next keystroke.
+      _indexStarted = false;
+      if (mounted) setState(() => _error = 'Search failed: $e');
+    } finally {
+      _indexing = false;
+      if (mounted) setState(() => _indexProgress = '');
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
 
   Future<void> _loadOrgs() => _guard(() async {
         final orgs = await _viam.appClient.listOrganizations();
@@ -326,60 +407,145 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   }
 
   Widget _body() {
-    return _connecting
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 16),
-                  Text(_connectingName.isEmpty
-                      ? 'Connecting to boat…'
-                      : 'Connecting to $_connectingName…'),
-                  const SizedBox(height: 16),
-                  OutlinedButton(
-                    onPressed: () {
-                      // Back out to the list (loaded in the background); if
-                      // the in-flight connect still lands, its stale
-                      // generation closes it instead of taking the screen.
-                      _connectGen++;
-                      setState(() {
-                        _connecting = false;
-                        _connectingName = '';
-                      });
-                    },
-                    child: const Text('Pick a different boat'),
-                  ),
-                ],
+    if (_connecting) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(_connectingName.isEmpty
+                ? 'Connecting to boat…'
+                : 'Connecting to $_connectingName…'),
+            const SizedBox(height: 16),
+            OutlinedButton(
+              onPressed: () {
+                // Back out to the list (loaded in the background); if
+                // the in-flight connect still lands, its stale
+                // generation closes it instead of taking the screen.
+                _connectGen++;
+                setState(() {
+                  _connecting = false;
+                  _connectingName = '';
+                });
+              },
+              child: const Text('Pick a different boat'),
+            ),
+          ],
+        ),
+      );
+    }
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) {
+      return _ErrorRetry(message: _error!, onRetry: _loadOrgs);
+    }
+    final searching = _level == _Level.orgs && _query.trim().isNotEmpty;
+    return Column(
+      children: [
+        // Boat search, on the top (org) screen only: finds a machine by
+        // name across every org/location without walking the tree.
+        if (_level == _Level.orgs)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: TextField(
+              controller: _searchCtl,
+              decoration: InputDecoration(
+                hintText: 'Search boats…',
+                prefixIcon: const Icon(Icons.search),
+                isDense: true,
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _searchCtl.clear();
+                          setState(() => _query = '');
+                        },
+                      ),
               ),
-            )
-          : _loading
-              ? const Center(child: CircularProgressIndicator())
-              : _error != null
-                  ? _ErrorRetry(message: _error!, onRetry: _loadOrgs)
-                  : RefreshIndicator(
-                      onRefresh: _refresh,
-                      child: ListView.separated(
-                      // Scrollable even when short, so pull-to-refresh works
-                      // on a two-row list.
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: _items.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, i) {
-                        final item = _items[i];
-                        return ListTile(
-                          leading: Icon(_level == _Level.robots
-                              ? Icons.sailing
-                              : Icons.folder_outlined),
-                          title: Text(item.name?.toString() ?? '(unnamed)'),
-                          trailing: Icon(_level == _Level.robots
-                              ? Icons.link
-                              : Icons.chevron_right),
-                          onTap: () => _onTap(item),
-                        );
-                      },
-                    ),
-                  );
+              onChanged: (v) {
+                setState(() => _query = v);
+                // First keystroke starts the one-time index build.
+                if (v.trim().isNotEmpty) _buildBoatIndex();
+              },
+            ),
+          ),
+        Expanded(child: searching ? _searchResults() : _levelList()),
+      ],
+    );
+  }
+
+  Widget _levelList() {
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.separated(
+        // Scrollable even when short, so pull-to-refresh works
+        // on a two-row list.
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: _items.length,
+        separatorBuilder: (_, __) => const Divider(height: 1),
+        itemBuilder: (context, i) {
+          final item = _items[i];
+          return ListTile(
+            leading: Icon(_level == _Level.robots
+                ? Icons.sailing
+                : Icons.folder_outlined),
+            title: Text(item.name?.toString() ?? '(unnamed)'),
+            trailing: Icon(_level == _Level.robots
+                ? Icons.link
+                : Icons.chevron_right),
+            onTap: () => _onTap(item),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Search hits, streaming in while the index walk is still running. A hit
+  /// carries its org, so tapping connects directly — no tree walk.
+  Widget _searchResults() {
+    final hits = filterBoatHits(_allBoats, _query);
+    return ListView(
+      children: [
+        for (final h in hits)
+          ListTile(
+            leading: const Icon(Icons.sailing),
+            title: Text(h.robot.name?.toString() ?? '(unnamed)'),
+            subtitle: Text('${h.org.name ?? ''} · ${h.loc.name ?? ''}'),
+            trailing: const Icon(Icons.link),
+            onTap: () {
+              _orgId = h.org.id;
+              _selectedOrg = h.org;
+              _selectedLoc = h.loc;
+              _connect(h.robot);
+            },
+          ),
+        if (_indexing)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(_indexProgress,
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+              ],
+            ),
+          )
+        else if (hits.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('No boats match')),
+          ),
+      ],
+    );
   }
 }
 
