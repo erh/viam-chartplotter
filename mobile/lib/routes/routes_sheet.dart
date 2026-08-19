@@ -1,9 +1,13 @@
+import 'dart:io';
+
 // Flutter has its own navigator `Route`; ours (route_store) wins here.
 import 'package:flutter/material.dart' hide Route;
 import 'package:latlong2/latlong.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../boat_state.dart';
 import '../chart/areas.dart' show parseCssColor;
+import '../gpx.dart';
 import '../simplify.dart';
 import 'route_store.dart';
 
@@ -295,6 +299,22 @@ class _RoutesSheetState extends State<RoutesSheet> {
         ));
   }
 
+  /// GPX export (E4): write the route to a temp file and hand it to the
+  /// platform share sheet — the mobile equivalent of the web download, and
+  /// how a route gets onto a Garmin (Garmin/GPX/*.gpx on a card).
+  Future<void> _exportGpx(Route r) async {
+    try {
+      final file = File('${Directory.systemTemp.path}/${gpxFilename(r.name)}');
+      await file.writeAsString(routeToGpx(r.name, r.waypoints));
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/gpx+xml')],
+        subject: r.name,
+      );
+    } catch (e) {
+      if (mounted) setState(() => _error = 'GPX export failed: $e');
+    }
+  }
+
   /// Save-from-track (E3): pick a window ending now, pull the recorded
   /// track, simplify (Douglas–Peucker via simplifyTrack), preview on the
   /// chart, save with source "track". The preview IS the saved geometry —
@@ -552,6 +572,8 @@ class _RoutesSheetState extends State<RoutesSheet> {
                                 _load(r);
                               case 'load-rev':
                                 _load(r, reversed: true);
+                              case 'gpx':
+                                _exportGpx(r);
                               case 'edit':
                                 _rename(r);
                               case 'delete':
@@ -564,6 +586,8 @@ class _RoutesSheetState extends State<RoutesSheet> {
                             const PopupMenuItem(
                                 value: 'load-rev',
                                 child: Text('Load reversed')),
+                            const PopupMenuItem(
+                                value: 'gpx', child: Text('Export GPX…')),
                             // Inherited (parent-scope) routes are read-only:
                             // no rename/recolour/delete offered at all.
                             if (!r.readOnly) ...[

@@ -29,6 +29,9 @@ dependencies:
   package_info_plus: ^8.0.0
   # Device-GPS fallback when the boat's fix is missing/stale (L5).
   geolocator: ^13.0.0
+  # GPX export hands the file to the platform share sheet (E4) — the mobile
+  # equivalent of the web download, and how a route gets onto a Garmin.
+  share_plus: ^10.0.0
 
 dev_dependencies:
   flutter_test:
