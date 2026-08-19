@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Bonjour discovery of the boat server requires declaring the
+	     service type and a local-network usage string. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Finds and connects to the boat's chartplotter server on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_viam-chartplotter._tcp</string>
+	</array>
+	<!-- The boat server is plain HTTP on the LAN. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

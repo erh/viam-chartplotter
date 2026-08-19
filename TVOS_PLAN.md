@@ -35,7 +35,15 @@ Add a small display-client API next to it.
    mDNS/Bonjour so the TV finds the boat with zero typing.
 4. Verify with curl from another machine on the boat LAN.
 
-## Phase 2 — tvOS app skeleton (new `tvos/` directory, Swift/SwiftUI)
+## Phase 2 — tvOS app skeleton (new `tvos/` directory, Swift/SwiftUI) — DONE
+
+Implemented in `tvos/` and verified in the tvOS 26 simulator against
+the live boat: Bonjour auto-connect, checkmate chart tiles (from the
+hosted tile server, per-zoom ecdis/wms styles), rotated boat marker,
+speed auto-zoom, live SOG/depth/HDG/COG panel, route line + waypoint
+panel. Hard-won detail: follow the boat with setCenter per tick and
+setRegion only on zoom-band changes — restarting a region animation
+every poll keeps MapKit from ever committing tiles.
 
 1. Project scaffold + connection screen: Bonjour browse for
    `_viam-chartplotter._tcp`, auto-connect when exactly one server is
