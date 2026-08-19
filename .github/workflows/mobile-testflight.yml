@@ -38,9 +38,10 @@ jobs:
     timeout-minutes: 60
     env:
       TEAM_ID: 5582DW8S98
-      # Must match the App Store Connect app record's bundle id. Authoritative:
-      # a step below stamps it over whatever `flutter create` generated.
-      BUNDLE_ID: com.viam.viamChartplotterMobile
+      # Must match the App Store Connect app record's bundle id ("Checkmate
+      # Viam Chart Plotter"). Authoritative: a step below stamps it over
+      # whatever `flutter create` generated.
+      BUNDLE_ID: com.checkmate.viamChartplotterMobile
     steps:
       - uses: actions/checkout@v4
 
