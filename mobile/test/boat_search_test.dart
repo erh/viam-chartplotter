@@ -30,9 +30,12 @@ void main() {
     expect(hits.single.robot.name, 'Checkmate');
   });
 
-  test('matches location and org names too', () {
+  test('matches the location name too', () {
     expect(filterBoatHits(all, 'block island').single.robot.name, 'Andiamo');
-    expect(filterBoatHits(all, 'friends').single.robot.name, 'Andiamo');
+  });
+
+  test('does NOT match the org name — that returned every boat at once', () {
+    expect(filterBoatHits(all, 'friends'), isEmpty);
   });
 
   test('dedupes a boat reachable through two orgs, keeping the first', () {
@@ -42,7 +45,7 @@ void main() {
   });
 
   test('sorts by machine name and returns nothing for a blank query', () {
-    final hits = filterBoatHits(all, 'e'); // hits everything via org 'erh'…
+    final hits = filterBoatHits(all, 'a'); // Andiamo + Checkmate, by name
     final names = [for (final h in hits) h.robot.name as String];
     expect(names, List.of(names)..sort());
     expect(filterBoatHits(all, '   '), isEmpty);

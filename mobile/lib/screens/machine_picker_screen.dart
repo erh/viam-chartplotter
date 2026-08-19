@@ -36,9 +36,11 @@ enum _Level { orgs, locations, robots }
 typedef BoatHit = ({dynamic robot, dynamic org, dynamic loc});
 
 /// Case-insensitive boat filter for the org-screen search: matches the
-/// machine, location, or org name (people often name the location after the
-/// boat), dedupes by machine id (a shared location is reachable through two
-/// orgs), and sorts by machine name. Pure, for tests.
+/// machine or LOCATION name (people often name the location after the
+/// boat). Deliberately not the org name — that matched every boat in the
+/// org at once, which is noise, not search. Dedupes by machine id (a
+/// shared location is reachable through two orgs), sorts by machine name.
+/// Pure, for tests.
 List<BoatHit> filterBoatHits(List<BoatHit> all, String query) {
   final q = query.trim().toLowerCase();
   if (q.isEmpty) return const [];
@@ -46,7 +48,7 @@ List<BoatHit> filterBoatHits(List<BoatHit> all, String query) {
   final seen = <String>{};
   final out = [
     for (final h in all)
-      if ((has(h.robot.name) || has(h.loc.name) || has(h.org.name)) &&
+      if ((has(h.robot.name) || has(h.loc.name)) &&
           seen.add(h.robot.id?.toString() ??
               identityHashCode(h.robot).toString()))
         h
