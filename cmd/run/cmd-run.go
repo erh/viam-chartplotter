@@ -30,7 +30,7 @@ func realMain() error {
 
 	mongoURI := os.Getenv("MONGO_URI")
 	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6, "",
-		mongoURI, "osm", "features", vc.ResolveTileServerBaseURL("", mongoURI), false)
+		mongoURI, "osm", "features", vc.ResolveTileServerBaseURL("", mongoURI), false, nil)
 	if err != nil {
 		return err
 	}

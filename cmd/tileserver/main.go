@@ -48,7 +48,7 @@ func realMain() error {
 	// tile_server_base_url is empty: this process IS the tile server, it serves
 	// its own tiles same-origin.
 	ws, err := vc.StartChartplotterServer(generic.Named("tileserver"), dist, logger,
-		*port, *cacheDir, 0, 6, "", *mongoURI, *mongoDB, "features", "", *chartOnly)
+		*port, *cacheDir, 0, 6, "", *mongoURI, *mongoDB, "features", "", *chartOnly, nil)
 	if err != nil {
 		return err
 	}

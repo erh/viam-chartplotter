@@ -37,6 +37,11 @@ public hosted map+weather server, so tiles and weather work with zero setup.
 | `myboat_icon_path` | string | — | path to a custom boat icon |
 | `tile_server_base_url` | string | "" (same-origin; hosted server if `mongo_uri` unset) | base URL of a separate map+weather server the frontend fetches tiles+weather from. Empty = this instance serves its own. |
 | `chart_only` | bool | `false` | chart-extended (kiosk) mode: no boat/robot to connect to — the frontend skips the Viam connection and shows only the chart (no boat marker, AIS, nav, camera, or panels). Also auto-enabled when no host is resolvable. |
+| `movement_sensor` | string | — | movement sensor for `/api/state` (position/heading/SOG) |
+| `depth_sensor` | string | — | depth sensor; adds `depth_ft` to `/api/state` |
+| `route_sensor` | string | — | N2K route sensor (e.g. viamboat); feeds `/api/route` |
+| `nav_service` | string | — | navigation service; adds waypoints to `/api/route` |
+| `cameras` | string[] | — | cameras exposed as `/api/camera/{name}.jpg` |
 
 ```json
 {
@@ -51,6 +56,23 @@ public hosted map+weather server, so tiles and weather work with zero setup.
   }
 }
 ```
+
+### display API (LAN thin clients)
+
+When any of `movement_sensor` / `depth_sensor` / `route_sensor` /
+`nav_service` / `cameras` are set, the server exposes a small
+unauthenticated JSON/JPEG API for display clients on the boat LAN
+(e.g. the tvOS app — see TVOS_PLAN.md), and advertises itself over
+mDNS/Bonjour as `_viam-chartplotter._tcp` so clients can discover it
+with zero configuration. All names are optional dependencies: the
+server still comes up if one is missing; that endpoint answers 503.
+
+| endpoint | returns |
+|----------|---------|
+| `GET /api/info` | which endpoints are configured + camera names |
+| `GET /api/state` | `{lat, lng, sog_kn, heading_deg, cog_deg, depth_ft, ts}` |
+| `GET /api/route` | `{destination_lat/lng, distance_to_waypoint_m, closing_velocity_m_s, waypoints[]}` |
+| `GET /api/camera/{name}.jpg` | latest still frame from the named camera |
 
 ---
 

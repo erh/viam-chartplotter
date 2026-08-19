@@ -21,6 +21,7 @@ import (
 	"go.viam.com/rdk/resource"
 
 	"github.com/erh/vmodutils"
+	"github.com/viamrobotics/zeroconf"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
@@ -64,9 +65,36 @@ func init() {
 	resource.RegisterComponent(
 		generic.API,
 		Model,
-		resource.Registration[resource.Resource, resource.NoNativeConfig]{
+		resource.Registration[resource.Resource, *ChartplotterConfig]{
 			Constructor: newServer,
 		})
+}
+
+// ChartplotterConfig carries the attributes that name other machine
+// resources — they feed the LAN display API (/api/*, see displayapi.go
+// and TVOS_PLAN.md). All optional; the rest of the chartplotter's knobs
+// (port, mongo, caching, …) are read straight off config.Attributes in
+// newServer and aren't declared here.
+type ChartplotterConfig struct {
+	MovementSensor string   `json:"movement_sensor,omitempty"`
+	DepthSensor    string   `json:"depth_sensor,omitempty"`
+	RouteSensor    string   `json:"route_sensor,omitempty"`
+	NavService     string   `json:"nav_service,omitempty"`
+	Cameras        []string `json:"cameras,omitempty"`
+}
+
+// Validate declares the named resources as optional dependencies: the
+// server should come up (tiles + web app) even when a named sensor or
+// camera is missing, with just its /api endpoint unavailable.
+func (cfg *ChartplotterConfig) Validate(path string) ([]string, []string, error) {
+	var opt []string
+	for _, n := range []string{cfg.MovementSensor, cfg.DepthSensor, cfg.RouteSensor, cfg.NavService} {
+		if n != "" {
+			opt = append(opt, n)
+		}
+	}
+	opt = append(opt, cfg.Cameras...)
+	return nil, opt, nil
 }
 
 func newServer(ctx context.Context, deps resource.Dependencies, config resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -74,6 +102,11 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := resource.NativeConfig[*ChartplotterConfig](config)
+	if err != nil {
+		return nil, err
+	}
+	api := NewDisplayAPI(deps, cfg, logger.Sublogger("displayApi"))
 	port := config.Attributes.Int("port", 8888)
 	cacheDir := config.Attributes.String("noaa_cache_dir")
 	cacheMaxBytes := int64(config.Attributes.Int("noaa_cache_max_bytes", 0))
@@ -102,7 +135,7 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// chart — no boat marker, AIS, navigation, camera, or app panels. Exposed via
 	// /app-config; the frontend also auto-enters it when no host is resolvable.
 	chartOnly := config.Attributes.Bool("chart_only", false)
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly, api)
 }
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
@@ -211,6 +244,7 @@ func StartChartplotterServer(
 	mongoColl string,
 	tileServerBaseURL string,
 	chartOnly bool,
+	api *DisplayAPI,
 ) (resource.Resource, error) {
 	// Stand up tracing before anything else so even the early-init
 	// errors get captured. Shutdown is wired through chartplotterResource
@@ -404,6 +438,26 @@ func StartChartplotterServer(
 		}
 	}
 
+	// LAN display API (see displayapi.go / TVOS_PLAN.md) + Bonjour
+	// advertisement so thin clients (the tvOS app) can discover this
+	// server with zero configuration. Only the module path passes an
+	// api — the standalone cmd/run and cmd/tileserver don't.
+	var mdnsServer *zeroconf.Server
+	if api != nil {
+		api.Register(mux)
+		host, _ := os.Hostname()
+		instance := firstNonEmpty(host, name.ShortName(), "chartplotter")
+		mdnsServer, err = zeroconf.Register(
+			instance, "_viam-chartplotter._tcp", "local.", port,
+			[]string{"path=/api"}, nil, logger.Sublogger("mdns").AsZap())
+		if err != nil {
+			logger.Warnf("mdns advertisement failed (display clients need a manual address): %v", err)
+			mdnsServer = nil
+		} else {
+			logger.Infof("mdns: advertising %q as _viam-chartplotter._tcp on port %d", instance, port)
+		}
+	}
+
 	server.Addr = fmt.Sprintf(":%d", port)
 	logger.Infof("going to listen on %v", server.Addr)
 	go func() {
@@ -418,6 +472,7 @@ func StartChartplotterServer(
 		weatherCache:   weatherCache,
 		tileCache:      encTileCache,
 		encHandlers:    encHandlers,
+		mdnsServer:     mdnsServer,
 		tracerShutdown: tracerShutdown,
 	}, nil
 }
@@ -430,6 +485,7 @@ type chartplotterResource struct {
 	weatherCache   *weather.WeatherCache
 	tileCache      *render.ENCTileCache
 	encHandlers    *render.ENCHandlers
+	mdnsServer     *zeroconf.Server
 	tracerShutdown func(context.Context) error
 }
 
@@ -442,6 +498,9 @@ func (r *chartplotterResource) Status(ctx context.Context) (map[string]interface
 }
 
 func (r *chartplotterResource) Close(ctx context.Context) error {
+	if r.mdnsServer != nil {
+		r.mdnsServer.Shutdown()
+	}
 	if r.weatherCache != nil {
 		r.weatherCache.Close()
 	}
