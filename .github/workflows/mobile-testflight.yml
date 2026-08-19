@@ -1,6 +1,8 @@
-# Build a signed iOS release and upload it to TestFlight whenever the mobile
-# app changes on main (plus on demand via workflow_dispatch / `gh workflow
-# run mobile-testflight.yml --ref <branch>`).
+# Build a signed iOS release and upload it to TestFlight on a mobile release
+# tag — `mobile-<semver>`, e.g. `mobile-1.4.0` (plus on demand via
+# workflow_dispatch / `gh workflow run mobile-testflight.yml --ref <branch>`).
+# Pushes to main no longer upload; cut a tag to ship. (Module deploys are the
+# same idea with bare `<semver>` tags — see viam-build.yml.)
 #
 # Signing is fully cloud-managed: xcodebuild authenticates with the App Store
 # Connect API key (secrets ASC_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8) and
@@ -19,10 +21,8 @@ name: mobile-testflight
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - "mobile/**"
-      - ".github/workflows/mobile-testflight.yml"
+    tags:
+      - "mobile-[0-9]+.[0-9]+.[0-9]+"
 
 concurrency:
   group: mobile-testflight
