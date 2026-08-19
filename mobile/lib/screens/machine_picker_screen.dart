@@ -44,6 +44,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   // cancel + pick-another can't race into two live connections.
   int _connectGen = 0;
   String _orgId = ''; // org of the machine being connected (set on org tap)
+  String? _lastFqdn; // address the last dial resolved, cached in the record
   final TokenStore _storage = TokenStore();
 
   Viam get _viam => widget.session.viam!;
@@ -73,10 +74,23 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         _connectingName = (m['name'] is String) ? m['name'] as String : '';
       });
       _orgId = orgId;
-      final client = await _connectRobot(robotId);
+      final cached = m['fqdn'];
+      final client = await _connectRobot(
+        robotId,
+        cachedFqdn: cached is String && cached.isNotEmpty ? cached : null,
+      );
       if (gen != _connectGen) {
         await client.close();
         return;
+      }
+      // Records written before the address was cached get one now, so the
+      // first re-dial after a dropout can skip the cloud lookup.
+      if (cached is! String || cached != _lastFqdn) {
+        await _rememberMachine(
+          robotId: robotId,
+          orgId: orgId,
+          name: (m['name'] is String) ? m['name'] as String : '',
+        );
       }
       if (mounted) widget.onConnected(client);
     } catch (_) {
@@ -146,16 +160,11 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       }
       // Remember this machine so the next launch can reconnect to it
       // without walking the picker.
-      try {
-        await _storage.write(
-          key: kLastMachineKey,
-          value: jsonEncode({
-            'robotId': robot.id,
-            'orgId': _orgId,
-            'name': robot.name?.toString() ?? '',
-          }),
-        );
-      } catch (_) {}
+      await _rememberMachine(
+        robotId: robot.id.toString(),
+        orgId: _orgId,
+        name: robot.name?.toString() ?? '',
+      );
       widget.onConnected(client);
     } catch (e) {
       if (mounted && gen == _connectGen) {
@@ -170,8 +179,36 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
 
   /// Dial via [MachineConnector] — the shared cloud/API-key connect path,
   /// also used for launch auto-connect and dead-connection re-dials.
-  Future<RobotClient> _connectRobot(String robotId) =>
-      MachineConnector(viam: _viam).connect(robotId, _orgId);
+  Future<RobotClient> _connectRobot(String robotId, {String? cachedFqdn}) async {
+    final connector = MachineConnector(viam: _viam);
+    final client =
+        await connector.connect(robotId, _orgId, cachedFqdn: cachedFqdn);
+    _lastFqdn = connector.fqdn;
+    return client;
+  }
+
+  /// Store the machine to reconnect to, including the address the dial
+  /// resolved — a re-dial that skips the app.viam.com lookup recovers
+  /// noticeably faster, and works on a link too marginal for the extra calls.
+  Future<void> _rememberMachine({
+    required String robotId,
+    required String orgId,
+    required String name,
+  }) async {
+    try {
+      await _storage.write(
+        key: kLastMachineKey,
+        value: jsonEncode({
+          'robotId': robotId,
+          'orgId': orgId,
+          'name': name,
+          if (_lastFqdn != null) 'fqdn': _lastFqdn,
+        }),
+      );
+    } catch (_) {
+      // Storage unavailable — auto-connect just won't survive a restart.
+    }
+  }
 
   void _onTap(dynamic item) {
     switch (_level) {

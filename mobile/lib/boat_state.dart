@@ -64,6 +64,11 @@ class BoatState extends ChangeNotifier {
   String windInfo = 'off'; // wind-overlay fetch state, shown in Debug
   String status = 'Starting…';
   DateTime? lastUpdate;
+  // Why the last re-dial failed, and how many attempts the current outage has
+  // taken. Surfaced in Debug rather than the status pill, which is far too
+  // narrow for a gRPC error.
+  String? lastConnectError;
+  int reconnectAttempts = 0;
 
   // Timestamped live history per metric (depth/seatemp/sog/wind/tank:<name>),
   // for the inline sparklines and the detail graph. ~4h at 1 Hz.
@@ -91,7 +96,7 @@ class BoatState extends ChangeNotifier {
           ];
     if (older.isEmpty) return;
     list.insertAll(0, older);
-    notifyListeners();
+    _notify();
   }
 
   bool get connected => status.startsWith('Connected');
@@ -138,7 +143,7 @@ class BoatState extends ChangeNotifier {
 
   void setAis(List<AisBoat> boats) {
     aisBoats = boats;
-    notifyListeners();
+    _notify();
   }
 
   void setRoute({
@@ -149,22 +154,22 @@ class BoatState extends ChangeNotifier {
     this.destination = destination;
     this.wpDistanceM = wpDistanceM;
     this.wpClosingMs = wpClosingMs;
-    notifyListeners();
+    _notify();
   }
 
   void setSources(Map<String, String?> s) {
     sources = s;
-    notifyListeners();
+    _notify();
   }
 
   void setCameras(List<String> names) {
     cameraNames = names;
-    notifyListeners();
+    _notify();
   }
 
   void setWindInfo(String s) {
     windInfo = s;
-    notifyListeners();
+    _notify();
   }
 
   void setSystems({
@@ -193,11 +198,35 @@ class BoatState extends ChangeNotifier {
     }
     if (acVolts != null) this.acVolts = acVolts;
     if (acWatts != null) this.acWatts = acWatts;
-    notifyListeners();
+    _notify();
   }
 
   void setStatus(String s) {
+    if (s == status) return; // the reconnect countdown re-asserts a lot
     status = s;
+    _notify();
+  }
+
+  void setConnectionDiag({required String? error, required int attempts}) {
+    if (error == lastConnectError && attempts == reconnectAttempts) return;
+    lastConnectError = error;
+    reconnectAttempts = attempts;
+    _notify();
+  }
+
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// A poll abandoned mid-flight, or a re-dial that landed after "switch
+  /// boat", can still call in after this state was retired — swallow those
+  /// instead of tripping ChangeNotifier's use-after-dispose assert.
+  void _notify() {
+    if (_disposed) return;
     notifyListeners();
   }
 
@@ -232,6 +261,6 @@ class BoatState extends ChangeNotifier {
     }
     if (windAngleDeg != null) this.windAngleDeg = windAngleDeg;
     lastUpdate = DateTime.now();
-    notifyListeners();
+    _notify();
   }
 }

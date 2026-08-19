@@ -38,6 +38,14 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   // of auto-reconnecting to the boat the user just left.
   bool _skipAutoConnect = false;
 
+  // When the app was last backgrounded, so resume can tell a glance at a
+  // notification from a stint in a pocket.
+  DateTime? _pausedAt;
+
+  /// Past this much time backgrounded, assume the WebRTC peer is gone and
+  /// re-dial on resume without spending a probe deadline confirming it.
+  static const _deadAfterBackground = Duration(seconds: 30);
+
   @override
   void initState() {
     super.initState();
@@ -48,11 +56,22 @@ class _ChartplotterAppState extends State<ChartplotterApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_boatConnected) return;
     // Locking the phone kills the WebRTC connection but leaves the app
-    // showing its last status. Probe on resume so a dead connection is
-    // noticed (and re-dialed) immediately instead of silently lying.
-    if (state == AppLifecycleState.resumed && _boatConnected) {
-      _conn.checkNow();
+    // showing its last status. Stop polling while we're away (the OS suspends
+    // or throttles us anyway, and ticking just burns battery and cellular
+    // data), then settle the connection's fate the moment we're back instead
+    // of letting it silently lie until the watchdog notices.
+    if (state == AppLifecycleState.resumed) {
+      final away = _pausedAt;
+      _pausedAt = null;
+      final gone = away != null &&
+          DateTime.now().difference(away) > _deadAfterBackground;
+      _conn.resume(assumeDead: gone);
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _pausedAt ??= DateTime.now();
+      _conn.pause();
     }
   }
 
@@ -79,14 +98,24 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     // connect path (cached machine API key), using the picker's stored
     // last-machine record.
     _conn.reconnector = () async {
+      // Refresh the OAuth session first. A re-dial still needs app.viam.com
+      // (to verify or mint the machine key), so an access token that expired
+      // while the app was backgrounded used to turn every retry into a
+      // permanent failure — the app would sit on "reconnecting…" forever with
+      // no way out but a restart.
+      await _session.validAccessToken();
       final viam = _session.viam;
       final raw = await TokenStore().read(key: kLastMachineKey);
       if (viam == null || raw == null) {
         throw StateError('no session or machine to reconnect to');
       }
       final m = jsonDecode(raw) as Map<String, dynamic>;
-      return MachineConnector(viam: viam)
-          .connect(m['robotId'] as String, m['orgId'] as String);
+      final cached = m['fqdn'];
+      return MachineConnector(viam: viam).connect(
+        m['robotId'] as String,
+        m['orgId'] as String,
+        cachedFqdn: cached is String && cached.isNotEmpty ? cached : null,
+      );
     };
     setState(() {
       _boatConnected = true;
