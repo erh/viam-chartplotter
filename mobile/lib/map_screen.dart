@@ -66,10 +66,14 @@ class _MapScreenState extends State<MapScreen> {
   bool _followedFirstFix = false;
 
   // A persisted view means the user deliberately left the map somewhere —
-  // the first GPS fix must not stomp it (J6).
+  // the first GPS fix must not stomp it (J6), and follow starts suspended.
   late final bool _restoredView =
       _settings.mapCenter != null && _settings.mapZoom != null;
   Timer? _persistViewDebounce;
+
+  // Follow mode (J4): keep the boat anchored on screen on every position
+  // update; a user drag suspends it, the FAB resumes.
+  late bool _followBoat = !_restoredView;
 
   // Chart orientation. north-up = rotation locked to 0; course-up = the chart
   // rotates so the boat's course-over-ground points to the top of the screen.
@@ -196,13 +200,53 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   /// Persist the camera after it settles — a debounce, not per-frame writes.
+  /// While following, only the zoom is saved: a saved center means "the user
+  /// deliberately left the map somewhere" (it also decides whether the next
+  /// launch starts suspended), and web clears it on re-anchor the same way.
   void _persistView() {
     _persistViewDebounce?.cancel();
     _persistViewDebounce = Timer(const Duration(seconds: 1), () {
       final c = _map.camera;
-      _settings.mapCenter = c.center;
+      if (!_followBoat) _settings.mapCenter = c.center;
       _settings.mapZoom = c.zoom;
     });
+  }
+
+  /// Never trust a null-island fix (web guards this too, isValidCoordinate):
+  /// a boat with no GPS reports [0,0] and would yank the chart to the Gulf
+  /// of Guinea.
+  static bool _validPos(LatLng p) =>
+      !(p.latitude == 0 && p.longitude == 0) &&
+      p.latitude.abs() <= 90 &&
+      p.longitude.abs() <= 180;
+
+  /// Screen offset for the followed boat (J2): centred, or 80% down for
+  /// look-ahead. Rotation-aware — flutter_map applies the offset in screen
+  /// space, so course-up keeps the look-ahead ahead.
+  Offset _followOffset() {
+    if (!_settings.boatPositionBottom) return Offset.zero;
+    final h = MediaQuery.maybeSizeOf(context)?.height ?? 0;
+    return Offset(0, h * 0.3); // center (50%) + 30% = 80% down
+  }
+
+  /// Keep the boat anchored while following (J4).
+  void _followTick() {
+    if (!_followBoat) return;
+    final pos = widget.state.position;
+    if (pos == null || !_validPos(pos)) return;
+    try {
+      _map.move(pos, _map.camera.zoom, offset: _followOffset());
+    } catch (_) {
+      // Map not built yet — the next tick follows.
+    }
+  }
+
+  /// Resume following (the FAB): clears the persisted center, matching the
+  /// web's re-anchor behaviour.
+  void _resumeFollow() {
+    setState(() => _followBoat = true);
+    _settings.mapCenter = null;
+    _followTick();
   }
 
   Future<void> _toggleWind() async {
@@ -246,6 +290,7 @@ class _MapScreenState extends State<MapScreen> {
     var depthColor = _settings.depthColorTrack;
     var headingOn = _settings.headingLineOn;
     var headingLen = _settings.headingLineLengthNm;
+    var boatBottom = _settings.boatPositionBottom;
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -277,6 +322,13 @@ class _MapScreenState extends State<MapScreen> {
               title: const Text('Heading line'),
               value: headingOn,
               onChanged: (v) => setDialogState(() => headingOn = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Boat low on screen'),
+              subtitle: const Text('Look-ahead: boat sits 80% down'),
+              value: boatBottom,
+              onChanged: (v) => setDialogState(() => boatBottom = v),
             ),
             Row(
               children: [
@@ -316,7 +368,9 @@ class _MapScreenState extends State<MapScreen> {
       _settings.depthColorTrack = depthColor;
       _settings.headingLineOn = headingOn;
       _settings.headingLineLengthNm = headingLen;
+      _settings.boatPositionBottom = boatBottom;
     });
+    _followTick(); // re-anchor immediately if the screen position changed
   }
 
   void _zoom(double delta) {
@@ -342,16 +396,19 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _onState() {
-    // Recenter once when the first GPS fix arrives, then leave the user in
-    // control of the viewport — unless a persisted view was restored, which
-    // the user deliberately left somewhere (J6). (Task J4 replaces this with
-    // continuous follow plus pan-to-suspend.)
+    // First valid fix while following: jump to a useful zoom, then the
+    // follow tick below keeps the boat anchored every update (J4).
     final pos = widget.state.position;
-    if (!_followedFirstFix && pos != null) {
+    if (!_followedFirstFix && pos != null && _validPos(pos)) {
       _followedFirstFix = true;
-      if (!_restoredView) _map.move(pos, 13);
+      if (_followBoat && !_restoredView) {
+        try {
+          _map.move(pos, 13);
+        } catch (_) {}
+      }
     }
     _applyCourseUp(); // keep the chart aligned as the course changes
+    _followTick();
     // The AIS marker cache keys off the list identity: the poll loop swaps
     // in a fresh list per AIS tick, so identical() is a change detector.
     if (!identical(widget.state.aisBoats, _aisMarkersFor)) {
@@ -383,6 +440,18 @@ class _MapScreenState extends State<MapScreen> {
               interactionOptions: const InteractionOptions(
                 flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
               ),
+              // Suspend follow on a user DRAG only (J4) — not pinch-zoom,
+              // which should keep the boat anchored (J2), and not
+              // programmatic moves. The web app documents why a
+              // center-diff check false-positives here (:1193).
+              onMapEvent: (evt) {
+                if (!_followBoat) return;
+                if (evt.source == MapEventSource.onDrag ||
+                    evt.source == MapEventSource.dragStart ||
+                    evt.source == MapEventSource.flingAnimationController) {
+                  setState(() => _followBoat = false);
+                }
+              },
               onPositionChanged: (camera, _) {
                 _wind.bounds = camera.visibleBounds;
                 _rotationDeg = camera.rotation;
@@ -581,12 +650,16 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
-      floatingActionButton: s.position == null
+      // The follow affordance (J4): hidden while following (the boat is
+      // already anchored); after a drag suspends follow it appears as the
+      // way back.
+      floatingActionButton: (s.position == null || _followBoat)
           ? null
-          : FloatingActionButton(
-              onPressed: () => _map.move(s.position!, 14),
-              tooltip: 'Center on boat',
-              child: const Icon(Icons.my_location),
+          : FloatingActionButton.extended(
+              onPressed: _resumeFollow,
+              tooltip: 'Resume following the boat',
+              icon: const Icon(Icons.my_location),
+              label: const Text('Follow'),
             ),
     );
   }

@@ -678,7 +678,7 @@ Reuse the same distance helper as C4/E5 (`getDistance` equivalent — use
 
 ---
 
-### J2 · Boat position on screen `S` `P1`
+### J2 · Boat position on screen `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map_screen.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:3318-3327`, applied in `updateFromData:1216`
@@ -690,13 +690,14 @@ mode — what you want under way). Web computes the target pixel as
 offset the camera target by the equivalent screen delta. Persist via J6.
 
 **Accept.**
-- [ ] In bottom mode the boat sits ~80 % down and stays there while following.
-- [ ] Pinch-zoom keeps the boat anchored at its screen position (see the web
-      comment at `:1193` about zoom-anchor fighting the recentre logic).
+- [x] In bottom mode the boat sits ~80 % down and stays there while following
+      (flutter_map move offset, rotation-aware).
+- [x] Pinch-zoom keeps the boat anchored at its screen position (follow only
+      suspends on drag sources, and the next follow tick re-anchors).
 
 ---
 
-### J4 · Follow mode with pan-to-suspend `S` `P0`
+### J4 · Follow mode with pan-to-suspend `S` `P0` — ✅ **done**
 
 **Files:** `mobile/lib/map_screen.dart`, `mobile/lib/map/map_controls.dart`
 **Web ref:** `src/marineMap.svelte:3430-3448` (`stopPanning`), `4229-4246`
@@ -720,9 +721,13 @@ Panning"** button while suspended, and resumes on tap.
    the chart to the Gulf of Guinea.
 
 **Accept.**
-- [ ] Under way with follow on, the boat stays put on screen.
-- [ ] One drag suspends following; the resume affordance appears.
-- [ ] A boat reporting `[0,0]` never moves the view.
+- [x] Under way with follow on, the boat stays put on screen (anchored on
+      every position update).
+- [x] One drag suspends following; the resume affordance appears (extended
+      "Follow" FAB; drag/fling gesture sources only, not pinch or
+      programmatic moves).
+- [x] A boat reporting `[0,0]` never moves the view (_validPos guard,
+      mirroring the web's isValidCoordinate).
 
 ---
 

@@ -104,6 +104,13 @@ class Settings {
   bool get depthColorTrack => _prefs.getBool('depthColorTrack') ?? false;
   set depthColorTrack(bool v) => _prefs.setBool('depthColorTrack', v);
 
+  /// Where the boat sits on screen while following (J2): centred, or 80%
+  /// down the screen — look-ahead mode, what you want under way. Web key
+  /// `mapBoatPosition` ("center"/"bottom").
+  bool get boatPositionBottom => _prefs.getString('mapBoatPosition') == 'bottom';
+  set boatPositionBottom(bool v) =>
+      _prefs.setString('mapBoatPosition', v ? 'bottom' : 'center');
+
   /// Heading line (C4): shown by default, length one of the web app's
   /// choices (web: `mapHeadingLineLengthNm`, default 5).
   bool get headingLineOn => _prefs.getBool('headingLineOn') ?? true;
