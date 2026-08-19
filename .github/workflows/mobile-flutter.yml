@@ -6,6 +6,10 @@ name: Mobile (Flutter) CI
 on:
   push:
     branches: ["main", "claude/**"]
+    # Release-candidate tags (e.g. mobile-0.0.0-rc1) get a full CI run too.
+    # Path filters are not evaluated for tag pushes (documented GitHub
+    # behaviour), so the tag alone is enough to trigger.
+    tags: ["mobile-*-rc*"]
     paths:
       - "mobile/**"
       - ".github/workflows/mobile-flutter.yml"
