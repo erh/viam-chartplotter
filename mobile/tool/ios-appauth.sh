@@ -29,9 +29,44 @@ set_str() {
 }
 
 # --- WebRTC (viam_sdk) usage descriptions ----------------------------------
-set_str NSCameraUsageDescription "Shows the boat's camera feeds."
+# NOTE: no apostrophes in these strings — PlistBuddy parses its -c argument
+# itself and an unbalanced quote makes BOTH the Set and the fallback Add fail
+# ("Parse Error: Unclosed Quotes"), silently shipping a plist without the key.
+# Apple then rejects the binary in processing (ITMS-90683). The verification
+# at the bottom guards against regressions.
+set_str NSCameraUsageDescription "Shows the boat camera feeds."
 set_str NSMicrophoneUsageDescription "Required by the Viam robot connection."
+for key in NSCameraUsageDescription NSMicrophoneUsageDescription; do
+  "$PB" -c "Print :$key" "$PLIST" >/dev/null 2>&1 || {
+    echo "ERROR: $key did not land in $PLIST (PlistBuddy parse failure?)" >&2
+    exit 1
+  }
+done
 echo "ensured camera/microphone usage descriptions in $PLIST"
+
+# --- Minimum iOS version ----------------------------------------------------
+# bonsoir_darwin (the viam_sdk mDNS dependency) needs iOS >= 13.0; the
+# flutter-create template can target lower, which fails pod install with
+# "requires a higher minimum iOS deployment version". Pin both the Podfile
+# platform line and the Xcode project's deployment target.
+IOS_MIN="15.0" # App Store floor from Spring 2027 (ITMS-90068); bonsoir needs >=13
+if [ -f ios/Podfile ]; then
+  sed -i '' "s/^# platform :ios, '.*'$/platform :ios, '$IOS_MIN'/" ios/Podfile
+  sed -i '' "s/^platform :ios, '[0-9.]*'$/platform :ios, '$IOS_MIN'/" ios/Podfile
+fi
+if [ -f ios/Runner.xcodeproj/project.pbxproj ]; then
+  sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = $IOS_MIN;/g" \
+    ios/Runner.xcodeproj/project.pbxproj
+fi
+echo "pinned iOS deployment target $IOS_MIN"
+
+# --- Export compliance ------------------------------------------------------
+# Only standard HTTPS/TLS encryption (exempt), declared up front — otherwise
+# every TestFlight upload sits in "Missing Compliance" until it's answered
+# manually in App Store Connect.
+"$PB" -c "Set :ITSAppUsesNonExemptEncryption false" "$PLIST" 2>/dev/null \
+  || "$PB" -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+echo "ensured export-compliance key in $PLIST"
 
 # --- Local network / mDNS ---------------------------------------------------
 # The Viam SDK finds the machine on the LAN via Bonsoir mDNS browsing for the

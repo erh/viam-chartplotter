@@ -5,9 +5,11 @@ import 'package:viam_sdk/viam_sdk.dart';
 
 import 'auth/token_store.dart';
 
-/// Storage key for the last-connected machine (`{robotId, orgId, name}`),
+/// Storage key for the last-connected machine (`{robotId, orgId, name, fqdn}`),
 /// written by the machine picker and read for launch auto-connect and for
-/// re-dialing after the connection dies (e.g. phone lock).
+/// re-dialing after the connection dies (e.g. phone lock). `fqdn` is the
+/// resolved main-part address, cached so a re-dial can skip the app.viam.com
+/// lookup; records written by older builds don't have it.
 const kLastMachineKey = 'last_machine';
 
 /// Dials a machine's main part via app.viam.com signaling with a per-machine
@@ -30,14 +32,38 @@ class MachineConnector {
   final Viam viam;
   final TokenStore _storage = TokenStore();
 
-  Future<RobotClient> connect(String robotId, String orgId) async {
-    final parts = await viam.appClient.listRobotParts(robotId);
-    final part = parts.firstWhere((p) => p.mainPart);
+  /// The main-part address this connector resolved (or was handed). Callers
+  /// persist it alongside the machine so the next dial can skip the lookup.
+  String? fqdn;
+
+  /// Dial [robotId]. [cachedFqdn] skips the app.viam.com part lookup — worth
+  /// doing on every re-dial, because two cloud round trips ahead of the
+  /// handshake are the part most likely to fail on the marginal link that
+  /// caused the reconnect in the first place.
+  Future<RobotClient> connect(
+    String robotId,
+    String orgId, {
+    String? cachedFqdn,
+  }) async {
+    var address = cachedFqdn ?? await _lookupFqdn(robotId);
+    fqdn = address;
     final stored = await _loadStoredKey(robotId);
     if (stored != null) {
       try {
-        return await _dialWithKey(part.fqdn, stored);
-      } catch (_) {
+        return await _dialWithKey(address, stored);
+      } catch (e) {
+        if (!_isAuthFailure(e)) {
+          // The credential is fine, the link is not — or a cached address has
+          // gone stale. Re-resolve if we were dialing a cached address, then
+          // retry once with the same key. Minting a replacement we don't need
+          // costs a cloud round trip on every flaky-link retry and litters the
+          // org with single-use keys.
+          if (cachedFqdn != null) {
+            address = await _lookupFqdn(robotId);
+            fqdn = address;
+          }
+          return await _dialWithKey(address, stored);
+        }
         // Key revoked/rotated server-side — discard and mint a fresh one.
         try {
           await _storage.delete(key: _storageKey(robotId));
@@ -46,13 +72,29 @@ class MachineConnector {
     }
     final minted = await _mintKey(robotId, orgId);
     try {
-      return await _dialWithKey(part.fqdn, minted);
+      return await _dialWithKey(address, minted);
     } on TimeoutException {
       // Signaling/answerer hiccups showed up as one-off 10 s dial timeouts
       // during testing while the identical dial succeeded moments later —
       // one retry before surfacing the error.
-      return await _dialWithKey(part.fqdn, minted);
+      return await _dialWithKey(address, minted);
     }
+  }
+
+  Future<String> _lookupFqdn(String robotId) async {
+    final parts = await viam.appClient.listRobotParts(robotId);
+    return parts.firstWhere((p) => p.mainPart).fqdn;
+  }
+
+  /// Whether a failed dial means the credential was rejected, as opposed to a
+  /// network/timeout blip. Only the former should discard the cached key.
+  static bool _isAuthFailure(Object e) {
+    if (e is TimeoutException) return false;
+    final s = e.toString().toLowerCase();
+    return s.contains('unauthenticated') ||
+        s.contains('permission denied') ||
+        s.contains('permission_denied') ||
+        s.contains('unauthorized');
   }
 
   static String _storageKey(String robotId) => 'machine_api_key_$robotId';

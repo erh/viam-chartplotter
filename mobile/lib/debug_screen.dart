@@ -23,6 +23,10 @@ class DebugScreen extends StatelessWidget {
             const _Section('Connection'),
             _Row('Status', state.status),
             _Row('Last update', state.lastUpdate?.toLocal().toString() ?? '—'),
+            if (state.reconnectAttempts > 0)
+              _Row('Reconnect tries', '${state.reconnectAttempts}'),
+            if (state.lastConnectError != null)
+              _Row('Last error', state.lastConnectError!),
             _Row('AIS targets', '${state.aisBoats.length}'),
             _Row('Wind', state.windInfo),
             const SizedBox(height: 16),

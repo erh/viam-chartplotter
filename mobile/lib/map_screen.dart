@@ -193,7 +193,10 @@ class _MapScreenState extends State<MapScreen> {
                       builder: (_) => DebugScreen(state: s),
                     ),
                   ),
-                  child: StatusChip(state: s),
+                  child: StatusChip(
+                    state: s,
+                    onReconnect: widget.connection.reconnectNow,
+                  ),
                 ),
               ),
             ),

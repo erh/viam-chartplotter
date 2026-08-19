@@ -44,6 +44,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   // cancel + pick-another can't race into two live connections.
   int _connectGen = 0;
   String _orgId = ''; // org of the machine being connected (set on org tap)
+  String? _lastFqdn; // address the last dial resolved, cached in the record
   final TokenStore _storage = TokenStore();
 
   Viam get _viam => widget.session.viam!;
@@ -73,10 +74,23 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         _connectingName = (m['name'] is String) ? m['name'] as String : '';
       });
       _orgId = orgId;
-      final client = await _connectRobot(robotId);
+      final cached = m['fqdn'];
+      final client = await _connectRobot(
+        robotId,
+        cachedFqdn: cached is String && cached.isNotEmpty ? cached : null,
+      );
       if (gen != _connectGen) {
         await client.close();
         return;
+      }
+      // Records written before the address was cached get one now, so the
+      // first re-dial after a dropout can skip the cloud lookup.
+      if (cached is! String || cached != _lastFqdn) {
+        await _rememberMachine(
+          robotId: robotId,
+          orgId: orgId,
+          name: (m['name'] is String) ? m['name'] as String : '',
+        );
       }
       if (mounted) widget.onConnected(client);
     } catch (_) {
@@ -96,6 +110,11 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       _error = null;
     });
     try {
+      // Renew the session before any cloud call: the access token can expire
+      // while the app sits on this screen, and an unauthenticated failure
+      // reads to the user as "the app broke".
+      await widget.session.validAccessToken();
+      if (widget.session.viam == null) return; // signed out; the tree reroutes
       await body();
     } catch (e) {
       _error = '$e';
@@ -104,33 +123,79 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     }
   }
 
+  // Sorted by name so a long org/machine list is scannable — the API returns
+  // them in no particular order, which read as "my org is missing" — and
+  // deduped by id, since an org can come back twice (e.g. two membership
+  // paths to it).
+  static List<dynamic> _byName(List<dynamic> items) {
+    final seen = <String>{};
+    final unique = [
+      for (final it in items)
+        if (seen.add(it.id?.toString() ?? identityHashCode(it).toString())) it
+    ];
+    return unique
+      ..sort((a, b) => (a.name?.toString().toLowerCase() ?? '')
+          .compareTo(b.name?.toString().toLowerCase() ?? ''));
+  }
+
+  // Selection path, so back/refresh can rebuild the current or parent level.
+  dynamic _selectedOrg;
+  dynamic _selectedLoc;
+
   Future<void> _loadOrgs() => _guard(() async {
         final orgs = await _viam.appClient.listOrganizations();
         setState(() {
           _level = _Level.orgs;
           _title = 'Select organization';
-          _items = orgs;
+          _items = _byName(orgs);
         });
       });
 
   Future<void> _loadLocations(dynamic org) => _guard(() async {
         _orgId = org.id;
+        _selectedOrg = org;
         final locs = await _viam.appClient.listLocations(org.id);
         setState(() {
           _level = _Level.locations;
           _title = 'Select location';
-          _items = locs;
+          _items = _byName(locs);
         });
       });
 
   Future<void> _loadRobots(dynamic loc) => _guard(() async {
+        _selectedLoc = loc;
         final robots = await _viam.appClient.listRobots(loc.id);
         setState(() {
           _level = _Level.robots;
           _title = 'Select machine';
-          _items = robots;
+          _items = _byName(robots);
         });
       });
+
+  /// Reload whatever level is showing (pull-to-refresh) — e.g. an org that
+  /// just enabled OAuth access, or a machine that just came online.
+  Future<void> _refresh() {
+    switch (_level) {
+      case _Level.orgs:
+        return _loadOrgs();
+      case _Level.locations:
+        return _loadLocations(_selectedOrg);
+      case _Level.robots:
+        return _loadRobots(_selectedLoc);
+    }
+  }
+
+  /// One level up: machines → locations → organizations.
+  void _goBack() {
+    switch (_level) {
+      case _Level.robots:
+        _loadLocations(_selectedOrg);
+      case _Level.locations:
+        _loadOrgs();
+      case _Level.orgs:
+        break; // top level — no back button shown
+    }
+  }
 
   Future<void> _connect(dynamic robot) async {
     final gen = ++_connectGen;
@@ -146,16 +211,11 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
       }
       // Remember this machine so the next launch can reconnect to it
       // without walking the picker.
-      try {
-        await _storage.write(
-          key: kLastMachineKey,
-          value: jsonEncode({
-            'robotId': robot.id,
-            'orgId': _orgId,
-            'name': robot.name?.toString() ?? '',
-          }),
-        );
-      } catch (_) {}
+      await _rememberMachine(
+        robotId: robot.id.toString(),
+        orgId: _orgId,
+        name: robot.name?.toString() ?? '',
+      );
       widget.onConnected(client);
     } catch (e) {
       if (mounted && gen == _connectGen) {
@@ -170,8 +230,41 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
 
   /// Dial via [MachineConnector] — the shared cloud/API-key connect path,
   /// also used for launch auto-connect and dead-connection re-dials.
-  Future<RobotClient> _connectRobot(String robotId) =>
-      MachineConnector(viam: _viam).connect(robotId, _orgId);
+  Future<RobotClient> _connectRobot(String robotId, {String? cachedFqdn}) async {
+    // Dialing needs app.viam.com (to resolve the address and verify or mint
+    // the machine key), so the session has to be current first.
+    await widget.session.validAccessToken();
+    final viam = widget.session.viam;
+    if (viam == null) throw StateError('signed out');
+    final connector = MachineConnector(viam: viam);
+    final client =
+        await connector.connect(robotId, _orgId, cachedFqdn: cachedFqdn);
+    _lastFqdn = connector.fqdn;
+    return client;
+  }
+
+  /// Store the machine to reconnect to, including the address the dial
+  /// resolved — a re-dial that skips the app.viam.com lookup recovers
+  /// noticeably faster, and works on a link too marginal for the extra calls.
+  Future<void> _rememberMachine({
+    required String robotId,
+    required String orgId,
+    required String name,
+  }) async {
+    try {
+      await _storage.write(
+        key: kLastMachineKey,
+        value: jsonEncode({
+          'robotId': robotId,
+          'orgId': orgId,
+          'name': name,
+          if (_lastFqdn != null) 'fqdn': _lastFqdn,
+        }),
+      );
+    } catch (_) {
+      // Storage unavailable — auto-connect just won't survive a restart.
+    }
+  }
 
   void _onTap(dynamic item) {
     switch (_level) {
@@ -186,8 +279,19 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final warning = widget.session.warning;
     return Scaffold(
       appBar: AppBar(
+        // Back one level (machines → locations → orgs) at every level below
+        // the top; without this the only way out of a wrong tap was signing
+        // out and starting over.
+        leading: (_level != _Level.orgs && !_connecting)
+            ? IconButton(
+                tooltip: 'Back',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _goBack,
+              )
+            : null,
         title: Text(_title),
         actions: [
           IconButton(
@@ -197,7 +301,32 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
           ),
         ],
       ),
-      body: _connecting
+      body: Column(
+        children: [
+          if (warning != null) _SessionWarning(message: warning),
+          Expanded(child: _body()),
+        ],
+      ),
+      // Who this session belongs to — the answer to "why can't I see my
+      // org" is usually "wrong account".
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(
+            'Signed in as ${widget.session.userEmail ?? 'unknown user'}',
+            textAlign: TextAlign.center,
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Colors.white54),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _body() {
+    return _connecting
           ? Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -228,7 +357,12 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
               ? const Center(child: CircularProgressIndicator())
               : _error != null
                   ? _ErrorRetry(message: _error!, onRetry: _loadOrgs)
-                  : ListView.separated(
+                  : RefreshIndicator(
+                      onRefresh: _refresh,
+                      child: ListView.separated(
+                      // Scrollable even when short, so pull-to-refresh works
+                      // on a two-row list.
+                      physics: const AlwaysScrollableScrollPhysics(),
                       itemCount: _items.length,
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (context, i) {
@@ -245,6 +379,37 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
                         );
                       },
                     ),
+                  );
+  }
+}
+
+/// Banner for a session that is signed in but won't survive — the two causes
+/// (no refresh token, unusable secure storage) both present to the user as
+/// "it made me log in again", so naming which one it is matters.
+class _SessionWarning extends StatelessWidget {
+  const _SessionWarning({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SelectableText(
+              message,
+              style: TextStyle(fontSize: 12, color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
