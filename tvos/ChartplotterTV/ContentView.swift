@@ -201,22 +201,65 @@ struct ChartScreen: View {
         .panelStyle()
     }
 
+    /// One leg of the route summary: distance plus (with a usable
+    /// speed) time to go.
+    private struct RouteLeg {
+        let nm: Double
+        let seconds: Double?
+    }
+
+    /// Next-waypoint leg: the nav system's DTW + closing velocity when
+    /// it has an active route, else straight-line from the boat to the
+    /// first nav-service waypoint at current SOG.
+    private var nextLeg: RouteLeg? {
+        let sogKn = client.state?.sogKn ?? 0
+        if let nm = client.route?.distanceToWaypointNM {
+            return RouteLeg(nm: nm, seconds: client.route?.etaSeconds
+                ?? (sogKn > 0.5 ? nm / sogKn * 3600 : nil))
+        }
+        guard let s = client.state, let wp = client.route?.waypoints?.first else { return nil }
+        let nm = haversineNM(s.lat, s.lng, wp.lat, wp.lng)
+        return RouteLeg(nm: nm, seconds: sogKn > 0.5 ? nm / sogKn * 3600 : nil)
+    }
+
+    /// Whole-route leg: the next leg plus every remaining
+    /// waypoint-to-waypoint hop, timed at current SOG. Only meaningful
+    /// with 2+ waypoints — with one, it's identical to nextLeg.
+    private var finalLeg: RouteLeg? {
+        guard let wps = client.route?.waypoints, wps.count >= 2,
+            var prev = wps.first, let first = nextLeg
+        else { return nil }
+        var total = first.nm
+        for wp in wps.dropFirst() {
+            total += haversineNM(prev.lat, prev.lng, wp.lat, wp.lng)
+            prev = wp
+        }
+        let sogKn = client.state?.sogKn ?? 0
+        return RouteLeg(nm: total, seconds: sogKn > 0.5 ? total / sogKn * 3600 : nil)
+    }
+
     @ViewBuilder
     private var routePanel: some View {
-        if let r = client.route, r.distanceToWaypointNM != nil || !(r.waypoints?.isEmpty ?? true) {
+        let wpCount = client.route?.waypoints?.count ?? 0
+        if let next = nextLeg {
             VStack(alignment: .trailing, spacing: 8) {
-                if let nm = r.distanceToWaypointNM {
-                    row("Next WPT", String(format: "%.2f nm", nm))
-                }
-                if let v = r.closingVelocityMS, v > 0.1 {
+                row("Next WPT", String(format: "%.2f nm", next.nm))
+                if let v = client.route?.closingVelocityMS, v > 0.1 {
                     row("Closing", String(format: "%.1f kn", v * 1.94384))
                 }
-                if let eta = r.etaSeconds {
-                    row("Time", Self.formatDuration(eta))
-                    row("ETA", Date(timeIntervalSinceNow: eta).formatted(date: .omitted, time: .shortened))
+                if let s = next.seconds {
+                    row("Time", Self.formatDuration(s))
+                    row("ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
                 }
-                if let wps = r.waypoints, !wps.isEmpty {
-                    row("Waypoints", "\(wps.count)")
+                if let final = finalLeg {
+                    row("Final", String(format: "%.2f nm", final.nm))
+                    if let s = final.seconds {
+                        row("Final Time", Self.formatDuration(s))
+                        row("Final ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
+                    }
+                }
+                if wpCount > 1 {
+                    row("Waypoints", "\(wpCount)")
                 }
             }
             .panelStyle()
