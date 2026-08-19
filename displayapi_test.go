@@ -252,6 +252,32 @@ func TestTrackSeedQuery(t *testing.T) {
 	}
 }
 
+func TestRemoteCredentials(t *testing.T) {
+	// Single credentials object.
+	id, key := remoteCredentials(map[string]any{
+		"auth": map[string]any{
+			"entity":      "key-id-1",
+			"credentials": map[string]any{"type": "api-key", "payload": "secret1"},
+		},
+	})
+	if id != "key-id-1" || key != "secret1" {
+		t.Fatalf("got %q/%q", id, key)
+	}
+	// Credentials array + entity on the credential itself.
+	id, key = remoteCredentials(map[string]any{
+		"auth": map[string]any{
+			"credentials": []any{map[string]any{"payload": "secret2", "entity": "key-id-2"}},
+		},
+	})
+	if id != "key-id-2" || key != "secret2" {
+		t.Fatalf("got %q/%q", id, key)
+	}
+	// No auth block.
+	if id, key = remoteCredentials(map[string]any{"address": "x"}); id != "" || key != "" {
+		t.Fatalf("expected empty, got %q/%q", id, key)
+	}
+}
+
 func TestLocationIDFromRemoteAddress(t *testing.T) {
 	for addr, want := range map[string]string{
 		"cm90-garmin1-main.rphjbz36x7.viam.cloud": "rphjbz36x7",

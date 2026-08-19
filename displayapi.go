@@ -188,11 +188,14 @@ func (a *DisplayAPI) startTrackRecorder() {
 	}()
 }
 
-// trackSeedScope is one (location, robot) candidate to query for
-// captured position history.
+// trackSeedScope is one fully-resolved candidate to query for captured
+// position history: which ids to filter on, which org's data store to
+// ask, and which client (credentials) to ask with.
 type trackSeedScope struct {
 	locationID string
 	robotID    string
+	orgID      string
+	dc         *app.DataClient
 	desc       string
 }
 
@@ -202,13 +205,16 @@ type trackSeedScope struct {
 // and prepends them to the in-memory track. Best-effort: any failure
 // logs and leaves the recorder running live-only.
 //
-// The data isn't necessarily captured under this machine's own ids:
-// the movement sensor is often a resource of a remote machine (its own
-// robot_id, possibly a different location), same as the web app's
-// dataClientForComponent handles. So candidates are tried in order:
-// this machine, then each cloud-addressed remote in this machine's
-// config (resolved to its robot/location via the app API), then — if
-// exactly one robot in the org has matching data — that robot.
+// The data isn't necessarily captured under this machine's own ids —
+// or even in this machine's org: the movement sensor is often a
+// resource of a remote machine with its own robot_id, location, and
+// (for shared locations) a different primary org whose data store this
+// machine's key can't read. Candidates are tried in order: this
+// machine, then each cloud-addressed remote in this machine's config —
+// resolved to its robot/location/org via the app API, queried with the
+// remote's own credentials from the remotes[] auth block when present
+// (the same trick the web app's dataClientForComponent uses) — then,
+// if exactly one robot in this org has matching data, that robot.
 func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
 	orgID := os.Getenv(rutils.PrimaryOrgIDEnvVar)
 	robotID := os.Getenv(rutils.MachineIDEnvVar)
@@ -227,15 +233,21 @@ func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
 	dc := vc.DataClient()
 	start := time.Now().Add(-trackKeep)
 
-	scopes := []trackSeedScope{{locationID, robotID, "this machine"}}
-	scopes = append(scopes, a.remoteSeedScopes(ctx, vc.AppClient())...)
+	scopes := []trackSeedScope{{locationID, robotID, orgID, dc, "this machine"}}
+	remoteScopes, closers := a.remoteSeedScopes(ctx, vc, orgID)
+	defer func() {
+		for _, c := range closers {
+			c()
+		}
+	}()
+	scopes = append(scopes, remoteScopes...)
 	for _, scope := range scopes {
-		if a.trySeedScope(ctx, dc, orgID, scope, start) {
+		if a.trySeedScope(ctx, scope, start) {
 			return
 		}
 	}
 	if rid := a.discoverSeedRobot(ctx, dc, orgID, start); rid != "" {
-		if a.trySeedScope(ctx, dc, orgID, trackSeedScope{"", rid, "discovered robot " + rid}, start) {
+		if a.trySeedScope(ctx, trackSeedScope{"", rid, orgID, dc, "discovered robot " + rid}, start) {
 			return
 		}
 	}
@@ -244,17 +256,15 @@ func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
 
 // trySeedScope queries one scope (hot storage first, standard as the
 // fallback) and seeds the track when it yields points.
-func (a *DisplayAPI) trySeedScope(
-	ctx context.Context, dc *app.DataClient, orgID string, scope trackSeedScope, start time.Time,
-) bool {
+func (a *DisplayAPI) trySeedScope(ctx context.Context, scope trackSeedScope, start time.Time) bool {
 	query := trackSeedQuery(scope.locationID, scope.robotID, a.msName, start)
-	rows, err := dc.TabularDataByMQL(ctx, orgID, query,
+	rows, err := scope.dc.TabularDataByMQL(ctx, scope.orgID, query,
 		&app.TabularDataByMQLOptions{TabularDataSourceType: app.TabularDataSourceTypeHotStorage})
 	if err != nil || len(rows) == 0 {
 		if err != nil {
 			a.logger.Debugf("track seed (%s): hot storage: %v", scope.desc, err)
 		}
-		rows, err = dc.TabularDataByMQL(ctx, orgID, query, nil)
+		rows, err = scope.dc.TabularDataByMQL(ctx, scope.orgID, query, nil)
 		if err != nil {
 			a.logger.Debugf("track seed (%s): %v", scope.desc, err)
 			return false
@@ -275,47 +285,114 @@ func (a *DisplayAPI) trySeedScope(
 }
 
 // remoteSeedScopes resolves this machine's cloud-addressed remotes to
-// (location, robot) scopes. A remote's address embeds its location id
+// query scopes. A remote's address embeds its location id
 // ("<part-fqdn>.<location-id>.viam.cloud"); the robot id comes from
-// matching the address against part FQDNs in that location.
-func (a *DisplayAPI) remoteSeedScopes(ctx context.Context, ac *app.AppClient) []trackSeedScope {
+// matching the address against part FQDNs in that location; the org is
+// the location's primary org; and when the remotes[] entry carries its
+// own api key we query with a client built from it — a shared-location
+// remote's data lives in an org this machine's key may not read.
+// Returned closers shut down any per-remote clients.
+func (a *DisplayAPI) remoteSeedScopes(
+	ctx context.Context, vc *app.ViamClient, moduleOrgID string,
+) ([]trackSeedScope, []func()) {
 	partID := os.Getenv(rutils.MachinePartIDEnvVar)
 	if partID == "" {
-		return nil
+		return nil, nil
 	}
-	part, _, err := ac.GetRobotPart(ctx, partID)
+	part, _, err := vc.AppClient().GetRobotPart(ctx, partID)
 	if err != nil || part == nil {
 		a.logger.Debugf("track seed: get own part config: %v", err)
-		return nil
+		return nil, nil
 	}
 	remotes, _ := part.RobotConfig["remotes"].([]any)
 	var scopes []trackSeedScope
+	var closers []func()
 	for _, r := range remotes {
 		rm, _ := r.(map[string]any)
 		addr, _ := rm["address"].(string)
+		name, _ := rm["name"].(string)
 		locID := locationIDFromRemoteAddress(addr)
 		if locID == "" {
 			continue
 		}
-		robots, err := ac.ListRobots(ctx, locID)
+		client := vc
+		if keyID, key := remoteCredentials(rm); key != "" && keyID != "" {
+			rvc, err := app.CreateViamClientWithAPIKey(ctx, app.Options{}, key, keyID, a.logger)
+			if err != nil {
+				a.logger.Debugf("track seed: remote %q client: %v", name, err)
+			} else {
+				client = rvc
+				closers = append(closers, func() { _ = rvc.Close() })
+			}
+		}
+		orgID := moduleOrgID
+		if loc, err := client.AppClient().GetLocation(ctx, locID); err == nil {
+			if p := locationPrimaryOrgID(loc); p != "" {
+				orgID = p
+			}
+		} else {
+			a.logger.Debugf("track seed: get location %s: %v", locID, err)
+		}
+		robots, err := client.AppClient().ListRobots(ctx, locID)
 		if err != nil {
 			a.logger.Debugf("track seed: list robots in %s: %v", locID, err)
 			continue
 		}
 		for _, robot := range robots {
-			parts, err := ac.GetRobotParts(ctx, robot.ID)
+			parts, err := client.AppClient().GetRobotParts(ctx, robot.ID)
 			if err != nil {
 				continue
 			}
 			for _, p := range parts {
 				if p.FQDN == addr {
-					name, _ := rm["name"].(string)
-					scopes = append(scopes, trackSeedScope{locID, robot.ID, "remote " + name})
+					scopes = append(scopes, trackSeedScope{locID, robot.ID, orgID, client.DataClient(), "remote " + name})
 				}
 			}
 		}
 	}
-	return scopes
+	return scopes, closers
+}
+
+// remoteCredentials extracts the api key id (entity) and key payload
+// from a remotes[] config entry. The credentials may be a single
+// object or an array — the same shapes the web app accepts.
+func remoteCredentials(rm map[string]any) (apiKeyID, apiKey string) {
+	auth, _ := rm["auth"].(map[string]any)
+	if auth == nil {
+		return "", ""
+	}
+	raw := auth["credentials"]
+	if arr, ok := raw.([]any); ok && len(arr) > 0 {
+		raw = arr[0]
+	}
+	cred, _ := raw.(map[string]any)
+	if cred == nil {
+		return "", ""
+	}
+	payload, _ := cred["payload"].(string)
+	if payload == "" {
+		return "", ""
+	}
+	entity, _ := auth["entity"].(string)
+	if entity == "" {
+		entity, _ = cred["authEntity"].(string)
+	}
+	if entity == "" {
+		entity, _ = cred["entity"].(string)
+	}
+	return entity, payload
+}
+
+func locationPrimaryOrgID(loc *app.Location) string {
+	if loc == nil {
+		return ""
+	}
+	for _, o := range loc.Organizations {
+		if o != nil && o.Primary {
+			return o.OrganizationID
+		}
+	}
+	return ""
 }
 
 // locationIDFromRemoteAddress extracts the location id from a Viam
