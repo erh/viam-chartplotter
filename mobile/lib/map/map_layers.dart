@@ -33,6 +33,10 @@ List<Widget> buildMapLayers({
   // Saved-route previews (E2): display-only, dashed so they can never be
   // mistaken for the active (solid) route.
   List<({List<LatLng> points, Color color})> routePreviews = const [],
+  // Active nav-service route (E1): the waypoint chain (boat prepended by the
+  // caller when it has a fresh fix) and the tappable waypoint markers.
+  List<LatLng> activeRoutePoints = const [],
+  List<Marker> waypointMarkers = const [],
   required List<({List<LatLng> points, Color color})> trackSegments,
   List<LatLng> headingLine = const [],
   List<List<LatLng>> headingTicks = const [],
@@ -179,8 +183,20 @@ List<Widget> buildMapLayers({
     ],
     // Wind overlay (arrow markers, over the chart, under boat markers).
     if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
-    // Active route: line from the boat to the destination.
-    if (state.position != null && state.destination != null)
+    // Active route. With nav-service waypoints (E1) the full chain draws
+    // solid purple; otherwise fall back to the route sensor's boat→destination
+    // line (an MFD-driven route the nav service doesn't know about).
+    if (activeRoutePoints.length >= 2)
+      PolylineLayer(
+        polylines: [
+          Polyline(
+            points: activeRoutePoints,
+            strokeWidth: 3,
+            color: Colors.purpleAccent,
+          ),
+        ],
+      )
+    else if (state.position != null && state.destination != null)
       PolylineLayer(
         polylines: [
           Polyline(
@@ -190,7 +206,7 @@ List<Widget> buildMapLayers({
           ),
         ],
       ),
-    if (state.destination != null)
+    if (waypointMarkers.isEmpty && state.destination != null)
       MarkerLayer(
         markers: [
           Marker(
@@ -282,6 +298,9 @@ List<Widget> buildMapLayers({
     // MapScreen (D10): culled to the viewport, capped, rebuilt only when the
     // AIS set or the camera changes — not on every 1 Hz state tick.
     if (aisMarkers.isNotEmpty) MarkerLayer(markers: aisMarkers),
+    // Waypoint markers (E1): above the traffic picture — these are what the
+    // helmsman is steering to and editing.
+    if (waypointMarkers.isNotEmpty) MarkerLayer(markers: waypointMarkers),
     if (state.displayPosition != null)
       MarkerLayer(
         markers: [

@@ -10,6 +10,7 @@ import 'chart/areas.dart';
 import 'config.dart';
 import 'history.dart';
 import 'routes/nav_api.dart';
+import 'routes/route_store.dart';
 import 'settings.dart';
 
 /// Component names marked `chartplotter-hide: true` in a part's config JSON
@@ -502,6 +503,96 @@ class ViamConnection {
     if (nav == null) throw StateError('No navigation service');
     await nav.setWaypoints(waypoints).timeout(_sensorTimeout);
     await refreshNavWaypoints();
+  }
+
+  // ---- waypoint edits (E1) ---------------------------------------------
+  // Each applies optimistically (pending-<ts> ids for adds), fires the RPC,
+  // then refetches so local state converges on the backend's ids — a failed
+  // RPC is undone by the same refetch. Move/insert/remove need a REAL id;
+  // a pending one means the add hasn't landed yet, so we refuse rather than
+  // send an id the backend has never heard of.
+
+  NavApi _navOrThrow() {
+    final nav = _navApi;
+    if (nav == null) throw StateError('No navigation service');
+    return nav;
+  }
+
+  Future<void> addNavWaypoint(LatLng pos) async {
+    final nav = _navOrThrow();
+    state.setNavWaypoints(waypointsWithAdded(state.navWaypoints,
+        NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
+    try {
+      await nav
+          .addWaypoint(pos.latitude, pos.longitude)
+          .timeout(_sensorTimeout);
+    } finally {
+      await refreshNavWaypoints();
+    }
+  }
+
+  Future<void> moveNavWaypoint(String id, LatLng pos) async {
+    final nav = _navOrThrow();
+    if (id.startsWith('pending-')) {
+      throw StateError('Waypoint is still syncing — try again in a moment');
+    }
+    state.setNavWaypoints(waypointsWithMoved(state.navWaypoints, id, pos));
+    try {
+      await nav
+          .moveWaypoint(id, pos.latitude, pos.longitude)
+          .timeout(_sensorTimeout);
+    } finally {
+      await refreshNavWaypoints();
+    }
+  }
+
+  Future<void> insertNavWaypointBefore(String beforeId, LatLng pos) async {
+    final nav = _navOrThrow();
+    if (beforeId.startsWith('pending-')) {
+      throw StateError('Waypoint is still syncing — try again in a moment');
+    }
+    state.setNavWaypoints(waypointsWithInsertedBefore(
+        state.navWaypoints,
+        beforeId,
+        NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
+    try {
+      await nav
+          .insertWaypoint(beforeId, pos.latitude, pos.longitude)
+          .timeout(_sensorTimeout);
+    } finally {
+      await refreshNavWaypoints();
+    }
+  }
+
+  Future<void> removeNavWaypoint(String id) async {
+    // A pending waypoint only exists locally: drop it and let the next poll
+    // reconcile whatever the in-flight add ends up creating.
+    state.setNavWaypoints(waypointsWithRemoved(state.navWaypoints, id));
+    if (id.startsWith('pending-')) return;
+    final nav = _navOrThrow();
+    try {
+      await nav.removeWaypoint(id).timeout(_sensorTimeout);
+    } finally {
+      await refreshNavWaypoints();
+    }
+  }
+
+  /// Clear the whole active route: the nav service has no clear verb, so
+  /// loop removeWaypoint over the real ids (web does the same).
+  Future<void> clearNavWaypoints() async {
+    final nav = _navOrThrow();
+    final ids = [
+      for (final w in state.navWaypoints)
+        if (!w.isPending) w.id
+    ];
+    state.setNavWaypoints(const []);
+    try {
+      for (final id in ids) {
+        await nav.removeWaypoint(id).timeout(_sensorTimeout);
+      }
+    } finally {
+      await refreshNavWaypoints();
+    }
   }
 
   Future<void> _tick() async {

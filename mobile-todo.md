@@ -1123,10 +1123,12 @@ adjust a route from the phone at all.
 4. After a `set_waypoints`, refetch so local ids are real backend ObjectIDs.
 
 **Accept.**
-- [ ] Add / move / insert / delete / clear all round-trip and survive a poll.
-- [ ] A route edited on the phone shows the same waypoints in the web app.
-- [ ] Dragging a waypoint issues one `move_waypoint`, not one per frame.
-- [ ] Clearing requires deliberate confirmation.
+- [x] Add / move / insert / delete / clear all round-trip and survive a poll.
+- [x] A route edited on the phone shows the same waypoints in the web app.
+- [x] Dragging a waypoint issues one `move_waypoint`, not one per frame.
+      (Touch design: move is armed from the waypoint sheet and committed by
+      one tap-to-place — one RPC per gesture, no per-frame drag events.)
+- [x] Clearing requires deliberate confirmation.
 
 **Watch out.** `NavigationClient.doCommand` needs a protobuf `Struct`, not a
 plain map — the web app has a scar here (`App.svelte:2329`: a plain object

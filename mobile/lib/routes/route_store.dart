@@ -127,6 +127,34 @@ class Route {
   }
 }
 
+// ---- optimistic waypoint edits (E1) ---------------------------------------
+// Pure list transforms applied the moment the user acts; the next
+// getWaypoints poll replaces them with the backend's truth (and real ids).
+
+/// Local id for a waypoint the backend hasn't acknowledged yet.
+String pendingWaypointId(DateTime now) =>
+    'pending-${now.millisecondsSinceEpoch}';
+
+List<NavWaypoint> waypointsWithAdded(List<NavWaypoint> wps, NavWaypoint w) =>
+    [...wps, w];
+
+List<NavWaypoint> waypointsWithMoved(
+        List<NavWaypoint> wps, String id, LatLng pos) =>
+    [
+      for (final w in wps)
+        w.id == id ? NavWaypoint(id: w.id, pos: pos) : w
+    ];
+
+List<NavWaypoint> waypointsWithInsertedBefore(
+    List<NavWaypoint> wps, String beforeId, NavWaypoint w) {
+  final i = wps.indexWhere((x) => x.id == beforeId);
+  if (i < 0) return [...wps, w]; // target vanished: degrade to append
+  return [...wps.sublist(0, i), w, ...wps.sublist(i)];
+}
+
+List<NavWaypoint> waypointsWithRemoved(List<NavWaypoint> wps, String id) =>
+    [for (final w in wps) if (w.id != id) w];
+
 /// Stable, unique-ish route id: `rte_<time36>_<4 hex>` (web newRouteId).
 String newRouteId({DateTime? now, math.Random? rng}) {
   final time = (now ?? DateTime.now())

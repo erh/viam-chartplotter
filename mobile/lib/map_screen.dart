@@ -29,6 +29,7 @@ import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
 import 'map/wind_overlay.dart';
+import 'routes/route_store.dart' show NavWaypoint;
 import 'routes/routes_sheet.dart';
 import 'settings.dart';
 import 'tile_sources.dart';
@@ -98,6 +99,21 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _onMapTap(LatLng point) {
+    // Armed waypoint edits (E1) take the tap first: move, then insert. Both
+    // commit exactly one RPC per gesture (tap-to-place, not drag-per-frame).
+    final movingId = _movingWaypointId;
+    if (movingId != null) {
+      setState(() => _movingWaypointId = null);
+      _navEdit(() => widget.connection.moveNavWaypoint(movingId, point));
+      return;
+    }
+    final beforeId = _insertBeforeId;
+    if (beforeId != null) {
+      setState(() => _insertBeforeId = null);
+      _navEdit(
+          () => widget.connection.insertNavWaypointBefore(beforeId, point));
+      return;
+    }
     if (!_measureMode) return;
     setState(() {
       if (_measureA == null || _measureB != null) {
@@ -107,6 +123,158 @@ class _MapScreenState extends State<MapScreen> {
         _measureB = point;
       }
     });
+  }
+
+  // ---- waypoint editing (E1) -------------------------------------------
+  // Long-press adds; tapping a waypoint opens a sheet with move / insert /
+  // delete / clear. Move and insert arm a tap-to-place mode (banner below):
+  // one deliberate tap = one move_waypoint/insert_waypoint, which is the
+  // touch equivalent of the web's drag-commit-on-release.
+  String? _movingWaypointId;
+  String? _insertBeforeId;
+
+  bool get _waypointModeArmed =>
+      _movingWaypointId != null || _insertBeforeId != null;
+
+  /// Run one waypoint edit, surfacing failure — the optimistic state was
+  /// already rolled back by the connection's refetch.
+  Future<void> _navEdit(Future<void> Function() fn) async {
+    try {
+      await fn();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Waypoint edit failed: $e')));
+    }
+  }
+
+  void _onMapLongPress(LatLng point) {
+    if (widget.connection.navApi == null) return;
+    if (_measureMode || _waypointModeArmed) return; // don't fight other modes
+    _navEdit(() => widget.connection.addNavWaypoint(point));
+  }
+
+  void _showWaypointSheet(int index, NavWaypoint w) {
+    final total = widget.state.navWaypoints.length;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text('Waypoint ${index + 1} of $total'),
+              subtitle: Text(
+                  '${w.pos.latitude.toStringAsFixed(5)}, '
+                  '${w.pos.longitude.toStringAsFixed(5)}'
+                  '${w.isPending ? ' · syncing…' : ''}'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.open_with),
+              title: const Text('Move — then tap the new spot'),
+              enabled: !w.isPending,
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _movingWaypointId = w.id;
+                  _insertBeforeId = null;
+                });
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.add_location_alt),
+              title: const Text('Insert before — tap where'),
+              enabled: !w.isPending,
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _insertBeforeId = w.id;
+                  _movingWaypointId = null;
+                });
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Delete waypoint'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _navEdit(() => widget.connection.removeNavWaypoint(w.id));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.clear_all, color: Colors.redAccent),
+              title: const Text('Clear entire route…',
+                  style: TextStyle(color: Colors.redAccent)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                // Deliberate two-step confirm (web arms clearConfirmArmed).
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (dctx) => AlertDialog(
+                    title: const Text('Clear route?'),
+                    content: Text('Remove all $total waypoints?'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(dctx, false),
+                          child: const Text('Cancel')),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                            backgroundColor: Colors.red),
+                        onPressed: () => Navigator.pop(dctx, true),
+                        child: const Text('Clear route'),
+                      ),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  await _navEdit(widget.connection.clearNavWaypoints);
+                }
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Numbered, tappable waypoint markers; pending (unacknowledged) ones
+  /// render translucent.
+  List<Marker> _waypointMarkers() {
+    final wps = widget.state.navWaypoints;
+    return [
+      for (var i = 0; i < wps.length; i++)
+        Marker(
+          point: wps[i].pos,
+          width: 40,
+          height: 40,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _showWaypointSheet(i, wps[i]),
+            child: Center(
+              child: Container(
+                width: 26,
+                height: 26,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.purpleAccent
+                      .withValues(alpha: wps[i].isPending ? 0.45 : 0.95),
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: Text(
+                  '${i + 1}',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ),
+        ),
+    ];
   }
 
   // Chart orientation. north-up = rotation locked to 0; course-up = the chart
@@ -799,6 +967,9 @@ class _MapScreenState extends State<MapScreen> {
                 flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
               ),
               onTap: (_, point) => _onMapTap(point),
+              // Long-press adds a waypoint (E1) — deliberately a different
+              // gesture from the measure tool's taps so they can't fight.
+              onLongPress: (_, point) => _onMapLongPress(point),
               // Suspend follow on a user DRAG only (J4) — not pinch-zoom,
               // which should keep the boat anchored (J2), and not
               // programmatic moves. The web app documents why a
@@ -846,6 +1017,14 @@ class _MapScreenState extends State<MapScreen> {
               aisProjections: _aisProjections,
               aisTracks: _aisTracks,
               routePreviews: _routePreviews.values.toList(),
+              // Active nav route (E1): boat (fresh fix only) + the chain.
+              activeRoutePoints: s.navWaypoints.isEmpty
+                  ? const []
+                  : [
+                      if (s.boatFixFresh && s.position != null) s.position!,
+                      for (final w in s.navWaypoints) w.pos,
+                    ],
+              waypointMarkers: _waypointMarkers(),
               ownProjection: (s.boatFixFresh && s.position != null)
                   ? (projectionPoints(s.position!, s.cogDeg, s.speedKn ?? 0,
                           _settings.aisProjectionMin) ??
@@ -978,6 +1157,44 @@ class _MapScreenState extends State<MapScreen> {
                       style: const TextStyle(
                           color: Colors.yellowAccent,
                           fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          // Waypoint move/insert armed (E1): say what the next tap does.
+          if (_waypointModeArmed)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 56),
+                  child: Container(
+                    padding: const EdgeInsets.only(left: 14),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.purpleAccent),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _movingWaypointId != null
+                              ? 'Tap the waypoint’s new spot'
+                              : 'Tap where to insert the waypoint',
+                          style: const TextStyle(
+                              color: Colors.purpleAccent,
+                              fontWeight: FontWeight.bold),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() {
+                            _movingWaypointId = null;
+                            _insertBeforeId = null;
+                          }),
+                          child: const Text('Cancel'),
+                        ),
+                      ],
                     ),
                   ),
                 ),
