@@ -121,6 +121,11 @@ class Settings {
   bool get lowDataOn => _prefs.getBool('lowDataOn') ?? false;
   set lowDataOn(bool v) => _prefs.setBool('lowDataOn', v);
 
+  /// Selected wind-forecast model (F2), e.g. "gfs" / "hrrr".
+  String? get windModel => _prefs.getString('windModel');
+  set windModel(String? v) =>
+      v == null ? _prefs.remove('windModel') : _prefs.setString('windModel', v);
+
   /// Night mode (L4): red-multiply the whole chart UI to protect night
   /// vision. The server has no night render, so this is client-side.
   bool get nightModeOn => _prefs.getBool('nightModeOn') ?? false;

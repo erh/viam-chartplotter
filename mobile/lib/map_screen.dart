@@ -37,6 +37,7 @@ import 'settings.dart';
 import 'tile_sources.dart';
 import 'track.dart';
 import 'viam_connection.dart';
+import 'weather.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
 /// in a dashboard drawer (DataDrawer) rather than overlaid on the chart; only
@@ -758,6 +759,20 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Switch weather models (F2) — the controller persists, reshapes fh and
+  /// refetches; failure rolls the selection back and gets a snackbar.
+  Future<void> _selectWindModel(WeatherModel m) async {
+    setState(() {}); // reflect the spinner
+    try {
+      await _wind.selectModel(m);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${m.displayName}: $e')));
+    }
+    if (mounted) setState(() {});
+  }
+
   /// Fetch the wind field at forecast hour [fh] and show it.
   Future<void> _loadWind(int fh) async {
     _wind.bounds = _map.camera.visibleBounds;
@@ -1464,6 +1479,9 @@ class _MapScreenState extends State<MapScreen> {
                   loading: _wind.loading,
                   onScrub: (v) => setState(() => _wind.fh = v),
                   onCommit: _loadWind,
+                  model: _wind.model,
+                  models: _wind.windModels,
+                  onModel: _selectWindModel,
                 ),
               ),
             ),

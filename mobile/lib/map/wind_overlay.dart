@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
 import '../app_config.dart';
+import '../settings.dart';
 import '../weather.dart';
 
 /// Owns the wind overlay: the fetched field, the on/off + forecast-hour state,
@@ -23,10 +24,6 @@ class WindOverlayController {
 
   final BoatState state;
 
-  /// GFS: 0..240 h in 3 h steps. Task F2 replaces this constant with the
-  /// selected model's own range from /noaa-weather/models.
-  static const int maxFh = 240;
-
   /// Arrow cap, mirroring the same protection the AIS layer needs (task D10).
   static const int _maxMarkers = 1500;
 
@@ -34,6 +31,53 @@ class WindOverlayController {
   bool on = false;
   bool loading = false;
   int fh = 0; // forecast hour (0 = latest analysis)
+
+  // Model catalogue (F2): fetched once per session from
+  // /noaa-weather/models; the GFS fallback keeps older servers working.
+  // The slider's range and step come from [model], never from constants.
+  List<WeatherModel> models = const [WeatherModel.gfsFallback];
+  WeatherModel model = WeatherModel.gfsFallback;
+  bool _modelsFetched = false;
+
+  /// Wind-kind entries for the picker (disabled ones included — they show
+  /// greyed with their reason, matching the web's tooltip).
+  List<WeatherModel> get windModels =>
+      [for (final m in models) if (m.kind == 'wind') m];
+
+  /// Fetch the catalogue once and re-resolve the persisted selection
+  /// against it. Never throws — a failure keeps the GFS defaults.
+  Future<void> ensureModels() async {
+    if (_modelsFetched) return;
+    _modelsFetched = true;
+    models = await fetchWeatherModels(AppConfig.tileBase.value);
+    final wanted = Settings.instance.windModel;
+    model = windModels.firstWhere(
+      (m) => m.name == wanted && !m.disabled,
+      orElse: () => windModels.firstWhere((m) => !m.disabled,
+          orElse: () => WeatherModel.gfsFallback),
+    );
+    fh = model.clampFh(fh);
+  }
+
+  /// Switch models (F2): persist, reshape the forecast hour into the new
+  /// model's range, and refetch. Throws like [load] so the caller can show
+  /// why (the selection is rolled back — the UI must not claim a model that
+  /// isn't rendering, the web has the same rule).
+  Future<void> selectModel(WeatherModel next) async {
+    if (next.name == model.name || next.disabled) return;
+    final prev = model;
+    model = next;
+    fh = next.clampFh(fh);
+    Settings.instance.windModel = next.name;
+    try {
+      await load(fh);
+    } catch (_) {
+      model = prev;
+      fh = prev.clampFh(fh);
+      Settings.instance.windModel = prev.name;
+      rethrow;
+    }
+  }
 
   /// Current viewport and chart rotation, mirrored from the map camera by the
   /// screen so marker sampling and arrow angles stay in sync with the chart.
@@ -55,18 +99,21 @@ class WindOverlayController {
       rebuildMarkers();
       return;
     }
+    await ensureModels();
     await load(fh);
   }
 
   /// Fetch the wind field at forecast hour [hour] and show it.
   Future<void> load(int hour) async {
     loading = true;
-    state.setWindInfo('fetching gfs fh=$hour …');
+    final h = model.clampFh(hour);
+    state.setWindInfo('fetching ${model.name} fh=$h …');
     try {
-      final f = await fetchWindField(AppConfig.tileBase.value, 'gfs', fh: hour);
+      final f =
+          await fetchWindField(AppConfig.tileBase.value, model.name, fh: h);
       field = f;
       on = true;
-      fh = hour;
+      fh = h;
       loading = false;
       rebuildMarkers(); // also updates the Debug wind row with the count
     } catch (e) {
@@ -140,7 +187,9 @@ class WindOverlayController {
 }
 
 /// Bottom forecast-time slider, shown only while the wind overlay is on.
-/// [onScrub] previews a value while dragging; [onCommit] fetches it.
+/// [onScrub] previews a value while dragging; [onCommit] fetches it. The
+/// range and step come from the selected [model] (F2); with more than one
+/// wind model available a picker sits beside the slider.
 class WindForecastBar extends StatelessWidget {
   const WindForecastBar({
     super.key,
@@ -148,15 +197,25 @@ class WindForecastBar extends StatelessWidget {
     required this.loading,
     required this.onScrub,
     required this.onCommit,
+    this.model = WeatherModel.gfsFallback,
+    this.models = const [],
+    this.onModel,
   });
 
   final int fh;
   final bool loading;
   final ValueChanged<int> onScrub;
   final ValueChanged<int> onCommit;
+  final WeatherModel model;
+  final List<WeatherModel> models;
+  final ValueChanged<WeatherModel>? onModel;
 
   @override
   Widget build(BuildContext context) {
+    final divisions =
+        ((model.maxFh - model.minFh) / (model.stepFh > 0 ? model.stepFh : 3))
+            .round();
+    int snap(double v) => model.clampFh(v.round());
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       decoration: BoxDecoration(
@@ -173,6 +232,58 @@ class WindForecastBar extends StatelessWidget {
                     strokeWidth: 2, color: Colors.white)
                 : const Icon(Icons.air, color: Colors.white, size: 18),
           ),
+          // Model picker (F2), only when there's a real choice (web parity).
+          if (models.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: DropdownButton<String>(
+                value: model.name,
+                dropdownColor: Colors.black87,
+                underline: const SizedBox.shrink(),
+                isDense: true,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                items: [
+                  for (final m in models)
+                    DropdownMenuItem(
+                      value: m.name,
+                      enabled: !m.disabled,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            m.disabled ? '${m.displayName} (n/a)' : m.displayName,
+                            style: TextStyle(
+                                color: m.disabled
+                                    ? Colors.white38
+                                    : Colors.white,
+                                fontSize: 13),
+                          ),
+                          // The web puts `reason` in the option tooltip;
+                          // touch has no hover, so it's a subtitle here.
+                          if (m.disabled && (m.reason ?? '').isNotEmpty)
+                            Text(m.reason!,
+                                style: const TextStyle(
+                                    color: Colors.white38, fontSize: 10)),
+                        ],
+                      ),
+                    ),
+                ],
+                selectedItemBuilder: (_) => [
+                  for (final m in models)
+                    Center(
+                        child: Text(m.displayName,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 13))),
+                ],
+                onChanged: loading || onModel == null
+                    ? null
+                    : (name) {
+                        final m = models.where((x) => x.name == name);
+                        if (m.isNotEmpty) onModel!(m.first);
+                      },
+              ),
+            ),
           SizedBox(
             width: 48,
             child: Text(
@@ -183,12 +294,14 @@ class WindForecastBar extends StatelessWidget {
           ),
           Expanded(
             child: Slider(
-              value: fh.toDouble(),
-              max: WindOverlayController.maxFh.toDouble(),
-              divisions: WindOverlayController.maxFh ~/ 3,
+              value: fh.toDouble().clamp(
+                  model.minFh.toDouble(), model.maxFh.toDouble()),
+              min: model.minFh.toDouble(),
+              max: model.maxFh.toDouble(),
+              divisions: divisions > 0 ? divisions : null,
               label: fh == 0 ? 'now' : '+${fh}h',
-              onChanged: (v) => onScrub((v / 3).round() * 3),
-              onChangeEnd: (v) => onCommit((v / 3).round() * 3),
+              onChanged: (v) => onScrub(snap(v)),
+              onChangeEnd: (v) => onCommit(snap(v)),
             ),
           ),
         ],

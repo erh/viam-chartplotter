@@ -1359,9 +1359,9 @@ it in the option's tooltip; on mobile use a subtitle). Persist the choice via
 J6.
 
 **Accept.**
-- [ ] Switching to a short-range model reshapes the slider to its range.
-- [ ] A disabled model is visibly unavailable with its reason.
-- [ ] `/noaa-weather/models` unreachable → fall back to GFS defaults.
+- [x] Switching to a short-range model reshapes the slider to its range.
+- [x] A disabled model is visibly unavailable with its reason.
+- [x] `/noaa-weather/models` unreachable → fall back to GFS defaults.
 
 ---
 
