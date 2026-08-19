@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
 import '../app_config.dart';
+import '../isobars.dart';
 import '../settings.dart';
 import '../weather.dart';
 
@@ -167,6 +168,12 @@ class WindOverlayController {
   LatLngBounds? bounds;
   double rotationDeg = 0;
 
+  /// Current view zoom, mirrored like [bounds]. The isobar ladder (F4)
+  /// thinks in the web's "resolution" (degrees of longitude per pixel);
+  /// this converts so the thresholds stay byte-for-byte comparable.
+  double viewZoom = 9;
+  double get _resolutionDeg => 360 / (256 * math.pow(2, viewZoom));
+
   List<Marker> markers = const [];
 
   /// Turn the overlay on/off, fetching the field on first use. Throws whatever
@@ -211,6 +218,7 @@ class WindOverlayController {
   /// to render) rather than a CustomPainter.
   void rebuildMarkers() {
     _rebuildWaveCells();
+    _rebuildIsobars();
     final f = field;
     final b = bounds;
     if (!on || f == null || b == null) {
@@ -298,6 +306,146 @@ class WindOverlayController {
       if (out.length >= maxCells) break;
     }
     waveCells = out;
+  }
+
+  // ---- isobars (F4) -----------------------------------------------------
+  // The server runs marching squares over PRMSL and serves GeoJSON contour
+  // segments; the client just draws them with the web's zoom/label ladder.
+  IsobarField? isobarField;
+  bool isobarsOn = false;
+  bool isobarLoading = false;
+  List<Polyline> isobarLines = const [];
+  List<Marker> isobarMarkers = const []; // labels + H/L extrema
+
+  String get _isobarModelName {
+    final m = [
+      for (final m in models)
+        if (m.kind == 'isobars' && !m.disabled) m
+    ];
+    return m.isEmpty ? 'gfs-isobars' : m.first.name;
+  }
+
+  Future<void> toggleIsobars() async {
+    if (isobarsOn) {
+      isobarsOn = false;
+      Settings.instance.isobarsOn = false;
+      isobarLines = const [];
+      isobarMarkers = const [];
+      return;
+    }
+    await ensureModels();
+    Settings.instance.isobarsOn = true;
+    if (isobarField != null) {
+      isobarsOn = true;
+      rebuildMarkers();
+      return;
+    }
+    await loadIsobars(fh);
+  }
+
+  Future<void> loadIsobars(int hour) async {
+    isobarLoading = true;
+    try {
+      isobarField = await fetchIsobars(AppConfig.tileBase.value,
+          model: _isobarModelName, fh: model.clampFh(hour));
+      isobarsOn = true;
+      isobarLoading = false;
+      rebuildMarkers();
+    } catch (e) {
+      isobarLoading = false;
+      state.setWindInfo('isobar error: $e');
+      rethrow;
+    }
+  }
+
+  /// Rebuild the isobar polylines + label/extremum markers for the current
+  /// viewport, applying the ported ladder: 2 hPa fill lines drop at
+  /// overview zoom, stroke weight by tier, labels sparse on a fixed world
+  /// lattice so they don't crawl when panning.
+  void _rebuildIsobars() {
+    final f = isobarField;
+    final b = bounds;
+    if (!isobarsOn || f == null || b == null) {
+      isobarLines = const [];
+      isobarMarkers = const [];
+      return;
+    }
+    final res = _resolutionDeg;
+    final latM = (b.north - b.south) * 0.2;
+    final lonM = (b.east - b.west) * 0.2;
+    bool inView(LatLng p) =>
+        p.latitude >= b.south - latM &&
+        p.latitude <= b.north + latM &&
+        p.longitude >= b.west - lonM &&
+        p.longitude <= b.east + lonM;
+
+    const maxSegments = 4000;
+    final lines = <Polyline>[];
+    final markers = <Marker>[];
+    for (final line in f.lines) {
+      if (lines.length >= maxSegments) break;
+      if (!isobarLineVisible(line.hPa, res)) continue;
+      if (!inView(line.labelAnchor)) continue;
+      final double width;
+      switch (isobarTier(line.hPa)) {
+        case IsobarTier.reference:
+          width = 2.0;
+        case IsobarTier.heavy:
+          width = 1.4;
+        case IsobarTier.standard:
+          width = 1.0;
+        case IsobarTier.half:
+          width = 0.6;
+      }
+      lines.add(Polyline(
+        points: line.points,
+        color: Colors.black.withValues(alpha: 0.65),
+        strokeWidth: width,
+      ));
+      final label = isobarLabel(line, res);
+      if (label != null) {
+        markers.add(Marker(
+          point: line.labelAnchor,
+          width: 40,
+          height: 18,
+          child: Container(
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.75),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(label,
+                style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold)),
+          ),
+        ));
+      }
+    }
+    // H/L extrema: red highs, blue lows — surface-analysis convention.
+    for (final e in f.extrema) {
+      if (!inView(e.position)) continue;
+      markers.add(Marker(
+        point: e.position,
+        width: 34,
+        height: 34,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(e.kind,
+                style: TextStyle(
+                    color: e.kind == 'H' ? Colors.red : Colors.blue,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900)),
+            Text('${e.hPa}',
+                style: const TextStyle(color: Colors.black87, fontSize: 9)),
+          ],
+        ),
+      ));
+    }
+    isobarLines = lines;
+    isobarMarkers = markers;
   }
 
   /// Point weather sample (F7) — the web cursorInfo's numbers for a

@@ -135,6 +135,10 @@ class Settings {
   bool get wavesOn => _prefs.getBool('wavesOn') ?? false;
   set wavesOn(bool v) => _prefs.setBool('wavesOn', v);
 
+  /// Isobar overlay on/off (F4).
+  bool get isobarsOn => _prefs.getBool('isobarsOn') ?? false;
+  set isobarsOn(bool v) => _prefs.setBool('isobarsOn', v);
+
   /// Night mode (L4): red-multiply the whole chart UI to protect night
   /// vision. The server has no night render, so this is client-side.
   bool get nightModeOn => _prefs.getBool('nightModeOn') ?? false;

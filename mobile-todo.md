@@ -252,7 +252,7 @@ logic) and leave the rest for you.
 | M2 | Safety overlays | B1 B2 B4 D1 D2 D3 G1 | 1.5 wk | ☑ |
 | M3 | Routes & waypoints | E1 E2 E3 E4 E5 | 2 wk | ☑ |
 | M4 | Marine hardening | C3 L1 L3 L4 L6 | 1.5 wk | ☑ |
-| M5 | Weather & environment | F2 F3 F4 F7 F8 G2 G3 G4 | 2 wk | ☐ |
+| M5 | Weather & environment | F2 F3 F4 F7 F8 G2 G3 G4 | 2 wk | ☑ |
 | M6 | Systems, cameras, polish | H1 H2 H4 I1 I2 J3 J5 J8 | 1 wk | ☐ |
 | M7 | Long tail | A4 B3 D4–D9 F1 H3 H5 H7 L2 | 2–3 wk | ☐ |
 
@@ -1464,7 +1464,7 @@ labels. The algorithm is self-contained; the risk is label placement, which is
 fiddly on a small screen — label sparsely.
 
 **Accept.**
-- [ ] Isobar geometry matches the web app for the same forecast hour.
+- [x] Isobar geometry matches the web app for the same forecast hour.
 
 ---
 

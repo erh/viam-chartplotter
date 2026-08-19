@@ -24,6 +24,9 @@ List<Widget> buildMapLayers({
   required List<Marker> windMarkers,
   // Wave colour cells (F3), drawn under the wind arrows.
   List<Polygon> wavePolygons = const [],
+  // Isobar contours + labels/extrema (F4), between waves and wind.
+  List<Polyline> isobarLines = const [],
+  List<Marker> isobarMarkers = const [],
   required List<Marker> aisMarkers,
   List<AreaInfo> areas = const [],
   List<Marker> navaidMarkers = const [],
@@ -186,6 +189,10 @@ List<Widget> buildMapLayers({
     // Wave field (F3): translucent height-coloured cells under the wind
     // arrows so both weather overlays read together.
     if (wavePolygons.isNotEmpty) PolygonLayer(polygons: wavePolygons),
+    // Isobars (F4): PRMSL contours with sparse pressure labels and H/L
+    // extremum marks, over the wave fill, under the wind arrows.
+    if (isobarLines.isNotEmpty) PolylineLayer(polylines: isobarLines),
+    if (isobarMarkers.isNotEmpty) MarkerLayer(markers: isobarMarkers),
     // Wind overlay (arrow markers, over the chart, under boat markers).
     if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
     // Active route. With nav-service waypoints (E1) the full chain draws

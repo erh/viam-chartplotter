@@ -739,6 +739,11 @@ class _MapScreenState extends State<MapScreen> {
         if (mounted && !_wind.wavesOn) _toggleWaves();
       });
     }
+    if (_settings.isobarsOn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_wind.isobarsOn) _toggleIsobars();
+      });
+    }
     // Forecast refresh (G2): the minute tick is cheap — shouldRefresh gates
     // the actual network call on age and material movement.
     _forecastTimer = Timer.periodic(
@@ -835,6 +840,21 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Toggle the isobar overlay (F4) — same shape as _toggleWind.
+  Future<void> _toggleIsobars() async {
+    _wind.bounds = _map.camera.visibleBounds;
+    _wind.viewZoom = _map.camera.zoom;
+    setState(() {});
+    try {
+      await _wind.toggleIsobars();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Isobars unavailable: $e')));
+    }
+    if (mounted) setState(() {});
+  }
+
   /// Toggle the wave overlay (F3) — same shape as _toggleWind.
   Future<void> _toggleWaves() async {
     _wind.bounds = _map.camera.visibleBounds;
@@ -888,6 +908,7 @@ class _MapScreenState extends State<MapScreen> {
         _wind.fh = fh;
       }
       if (_wind.wavesOn) await _wind.loadWaves(_wind.fh);
+      if (_wind.isobarsOn) await _wind.loadIsobars(_wind.fh);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -1178,7 +1199,7 @@ class _MapScreenState extends State<MapScreen> {
     }
     final weatherZoomOk =
         WindOverlayController.weatherVisibleAtZoom(viewZoomNow);
-    final weatherOn = _wind.on || _wind.wavesOn;
+    final weatherOn = _wind.on || _wind.wavesOn || _wind.isobarsOn;
     return LayoutBuilder(builder: (context, box) {
       final tablet = box.maxWidth >= 840;
       final chart = Stack(
@@ -1217,6 +1238,7 @@ class _MapScreenState extends State<MapScreen> {
               },
               onPositionChanged: (camera, _) {
                 _wind.bounds = camera.visibleBounds;
+                _wind.viewZoom = camera.zoom;
                 _rotationDeg = camera.rotation;
                 _wind.rotationDeg = camera.rotation;
                 _persistView();
@@ -1244,6 +1266,12 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               wavePolygons: (_wind.wavesOn && weatherZoomOk)
                   ? _wind.waveCells
+                  : const [],
+              isobarLines: (_wind.isobarsOn && weatherZoomOk)
+                  ? _wind.isobarLines
+                  : const [],
+              isobarMarkers: (_wind.isobarsOn && weatherZoomOk)
+                  ? _wind.isobarMarkers
                   : const [],
               aisMarkers: _aisMarkers,
               areas: _visibleAreas,
@@ -1540,6 +1568,14 @@ class _MapScreenState extends State<MapScreen> {
                       active: _wind.wavesOn,
                       busy: _wind.waveLoading,
                       onTap: _toggleWaves,
+                    ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
+                      icon: Icons.fingerprint,
+                      tooltip: 'Isobars (pressure)',
+                      active: _wind.isobarsOn,
+                      busy: _wind.isobarLoading,
+                      onTap: _toggleIsobars,
                     ),
                     if (widget.connection.navApi != null) ...[
                       const SizedBox(height: 8),
