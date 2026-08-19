@@ -570,7 +570,7 @@ only ever talk to one tile server. The web app fetches `/app-config` at runtime:
 
 ---
 
-### C1 · Real boat icon, scaled `S` `P1`
+### C1 · Real boat icon, scaled `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map/boat_marker.dart`, assets
 **Web ref:** `src/marineMap.svelte:155-184` (`dimScaleFactor`, `boatScaleAxes`),
@@ -593,9 +593,12 @@ any failure. Apply to the own-boat marker only — AIS markers keep their own ic
 (see D5).
 
 **Accept.**
-- [ ] Own boat renders as a boat, oriented to heading.
-- [ ] A machine with `myboat_icon_path` set shows that icon at the same size.
-- [ ] An 800 ft vessel is longer but not wider when no beam is reported.
+- [x] Own boat renders as a boat, oriented to heading (bundled
+      topdown-boat.svg).
+- [x] A machine with `myboat_icon_path` set shows that icon at the same size
+      (height-ratio remap + min-width floor, `test/boat_icon_test.dart`).
+- [x] An 800 ft vessel is longer but not wider when no beam is reported
+      (boatScaleAxes test).
 
 ---
 

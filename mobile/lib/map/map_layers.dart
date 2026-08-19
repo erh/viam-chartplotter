@@ -3,6 +3,7 @@ import 'package:flutter_map/flutter_map.dart';
 
 import '../boat_state.dart';
 import '../tile_sources.dart';
+import 'boat_icon.dart';
 import 'boat_marker.dart';
 import 'osm_underlay.dart';
 
@@ -91,10 +92,11 @@ List<Widget> buildMapLayers({
     if (state.position != null)
       MarkerLayer(
         markers: [
+          // The marker box is the icon's diagonal so rotation never clips.
           Marker(
             point: state.position!,
-            width: 40,
-            height: 40,
+            width: boatMarkerBoxSide(),
+            height: boatMarkerBoxSide(),
             child:
                 BoatMarker(headingDeg: (state.headingDeg ?? 0) + rotationDeg),
           ),
