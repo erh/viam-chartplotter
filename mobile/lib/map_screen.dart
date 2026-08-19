@@ -11,6 +11,7 @@ import 'ais.dart';
 import 'app_config.dart';
 import 'map/ais_markers.dart';
 import 'map/boat_icon.dart';
+import 'map/heading_line.dart';
 
 import 'boat_state.dart';
 import 'camera_screen.dart';
@@ -243,6 +244,8 @@ class _MapScreenState extends State<MapScreen> {
     final controller = TextEditingController(
         text: _settings.safeDepthFt?.toString() ?? '');
     var depthColor = _settings.depthColorTrack;
+    var headingOn = _settings.headingLineOn;
+    var headingLen = _settings.headingLineLengthNm;
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -269,6 +272,26 @@ class _MapScreenState extends State<MapScreen> {
               value: depthColor,
               onChanged: (v) => setDialogState(() => depthColor = v),
             ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Heading line'),
+              value: headingOn,
+              onChanged: (v) => setDialogState(() => headingOn = v),
+            ),
+            Row(
+              children: [
+                const Expanded(child: Text('Heading line length')),
+                DropdownButton<int>(
+                  value: headingLen,
+                  items: [
+                    for (final n in headingLineLengthChoices)
+                      DropdownMenuItem(value: n, child: Text('$n nm')),
+                  ],
+                  onChanged: (v) =>
+                      setDialogState(() => headingLen = v ?? headingLen),
+                ),
+              ],
+            ),
           ],
         ),
         actions: [
@@ -291,6 +314,8 @@ class _MapScreenState extends State<MapScreen> {
       // with the new shading immediately.
       _settings.safeDepthFt = text.isEmpty ? null : int.tryParse(text);
       _settings.depthColorTrack = depthColor;
+      _settings.headingLineOn = headingOn;
+      _settings.headingLineLengthNm = headingLen;
     });
   }
 
@@ -378,6 +403,12 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
               trackSegments: _trackSegments(),
+              headingLine: (_settings.headingLineOn &&
+                      s.position != null &&
+                      s.headingDeg != null)
+                  ? headingLinePoints(s.position!, s.headingDeg!,
+                      _settings.headingLineLengthNm.toDouble())
+                  : const [],
               buildStamp: _settings.buildStamp,
               // Fractional VIEW zoom for the OSM suppression gate (A5) —
               // deliberately not the tile z; see OsmUnderlayTileProvider.

@@ -639,7 +639,7 @@ obvious); old features are pruned to bound memory.
 
 ---
 
-### C4 · Heading line `S` `P1`
+### C4 · Heading line `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:3328-3376`, layer `3961`, length options
@@ -651,9 +651,11 @@ offset, not a flat-earth delta — at 15 nm the error is visible. Toggle it in t
 layer controls.
 
 **Accept.**
-- [ ] The line points along heading (not COG) and ends at the selected distance
-      measured with the ruler (J1).
-- [ ] The length choice survives a restart.
+- [x] The line points along heading (not COG) and ends at the selected
+      distance (great-circle sampled; `test/heading_line_test.dart` checks
+      endpoint distance ±0.1% and initial bearing).
+- [x] The length choice survives a restart (persisted as
+      `mapHeadingLineLengthNm`, web-compatible key).
 
 ---
 

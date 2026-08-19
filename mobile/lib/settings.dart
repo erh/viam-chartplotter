@@ -104,6 +104,19 @@ class Settings {
   bool get depthColorTrack => _prefs.getBool('depthColorTrack') ?? false;
   set depthColorTrack(bool v) => _prefs.setBool('depthColorTrack', v);
 
+  /// Heading line (C4): shown by default, length one of the web app's
+  /// choices (web: `mapHeadingLineLengthNm`, default 5).
+  bool get headingLineOn => _prefs.getBool('headingLineOn') ?? true;
+  set headingLineOn(bool v) => _prefs.setBool('headingLineOn', v);
+
+  int get headingLineLengthNm {
+    final v = _prefs.getInt('mapHeadingLineLengthNm');
+    return (v != null && const [1, 2, 3, 5, 10, 15].contains(v)) ? v : 5;
+  }
+
+  set headingLineLengthNm(int v) =>
+      _prefs.setInt('mapHeadingLineLengthNm', v);
+
   /// Tile server base resolved from /app-config (A6), cached so the next
   /// launch starts on it without re-probing. Null = use the built-in default.
   String? get tileBaseOverride {
