@@ -140,6 +140,47 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Chart settings dialog — today just the safe depth (A2), the single most
+  /// safety-relevant chart parameter: solid coral below it, gradient to white
+  /// at 2×. Empty = the server's configured default.
+  Future<void> _editChartSettings() async {
+    final controller = TextEditingController(
+        text: _settings.safeDepthFt?.toString() ?? '');
+    final apply = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Chart settings'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: 'Safe depth (ft)',
+            helperText: 'Shades water shallower than your draft.\n'
+                'Empty = server default.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    if (apply != true || !mounted) return;
+    final text = controller.text.trim();
+    setState(() {
+      // The tile layer's key includes this value, so the chart refetches
+      // with the new shading immediately.
+      _settings.safeDepthFt = text.isEmpty ? null : int.tryParse(text);
+    });
+  }
+
   void _zoom(double delta) {
     final c = _map.camera;
     _map.move(c.center, (c.zoom + delta).clamp(3.0, 20.0));
@@ -217,6 +258,8 @@ class _MapScreenState extends State<MapScreen> {
               windOn: _wind.on,
               windMarkers: _wind.markers,
               onAisTap: (b) => showAisDetails(context, b),
+              buildStamp: _settings.buildStamp,
+              safeDepthFt: _settings.safeDepthFt,
             ),
           ),
           // Top-left: compact connection status.
@@ -286,6 +329,12 @@ class _MapScreenState extends State<MapScreen> {
                       active: _wind.on,
                       busy: _wind.loading,
                       onTap: _toggleWind,
+                    ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
+                      icon: Icons.settings,
+                      tooltip: 'Chart settings',
+                      onTap: _editChartSettings,
                     ),
                     if (s.cameraNames.isNotEmpty &&
                         widget.connection.robot != null) ...[

@@ -45,6 +45,25 @@ String chartTileParams(
   return 'style=ecdis';
 }
 
+/// Full query string for a chart tile: the zoom-tiered render params (A1)
+/// plus the params carried on every chart request — `v=<buildStamp>` so a
+/// new release busts HTTP/tile caches (A3), and `sd=<feet>` when the
+/// operator has set a safe depth, driving the DEPARE shading (A2). A null
+/// safe depth omits the param entirely (never `sd=`), matching the web app.
+String chartTileUrlParams(
+  int z, {
+  required String buildStamp,
+  int? safeDepthFt,
+  int? navaidMinZ = vectorTileNavaidMinZ,
+  int? structureMinZ = vectorTileStructureMinZ,
+}) {
+  final sb = StringBuffer(
+      chartTileParams(z, navaidMinZ: navaidMinZ, structureMinZ: structureMinZ))
+    ..write('&v=${Uri.encodeComponent(buildStamp)}');
+  if (safeDepthFt != null) sb.write('&sd=$safeDepthFt');
+  return sb.toString();
+}
+
 /// A [NetworkTileProvider] whose tile URL is the layer's urlTemplate plus
 /// per-tile-zoom query params — flutter_map's equivalent of the web app's
 /// tileUrlFunction.

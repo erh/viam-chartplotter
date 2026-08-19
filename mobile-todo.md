@@ -317,7 +317,7 @@ correct — for A5's suppression, it is not. Don't conflate them.
 
 ---
 
-### A2 · Safe-depth (`sd`) draft param `S` `P0`
+### A2 · Safe-depth (`sd`) draft param `S` `P0` — ✅ **done**
 
 **Files:** `mobile/lib/config.dart`, `mobile/lib/tile_sources.dart`
 **Web ref:** `src/marineMap.svelte:344-353, 3629`
@@ -341,13 +341,15 @@ sends nothing and the server falls back to its `safe_depth_ft` config attribute.
    so `flutter_map` drops its cache).
 
 **Accept.**
-- [ ] Setting safe depth to 6 ft vs 20 ft visibly changes the shading band.
-- [ ] Empty value sends no `sd` param at all (not `sd=`).
-- [ ] The value survives an app restart.
+- [x] Setting safe depth to 6 ft vs 20 ft visibly changes the shading band
+      (tile-layer key includes `sd`, so the cache drops and refetches).
+- [x] Empty value sends no `sd` param at all (not `sd=`) —
+      `test/chart_url_extras_test.dart`.
+- [x] The value survives an app restart (persisted via J6's Settings).
 
 ---
 
-### A3 · Tile cache-buster `S` `P1`
+### A3 · Tile cache-buster `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/tile_sources.dart`
 **Web ref:** `src/marineMap.svelte:325-339, 3628`
@@ -364,8 +366,9 @@ Whatever the source, it must change on every release. Add a manual "clear tile
 cache" action alongside it when L1 lands.
 
 **Accept.**
-- [ ] Every chart tile request carries a `v=` param.
-- [ ] The value changes between two builds from different commits.
+- [x] Every chart tile request carries a `v=` param.
+- [x] The value changes between two builds from different commits (version +
+      build number via package_info_plus; CI stamps the run number).
 
 ---
 

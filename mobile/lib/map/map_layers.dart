@@ -22,16 +22,23 @@ List<Widget> buildMapLayers({
   required bool windOn,
   required List<Marker> windMarkers,
   required void Function(AisBoat) onAisTap,
+  required String buildStamp,
+  int? safeDepthFt,
 }) {
   return [
     TileLayer(
-      key: ValueKey(base.id),
+      // The safe depth participates in the key so changing it drops
+      // flutter_map's in-memory tile cache and refetches the reshaded
+      // chart (A2).
+      key: ValueKey('${base.id}-sd${safeDepthFt ?? ''}'),
       urlTemplate: base.urlTemplate,
-      // Chart tiles vary their query params by tile zoom (A1); other layers
-      // use the plain template with the default network provider.
+      // Chart tiles vary their query params by tile zoom (A1) and carry the
+      // cache-buster + safe depth (A3/A2); other layers use the plain
+      // template with the default network provider.
       tileProvider: base.paramsForZoom == null
           ? null
-          : ZoomParamsTileProvider(base.paramsForZoom!),
+          : ZoomParamsTileProvider((z) => chartTileUrlParams(z,
+              buildStamp: buildStamp, safeDepthFt: safeDepthFt)),
       minZoom: base.minZoom.toDouble(),
       maxNativeZoom: base.maxZoom,
       userAgentPackageName: 'com.viam.chartplotter.mobile',
