@@ -1421,9 +1421,9 @@ timer and when the boat moves materially; cache the last response so a dropout
 shows stale-but-labelled data rather than blanks.
 
 **Accept.**
-- [ ] Values match the web app's panel at the same position.
-- [ ] After sunset, the sun row shows tomorrow's times.
-- [ ] Offline shows the last values marked stale, not an error.
+- [x] Values match the web app's panel at the same position.
+- [x] After sunset, the sun row shows tomorrow's times.
+- [x] Offline shows the last values marked stale, not an error.
 
 ---
 

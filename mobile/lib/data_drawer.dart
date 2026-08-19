@@ -1,21 +1,35 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'boat_state.dart';
+import 'forecast.dart';
 import 'graph_screen.dart';
 import 'history.dart';
+import 'moon.dart';
 import 'sparkline.dart';
 
 /// The dashboard as a Drawer — the phone presentation (L6): full-screen
 /// chart, data behind the dashboard button. Tablets embed [DataPanel]
 /// persistently instead.
 class DataDrawer extends StatelessWidget {
-  const DataDrawer({super.key, required this.state, this.history});
+  const DataDrawer(
+      {super.key,
+      required this.state,
+      this.history,
+      this.forecast,
+      this.forecastStale = false});
   final BoatState state;
   final HistoryService? history;
+  final LocalForecast? forecast;
+  final bool forecastStale;
 
   @override
-  Widget build(BuildContext context) =>
-      Drawer(child: DataPanel(state: state, history: history));
+  Widget build(BuildContext context) => Drawer(
+      child: DataPanel(
+          state: state,
+          history: history,
+          forecast: forecast,
+          forecastStale: forecastStale));
 }
 
 /// The dashboard: all the boat readouts that used to be overlaid on the chart,
@@ -23,9 +37,20 @@ class DataDrawer extends StatelessWidget {
 /// setState()s on every BoatState tick. Presentation-agnostic — a Drawer on
 /// phones, a persistent side panel on tablets (L6).
 class DataPanel extends StatelessWidget {
-  const DataPanel({super.key, required this.state, this.history});
+  const DataPanel(
+      {super.key,
+      required this.state,
+      this.history,
+      this.forecast,
+      this.forecastStale = false});
   final BoatState state;
   final HistoryService? history;
+
+  /// Local open-meteo forecast (G2), owned/refreshed by MapScreen. Null
+  /// until the first successful fetch; [forecastStale] labels a cached
+  /// value that outlived its freshness (dropout at sea) — stale beats blank.
+  final LocalForecast? forecast;
+  final bool forecastStale;
 
   String _fmt(double? v, String unit, {int digits = 1}) =>
       v == null ? '—' : '${v.toStringAsFixed(digits)} $unit';
@@ -51,6 +76,18 @@ class DataPanel extends StatelessWidget {
 
   static String _hhmm(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  /// "↑ 21:14  ↓ 09:02", or the polar edge cases; some days genuinely skip
+  /// a rise or a set (the moon slips ~50 min a day).
+  static String _moonStr(MoonTimes m) {
+    if (m.alwaysUp) return 'up all day';
+    if (m.alwaysDown) return 'down all day';
+    final parts = [
+      if (m.rise != null) '↑ ${_hhmm(m.rise!)}',
+      if (m.set != null) '↓ ${_hhmm(m.set!)}',
+    ];
+    return parts.isEmpty ? '—' : parts.join('   ');
+  }
 
   String _seakeeper(BoatState s) {
     if (s.seakeeperStabilizing == true) {
@@ -176,6 +213,45 @@ class DataPanel extends StatelessWidget {
               if (tide.nextLow case final l?)
                 _Row('Next low',
                     '${l.v.toStringAsFixed(1)} ft at ${_hhmm(l.t)}'),
+            ],
+            // Local forecast (G2) + moon (G3) + Windy deep link (G4).
+            if (forecast case final fx?) ...[
+              const SizedBox(height: 16),
+              _Section('Wx · next 4h${forecastStale ? " — STALE" : ""}'),
+              if (fx.tempF != null)
+                _Row('Air temp', '${fx.tempF!.toStringAsFixed(0)} °F'),
+              if (fx.windKn != null)
+                _Row(
+                    'Wind fcst',
+                    '${fx.windKn!.toStringAsFixed(0)} kn'
+                        '${fx.windDirDeg != null ? " @ ${fx.windDirDeg!.round()}°" : ""}'),
+              _Row('Rain 4 h', '${fx.rain4hIn.toStringAsFixed(2)} in'),
+              // Once today's sunset has passed the parser hands us
+              // tomorrow's pair, so this row stays useful at night.
+              if (fx.sunrise != null && fx.sunset != null)
+                _Row('Sun', '↑ ${_hhmm(fx.sunrise!)}   ↓ ${_hhmm(fx.sunset!)}'),
+              if (state.position case final p?
+                  when !(p.latitude == 0 && p.longitude == 0))
+                _Row('Moon', _moonStr(getMoonTimes(
+                    DateTime.now(), p.latitude, p.longitude))),
+              if (state.position case final p?
+                  when !(p.latitude == 0 && p.longitude == 0))
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact),
+                    icon: const Icon(Icons.open_in_new, size: 14),
+                    label: const Text('Open Windy forecast'),
+                    onPressed: () => launchUrl(
+                      Uri.parse('https://www.windy.com/'
+                          '?${p.latitude.toStringAsFixed(4)},'
+                          '${p.longitude.toStringAsFixed(4)},10'),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                  ),
+                ),
             ],
             if (state.tanks.isNotEmpty) ...[
               const SizedBox(height: 16),

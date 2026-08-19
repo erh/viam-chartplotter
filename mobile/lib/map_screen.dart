@@ -19,6 +19,7 @@ import 'boat_state.dart';
 import 'camera_screen.dart';
 import 'data_drawer.dart';
 import 'debug_screen.dart';
+import 'forecast.dart';
 import 'fuel_screen.dart';
 import 'chart/navaid_icon.dart';
 import 'chart/navaids.dart';
@@ -331,6 +332,26 @@ class _MapScreenState extends State<MapScreen> {
 
   late final WindOverlayController _wind =
       WindOverlayController(state: widget.state);
+
+  // Local forecast (G2): slow-timer + moved-materially refresh, cached so a
+  // dropout shows stale-but-labelled data. Rendered by the data panel.
+  final ForecastService _forecast = ForecastService();
+  Timer? _forecastTimer;
+
+  Future<void> _maybeFetchForecast() async {
+    final pos = widget.state.displayPosition;
+    if (pos == null || !_validPos(pos)) return;
+    if (!shouldRefresh(
+        last: _forecast.last, pos: pos, now: DateTime.now())) {
+      return;
+    }
+    try {
+      await _forecast.fetch(pos.latitude, pos.longitude);
+    } catch (_) {
+      // Keep the cached value; the panel labels it stale.
+    }
+    if (mounted) setState(() {});
+  }
 
   // Cached track segments (C2): recomputed only when the track grew or the
   // depth-colour mode flipped, not on every rebuild.
@@ -718,11 +739,17 @@ class _MapScreenState extends State<MapScreen> {
         if (mounted && !_wind.wavesOn) _toggleWaves();
       });
     }
+    // Forecast refresh (G2): the minute tick is cheap — shouldRefresh gates
+    // the actual network call on age and material movement.
+    _forecastTimer = Timer.periodic(
+        const Duration(minutes: 1), (_) => _maybeFetchForecast());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeFetchForecast());
   }
 
   @override
   void dispose() {
     unawaited(WakelockPlus.disable().catchError((_) {}));
+    _forecastTimer?.cancel();
     _persistViewDebounce?.cancel();
     _navaids.dispose();
     _structures.dispose();
@@ -1669,7 +1696,11 @@ class _MapScreenState extends State<MapScreen> {
         key: _scaffoldKey,
         endDrawer: tablet
             ? null
-            : DataDrawer(state: s, history: widget.connection.history),
+            : DataDrawer(
+                state: s,
+                history: widget.connection.history,
+                forecast: _forecast.last,
+                forecastStale: _forecast.stale),
         body: _nightFilter(!tablet
             ? chart
             : Row(children: [
@@ -1679,7 +1710,10 @@ class _MapScreenState extends State<MapScreen> {
                   child: Material(
                     elevation: 8,
                     child: DataPanel(
-                        state: s, history: widget.connection.history),
+                        state: s,
+                        history: widget.connection.history,
+                        forecast: _forecast.last,
+                        forecastStale: _forecast.stale),
                   ),
                 ),
               ])),
