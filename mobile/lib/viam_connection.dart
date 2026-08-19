@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:latlong2/latlong.dart';
 import 'package:viam_sdk/viam_sdk.dart';
@@ -7,6 +8,32 @@ import 'ais.dart';
 import 'boat_state.dart';
 import 'config.dart';
 import 'history.dart';
+
+/// Component names marked `chartplotter-hide: true` in a part's config JSON
+/// (H6). Mirrors the web app's findComponentConfig check: the attribute is
+/// truthy on the component's `attributes`. Garbage/missing config → empty set.
+Set<String> hiddenComponentNames(String robotConfigJson) {
+  if (robotConfigJson.isEmpty) return const {};
+  try {
+    final cfg = jsonDecode(robotConfigJson);
+    final comps = (cfg as Map)['components'];
+    if (comps is! List) return const {};
+    final hidden = <String>{};
+    for (final c in comps) {
+      if (c is! Map) continue;
+      final attrs = c['attributes'];
+      if (attrs is! Map) continue;
+      final hide = attrs['chartplotter-hide'];
+      final truthy =
+          hide == true || hide == 'true' || (hide is num && hide != 0);
+      final name = c['name'];
+      if (truthy && name is String && name.isNotEmpty) hidden.add(name);
+    }
+    return hidden;
+  } catch (_) {
+    return const {};
+  }
+}
 
 /// Owns the boat connection and the 1 Hz poll loop. This is the Dart
 /// re-implementation of the web app's `doUpdate` loop (src/App.svelte),
@@ -122,9 +149,11 @@ class ViamConnection {
   /// without it a dead connection just shows "Connection lost".
   Future<RobotClient> Function()? reconnector;
 
-  Future<void> startWithRobot(RobotClient robot, {Viam? viam}) async {
+  Future<void> startWithRobot(RobotClient robot,
+      {Viam? viam, String? robotId}) async {
     _robot = robot;
     _viam = viam;
+    _robotId = robotId;
     _ownsRobot = false; // owned by the session/picker that connected it
     await _afterConnect();
   }
@@ -170,9 +199,37 @@ class ViamConnection {
     await _afterConnect();
   }
 
+  // Components the operator marked `chartplotter-hide` in the machine config
+  // (H6). Fetched once per connect on the login path; the API-key path has no
+  // cloud client and degrades to no filtering.
+  String? _robotId;
+  Set<String> _hiddenComponents = const {};
+
+  Future<void> _loadHiddenComponents() async {
+    final viam = _viam;
+    final robotId = _robotId;
+    if (viam == null || robotId == null) return;
+    try {
+      final parts = await viam.appClient.listRobotParts(robotId);
+      final hidden = <String>{};
+      for (final part in parts) {
+        hidden.addAll(hiddenComponentNames(part.robotConfigJson));
+      }
+      _hiddenComponents = hidden;
+    } catch (_) {
+      // Config unreachable — discover unfiltered rather than fail connect.
+    }
+  }
+
+  /// True when [resourceName] (possibly remote-prefixed, `remote:name`) is
+  /// marked hidden in the machine config.
+  bool _isHidden(String resourceName) =>
+      _hiddenComponents.contains(resourceName.split(':').last);
+
   Future<void> _afterConnect() async {
     final robot = _robot;
     if (robot == null) return;
+    await _loadHiddenComponents();
     await _discover(robot);
     _setConnectedStatus();
     await _buildHistory(robot);
@@ -281,6 +338,7 @@ class ViamConnection {
     try {
       final lower = needle.toLowerCase();
       for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
         if (rn.subtype == 'sensor' && rn.name.toLowerCase().contains(lower)) {
           return rn.name;
         }
@@ -295,6 +353,7 @@ class ViamConnection {
     final out = <String>[];
     try {
       for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
         if (rn.subtype == 'sensor' && pred(rn.name.toLowerCase())) {
           out.add(rn.name);
         }
@@ -334,6 +393,7 @@ class ViamConnection {
     final all = <String>[];
     try {
       for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
         if (rn.subtype == 'camera') all.add(rn.name);
       }
     } catch (_) {}
@@ -350,6 +410,7 @@ class ViamConnection {
     try {
       final s = suffix.toLowerCase();
       for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
         if (rn.subtype == 'sensor' && rn.name.toLowerCase().endsWith(s)) {
           return rn.name;
         }
@@ -364,6 +425,7 @@ class ViamConnection {
     if (Config.movementSensor.isNotEmpty) return Config.movementSensor;
     try {
       for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
         if (rn.subtype == 'movement_sensor') return rn.name;
       }
     } catch (_) {

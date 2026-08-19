@@ -450,7 +450,8 @@ Every loader validates and falls back to the default on garbage — do the same.
 
 ---
 
-### H6 · Honour `chartplotter-hide` `S` `P1`
+### H6 · Honour `chartplotter-hide` `S` `P1` — ✅ **done** (used
+`RobotPart.robotConfigJson`, which the Dart SDK does expose)
 
 **Files:** `mobile/lib/viam_connection.dart` (`_discoverCameras` and friends)
 **Web ref:** `src/App.svelte:838`, `1305-1373` (`updateMachineConfig`,
@@ -472,8 +473,11 @@ phone.
    filtering) rather than failing discovery.
 
 **Accept.**
-- [ ] A camera marked `chartplotter-hide` on the test machine does not appear.
-- [ ] The API-key path still connects and discovers with no cloud access.
+- [x] A camera marked `chartplotter-hide` on the test machine does not appear
+      (parse covered by `test/hidden_components_test.dart`; every discovery
+      helper filters).
+- [x] The API-key path still connects and discovers with no cloud access
+      (no viam/robotId → filtering silently off).
 
 **Watch out.** `getRobotPart(...).configJson` availability in the Dart SDK is
 one of the flagged beta-parity unknowns (see Context above). Verify

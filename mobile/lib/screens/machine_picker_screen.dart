@@ -19,7 +19,7 @@ class MachinePickerScreen extends StatefulWidget {
   });
 
   final ViamSession session;
-  final void Function(RobotClient robot) onConnected;
+  final void Function(RobotClient robot, String robotId) onConnected;
 
   /// Reconnect to the last-connected machine automatically on open. The
   /// "switch boat" flow passes false so the user actually gets the list.
@@ -92,7 +92,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
           name: (m['name'] is String) ? m['name'] as String : '',
         );
       }
-      if (mounted) widget.onConnected(client);
+      if (mounted) widget.onConnected(client, robotId);
     } catch (_) {
       // Stale machine, revoked access, offline — fall back to the list.
       if (mounted && _connecting) {
@@ -216,7 +216,7 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
         orgId: _orgId,
         name: robot.name?.toString() ?? '',
       );
-      widget.onConnected(client);
+      widget.onConnected(client, robot.id.toString());
     } catch (e) {
       if (mounted && gen == _connectGen) {
         setState(() {
