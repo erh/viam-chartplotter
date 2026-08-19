@@ -3,6 +3,7 @@ import 'dart:io';
 // Flutter has its own navigator `Route`; ours (route_store) wins here.
 import 'package:flutter/material.dart' hide Route;
 import 'package:latlong2/latlong.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../boat_state.dart';
@@ -304,11 +305,22 @@ class _RoutesSheetState extends State<RoutesSheet> {
   /// how a route gets onto a Garmin (Garmin/GPX/*.gpx on a card).
   Future<void> _exportGpx(Route r) async {
     try {
-      final file = File('${Directory.systemTemp.path}/${gpxFilename(r.name)}');
+      // The plugin temp dir, not Directory.systemTemp: the latter isn't
+      // reliably writable/shareable inside the iOS sandbox.
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/${gpxFilename(r.name)}');
       await file.writeAsString(routeToGpx(r.name, r.waypoints));
+      // iPad presents the share sheet as a popover and REQUIRES an anchor
+      // rect — omitting sharePositionOrigin throws a PlatformException on
+      // every export there ("export to gpx failed"). Anchor to the sheet.
+      final box = context.findRenderObject() as RenderBox?;
+      final origin = box == null
+          ? const Rect.fromLTWH(0, 0, 1, 1)
+          : box.localToGlobal(Offset.zero) & box.size;
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'application/gpx+xml')],
         subject: r.name,
+        sharePositionOrigin: origin,
       );
     } catch (e) {
       if (mounted) setState(() => _error = 'GPX export failed: $e');
