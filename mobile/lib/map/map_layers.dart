@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
 import '../tile_sources.dart';
@@ -21,6 +22,7 @@ List<Widget> buildMapLayers({
   required bool windOn,
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
+  required List<({List<LatLng> points, Color color})> trackSegments,
   required String buildStamp,
   required double Function() viewZoom,
   int? safeDepthFt,
@@ -60,6 +62,15 @@ List<Widget> buildMapLayers({
       errorTileCallback: (tile, error, stackTrace) =>
           debugPrint('tile load failed (${base.id}): $error'),
     ),
+    // Own-boat live track (C2), under everything that moves. One polyline
+    // per same-colour run; depth mode colours shoal transits red.
+    if (trackSegments.isNotEmpty)
+      PolylineLayer(
+        polylines: [
+          for (final s in trackSegments)
+            Polyline(points: s.points, color: s.color, strokeWidth: 1.5),
+        ],
+      ),
     // Wind overlay (arrow markers, over the chart, under boat markers).
     if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
     // Active route: line from the boat to the destination.

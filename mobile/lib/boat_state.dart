@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
+import 'track.dart';
 
 /// One tank's live reading plus the two freshness timestamps the fuel page
 /// color-codes: when the app last successfully fetched the sensor, and when
@@ -78,6 +79,8 @@ class BoatState extends ChangeNotifier {
   // rebuilds that produced them.
   int aisCulled = 0;
   int aisCapped = 0;
+  // Own-boat live track (C2), recorded as positions arrive.
+  final Track track = Track();
   String status = 'Starting…';
   DateTime? lastUpdate;
   // Why the last re-dial failed, and how many attempts the current outage has
@@ -256,7 +259,12 @@ class BoatState extends ChangeNotifier {
     double? windSpeedKn,
     double? windAngleDeg,
   }) {
-    if (position != null) this.position = position;
+    if (position != null) {
+      this.position = position;
+      // Live track (C2): the Track applies its own minimum-move filter, so
+      // a moored boat doesn't accumulate points.
+      track.record(position, depthFt: depthFt ?? this.depthFt);
+    }
     if (speedKn != null) {
       this.speedKn = speedKn;
       _push('sog', speedKn);

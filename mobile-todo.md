@@ -602,7 +602,7 @@ any failure. Apply to the own-boat marker only — AIS markers keep their own ic
 
 ---
 
-### C2 · Live track behind the boat `M` `P0`
+### C2 · Live track behind the boat `M` `P0` — ✅ **done**
 
 **Files:** new `mobile/lib/track.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:2696-2703` (`depthToColor`), `2704-2745`
@@ -631,9 +631,11 @@ obvious); old features are pruned to bound memory.
    card because a track without pruning isn't shippable).
 
 **Accept.**
-- [ ] A 30-minute run leaves a visible track.
-- [ ] Depth colouring makes a shoal transit visibly red.
-- [ ] Sitting at a dock for an hour doesn't grow memory unboundedly.
+- [x] A 30-minute run leaves a visible track.
+- [x] Depth colouring makes a shoal transit visibly red (depthToColor port +
+      per-run polylines, `test/track_test.dart`).
+- [x] Sitting at a dock for an hour doesn't grow memory unboundedly
+      (3 m minimum-move filter + 20k-point oldest-first prune, tested).
 
 ---
 

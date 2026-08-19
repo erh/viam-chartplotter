@@ -23,6 +23,7 @@ import 'map/map_layers.dart';
 import 'map/wind_overlay.dart';
 import 'settings.dart';
 import 'tile_sources.dart';
+import 'track.dart';
 import 'viam_connection.dart';
 
 /// Full-screen chart with a heading-rotated boat marker. The data readouts live
@@ -76,6 +77,24 @@ class _MapScreenState extends State<MapScreen> {
 
   late final WindOverlayController _wind =
       WindOverlayController(state: widget.state);
+
+  // Cached track segments (C2): recomputed only when the track grew or the
+  // depth-colour mode flipped, not on every rebuild.
+  List<({List<LatLng> points, Color color})> _trackSegs = const [];
+  int _trackSegsForLen = -1;
+  bool _trackSegsForDepthMode = false;
+
+  List<({List<LatLng> points, Color color})> _trackSegments() {
+    final pts = widget.state.track.points;
+    final depthMode = _settings.depthColorTrack;
+    if (pts.length != _trackSegsForLen ||
+        depthMode != _trackSegsForDepthMode) {
+      _trackSegs = trackSegments(pts, colorByDepth: depthMode);
+      _trackSegsForLen = pts.length;
+      _trackSegsForDepthMode = depthMode;
+    }
+    return _trackSegs;
+  }
 
   // Cached AIS marker layer (D10): rebuilt only when the AIS set or the
   // camera changes, never on the bare 1 Hz state tick, and bounded by a
@@ -216,25 +235,41 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  /// Chart settings dialog — today just the safe depth (A2), the single most
-  /// safety-relevant chart parameter: solid coral below it, gradient to white
-  /// at 2×. Empty = the server's configured default.
+  /// Chart settings dialog: the safe depth (A2 — the single most
+  /// safety-relevant chart parameter: solid coral below it, gradient to
+  /// white at 2×; empty = the server's configured default) and the track's
+  /// depth-colour mode (C2).
   Future<void> _editChartSettings() async {
     final controller = TextEditingController(
         text: _settings.safeDepthFt?.toString() ?? '');
+    var depthColor = _settings.depthColorTrack;
     final apply = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
         title: const Text('Chart settings'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            labelText: 'Safe depth (ft)',
-            helperText: 'Shades water shallower than your draft.\n'
-                'Empty = server default.',
-          ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Safe depth (ft)',
+                helperText: 'Shades water shallower than your draft.\n'
+                    'Empty = server default.',
+              ),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Colour track by depth'),
+              subtitle: const Text('Shoal water reads red, 10 ft+ green'),
+              value: depthColor,
+              onChanged: (v) => setDialogState(() => depthColor = v),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -246,6 +281,7 @@ class _MapScreenState extends State<MapScreen> {
             child: const Text('Apply'),
           ),
         ],
+        ),
       ),
     );
     if (apply != true || !mounted) return;
@@ -254,6 +290,7 @@ class _MapScreenState extends State<MapScreen> {
       // The tile layer's key includes this value, so the chart refetches
       // with the new shading immediately.
       _settings.safeDepthFt = text.isEmpty ? null : int.tryParse(text);
+      _settings.depthColorTrack = depthColor;
     });
   }
 
@@ -340,6 +377,7 @@ class _MapScreenState extends State<MapScreen> {
               windOn: _wind.on,
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
+              trackSegments: _trackSegments(),
               buildStamp: _settings.buildStamp,
               // Fractional VIEW zoom for the OSM suppression gate (A5) —
               // deliberately not the tile z; see OsmUnderlayTileProvider.

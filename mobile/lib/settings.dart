@@ -100,6 +100,10 @@ class Settings {
   bool get windOn => _prefs.getBool('windOn') ?? false;
   set windOn(bool v) => _prefs.setBool('windOn', v);
 
+  /// Colour the own-boat track by recorded depth (C2): shoal transits red.
+  bool get depthColorTrack => _prefs.getBool('depthColorTrack') ?? false;
+  set depthColorTrack(bool v) => _prefs.setBool('depthColorTrack', v);
+
   /// Tile server base resolved from /app-config (A6), cached so the next
   /// launch starts on it without re-probing. Null = use the built-in default.
   String? get tileBaseOverride {
