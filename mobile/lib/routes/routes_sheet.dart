@@ -305,18 +305,19 @@ class _RoutesSheetState extends State<RoutesSheet> {
   /// how a route gets onto a Garmin (Garmin/GPX/*.gpx on a card).
   Future<void> _exportGpx(Route r) async {
     try {
+      // iPad presents the share sheet as a popover and REQUIRES an anchor
+      // rect — omitting sharePositionOrigin throws a PlatformException on
+      // every export there ("export to gpx failed"). Anchor to the sheet,
+      // measured before any await so the context isn't used across a gap.
+      final box = context.findRenderObject() as RenderBox?;
+      final origin = box == null
+          ? const Rect.fromLTWH(0, 0, 1, 1)
+          : box.localToGlobal(Offset.zero) & box.size;
       // The plugin temp dir, not Directory.systemTemp: the latter isn't
       // reliably writable/shareable inside the iOS sandbox.
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/${gpxFilename(r.name)}');
       await file.writeAsString(routeToGpx(r.name, r.waypoints));
-      // iPad presents the share sheet as a popover and REQUIRES an anchor
-      // rect — omitting sharePositionOrigin throws a PlatformException on
-      // every export there ("export to gpx failed"). Anchor to the sheet.
-      final box = context.findRenderObject() as RenderBox?;
-      final origin = box == null
-          ? const Rect.fromLTWH(0, 0, 1, 1)
-          : box.localToGlobal(Offset.zero) & box.size;
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'application/gpx+xml')],
         subject: r.name,
