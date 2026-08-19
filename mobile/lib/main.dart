@@ -237,6 +237,17 @@ class _ChartplotterAppState extends State<ChartplotterApp>
       title: 'Viam Chartplotter',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
+      // Clamp system text scaling (Dynamic Type / Android font size).
+      // Chart chrome is spatial instrument UI: pills, dialogs, and the
+      // drawer are laid out around the map and break outright at the
+      // accessibility sizes (3x+). Up to 1.3x still honours "larger text"
+      // for readability; past that, layouts hold instead of overflowing —
+      // the same call every marine plotter and instrument cluster makes.
+      builder: (context, child) => MediaQuery.withClampedTextScaling(
+        minScaleFactor: 1.0,
+        maxScaleFactor: 1.3,
+        child: child ?? const SizedBox.shrink(),
+      ),
       home: _home(),
     );
   }
