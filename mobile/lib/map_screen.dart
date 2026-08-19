@@ -310,6 +310,9 @@ class _MapScreenState extends State<MapScreen> {
   Map<String, RoutePreview> _routePreviews = const {};
   Set<String> _previewedRouteIds = const {};
   bool _previewShowAll = false;
+  // Save-from-track candidate (E3): the simplified geometry being previewed
+  // in the sheet's dialog — exactly what would be saved.
+  List<LatLng>? _trackCandidate;
 
   void _openRoutesSheet() {
     final api = widget.connection.navApi;
@@ -324,6 +327,12 @@ class _MapScreenState extends State<MapScreen> {
         onLoad: widget.connection.loadRouteWaypoints,
         previewedIds: _previewedRouteIds,
         showAll: _previewShowAll,
+        fetchTrack: (widget.connection.history?.hasTrackWindow ?? false)
+            ? widget.connection.history!.fetchTrackWindow
+            : null,
+        onTrackPreview: (points) {
+          if (mounted) setState(() => _trackCandidate = points);
+        },
         onPreviews: (previews, ids, showAll) {
           if (!mounted) return;
           setState(() {
@@ -1016,7 +1025,11 @@ class _MapScreenState extends State<MapScreen> {
               structures: _structuresInView,
               aisProjections: _aisProjections,
               aisTracks: _aisTracks,
-              routePreviews: _routePreviews.values.toList(),
+              routePreviews: [
+                ..._routePreviews.values,
+                if (_trackCandidate case final tc? when tc.length >= 2)
+                  (points: tc, color: Colors.tealAccent),
+              ],
               // Active nav route (E1): boat (fresh fix only) + the chain.
               activeRoutePoints: s.navWaypoints.isEmpty
                   ? const []

@@ -341,6 +341,10 @@ class ViamConnection {
         locationId: meta.locationId,
         robotId: meta.machineId,
         specs: specs,
+        // Recorded Position captures back save-from-track (E3).
+        positionComponent: _movementSensorName == null
+            ? null
+            : leaf(_movementSensorName),
       );
     } catch (_) {
       // No cloud metadata / data access → graphs stay live-only.

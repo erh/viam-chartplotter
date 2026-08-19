@@ -1,3 +1,4 @@
+import 'package:latlong2/latlong.dart';
 import 'package:viam_sdk/viam_sdk.dart';
 
 /// How to pull one metric's recorded history out of Viam tabular data: which
@@ -32,6 +33,7 @@ class HistoryService {
     required this.locationId,
     required this.robotId,
     required Map<String, HistorySpec> specs,
+    this.positionComponent,
   }) : _specs = specs;
 
   final DataClient dataClient;
@@ -40,7 +42,82 @@ class HistoryService {
   final String robotId;
   final Map<String, HistorySpec> _specs;
 
+  /// Movement-sensor leaf name whose Position captures feed the recorded
+  /// track (E3 save-from-track). Null → no track window available.
+  final String? positionComponent;
+
   bool hasMetric(String metric) => _specs.containsKey(metric);
+
+  bool get hasTrackWindow => positionComponent != null && orgId.isNotEmpty;
+
+  /// The recorded track for an explicit [t0, t1] window (web
+  /// fetchTrackWindow): bucketed Position captures, chronological. The hot
+  /// store only retains ~recent data, so it's only asked when the window's
+  /// NEWEST edge is within ~2 days — an older window goes straight to cold —
+  /// and an empty hot answer falls back to cold (the window's tail may
+  /// already have aged out).
+  Future<List<LatLng>> fetchTrackWindow(DateTime t0, DateTime t1) async {
+    final comp = positionComponent;
+    if (comp == null || orgId.isEmpty) return const [];
+    final windowMs = t1.difference(t0).inMilliseconds;
+    if (windowMs <= 0) return const [];
+    // ~2000 raw fixes across the window; simplify cuts from there.
+    final bucketMs = (windowMs / 2000).clamp(1000, 3600000).round();
+
+    final pipeline = <Map<String, dynamic>>[
+      {
+        r'$match': {
+          'location_id': locationId,
+          'robot_id': robotId,
+          'component_name': comp,
+          'method_name': 'Position',
+          'time_received': {r'$gte': t0.toUtc(), r'$lte': t1.toUtc()},
+        }
+      },
+      // Newest-first so $first picks the latest fix in each bucket (web).
+      {
+        r'$sort': {'time_received': -1}
+      },
+      {
+        r'$group': {
+          '_id': {
+            r'$floor': {
+              r'$divide': [
+                {r'$toLong': r'$time_received'},
+                bucketMs,
+              ]
+            }
+          },
+          'ts': {r'$min': r'$time_received'},
+          'pos': {r'$first': r'$data'},
+        }
+      },
+      {
+        r'$sort': {'ts': 1}
+      },
+    ];
+
+    final hotEligible =
+        t1.isAfter(DateTime.now().subtract(const Duration(days: 2)));
+    var rows = hotEligible
+        ? await _run(pipeline, hot: true)
+        : const <Map<String, dynamic>>[];
+    if (rows.isEmpty) rows = await _run(pipeline, hot: false);
+
+    final out = <({DateTime t, LatLng p})>[];
+    for (final r in rows) {
+      final ts = _asDate(r['ts']);
+      final pos = r['pos'];
+      final coord = pos is Map ? pos['coordinate'] : null;
+      final lat = coord is Map ? coord['latitude'] : null;
+      final lng = coord is Map ? coord['longitude'] : null;
+      if (ts != null && lat is num && lng is num) {
+        out.add((t: ts, p: LatLng(lat.toDouble(), lng.toDouble())));
+      }
+    }
+    out.sort((a, b) => a.t.compareTo(b.t));
+    return [for (final e in out) e.p];
+  }
 
   /// Fetch bucketed history for [metric] over the trailing [window], in
   /// chronological order and already unit-converted. Returns an empty list on

@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
 import '../chart/areas.dart' show parseCssColor;
+import '../simplify.dart';
 import 'route_store.dart';
 
 /// A route preview to draw on the chart (display-only, dashed).
@@ -24,6 +25,8 @@ class RoutesSheet extends StatefulWidget {
     required this.onPreviews,
     this.previewedIds = const {},
     this.showAll = false,
+    this.fetchTrack,
+    this.onTrackPreview,
   });
 
   final BoatState state;
@@ -42,6 +45,14 @@ class RoutesSheet extends StatefulWidget {
   /// Previously-previewed route ids / show-all, restored on reopen.
   final Set<String> previewedIds;
   final bool showAll;
+
+  /// Recorded track for an explicit window (E3 save-from-track), from the
+  /// cloud data store. Null (API-key path / no movement sensor) hides the
+  /// feature.
+  final Future<List<LatLng>> Function(DateTime t0, DateTime t1)? fetchTrack;
+
+  /// Show the simplified candidate route on the chart (null clears it).
+  final void Function(List<LatLng>? points)? onTrackPreview;
 
   @override
   State<RoutesSheet> createState() => _RoutesSheetState();
@@ -284,6 +295,155 @@ class _RoutesSheetState extends State<RoutesSheet> {
         ));
   }
 
+  /// Save-from-track (E3): pick a window ending now, pull the recorded
+  /// track, simplify (Douglas–Peucker via simplifyTrack), preview on the
+  /// chart, save with source "track". The preview IS the saved geometry —
+  /// both come from the same simplified list.
+  Future<void> _saveFromTrack() async {
+    final fetch = widget.fetchTrack;
+    if (fetch == null) return;
+    final nameCtl = TextEditingController();
+    var hours = 4;
+    var granularityM = 50;
+    List<LatLng>? raw; // fetched window, cached across granularity changes
+    SimplifiedTrack? simplified;
+    var fetching = false;
+    String? err;
+
+    SimplifiedTrack? resimplify() => raw == null || raw!.isEmpty
+        ? null
+        : simplifyTrack(
+            raw!,
+            SimplifyOptions(
+                granularityMeters: granularityM.toDouble(), maxPoints: 200));
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> doFetch() async {
+            setDialogState(() {
+              fetching = true;
+              err = null;
+            });
+            try {
+              final now = DateTime.now();
+              raw = await fetch(now.subtract(Duration(hours: hours)), now);
+              simplified = resimplify();
+              widget.onTrackPreview?.call(simplified?.waypoints);
+              if (raw!.isEmpty) err = 'No recorded track in that window.';
+            } catch (e) {
+              err = 'Track fetch failed: $e';
+            }
+            setDialogState(() => fetching = false);
+          }
+
+          final s = simplified;
+          return AlertDialog(
+            title: const Text('Route from track'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(child: Text('Window')),
+                    DropdownButton<int>(
+                      value: hours,
+                      items: [
+                        for (final h in const [1, 2, 4, 8, 12, 24, 48])
+                          DropdownMenuItem(value: h, child: Text('last ${h}h')),
+                      ],
+                      onChanged: (v) =>
+                          setDialogState(() => hours = v ?? hours),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Expanded(child: Text('Granularity')),
+                    DropdownButton<int>(
+                      value: granularityM,
+                      items: [
+                        for (final g in const [25, 50, 100, 250, 500])
+                          DropdownMenuItem(value: g, child: Text('$g m')),
+                      ],
+                      onChanged: (v) {
+                        setDialogState(() {
+                          granularityM = v ?? granularityM;
+                          simplified = resimplify();
+                        });
+                        widget.onTrackPreview?.call(simplified?.waypoints);
+                      },
+                    ),
+                  ],
+                ),
+                TextButton.icon(
+                  onPressed: fetching ? null : doFetch,
+                  icon: fetching
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.download),
+                  label: const Text('Fetch & preview'),
+                ),
+                if (err != null)
+                  Text(err!, style: const TextStyle(color: Colors.redAccent)),
+                if (s != null && s.waypoints.isNotEmpty) ...[
+                  Text('${s.inputCount} fixes → ${s.waypoints.length} '
+                      'waypoints · '
+                      '${(pathLengthMeters(s.waypoints) / 1852).toStringAsFixed(1)} nm'),
+                  if (s.capped)
+                    const Text(
+                      'Hit the waypoint cap — raise granularity for detail.',
+                      style: TextStyle(color: Colors.orangeAccent),
+                    ),
+                ],
+                TextField(
+                  controller: nameCtl,
+                  decoration: const InputDecoration(labelText: 'Route name'),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                onPressed: (s != null &&
+                        s.waypoints.length >= 2 &&
+                        !fetching)
+                    ? () => Navigator.pop(ctx, true)
+                    : null,
+                child: const Text('Save route'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    final s = simplified;
+    final name = nameCtl.text.trim();
+    if (saved == true && s != null && s.waypoints.length >= 2) {
+      final now = DateTime.now().toUtc().toIso8601String();
+      await _withStore((api) => saveRoute(
+            api,
+            Route(
+              id: newRouteId(),
+              name: name.isEmpty ? 'Track route' : name,
+              color: nextColor(_routes),
+              source: 'track',
+              createdAt: now,
+              updatedAt: now,
+              waypoints: s.waypoints,
+            ),
+          ));
+    }
+    widget.onTrackPreview?.call(null); // candidate gone; the list previews it
+  }
+
   String _subtitle(Route r) {
     final n = r.count ?? r.waypoints.length;
     final parts = [
@@ -426,6 +586,12 @@ class _RoutesSheetState extends State<RoutesSheet> {
                     onPressed: _busy ? null : _saveCurrent,
                     icon: const Icon(Icons.save_alt),
                     label: Text('Save current (${activeWps.length})'),
+                  ),
+                if (widget.fetchTrack != null)
+                  TextButton.icon(
+                    onPressed: _busy ? null : _saveFromTrack,
+                    icon: const Icon(Icons.timeline),
+                    label: const Text('From track'),
                   ),
                 const Spacer(),
                 TextButton.icon(

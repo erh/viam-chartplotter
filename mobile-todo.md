@@ -1171,10 +1171,10 @@ explicit `[t0, t1]` bounds and the same hot→cold fallback rule (**hot only if
 the window's newest edge is within ~2 days**, else straight to cold).
 
 **Accept.**
-- [ ] A recorded run becomes a route with a sane waypoint count (tens, not
+- [x] A recorded run becomes a route with a sane waypoint count (tens, not
       thousands).
-- [ ] The preview matches what gets saved.
-- [ ] `simplify.test.ts`'s cases pass in Dart.
+- [x] The preview matches what gets saved.
+- [x] `simplify.test.ts`'s cases pass in Dart.
 
 ---
 
