@@ -11,7 +11,11 @@ void main() {
       final pts = headingLinePoints(from, 45, nm.toDouble());
       expect(pts.first, from);
       final meters = d.distance(from, pts.last);
-      expect(meters, closeTo(nm * 1852.0, nm * 1852.0 * 0.001),
+      // 0.5% tolerance: latlong2's offset (spherical) and distance
+      // (ellipsoidal in some releases) use slightly different earth models,
+      // and the resolved point-release differs between local and CI (the
+      // app's pubspec.lock is gitignored).
+      expect(meters, closeTo(nm * 1852.0, nm * 1852.0 * 0.005),
           reason: '$nm nm');
     }
   });
@@ -37,7 +41,7 @@ void main() {
         (ticks[i][0].latitude + ticks[i][1].latitude) / 2,
         (ticks[i][0].longitude + ticks[i][1].longitude) / 2,
       );
-      expect(d.distance(from, mid), closeTo((i + 1) * 1852.0, 20),
+      expect(d.distance(from, mid), closeTo((i + 1) * 1852.0, (i + 1) * 12.0),
           reason: 'tick \${i + 1}');
       // Across the line: the tick's own bearing is ~heading ± 90.
       final tickBrg = (d.bearing(ticks[i][0], ticks[i][1]) + 360) % 360;
