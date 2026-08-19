@@ -265,7 +265,8 @@ All P0s are done at the end of M3 (~5.5 wk).
 Small, no new subsystems, high leverage. The chart stops being subtly wrong and
 the app stops forgetting everything on launch.
 
-### A1 · Zoom-tiered chart tile params `S` `P0`
+### A1 · Zoom-tiered chart tile params `S` `P0` — ✅ **done** (screenshot
+comparison against web still worth an on-water check)
 
 **Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:3730-3795`
@@ -304,9 +305,10 @@ requested below z7.
 
 **Accept.**
 - [ ] Screenshots at z9 / z13 / z15 match the web app's chart at the same
-      position and zoom.
+      position and zoom. *(manual, on-water)*
 - [x] No request contains `landfill=`.
-- [ ] No tile request is issued below z7.
+- [x] No tile request is issued below z7 (`minZoom: 7` on the checkmate
+      TileSource; provider covered by `test/tile_params_test.dart`).
 
 **Watch out.** `flutter_map` `coords.z` is the *tile* z; the web app
 deliberately gates on the **view** zoom for the OSM suppression (A5) because OL
@@ -397,7 +399,7 @@ only on event handlers, capped at 1500 (`_rebuildWindMarkers`). AIS didn't.
 
 ---
 
-### J6 · Persist map and tool state `S` `P0`
+### J6 · Persist map and tool state `S` `P0` — ✅ **done**
 
 **Files:** new `mobile/lib/settings.dart`, `mobile/lib/map_screen.dart`
 **Web ref:** `src/marineMap.svelte:272-284` (keys), `292-320`, `364-420`
@@ -436,8 +438,9 @@ Every loader validates and falls back to the default on garbage — do the same.
    only auto-centre when there is no persisted view.
 
 **Accept.**
-- [ ] Kill and relaunch: same position, zoom, base layer, orientation.
-- [ ] Corrupt a stored value by hand → app launches on defaults, no crash.
+- [x] Kill and relaunch: same position, zoom, base layer, orientation.
+- [x] Corrupt a stored value by hand → app launches on defaults, no crash
+      (`test/settings_test.dart`).
 
 ---
 
