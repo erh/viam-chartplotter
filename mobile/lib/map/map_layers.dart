@@ -126,7 +126,8 @@ List<Widget> buildMapLayers({
             child: state.usingPhoneGps
                 ? const PhoneGpsMarker()
                 : BoatMarker(
-                    headingDeg: (state.headingDeg ?? 0) + rotationDeg),
+                    headingDeg:
+                        (state.effectiveHeadingDeg ?? 0) + rotationDeg),
           ),
         ],
       ),

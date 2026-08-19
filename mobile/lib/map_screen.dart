@@ -504,12 +504,13 @@ class _MapScreenState extends State<MapScreen> {
               aisMarkers: _aisMarkers,
               trackSegments: _trackSegments(),
               // Heading line only off a live BOAT fix — a stale heading off
-              // the phone's position would be a lie (L5).
+              // the phone's position would be a lie (L5). Uses the effective
+              // heading (COG under way), like the web app.
               headingLine: (_settings.headingLineOn &&
                       s.boatFixFresh &&
                       s.position != null &&
-                      s.headingDeg != null)
-                  ? headingLinePoints(s.position!, s.headingDeg!,
+                      s.effectiveHeadingDeg != null)
+                  ? headingLinePoints(s.position!, s.effectiveHeadingDeg!,
                       _settings.headingLineLengthNm.toDouble())
                   : const [],
               buildStamp: _settings.buildStamp,

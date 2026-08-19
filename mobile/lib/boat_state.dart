@@ -98,6 +98,13 @@ class BoatState extends ChangeNotifier {
   /// The phone's fix is standing in for the boat's.
   bool get usingPhoneGps => !boatFixFresh && phonePosition != null;
 
+  /// Orientation to draw the boat with — web parity (src/App.svelte myBoat):
+  /// under way (SOG > 1 kn) course-over-ground is the truth, since current
+  /// and leeway make the compass disagree with the actual motion; below
+  /// 1 kn COG is GPS noise, so the compass heading wins.
+  double? get effectiveHeadingDeg =>
+      ((speedKn ?? 0) > 1 && cogDeg != null) ? cogDeg : headingDeg;
+
   /// What the map should mark as "here": the boat's fresh fix, else the
   /// phone's, else the boat's last known.
   LatLng? get displayPosition =>
