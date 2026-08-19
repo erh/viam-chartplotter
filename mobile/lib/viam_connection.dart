@@ -96,6 +96,27 @@ class ViamConnection {
   Timer? _timer;
   int _tickN = 0;
   bool _polling = false;
+  // Adaptive polling (L3): the 1 Hz timer always fires (so stuck-poll
+  // detection stays second-granular), but poll execution is gated by
+  // [pollEvery]. _tickN advances only on executed polls, so every staggered
+  // sub-cadence (%5 AIS/systems, %30 status, …) stretches with it.
+  int _timerTicks = 0;
+  DateTime _lastMovingAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Under way within the last two minutes — the grace keeps the cadence
+  /// from flapping while drifting through the moving threshold.
+  bool get _moving =>
+      DateTime.now().difference(_lastMovingAt) < const Duration(minutes: 2);
+
+  /// Seconds between poll sweeps (L3): full rate under way, backed off hard
+  /// at anchor, stretched again in low-data mode. The watchdog pattern is
+  /// intact — every RPC stays deadline-bounded and heartbeats are noted the
+  /// moment they're known — but at anchor death detection is allowed to take
+  /// two of these intervals instead of two seconds.
+  static int pollEvery({required bool moving, required bool lowData}) {
+    if (moving) return lowData ? 2 : 1;
+    return lowData ? 10 : 5;
+  }
   bool _ownsRobot = false; // close it on dispose only if we dialed it
 
   // ---- connection health ----------------------------------------------
@@ -242,6 +263,9 @@ class ViamConnection {
   Future<void> _afterConnect() async {
     final robot = _robot;
     if (robot == null) return;
+    // Fresh connect polls at full rate until the boat proves stationary —
+    // the first minutes after opening the app should never feel throttled.
+    _lastMovingAt = DateTime.now();
     await _loadHiddenComponents();
     await _discover(robot);
     _setConnectedStatus();
@@ -622,6 +646,15 @@ class ViamConnection {
       }
       return;
     }
+    // Adaptive cadence (L3), after the health checks above so a stuck poll
+    // is still noticed every second even at anchor.
+    _timerTicks++;
+    if (_timerTicks %
+            pollEvery(
+                moving: _moving, lowData: Settings.instance.lowDataOn) !=
+        0) {
+      return;
+    }
     _polling = true;
     _tickN++;
     try {
@@ -660,6 +693,7 @@ class ViamConnection {
   /// WebRTC peer hangs rather than failing, and a single hung read used to
   /// wedge the loop until a 15 s watchdog noticed.
   Future<void> _pollOnce(RobotClient robot, String? msName) async {
+    state.pollSweeps++; // session data-budget counter (L3)
     var ok = false;
     // The heartbeat blew its deadline rather than being refused. That means
     // the link is hung, not that one sensor is unhappy — nothing else on this
@@ -687,7 +721,11 @@ class ViamConnection {
 
       try {
         final v = await ms.linearVelocity().timeout(_sensorTimeout);
-        state.update(speedKn: v.y * 1.94384);
+        final kn = v.y * 1.94384;
+        state.update(speedKn: kn);
+        // Above ~0.7 kn the boat is genuinely under way (below is GPS
+        // noise/drift) — this is what holds the poll rate at 1 Hz (L3).
+        if (kn > 0.7) _lastMovingAt = DateTime.now();
       } catch (_) {}
 
       try {
@@ -790,6 +828,7 @@ class ViamConnection {
         (_aisSensorName != null || _aisWebSenderNames.isNotEmpty)) {
       // Receiver AIS keyed by MMSI; web senders (D6) keyed by user id —
       // merged web-last so a target reported by both keeps one entry.
+      state.aisFetches++;
       final byId = <String, AisBoat>{};
       final aisName = _aisSensorName;
       if (aisName != null) {

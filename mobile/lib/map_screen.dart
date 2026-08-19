@@ -763,6 +763,7 @@ class _MapScreenState extends State<MapScreen> {
     var projMin = _settings.aisProjectionMin;
     var aisTracks = _settings.aisTracksOn;
     var webSenders = _settings.webSendersOn;
+    var lowData = _settings.lowDataOn;
     final areaToggles = Map<String, bool>.of(_areaOn);
     final apply = await showDialog<bool>(
       context: context,
@@ -808,6 +809,13 @@ class _MapScreenState extends State<MapScreen> {
               subtitle: const Text('History trails behind targets'),
               value: aisTracks,
               onChanged: (v) => setDialogState(() => aisTracks = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Low data mode'),
+              subtitle: const Text('Slower polling for metered links'),
+              value: lowData,
+              onChanged: (v) => setDialogState(() => lowData = v),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -923,6 +931,7 @@ class _MapScreenState extends State<MapScreen> {
       _settings.aisProjectionMin = projMin;
       _settings.aisTracksOn = aisTracks;
       _settings.webSendersOn = webSenders;
+      _settings.lowDataOn = lowData;
       _areaOn
         ..clear()
         ..addAll(areaToggles);

@@ -116,6 +116,11 @@ class Settings {
   bool get webSendersOn => _prefs.getBool('webSendersOn') ?? true;
   set webSendersOn(bool v) => _prefs.setBool('webSendersOn', v);
 
+  /// Low data mode (L3): stretch every poll cadence and lean on the tile
+  /// cache — for metered cellular/satellite links offshore.
+  bool get lowDataOn => _prefs.getBool('lowDataOn') ?? false;
+  set lowDataOn(bool v) => _prefs.setBool('lowDataOn', v);
+
   /// AIS history tracks (D1): gates both the drawing and the 60 s
   /// all_history poll (web: the ais-track layer / aisTracksNeeded, default
   /// off).

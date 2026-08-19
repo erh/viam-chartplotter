@@ -4,6 +4,8 @@ import 'auth/oauth_config.dart';
 import 'app_config.dart';
 import 'boat_state.dart';
 import 'config.dart';
+import 'map/tile_cache.dart';
+import 'settings.dart';
 
 /// Developer/diagnostics view — reached by tapping the connection status chip.
 /// Shows which component each reading was auto-discovered from, plus connection
@@ -33,6 +35,18 @@ class DebugScreen extends StatelessWidget {
               _Row('AIS not drawn',
                   '${state.aisCulled} off-screen, ${state.aisCapped} over cap'),
             _Row('Wind', state.windInfo),
+            const SizedBox(height: 16),
+            // Session data budget (L3) — the instrumentation for the
+            // "1 hour under way" baseline: read these after a run.
+            const _Section('Data this session'),
+            _Row('Poll sweeps', '${state.pollSweeps}'),
+            _Row('AIS fetches', '${state.aisFetches}'),
+            if (TileDiskCache.instance case final c?) ...[
+              _Row('Tile downloads',
+                  '${c.misses} (${(c.netBytes / (1024 * 1024)).toStringAsFixed(1)} MB)'),
+              _Row('Tile cache hits', '${c.hits}'),
+            ],
+            _Row('Low data mode', Settings.instance.lowDataOn ? 'on' : 'off'),
             const SizedBox(height: 16),
             const _Section('Component health'),
             if (state.resourceHealth.isEmpty)

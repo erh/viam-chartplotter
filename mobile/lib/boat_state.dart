@@ -83,6 +83,12 @@ class BoatState extends ChangeNotifier {
   // rebuilds that produced them.
   int aisCulled = 0;
   int aisCapped = 0;
+  // Session data-budget counters (L3), plain fields for the debug screen:
+  // how many poll sweeps ran and how many (heavy) AIS fetches went out.
+  // Tile bytes live on TileDiskCache. Together these are the baseline
+  // instrumentation for the "1 hour under way" measurement.
+  int pollSweeps = 0;
+  int aisFetches = 0;
   // Own-boat live track (C2), recorded as positions arrive.
   final Track track = Track();
 

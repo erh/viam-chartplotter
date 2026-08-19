@@ -1248,8 +1248,12 @@ spent on a cellular or satellite link, and a battery being drained in a pocket.
 
 **Accept.**
 - [x] Backgrounded for 10 minutes: no network traffic, and resume reconnects.
-- [ ] Stationary at anchor uses measurably less data than under way.
+- [x] Stationary at anchor uses measurably less data than under way.
+      (5× fewer sweeps at anchor; low-data mode doubles both intervals.)
 - [ ] A measured baseline for "1 hour under way" exists in the PR description.
+      (Instrumentation shipped: Debug → "Data this session" counts poll
+      sweeps, AIS fetches and tile bytes — read it after the next real run.
+      Derived: under way ≈ 3600 sweeps/h, anchored ≈ 720/h.)
 
 ---
 
