@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/painting.dart';
 import 'package:flutter_map/flutter_map.dart';
 
+import 'tile_cache.dart';
 import 'us_enc_coverage.dart';
 
 /// The canonical 1×1 transparent PNG — served in place of suppressed tiles.
@@ -40,6 +41,8 @@ class OsmUnderlayTileProvider extends TileProvider {
         tileFullyInUSWaters(coordinates.z, coordinates.x, coordinates.y)) {
       return MemoryImage(_transparentPng);
     }
-    return NetworkImage(getTileUrl(coordinates, options), headers: headers);
+    // Disk-cached like the chart tiles (L1) — offshore, yesterday's OSM
+    // land beats a blank border strip.
+    return CachedTileImage(getTileUrl(coordinates, options), headers);
   }
 }

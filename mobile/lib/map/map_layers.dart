@@ -66,9 +66,9 @@ List<Widget> buildMapLayers({
       urlTemplate: base.urlTemplate,
       // Chart tiles vary their query params by tile zoom (A1) and carry the
       // cache-buster + safe depth (A3/A2); other layers use the plain
-      // template with the default network provider.
+      // template. Both go through the disk cache (L1).
       tileProvider: base.paramsForZoom == null
-          ? null
+          ? CachingTileProvider()
           : ZoomParamsTileProvider((z) => chartTileUrlParams(z,
               buildStamp: buildStamp, safeDepthFt: safeDepthFt)),
       minZoom: base.minZoom.toDouble(),

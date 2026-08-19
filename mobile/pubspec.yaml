@@ -32,6 +32,10 @@ dependencies:
   # GPX export hands the file to the platform share sheet (E4) — the mobile
   # equivalent of the web download, and how a route gets onto a Garmin.
   share_plus: ^10.0.0
+  # Tile disk cache (L1): SHA-1 keys + the platform cache directory. Both
+  # were already transitive; promoted because lib/ imports them directly.
+  crypto: ^3.0.0
+  path_provider: ^2.1.0
 
 dev_dependencies:
   flutter_test:

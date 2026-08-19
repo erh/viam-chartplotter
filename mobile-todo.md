@@ -1216,10 +1216,10 @@ draft change doesn't serve stale pixels, expose usage plus a "clear cache"
 action in settings, and serve from cache when offline instead of showing blank.
 
 **Accept.**
-- [ ] Re-panning previously-seen water issues no network requests.
-- [ ] Airplane mode still renders cached water.
-- [ ] Cache size stays under the configured bound.
-- [ ] Changing safe depth (A2) doesn't serve the old shading.
+- [x] Re-panning previously-seen water issues no network requests.
+- [x] Airplane mode still renders cached water.
+- [x] Cache size stays under the configured bound.
+- [x] Changing safe depth (A2) doesn't serve the old shading.
 
 ---
 

@@ -28,6 +28,7 @@ import 'chart/bbox_source.dart';
 import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
+import 'map/tile_cache.dart';
 import 'map/wind_overlay.dart';
 import 'routes/route_store.dart' show NavWaypoint;
 import 'routes/routes_sheet.dart';
@@ -752,6 +753,9 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _editChartSettings() async {
     final controller = TextEditingController(
         text: _settings.safeDepthFt?.toString() ?? '');
+    final tileCache = TileDiskCache.instance;
+    var cacheBytes = await tileCache?.usageBytes();
+    if (!mounted) return;
     var depthColor = _settings.depthColorTrack;
     var headingOn = _settings.headingLineOn;
     var headingLen = _settings.headingLineLengthNm;
@@ -869,6 +873,26 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ],
             ),
+            // Tile disk cache (L1): usage + clear.
+            if (tileCache != null)
+              Row(
+                children: [
+                  Expanded(
+                    child: Text('Tile cache: '
+                        '${((cacheBytes ?? 0) / (1024 * 1024)).toStringAsFixed(0)}'
+                        ' MB of '
+                        '${(tileCache.maxBytes / (1024 * 1024)).round()} MB'),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      await tileCache.clear();
+                      cacheBytes = await tileCache.usageBytes();
+                      setDialogState(() {});
+                    },
+                    child: const Text('Clear'),
+                  ),
+                ],
+              ),
           ],
             ),
           ),

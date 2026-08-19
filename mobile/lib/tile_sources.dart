@@ -1,6 +1,8 @@
+import 'package:flutter/painting.dart' show ImageProvider;
 import 'package:flutter_map/flutter_map.dart';
 
 import 'app_config.dart';
+import 'map/tile_cache.dart';
 
 /// Base map layers, each an XYZ raster URL into the existing Go tile server
 /// (or, for satellite, Esri). This is the crux of the port: the phone renders
@@ -63,10 +65,20 @@ String chartTileUrlParams(
   return sb.toString();
 }
 
-/// A [NetworkTileProvider] whose tile URL is the layer's urlTemplate plus
+/// Disk-cached network tile provider (L1): every fetched tile lands in
+/// [TileDiskCache], fresh hits skip the network entirely, and stale hits
+/// paper over an offline stretch. The key is the FULL URL — including `v=`
+/// and `sd=` — so version/draft changes never serve old pixels.
+class CachingTileProvider extends TileProvider {
+  @override
+  ImageProvider getImage(TileCoordinates coordinates, TileLayer options) =>
+      CachedTileImage(getTileUrl(coordinates, options), headers);
+}
+
+/// A [CachingTileProvider] whose tile URL is the layer's urlTemplate plus
 /// per-tile-zoom query params — flutter_map's equivalent of the web app's
 /// tileUrlFunction.
-class ZoomParamsTileProvider extends NetworkTileProvider {
+class ZoomParamsTileProvider extends CachingTileProvider {
   ZoomParamsTileProvider(this.paramsForZoom);
 
   final String Function(int z) paramsForZoom;

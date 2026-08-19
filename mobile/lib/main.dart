@@ -11,6 +11,7 @@ import 'boat_state.dart';
 import 'connect.dart';
 import 'app_config.dart';
 import 'config.dart';
+import 'map/tile_cache.dart';
 import 'map_screen.dart';
 import 'phone_gps.dart';
 import 'tides.dart';
@@ -28,6 +29,9 @@ Future<void> main() async {
   if (Settings.instance.safeDepthFt == null && Config.safeDepthFt.isNotEmpty) {
     Settings.instance.safeDepthFt = int.tryParse(Config.safeDepthFt);
   }
+  // Tile disk cache (L1): previously-seen water renders without network,
+  // including fully offline. Failure just means uncached tiles.
+  await TileDiskCache.init();
   runApp(const ChartplotterApp());
 }
 
