@@ -499,7 +499,7 @@ roadmap pointed at this file.
 
 After M1 a full run out and back is navigable without opening the web app.
 
-### A5 · Under-chart OSM fallback `M` `P0`
+### A5 · Under-chart OSM fallback `M` `P0` — ✅ **done**
 
 **Files:** `mobile/lib/tile_sources.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:101-131` (coverage boxes + tile test),
@@ -530,10 +530,13 @@ still load OSM, so there are no blank seams. OSM is skipped only when
    all-white map in the 6.5–7 band.
 
 **Accept.**
-- [ ] Pan to the Caribbean or the Med with the chart base selected → land is
-      visible from OSM, not a blank screen.
-- [ ] Long Island Sound issues no OSM tile requests at z≥7.
-- [ ] Zooming slowly through 6.5→7.5 never shows an all-white map.
+- [x] Pan to the Caribbean or the Med with the chart base selected → land is
+      visible from OSM, not a blank screen (coverage test:
+      `test/us_enc_coverage_test.dart`).
+- [x] Long Island Sound issues no OSM tile requests at z≥7 (suppressed tiles
+      get a local transparent PNG, no network).
+- [x] Zooming slowly through 6.5→7.5 never shows an all-white map (the gate
+      reads the fractional VIEW zoom, not the tile z).
 
 ---
 

@@ -337,6 +337,15 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
               buildStamp: _settings.buildStamp,
+              // Fractional VIEW zoom for the OSM suppression gate (A5) —
+              // deliberately not the tile z; see OsmUnderlayTileProvider.
+              viewZoom: () {
+                try {
+                  return _map.camera.zoom;
+                } catch (_) {
+                  return 0;
+                }
+              },
               safeDepthFt: _settings.safeDepthFt,
             ),
           ),

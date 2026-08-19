@@ -4,6 +4,7 @@ import 'package:flutter_map/flutter_map.dart';
 import '../boat_state.dart';
 import '../tile_sources.dart';
 import 'boat_marker.dart';
+import 'osm_underlay.dart';
 
 /// Builds the FlutterMap child stack, bottom to top: chart tiles, weather,
 /// route, AIS, own boat.
@@ -20,9 +21,23 @@ List<Widget> buildMapLayers({
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
   required String buildStamp,
+  required double Function() viewZoom,
   int? safeDepthFt,
 }) {
   return [
+    // Under-chart OSM fallback (A5): charts only cover US waters, so keep
+    // OSM underneath and let the provider suppress the fetch for tiles the
+    // opaque chart fully covers.
+    if (base.isChart)
+      TileLayer(
+        key: const ValueKey('osm-underlay'),
+        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        tileProvider: OsmUnderlayTileProvider(viewZoom: viewZoom),
+        maxNativeZoom: 19,
+        userAgentPackageName: 'com.viam.chartplotter.mobile',
+        errorTileCallback: (tile, error, stackTrace) =>
+            debugPrint('osm underlay tile failed: $error'),
+      ),
     TileLayer(
       // The safe depth participates in the key so changing it drops
       // flutter_map's in-memory tile cache and refetches the reshaded

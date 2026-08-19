@@ -85,12 +85,17 @@ class TileSource {
     this.minZoom = 0,
     this.maxZoom = 19,
     this.paramsForZoom,
+    this.isChart = false,
   });
   final String id;
   final String label;
   final String urlTemplate;
   final int minZoom;
   final int maxZoom;
+
+  /// A NOAA chart render: only covers US waters, so it gets the OSM
+  /// under-layer as a fallback for everywhere else (A5).
+  final bool isChart;
 
   /// When set, tiles are fetched as `urlTemplate?paramsForZoom(tileZ)` via
   /// [ZoomParamsTileProvider] instead of the bare template.
@@ -124,6 +129,7 @@ List<TileSource> baseLayersFor(String tileBase) => [
     minZoom: 7,
     maxZoom: 16,
     paramsForZoom: chartTileParams,
+    isChart: true,
   ),
   // Plain NOAA ENC render (default WMS style, solid land fills) — a fallback if
   // the merged Checkmate tiles look off on a given tile server.
@@ -132,6 +138,7 @@ List<TileSource> baseLayersFor(String tileBase) => [
     'NOAA ENC',
     '$tileBase/noaa-enc/tile/{z}/{x}/{y}.png',
     maxZoom: 16,
+    isChart: true,
   ),
   // OSM land underlay served by the same module.
   TileSource(
