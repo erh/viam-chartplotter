@@ -51,8 +51,52 @@ class MapRoundButton extends StatelessWidget {
   }
 }
 
-/// Base-layer picker. Currently a dropdown over [baseLayers]; when the layer
-/// count grows past a handful this becomes the layers sheet (task J5).
+/// A [MapRoundButton] that opens a popup menu instead of firing an action —
+/// how the toolbar stays a short column of icons instead of a wall of them.
+class MapMenuButton<T> extends StatelessWidget {
+  const MapMenuButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.itemBuilder,
+    required this.onSelected,
+    this.active = false,
+    this.busy = false,
+  });
+  final IconData icon;
+  final String tooltip;
+  final List<PopupMenuEntry<T>> Function(BuildContext) itemBuilder;
+  final ValueChanged<T> onSelected;
+  final bool active;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: active
+          ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.85)
+          : Colors.black.withValues(alpha: 0.6),
+      shape: const CircleBorder(),
+      child: PopupMenuButton<T>(
+        tooltip: tooltip,
+        enabled: !busy,
+        itemBuilder: itemBuilder,
+        onSelected: onSelected,
+        icon: busy
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white),
+              )
+            : Icon(icon, color: Colors.white),
+      ),
+    );
+  }
+}
+
+/// Base-layer picker as a single icon (the labeled dropdown ate a corner of
+/// the chart); the menu checks the active layer.
 class LayerSwitcher extends StatelessWidget {
   const LayerSwitcher({
     super.key,
@@ -64,26 +108,18 @@ class LayerSwitcher extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<TileSource>(
-          value: current,
-          dropdownColor: Colors.black87,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          style: const TextStyle(color: Colors.white),
-          items: [
-            for (final t in baseLayers)
-              DropdownMenuItem(value: t, child: Text(t.label)),
-          ],
-          onChanged: (t) {
-            if (t != null) onChanged(t);
-          },
-        ),
-      ),
+    return MapMenuButton<TileSource>(
+      icon: Icons.layers,
+      tooltip: 'Base layer (${current.label})',
+      itemBuilder: (_) => [
+        for (final t in baseLayers)
+          CheckedPopupMenuItem(
+            value: t,
+            checked: t == current,
+            child: Text(t.label),
+          ),
+      ],
+      onSelected: onChanged,
     );
   }
 }

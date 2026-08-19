@@ -1552,29 +1552,37 @@ class _MapScreenState extends State<MapScreen> {
                       active: _courseUp,
                       onTap: _toggleOrientation,
                     ),
+                    // One weather button for wind/waves/isobars — three
+                    // separate toggles made the column taller than the
+                    // screen on small phones.
                     const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.air,
-                      tooltip: 'Wind',
-                      active: _wind.on,
-                      busy: _wind.loading,
-                      onTap: _toggleWind,
-                    ),
-                    const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.waves,
-                      tooltip: 'Waves',
-                      active: _wind.wavesOn,
-                      busy: _wind.waveLoading,
-                      onTap: _toggleWaves,
-                    ),
-                    const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.fingerprint,
-                      tooltip: 'Isobars (pressure)',
-                      active: _wind.isobarsOn,
-                      busy: _wind.isobarLoading,
-                      onTap: _toggleIsobars,
+                    MapMenuButton<String>(
+                      icon: Icons.cloud,
+                      tooltip: 'Weather overlays',
+                      active:
+                          _wind.on || _wind.wavesOn || _wind.isobarsOn,
+                      busy: _wind.loading ||
+                          _wind.waveLoading ||
+                          _wind.isobarLoading,
+                      itemBuilder: (_) => [
+                        CheckedPopupMenuItem(
+                            value: 'wind',
+                            checked: _wind.on,
+                            child: const Text('Wind')),
+                        CheckedPopupMenuItem(
+                            value: 'waves',
+                            checked: _wind.wavesOn,
+                            child: const Text('Waves')),
+                        CheckedPopupMenuItem(
+                            value: 'isobars',
+                            checked: _wind.isobarsOn,
+                            child: const Text('Isobars')),
+                      ],
+                      onSelected: (v) => switch (v) {
+                        'wind' => _toggleWind(),
+                        'waves' => _toggleWaves(),
+                        _ => _toggleIsobars(),
+                      },
                     ),
                     if (widget.connection.navApi != null) ...[
                       const SizedBox(height: 8),
@@ -1584,65 +1592,67 @@ class _MapScreenState extends State<MapScreen> {
                         onTap: _openRoutesSheet,
                       ),
                     ],
+                    // Everything used less than once an hour lives in the
+                    // overflow menu.
                     const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.straighten,
-                      tooltip: 'Measure distance/bearing',
-                      active: _measureMode,
-                      onTap: _toggleMeasure,
+                    MapMenuButton<String>(
+                      icon: Icons.more_horiz,
+                      tooltip: 'More',
+                      active: _measureMode || _nightMode,
+                      itemBuilder: (_) => [
+                        CheckedPopupMenuItem(
+                            value: 'measure',
+                            checked: _measureMode,
+                            child: const Text('Measure')),
+                        CheckedPopupMenuItem(
+                            value: 'night',
+                            checked: _nightMode,
+                            child: const Text('Night mode')),
+                        if (s.cameraNames.isNotEmpty &&
+                            widget.connection.robot != null)
+                          const PopupMenuItem(
+                              value: 'cameras', child: Text('Cameras…')),
+                        if (s.tanks.isNotEmpty)
+                          const PopupMenuItem(
+                              value: 'fuel', child: Text('Fuel…')),
+                        const PopupMenuItem(
+                            value: 'settings',
+                            child: Text('Chart settings…')),
+                        if (widget.onSwitchBoat != null)
+                          const PopupMenuItem(
+                              value: 'switch', child: Text('Switch boat…')),
+                      ],
+                      onSelected: (v) {
+                        switch (v) {
+                          case 'measure':
+                            _toggleMeasure();
+                          case 'night':
+                            _toggleNightMode();
+                          case 'settings':
+                            _editChartSettings();
+                          case 'cameras':
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => CameraScreen(
+                                  robot: widget.connection.robot!,
+                                  names: s.cameraNames,
+                                ),
+                              ),
+                            );
+                          case 'fuel':
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => FuelScreen(
+                                  state: widget.state,
+                                  history: widget.connection.history,
+                                ),
+                              ),
+                            );
+                          case 'switch':
+                            widget.onSwitchBoat!();
+                        }
+                      },
                     ),
-                    const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: _nightMode ? Icons.dark_mode : Icons.dark_mode_outlined,
-                      tooltip: 'Night mode',
-                      active: _nightMode,
-                      onTap: _toggleNightMode,
-                    ),
-                    const SizedBox(height: 8),
-                    MapRoundButton(
-                      icon: Icons.settings,
-                      tooltip: 'Chart settings',
-                      onTap: _editChartSettings,
-                    ),
-                    if (s.cameraNames.isNotEmpty &&
-                        widget.connection.robot != null) ...[
-                      const SizedBox(height: 8),
-                      MapRoundButton(
-                        icon: Icons.videocam,
-                        tooltip: 'Cameras',
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => CameraScreen(
-                              robot: widget.connection.robot!,
-                              names: s.cameraNames,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                    if (s.tanks.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      MapRoundButton(
-                        icon: Icons.local_gas_station,
-                        tooltip: 'Fuel',
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => FuelScreen(
-                              state: widget.state,
-                              history: widget.connection.history,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                    if (widget.onSwitchBoat != null) ...[
-                      const SizedBox(height: 8),
-                      MapRoundButton(
-                        icon: Icons.sailing,
-                        tooltip: 'Switch boat',
-                        onTap: widget.onSwitchBoat!,
-                      ),
-                    ],
                   ],
                 ),
               ),
