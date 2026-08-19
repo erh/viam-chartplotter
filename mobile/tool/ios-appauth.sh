@@ -33,6 +33,21 @@ set_str NSCameraUsageDescription "Shows the boat's camera feeds."
 set_str NSMicrophoneUsageDescription "Required by the Viam robot connection."
 echo "ensured camera/microphone usage descriptions in $PLIST"
 
+# --- Minimum iOS version ----------------------------------------------------
+# bonsoir_darwin (the viam_sdk mDNS dependency) needs iOS >= 13.0; the
+# flutter-create template can target lower, which fails pod install with
+# "requires a higher minimum iOS deployment version". Pin both the Podfile
+# platform line and the Xcode project's deployment target.
+IOS_MIN="13.0"
+if [ -f ios/Podfile ]; then
+  sed -i '' "s/^# platform :ios, '.*'$/platform :ios, '$IOS_MIN'/" ios/Podfile
+fi
+if [ -f ios/Runner.xcodeproj/project.pbxproj ]; then
+  sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = $IOS_MIN;/g" \
+    ios/Runner.xcodeproj/project.pbxproj
+fi
+echo "pinned iOS deployment target $IOS_MIN"
+
 # --- Export compliance ------------------------------------------------------
 # Only standard HTTPS/TLS encryption (exempt), declared up front — otherwise
 # every TestFlight upload sits in "Missing Compliance" until it's answered
