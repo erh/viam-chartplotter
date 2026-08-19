@@ -38,8 +38,6 @@ dependencies:
   path_provider: ^2.1.0
   # Helm mode (L4): keep the screen awake while the chart is up.
   wakelock_plus: ^1.2.0
-  # Windy deep link (G4): the deep forecast the app doesn't render itself.
-  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'boat_state.dart';
 import 'forecast.dart';
@@ -234,24 +233,6 @@ class DataPanel extends StatelessWidget {
                   when !(p.latitude == 0 && p.longitude == 0))
                 _Row('Moon', _moonStr(getMoonTimes(
                     DateTime.now(), p.latitude, p.longitude))),
-              if (state.position case final p?
-                  when !(p.latitude == 0 && p.longitude == 0))
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    style: TextButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact),
-                    icon: const Icon(Icons.open_in_new, size: 14),
-                    label: const Text('Open Windy forecast'),
-                    onPressed: () => launchUrl(
-                      Uri.parse('https://www.windy.com/'
-                          '?${p.latitude.toStringAsFixed(4)},'
-                          '${p.longitude.toStringAsFixed(4)},10'),
-                      mode: LaunchMode.externalApplication,
-                    ),
-                  ),
-                ),
             ],
             if (state.tanks.isNotEmpty) ...[
               const SizedBox(height: 16),

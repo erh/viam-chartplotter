@@ -1450,6 +1450,10 @@ no API (open-meteo has no moon data). Keep the upstream attribution comment.
 **Do.** Open windy.com at the boat's position via `url_launcher`, for the deep
 forecast the app doesn't render itself.
 
+**Note:** shipped, then removed at the owner's request (2026-08) — the link
+wasn't wanted in the drawer. If it comes back, restore the `url_launcher`
+dep and the button in `data_drawer.dart` (see git history).
+
 ---
 
 ### F4 · Isobars `M` `P2`
