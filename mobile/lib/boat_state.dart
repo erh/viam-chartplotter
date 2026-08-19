@@ -3,6 +3,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
 import 'chart/areas.dart';
+import 'routes/route_stats.dart';
 import 'routes/route_store.dart';
 import 'tides.dart';
 import 'track.dart';
@@ -161,6 +162,11 @@ class BoatState extends ChangeNotifier {
     navWaypoints = wps;
     _notify();
   }
+
+  /// Next/Final distance + ETA over the whole remaining route (E5), or null
+  /// when there's no fix or no active nav-service route.
+  RouteStats? get routeStats =>
+      computeRouteStats(position, navWaypoints, speedKn);
 
   // Per-component health from GetMachineStatus (K1): leaf component name →
   // short state ("unhealthy", "configuring", …). Only non-ready components

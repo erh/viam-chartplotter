@@ -1200,8 +1200,9 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          // Top-center: glanceable next-waypoint distance + ETA while navigating.
-          if (s.navigating)
+          // Top-center: glanceable next-waypoint distance + ETA while
+          // navigating — via the route sensor or an active nav route (E5).
+          if (s.navigating || s.navWaypoints.isNotEmpty)
             SafeArea(
               child: Align(
                 alignment: Alignment.topCenter,

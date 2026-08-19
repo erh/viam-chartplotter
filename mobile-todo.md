@@ -1151,8 +1151,8 @@ route has more than one waypoint), using distance-along-line from the boat's
 projected position, and current SOG for the estimate.
 
 **Accept.**
-- [ ] On a 3-waypoint route, `Final` distance equals the sum of remaining legs.
-- [ ] Both ETAs blank out (not zero) when stationary.
+- [x] On a 3-waypoint route, `Final` distance equals the sum of remaining legs.
+- [x] Both ETAs blank out (not zero) when stationary.
 
 ---
 

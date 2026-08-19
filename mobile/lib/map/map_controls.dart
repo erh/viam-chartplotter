@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../boat_state.dart';
+import '../routes/route_stats.dart';
 import '../tile_sources.dart';
 
 /// The chrome that floats over the chart: round toolbar buttons, the base-layer
@@ -148,31 +149,54 @@ class EtaPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final nm = state.wpDistanceNm;
-    final mins = state.wpEtaMinutes;
+    // Next-waypoint line: the route sensor's live numbers when it has them
+    // (closing-velocity ETA, like the web's Next label), else the nav-route
+    // stats (SOG-based).
+    final stats = state.routeStats;
+    final nm = state.wpDistanceNm ?? stats?.nextNm;
+    final double? mins = state.wpEtaMinutes ?? stats?.nextMinutes;
     final parts = <String>[
       if (nm != null) '${nm.toStringAsFixed(2)} nm',
-      if (mins != null) '${mins.toStringAsFixed(0)} min',
+      if (nm != null) formatDurationMin(mins), // blank (—), never zero (E5)
     ];
-    if (parts.isEmpty) return const SizedBox.shrink();
+    if (parts.isEmpty && stats == null) return const SizedBox.shrink();
+    // Final line (E5): the whole remaining route, only when there's more
+    // than one waypoint (web shows Final the same way).
+    final showFinal = stats != null && stats.waypointCount > 1;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.flag, size: 14, color: Colors.purpleAccent),
-          const SizedBox(width: 6),
-          Text(
-            parts.join('  ·  '),
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w600),
-          ),
+          if (parts.isNotEmpty)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.flag, size: 14, color: Colors.purpleAccent),
+                const SizedBox(width: 6),
+                Text(
+                  parts.join('  ·  '),
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          if (showFinal)
+            Text(
+              'Final ${stats.finalNm.toStringAsFixed(1)} nm'
+              '  ·  ${formatDurationMin(stats.finalMinutes)}'
+              '  ·  ETA ${formatEta(stats.finalMinutes)}',
+              style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500),
+            ),
         ],
       ),
     );
