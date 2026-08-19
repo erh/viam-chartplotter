@@ -23,6 +23,7 @@ import 'chart/navaid_icon.dart';
 import 'chart/navaids.dart';
 import 'chart/structure_icon.dart';
 import 'chart/structures.dart';
+import 'chart/areas.dart';
 import 'chart/bbox_source.dart';
 import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
@@ -132,6 +133,16 @@ class _MapScreenState extends State<MapScreen> {
     }
     return _trackSegs;
   }
+
+  // Per-area visibility (B3), seeded from the season window on every load
+  // and deliberately NOT persisted (web does the same): a stale preference
+  // would leave a seasonal closure switched on long after its window.
+  final Map<String, bool> _areaOn = {};
+
+  bool _areaVisible(AreaInfo a) => _areaOn[a.name] ?? a.inSeason;
+
+  List<AreaInfo> get _visibleAreas =>
+      [for (final a in widget.state.areas) if (_areaVisible(a)) a];
 
   // Navaids vector layer (B1): viewport-loaded via B4, shown at z >= 12
   // (below that the tile bakes nothing to replace — the tier is off — and
@@ -537,6 +548,7 @@ class _MapScreenState extends State<MapScreen> {
     var projMin = _settings.aisProjectionMin;
     var aisTracks = _settings.aisTracksOn;
     var webSenders = _settings.webSendersOn;
+    final areaToggles = Map<String, bool>.of(_areaOn);
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -609,6 +621,29 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ],
             ),
+            if (widget.state.areas.isNotEmpty) ...[
+              const Padding(
+                padding: EdgeInsets.only(top: 12, bottom: 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Areas',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+              for (final a in widget.state.areas)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(
+                      '${a.folder != null ? '${a.folder} / ' : ''}${a.name}'),
+                  subtitle: areaDateSuffix(a.startDate, a.endDate).isEmpty
+                      ? null
+                      : Text(areaDateSuffix(a.startDate, a.endDate).trim()),
+                  value: areaToggles[a.name] ?? a.inSeason,
+                  onChanged: (v) =>
+                      setDialogState(() => areaToggles[a.name] = v),
+                ),
+            ],
             Row(
               children: [
                 const Expanded(child: Text('Projection vectors')),
@@ -653,6 +688,9 @@ class _MapScreenState extends State<MapScreen> {
       _settings.aisProjectionMin = projMin;
       _settings.aisTracksOn = aisTracks;
       _settings.webSendersOn = webSenders;
+      _areaOn
+        ..clear()
+        ..addAll(areaToggles);
     });
     _rebuildAisMarkers(); // projection minutes may have changed
     _followTick(); // re-anchor immediately if the screen position changed
@@ -767,6 +805,7 @@ class _MapScreenState extends State<MapScreen> {
               windOn: _wind.on,
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
+              areas: _visibleAreas,
               navaidMarkers: _navaidMarkers,
               structureMarkers: _structureMarkers,
               structures: _structuresInView,

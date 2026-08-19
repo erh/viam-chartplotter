@@ -3,6 +3,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
+import '../chart/areas.dart';
 import '../chart/structures.dart';
 import '../tile_sources.dart';
 import 'boat_marker.dart';
@@ -22,6 +23,7 @@ List<Widget> buildMapLayers({
   required bool windOn,
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
+  List<AreaInfo> areas = const [],
   List<Marker> navaidMarkers = const [],
   List<Marker> structureMarkers = const [],
   List<StructureFeature> structures = const [],
@@ -70,6 +72,51 @@ List<Widget> buildMapLayers({
       errorTileCallback: (tile, error, stackTrace) =>
           debugPrint('tile load failed (${base.id}): $error'),
     ),
+    // Regions from area components (B3): translucent fill + solid outline
+    // in the area's color, drawn under the boat/AIS vectors and above the
+    // chart tiles (matching the web's layer order). Points render as dots.
+    if (areas.isNotEmpty) ...[
+      PolygonLayer(
+        polygons: [
+          for (final a in areas)
+            for (final g in a.geoms)
+              if (!g.isPoint && !g.isLine)
+                Polygon(
+                  points: g.points,
+                  color: g.color.withValues(alpha: areaFillAlpha),
+                  borderColor: g.color,
+                  borderStrokeWidth: 2,
+                ),
+        ],
+      ),
+      PolylineLayer(
+        polylines: [
+          for (final a in areas)
+            for (final g in a.geoms)
+              if (g.isLine)
+                Polyline(points: g.points, color: g.color, strokeWidth: 2),
+        ],
+      ),
+      MarkerLayer(
+        markers: [
+          for (final a in areas)
+            for (final g in a.geoms)
+              if (g.isPoint)
+                Marker(
+                  point: g.points.first,
+                  width: 12,
+                  height: 12,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: g.color.withValues(alpha: areaFillAlpha),
+                      border: Border.all(color: g.color, width: 2),
+                    ),
+                  ),
+                ),
+        ],
+      ),
+    ],
     // Own-boat live track (C2), under everything that moves. One polyline
     // per same-colour run; depth mode colours shoal transits red.
     if (trackSegments.isNotEmpty)

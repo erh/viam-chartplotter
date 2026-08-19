@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
+import 'chart/areas.dart';
 import 'tides.dart';
 import 'track.dart';
 
@@ -113,6 +114,14 @@ class BoatState extends ChangeNotifier {
 
   void setPhonePosition(LatLng? p) {
     phonePosition = p;
+    notifyListeners();
+  }
+
+  // Regions from `area` components (B3) — e.g. right-whale zones.
+  List<AreaInfo> areas = const [];
+
+  void setAreas(List<AreaInfo> a) {
+    areas = a;
     notifyListeners();
   }
 

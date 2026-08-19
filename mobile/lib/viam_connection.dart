@@ -6,6 +6,7 @@ import 'package:viam_sdk/viam_sdk.dart';
 
 import 'ais.dart';
 import 'boat_state.dart';
+import 'chart/areas.dart';
 import 'config.dart';
 import 'history.dart';
 import 'settings.dart';
@@ -206,6 +207,9 @@ class ViamConnection {
   // cloud client and degrades to no filtering.
   String? _robotId;
   Set<String> _hiddenComponents = const {};
+  // Component → config-folder (ui_folder), for grouping area toggles (B3).
+  // Rides on the same authored-config fetch as H6.
+  Map<String, String> _componentFolders = const {};
 
   Future<void> _loadHiddenComponents() async {
     final viam = _viam;
@@ -214,10 +218,13 @@ class ViamConnection {
     try {
       final parts = await viam.appClient.listRobotParts(robotId);
       final hidden = <String>{};
+      final folders = <String, String>{};
       for (final part in parts) {
         hidden.addAll(hiddenComponentNames(part.robotConfigJson));
+        folders.addAll(componentFolders(part.robotConfigJson));
       }
       _hiddenComponents = hidden;
+      _componentFolders = folders;
     } catch (_) {
       // Config unreachable — discover unfiltered rather than fail connect.
     }
@@ -250,6 +257,7 @@ class ViamConnection {
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
     await _discoverAisWebSenders(robot);
+    await _discoverAreas(robot);
     _routeSensorName = _discoverSensorEndingWith(robot, 'route');
     _spotZeroFwName = _discoverSensorByName(robot, 'spotzero-fw', '');
     _spotZeroSwName = _discoverSensorByName(robot, 'spotzero-sw', '');
@@ -861,6 +869,50 @@ class ViamConnection {
   TankStatus _rememberTank(TankStatus t) {
     _tankLast[t.name] = t;
     return t;
+  }
+
+  /// Regions from `area` components (B3): probe generic components with
+  /// {"get_area": true} — real areas answer with a normalized GeoJSON
+  /// FeatureCollection + color + optional month-day season window (web:
+  /// discoverAreas). Config-driven and static, so discovery-time only.
+  Future<void> _discoverAreas(RobotClient robot) async {
+    final generics = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
+        if (rn.subtype == 'generic') generics.add(rn.name);
+      }
+    } catch (_) {}
+    if (generics.isEmpty) {
+      state.setAreas(const []);
+      return;
+    }
+    final found = await Future.wait([
+      for (final name in generics)
+        Generic.fromRobot(robot, name)
+            .doCommand({'get_area': true})
+            .timeout(_sensorTimeout)
+            .then<AreaInfo?>((r) {
+              if (r['geojson'] == null) return null;
+              final color = parseCssColor(r['color']?.toString());
+              final start = r['start_date']?.toString();
+              final end = r['end_date']?.toString();
+              return AreaInfo(
+                name: name,
+                color: color,
+                geoms: parseAreaGeoJson(r['geojson'], color),
+                startDate: start,
+                endDate: end,
+                inSeason: areaVisibleToday(start, end),
+                folder: _componentFolders[name.split(':').last],
+              );
+            })
+            .catchError((_) => null),
+    ]);
+    state.setAreas([
+      for (final a in found)
+        if (a != null && a.geoms.isNotEmpty) a
+    ]..sort((x, y) => x.name.compareTo(y.name)));
   }
 
   /// ais-web-senders aren't exposed via resourceNames' subtypes, so probe
