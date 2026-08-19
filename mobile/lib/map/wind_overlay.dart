@@ -25,9 +25,6 @@ class WindOverlayController {
 
   final BoatState state;
 
-  /// Arrow cap, mirroring the same protection the AIS layer needs (task D10).
-  static const int _maxMarkers = 1500;
-
   /// Weather zoom gate (F8), web parity (LayerOption.maxZoom = 12): past
   /// this zoom one 0.25° model cell spans hundreds of screen pixels and the
   /// field is a meaningless wash, so it hides — with a hint, not silently.
@@ -63,7 +60,6 @@ class WindOverlayController {
   bool wavesOn = false;
   bool waveLoading = false;
   WeatherModel? waveModel;
-  List<Polygon> waveCells = const [];
 
   WeatherModel? _resolveWaveModel() {
     final wanted = Settings.instance.waveModel;
@@ -78,7 +74,6 @@ class WindOverlayController {
     if (wavesOn) {
       wavesOn = false;
       Settings.instance.wavesOn = false;
-      waveCells = const [];
       return;
     }
     await ensureModels();
@@ -174,8 +169,6 @@ class WindOverlayController {
   double viewZoom = 9;
   double get _resolutionDeg => 360 / (256 * math.pow(2, viewZoom));
 
-  List<Marker> markers = const [];
-
   /// Turn the overlay on/off, fetching the field on first use. Throws whatever
   /// the fetch threw so the caller can surface it; [state]'s wind-info row is
   /// updated either way.
@@ -213,99 +206,16 @@ class WindOverlayController {
     }
   }
 
-  /// Rebuild the arrow markers for the current field + viewport, caching them
-  /// and reporting the count into the Debug wind row. Uses MarkerLayer (proven
-  /// to render) rather than a CustomPainter.
+  /// Rebuild the viewport-derived overlays. Wind/waves render as live
+  /// particle layers (weather_particles.dart, matching the web's ol-wind)
+  /// and need nothing built here — only the isobar geometry and the Debug
+  /// wind row remain.
   void rebuildMarkers() {
-    _rebuildWaveCells();
     _rebuildIsobars();
     final f = field;
-    final b = bounds;
-    if (!on || f == null || b == null) {
-      markers = const [];
-      return;
+    if (on && f != null) {
+      state.setWindInfo('loaded ${model.name} ${f.nx}×${f.ny} fh=$fh');
     }
-    final out = <Marker>[];
-    final span = math.max(b.east - b.west, b.north - b.south);
-    // ~12 arrows across the view at any zoom (not tied to the 0.25° grid).
-    final step = (span / 12).clamp(0.02, 5.0).toDouble();
-    if (step > 0) {
-      // Snap the lattice to multiples of `step` so arrows stay anchored to the
-      // ground and scroll with the map when panning (instead of the viewport).
-      final lat0 = (b.south / step).floorToDouble() * step;
-      final lon0 = (b.west / step).floorToDouble() * step;
-      for (double lat = lat0; lat <= b.north; lat += step) {
-        for (double lon = lon0; lon <= b.east; lon += step) {
-          final nlon = ((lon + 540) % 360) - 180;
-          final s = f.sampleInterp(nlon, lat);
-          if (s == null) continue;
-          final knots = math.sqrt(s.u * s.u + s.v * s.v) * 1.94384;
-          // bearing wind blows toward, offset by the chart rotation so arrows
-          // stay aligned in course-up mode.
-          final ang = math.atan2(s.u, s.v) + rotationDeg * math.pi / 180.0;
-          out.add(Marker(
-            point: LatLng(lat, nlon),
-            width: 24,
-            height: 24,
-            child: Transform.rotate(
-              angle: ang,
-              child: Icon(Icons.navigation, size: 16, color: colorFor(knots)),
-            ),
-          ));
-          if (out.length >= _maxMarkers) break;
-        }
-        if (out.length >= _maxMarkers) break;
-      }
-    }
-    markers = out;
-    state.setWindInfo(
-      'loaded ${f.nx}×${f.ny}; ${out.length} arrows; '
-      'view ${b.south.toStringAsFixed(1)}..${b.north.toStringAsFixed(1)}N, '
-      '${b.west.toStringAsFixed(1)}..${b.east.toStringAsFixed(1)}E; step '
-      '${step.toStringAsFixed(2)}°',
-    );
-  }
-
-  /// Rebuild the wave colour cells (F3) for the current field + viewport:
-  /// a ground-anchored lattice of translucent rectangles, each coloured by
-  /// significant wave height through the web's WAVE_COLOR_SCALE. A grid of
-  /// polygons, not particles — magnitude is what a helmsman reads.
-  void _rebuildWaveCells() {
-    final f = waveField;
-    final b = bounds;
-    if (!wavesOn || f == null || b == null) {
-      waveCells = const [];
-      return;
-    }
-    const maxCells = 900;
-    final out = <Polygon>[];
-    final span = math.max(b.east - b.west, b.north - b.south);
-    // ~24 cells across the view: fine enough to read gradients, coarse
-    // enough that the polygon count stays trivial.
-    final step = (span / 24).clamp(0.02, 5.0).toDouble();
-    final lat0 = (b.south / step).floorToDouble() * step;
-    final lon0 = (b.west / step).floorToDouble() * step;
-    for (double lat = lat0; lat <= b.north; lat += step) {
-      for (double lon = lon0; lon <= b.east; lon += step) {
-        final nlon = ((lon + 540) % 360) - 180;
-        final s = f.sampleInterp(nlon + step / 2, lat + step / 2);
-        if (s == null) continue;
-        final heightM = math.sqrt(s.u * s.u + s.v * s.v);
-        out.add(Polygon(
-          points: [
-            LatLng(lat, nlon),
-            LatLng(lat, nlon + step),
-            LatLng(lat + step, nlon + step),
-            LatLng(lat + step, nlon),
-          ],
-          color: colorForValue(waveColorScale, heightM, waveRangeMaxM)
-              .withValues(alpha: 0.45),
-        ));
-        if (out.length >= maxCells) break;
-      }
-      if (out.length >= maxCells) break;
-    }
-    waveCells = out;
   }
 
   // ---- isobars (F4) -----------------------------------------------------
@@ -473,16 +383,6 @@ class WindOverlayController {
     );
   }
 
-  /// Wind-speed colour ramp (knots). Shared with the legend when task F3 adds
-  /// one.
-  static Color colorFor(double kn) {
-    if (kn < 5) return const Color(0xFFabd9e9);
-    if (kn < 12) return const Color(0xFF74add1);
-    if (kn < 18) return const Color(0xFF66bd63);
-    if (kn < 25) return const Color(0xFFfdae61);
-    if (kn < 34) return const Color(0xFFf46d43);
-    return const Color(0xFFd73027);
-  }
 }
 
 /// Callout lines for a point weather sample (F7), formatted like the web's

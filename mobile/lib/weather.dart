@@ -5,6 +5,30 @@ import 'dart:ui' show Color;
 
 import 'package:http/http.dart' as http;
 
+/// Wind colour scale, ported verbatim from src/lib/windLayer.ts
+/// (WIND_COLOR_SCALE): blue → green at 10 kt → yellow → orange → red,
+/// pinned to [0, 15 m/s] so both apps colour the same breeze identically.
+const List<Color> windColorScale = [
+  Color(0xFF0a3d91), // 0 kt — deep blue
+  Color(0xFF1565c0), // 2 kt
+  Color(0xFF1e88e5), // 4 kt
+  Color(0xFF4fc3f7), // 6 kt
+  Color(0xFF26a69a), // 8 kt — teal
+  Color(0xFF2e7d32), // 10 kt — solid green
+  Color(0xFF66bb6a), // 12 kt
+  Color(0xFFcddc39), // 14 kt — chartreuse
+  Color(0xFFfbc02d), // 16 kt — saturated yellow
+  Color(0xFFf57f17), // 18 kt
+  Color(0xFFe65100), // 20 kt — orange
+  Color(0xFFd84315), // 22 kt
+  Color(0xFFbf360c), // 24 kt
+  Color(0xFFb71c1c), // 26 kt — red
+  Color(0xFF7f0000), // 28+ kt — dark red
+];
+
+/// Top of the wind colour ramp, m/s (web maxVelocity).
+const double windRangeMaxMs = 15;
+
 /// Wave colour scale (F3), ported verbatim from src/lib/windLayer.ts
 /// (WAVE_COLOR_SCALE) so both apps colour the same sea state identically.
 /// Stops span 0 → [waveRangeMaxM] metres.

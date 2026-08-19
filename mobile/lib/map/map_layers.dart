@@ -6,8 +6,10 @@ import '../boat_state.dart';
 import '../chart/areas.dart';
 import '../chart/structures.dart';
 import '../tile_sources.dart';
+import '../weather.dart';
 import 'boat_marker.dart';
 import 'osm_underlay.dart';
+import 'weather_particles.dart';
 
 /// Builds the FlutterMap child stack, bottom to top: chart tiles, weather,
 /// route, AIS, own boat.
@@ -20,10 +22,10 @@ List<Widget> buildMapLayers({
   required BoatState state,
   required TileSource base,
   required double rotationDeg,
-  required bool windOn,
-  required List<Marker> windMarkers,
-  // Wave colour cells (F3), drawn under the wind arrows.
-  List<Polygon> wavePolygons = const [],
+  // Weather particle fields (null = overlay off / zoom-gated). Rendered as
+  // ol-wind-style animated particles, matching the web app's display.
+  WindField? windField,
+  WindField? waveField,
   // Isobar contours + labels/extrema (F4), between waves and wind.
   List<Polyline> isobarLines = const [],
   List<Marker> isobarMarkers = const [],
@@ -188,13 +190,19 @@ List<Widget> buildMapLayers({
     ],
     // Wave field (F3): translucent height-coloured cells under the wind
     // arrows so both weather overlays read together.
-    if (wavePolygons.isNotEmpty) PolygonLayer(polygons: wavePolygons),
+    // Wave particles (F3): the web's ol-wind rendering — drift shows
+    // propagation, colour shows height.
+    if (waveField != null)
+      WeatherParticleLayer(
+          field: waveField, config: WeatherParticleConfig.waves),
     // Isobars (F4): PRMSL contours with sparse pressure labels and H/L
-    // extremum marks, over the wave fill, under the wind arrows.
+    // extremum marks, over the wave field, under the wind particles.
     if (isobarLines.isNotEmpty) PolylineLayer(polylines: isobarLines),
     if (isobarMarkers.isNotEmpty) MarkerLayer(markers: isobarMarkers),
-    // Wind overlay (arrow markers, over the chart, under boat markers).
-    if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
+    // Wind particles, over the chart, under boat markers.
+    if (windField != null)
+      WeatherParticleLayer(
+          field: windField, config: WeatherParticleConfig.wind),
     // Active route. With nav-service waypoints (E1) the full chain draws
     // solid purple; otherwise fall back to the route sensor's boat→destination
     // line (an MFD-driven route the nav service doesn't know about).

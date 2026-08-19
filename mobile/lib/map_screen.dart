@@ -1262,11 +1262,10 @@ class _MapScreenState extends State<MapScreen> {
               state: s,
               base: _base,
               rotationDeg: _rotationDeg,
-              windOn: _wind.on && weatherZoomOk,
-              windMarkers: _wind.markers,
-              wavePolygons: (_wind.wavesOn && weatherZoomOk)
-                  ? _wind.waveCells
-                  : const [],
+              windField:
+                  (_wind.on && weatherZoomOk) ? _wind.field : null,
+              waveField:
+                  (_wind.wavesOn && weatherZoomOk) ? _wind.waveField : null,
               isobarLines: (_wind.isobarsOn && weatherZoomOk)
                   ? _wind.isobarLines
                   : const [],
