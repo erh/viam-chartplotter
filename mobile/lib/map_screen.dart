@@ -156,6 +156,15 @@ class _MapScreenState extends State<MapScreen> {
       boats: s.aisBoats,
       bounds: camera.visibleBounds,
       reference: camera.center,
+      // Threatening targets (real upcoming CPA) survive the cap first (D3).
+      own: s.position != null
+          ? (
+              lat: s.position!.latitude,
+              lng: s.position!.longitude,
+              cogDeg: s.cogDeg,
+              spdKn: s.speedKn ?? 0,
+            )
+          : null,
       cap: _aisCap,
     );
     widget.state.aisCulled = result.culled;
@@ -171,7 +180,7 @@ class _MapScreenState extends State<MapScreen> {
           width: 30,
           height: 30,
           child: GestureDetector(
-            onTap: () => showAisDetails(context, b),
+            onTap: () => showAisDetails(context, b, own: widget.state),
             child: Transform.rotate(
               angle: (b.orientationDeg + _rotationDeg) * math.pi / 180.0,
               child: const Icon(Icons.navigation,

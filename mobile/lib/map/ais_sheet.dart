@@ -1,12 +1,31 @@
 import 'package:flutter/material.dart';
 
 import '../ais.dart';
+import '../boat_state.dart';
+import '../cpa.dart';
 
 /// Bottom sheet with one AIS target's detail — the touch equivalent of the web
 /// app's vessel popup (src/marineMap.svelte).
 ///
-/// Task D3 adds CPA/TCPA here; D4 adds the MMSI country flag.
-void showAisDetails(BuildContext context, AisBoat b) {
+/// Task D4 adds the MMSI country flag.
+void showAisDetails(BuildContext context, AisBoat b, {BoatState? own}) {
+  // CPA/TCPA (D3): only when both vessels have COG and the target hasn't
+  // already passed its closest point (web shows it only for tcpa >= 0).
+  ({double cpaNm, double tcpaMin})? cpa;
+  final ownPos = own?.position;
+  if (ownPos != null) {
+    cpa = computeCpa(
+      ownLat: ownPos.latitude,
+      ownLng: ownPos.longitude,
+      ownCogDeg: own!.cogDeg,
+      ownSpdKn: own.speedKn ?? 0,
+      tgtLat: b.location.latitude,
+      tgtLng: b.location.longitude,
+      tgtCogDeg: b.cogDeg,
+      tgtSpdKn: b.sogKn,
+    );
+    if (cpa != null && cpa.tcpaMin < 0) cpa = null;
+  }
   showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -35,6 +54,11 @@ void showAisDetails(BuildContext context, AisBoat b) {
             if (b.beamM != null)
               _row('Beam', '${b.beamM!.toStringAsFixed(0)} m'),
             if (b.destination != null) _row('Destination', b.destination!),
+            if (cpa != null)
+              _row(
+                  'CPA',
+                  '${cpa.cpaNm.toStringAsFixed(2)} nm '
+                      'in ${cpa.tcpaMin.toStringAsFixed(0)} min'),
             _row(
                 'Position',
                 '${b.location.latitude.toStringAsFixed(5)}, '

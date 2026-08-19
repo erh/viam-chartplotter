@@ -902,7 +902,7 @@ where the bugs are.
 
 ---
 
-### D3 · CPA / TCPA `S` `P0`
+### D3 · CPA / TCPA `S` `P0` — ✅ **done**
 
 **Files:** new `mobile/lib/cpa.dart`, `mobile/lib/map/ais_sheet.dart`
 **Web ref:** `src/marineMap.svelte:5147-5180` (`computeCpa`), rendered in the
@@ -924,9 +924,10 @@ same-course (no CPA), crossing, and already-diverging. Show CPA/TCPA in the AIS
 bottom sheet, and use it to prioritise which targets survive D10's cap.
 
 **Accept.**
-- [ ] Two synthetic targets on a known crossing produce the same CPA/TCPA as
-      the web app to 2 decimal places.
-- [ ] Missing COG → no CPA row rather than a wrong one.
+- [x] Two synthetic targets on a known crossing produce the same CPA/TCPA as
+      the web app to 2 decimal places (verbatim port, `test/cpa_test.dart`:
+      head-on, parallel, crossing, diverging).
+- [x] Missing COG → no CPA row rather than a wrong one.
 
 ---
 

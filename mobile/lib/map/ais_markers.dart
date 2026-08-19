@@ -2,6 +2,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../ais.dart';
+import '../cpa.dart';
 
 /// Viewport cull + cap for the AIS layer (D10).
 ///
@@ -19,6 +20,7 @@ import '../ais.dart';
   required List<AisBoat> boats,
   LatLngBounds? bounds,
   LatLng? reference,
+  ({double lat, double lng, double? cogDeg, double spdKn})? own,
   int cap = 500,
   double marginFraction = 0.3,
 }) {
@@ -43,14 +45,33 @@ import '../ais.dart';
   }
   var capped = 0;
   if (candidates.length > cap) {
-    if (reference != null) {
-      const d = Distance();
-      final sorted = List.of(candidates)
-        ..sort((a, b) => d
-            .distance(reference, a.location)
-            .compareTo(d.distance(reference, b.location)));
-      candidates = sorted;
+    const d = Distance();
+    // Over the cap, threatening targets survive first (D3): anything with a
+    // real upcoming CPA sorts by that CPA in nm; everything else falls into
+    // a distance bucket behind them.
+    double key(AisBoat b) {
+      if (own != null) {
+        final cpa = computeCpa(
+          ownLat: own.lat,
+          ownLng: own.lng,
+          ownCogDeg: own.cogDeg,
+          ownSpdKn: own.spdKn,
+          tgtLat: b.location.latitude,
+          tgtLng: b.location.longitude,
+          tgtCogDeg: b.cogDeg,
+          tgtSpdKn: b.sogKn,
+        );
+        if (cpa != null && cpa.tcpaMin >= 0) return cpa.cpaNm;
+      }
+      if (reference != null) {
+        return 1e6 + d.distance(reference, b.location);
+      }
+      return 2e9;
     }
+
+    final sorted = List.of(candidates)
+      ..sort((a, b) => key(a).compareTo(key(b)));
+    candidates = sorted;
     capped = candidates.length - cap;
     candidates = candidates.sublist(0, cap);
   }
