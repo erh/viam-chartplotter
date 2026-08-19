@@ -133,6 +133,7 @@ class _MapScreenState extends State<MapScreen> {
   // viewport cull + cap so a busy harbour doesn't rebuild hundreds of
   // rotated widgets per second.
   List<Marker> _aisMarkers = const [];
+  List<List<LatLng>> _aisProjections = const []; // COG vectors (D2)
   List<AisBoat>? _aisMarkersFor; // the list identity the cache was built from
   static const int _aisCap = 500;
   static const double _aisMinZoom = 7; // chart gate; heading invisible below
@@ -149,6 +150,7 @@ class _MapScreenState extends State<MapScreen> {
       widget.state.aisCulled = s.aisBoats.length;
       widget.state.aisCapped = 0;
       _aisMarkers = const [];
+      _aisProjections = const [];
       _aisMarkersFor = s.aisBoats;
       return;
     }
@@ -188,6 +190,15 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
         ),
+    ];
+    // Projection vectors (D2): where each shown target will be in N minutes
+    // along its COG at its SOG.
+    final projMin = _settings.aisProjectionMin;
+    _aisProjections = [
+      for (final b in result.shown)
+        if (projectionPoints(b.location, b.cogDeg, b.sogKn, projMin)
+            case final p?)
+          p,
     ];
     _aisMarkersFor = s.aisBoats;
   }
@@ -325,6 +336,7 @@ class _MapScreenState extends State<MapScreen> {
     var headingOn = _settings.headingLineOn;
     var headingLen = _settings.headingLineLengthNm;
     var boatBottom = _settings.boatPositionBottom;
+    var projMin = _settings.aisProjectionMin;
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -378,6 +390,20 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ],
             ),
+            Row(
+              children: [
+                const Expanded(child: Text('Projection vectors')),
+                DropdownButton<int>(
+                  value: projMin,
+                  items: [
+                    for (final n in aisProjectionChoices)
+                      DropdownMenuItem(value: n, child: Text('$n min')),
+                  ],
+                  onChanged: (v) =>
+                      setDialogState(() => projMin = v ?? projMin),
+                ),
+              ],
+            ),
           ],
         ),
         actions: [
@@ -403,7 +429,9 @@ class _MapScreenState extends State<MapScreen> {
       _settings.headingLineOn = headingOn;
       _settings.headingLineLengthNm = headingLen;
       _settings.boatPositionBottom = boatBottom;
+      _settings.aisProjectionMin = projMin;
     });
+    _rebuildAisMarkers(); // projection minutes may have changed
     _followTick(); // re-anchor immediately if the screen position changed
   }
 
@@ -507,6 +535,12 @@ class _MapScreenState extends State<MapScreen> {
               windOn: _wind.on,
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
+              aisProjections: _aisProjections,
+              ownProjection: (s.boatFixFresh && s.position != null)
+                  ? (projectionPoints(s.position!, s.cogDeg, s.speedKn ?? 0,
+                          _settings.aisProjectionMin) ??
+                      const [])
+                  : const [],
               trackSegments: _trackSegments(),
               // Heading line only off a live BOAT fix — a stale heading off
               // the phone's position would be a lie (L5). Uses the effective

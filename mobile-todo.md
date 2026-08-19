@@ -963,7 +963,7 @@ Render as polylines under the AIS markers, subject to D10's viewport cull.
 
 ---
 
-### D2 · AIS projection vectors `S` `P1`
+### D2 · AIS projection vectors `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:377-391` (persisted minutes), `4101-4111`
@@ -975,8 +975,9 @@ persisted via J6. Do the same for own boat. This plus D3 is how you read a
 traffic situation at a glance.
 
 **Accept.**
-- [ ] A 10 kn target's 6-minute vector measures 1.0 nm with the ruler (J1).
-- [ ] Targets with no COG draw no vector.
+- [x] A 10 kn target's 6-minute vector measures 1.0 nm
+      (`test/projection_test.dart`).
+- [x] Targets with no COG draw no vector (nor barely-moving ones).
 
 ---
 

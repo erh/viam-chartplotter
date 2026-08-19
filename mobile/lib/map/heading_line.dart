@@ -20,6 +20,22 @@ List<LatLng> headingLinePoints(
 /// Selectable lengths, matching the web app's options (default 5 nm).
 const List<int> headingLineLengthChoices = [1, 2, 3, 5, 10, 15];
 
+/// Projection vector (D2): where a vessel will be in [minutes] along its
+/// COG at its SOG. Null when there's no course or it isn't moving.
+List<LatLng>? projectionPoints(
+  LatLng from,
+  double? cogDeg,
+  double sogKn,
+  int minutes,
+) {
+  if (cogDeg == null || sogKn <= 0.1) return null;
+  final nm = sogKn * minutes / 60.0;
+  return headingLinePoints(from, cogDeg, nm, segments: 4);
+}
+
+/// Selectable projection minutes, matching the web (default 2).
+const List<int> aisProjectionChoices = [1, 2, 5, 10];
+
 /// Perpendicular tick segments across the heading line, one every 1 nm
 /// (including the far end), so distance along the line reads at a glance.
 /// Tick size scales with the line (1/80th each side) so it looks the same

@@ -21,6 +21,8 @@ List<Widget> buildMapLayers({
   required bool windOn,
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
+  List<List<LatLng>> aisProjections = const [],
+  List<LatLng> ownProjection = const [],
   required List<({List<LatLng> points, Color color})> trackSegments,
   List<LatLng> headingLine = const [],
   List<List<LatLng>> headingTicks = const [],
@@ -109,6 +111,25 @@ List<Widget> buildMapLayers({
             child:
                 const Icon(Icons.flag, color: Colors.purpleAccent, size: 26),
           ),
+        ],
+      ),
+    // Projection vectors (D2): thin lines ahead of each target — and own
+    // boat, in green — showing position in N minutes along COG at SOG.
+    if (aisProjections.isNotEmpty || ownProjection.length >= 2)
+      PolylineLayer(
+        polylines: [
+          for (final p in aisProjections)
+            Polyline(
+              points: p,
+              color: Colors.cyanAccent.withValues(alpha: 0.7),
+              strokeWidth: 1.5,
+            ),
+          if (ownProjection.length >= 2)
+            Polyline(
+              points: ownProjection,
+              color: Colors.greenAccent,
+              strokeWidth: 2,
+            ),
         ],
       ),
     // AIS targets (drawn under the own-boat marker). Prebuilt and cached by

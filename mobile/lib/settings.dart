@@ -111,6 +111,15 @@ class Settings {
   set boatPositionBottom(bool v) =>
       _prefs.setString('mapBoatPosition', v ? 'bottom' : 'center');
 
+  /// AIS/own-boat projection vectors (D2): minutes ahead along COG at SOG.
+  /// Web key `mapAisProjectionMin`, one of [1, 2, 5, 10], default 2.
+  int get aisProjectionMin {
+    final v = _prefs.getInt('mapAisProjectionMin');
+    return (v != null && const [1, 2, 5, 10].contains(v)) ? v : 2;
+  }
+
+  set aisProjectionMin(int v) => _prefs.setInt('mapAisProjectionMin', v);
+
   /// Heading line (C4): shown by default, length one of the web app's
   /// choices (web: `mapHeadingLineLengthNm`, default 5).
   bool get headingLineOn => _prefs.getBool('headingLineOn') ?? true;
