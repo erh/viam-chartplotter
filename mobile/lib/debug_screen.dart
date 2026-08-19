@@ -24,6 +24,7 @@ class DebugScreen extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           children: [
             const _Section('Connection'),
+            if (state.boatName.isNotEmpty) _Row('Boat', state.boatName),
             _Row('Status', state.status),
             _Row('Last update', state.lastUpdate?.toLocal().toString() ?? '—'),
             if (state.reconnectAttempts > 0)

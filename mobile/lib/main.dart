@@ -136,7 +136,8 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     if (mounted) setState(() {});
   }
 
-  void _onRobotConnected(RobotClient robot, String robotId) {
+  void _onRobotConnected(RobotClient robot, String robotId, String name) {
+    _state.boatName = name;
     // robotId lets the connection fetch the machine config once and honour
     // chartplotter-hide during discovery (H6).
     _conn.startWithRobot(robot, viam: _session.viam, robotId: robotId);

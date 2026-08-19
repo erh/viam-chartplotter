@@ -196,6 +196,9 @@ class BoatState extends ChangeNotifier {
   String? healthFor(String? componentName) => componentName == null
       ? null
       : resourceHealth[componentName.split(':').last];
+  /// Name of the machine this state is connected to (from the picker /
+  /// remembered record) — the answer to "which boat am I looking at".
+  String boatName = '';
   String status = 'Starting…';
   DateTime? lastUpdate;
   // Why the last re-dial failed, and how many attempts the current outage has
