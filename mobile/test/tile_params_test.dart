@@ -29,15 +29,16 @@ void main() {
     });
   });
 
-  test('shipped defaults: navaid tier on at 12 (B1), structures still off',
-      () {
-    // B1 landed the navaids vector layer, so the tile stops baking navaids
-    // at z >= 12; structures still render in the tile until B2.
+  test('shipped defaults: all three tiers live (B1 + B2 landed)', () {
     for (var z = 7; z < 12; z++) {
       expect(chartTileParams(z), 'style=ecdis', reason: 'z\$z');
     }
-    for (var z = 12; z <= 16; z++) {
+    for (var z = 12; z < 14; z++) {
       expect(chartTileParams(z), 'style=wms&navaids=0', reason: 'z\$z');
+    }
+    for (var z = 14; z <= 16; z++) {
+      expect(chartTileParams(z), 'style=wms&navaids=0&skip=BRIDGE,CBLOHD,PIPOHD,CONVYR',
+          reason: 'z\$z');
     }
   });
 

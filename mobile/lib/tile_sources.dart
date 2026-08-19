@@ -14,11 +14,11 @@ import 'app_config.dart';
 ///
 /// A tier is only turned on when its vector layer exists — the features the
 /// tile stops drawing would otherwise simply vanish from the chart. B1
-/// landed the navaids vector layer (chart/navaids.dart, gated z>=12), so
-/// the navaid tier is ON, matching the web's VECTOR_TILE_NAVAID_MIN_Z. B2
-/// (structures) flips the second to 14.
+/// landed navaids (chart/navaids.dart, z>=12) and B2 landed structures
+/// (chart/structures.dart, z>=14), so both tiers are ON, matching the
+/// web's VECTOR_TILE_NAVAID_MIN_Z / VECTOR_TILE_STRUCTURE_MIN_Z.
 const int vectorTileNavaidMinZ = 12; // B1 landed
-const int? vectorTileStructureMinZ = null; // B2: set to 14
+const int vectorTileStructureMinZ = 14; // B2 landed
 
 /// Query params for a Checkmate chart tile at tile-zoom [z] — the web app's
 /// overview / mid / detail variants:

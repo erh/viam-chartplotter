@@ -3,6 +3,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
+import '../chart/structures.dart';
 import '../tile_sources.dart';
 import 'boat_marker.dart';
 import 'osm_underlay.dart';
@@ -22,6 +23,8 @@ List<Widget> buildMapLayers({
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
   List<Marker> navaidMarkers = const [],
+  List<Marker> structureMarkers = const [],
+  List<StructureFeature> structures = const [],
   List<List<LatLng>> aisProjections = const [],
   List<List<LatLng>> aisTracks = const [],
   List<LatLng> ownProjection = const [],
@@ -115,9 +118,51 @@ List<Widget> buildMapLayers({
           ),
         ],
       ),
+    // Structure traces (B2): at z>=14 the tile skips these classes, so
+    // this vector is the SOLE renderer — bridges draw as a solid amber
+    // bar with a dark outline, overhead cables/pipes/conveyors as a thick
+    // dashed line (the dash reads as "overhead").
+    if (structures.any((f) => f.traces.isNotEmpty)) ...[
+      PolygonLayer(
+        polygons: [
+          for (final f in structures)
+            if (f.isPolygon)
+              for (final ring in f.traces)
+                Polygon(
+                  points: ring,
+                  color: f.isBridge
+                      ? const Color(0xFFFACC15).withValues(alpha: 0.55)
+                      : const Color(0xFFFDE68A).withValues(alpha: 0.4),
+                  borderColor: f.isBridge
+                      ? const Color(0xF2783510)
+                      : const Color(0xF29A3412),
+                  borderStrokeWidth: 3,
+                ),
+        ],
+      ),
+      PolylineLayer(
+        polylines: [
+          for (final f in structures)
+            if (!f.isPolygon)
+              for (final line in f.traces)
+                Polyline(
+                  points: line,
+                  color: f.isBridge
+                      ? const Color(0xF2783510)
+                      : const Color(0xF29A3412),
+                  strokeWidth: 3,
+                  pattern: f.isBridge
+                      ? const StrokePattern.solid()
+                      : StrokePattern.dashed(segments: const [8, 5]),
+                ),
+        ],
+      ),
+    ],
     // Navaids (B1): tappable buoys/beacons/lights, above the chart tiles
     // and under the traffic picture.
     if (navaidMarkers.isNotEmpty) MarkerLayer(markers: navaidMarkers),
+    // Structure badges (B2), tappable for clearances.
+    if (structureMarkers.isNotEmpty) MarkerLayer(markers: structureMarkers),
     // AIS history tracks (D1), dim, under the projections and markers.
     if (aisTracks.isNotEmpty)
       PolylineLayer(

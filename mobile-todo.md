@@ -859,7 +859,7 @@ long tail of rare classes second.
 
 ---
 
-### B2 · Structures vector layer `M` `P1`
+### B2 · Structures vector layer `M` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/chart/structures.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:1960-1990` (`bridgeCategoryLabel`),
@@ -875,8 +875,11 @@ at **z ≥ 14** and flip A1's `VECTOR_TILE_STRUCTURE_MIN_Z` plus the
 `skip=BRIDGE,CBLOHD,PIPOHD,CONVYR` param in the same PR.
 
 **Accept.**
-- [ ] A bridge's sheet shows its clearance and category, matching web.
-- [ ] At z14+ each structure is exactly one icon (no doubled tile+vector draw).
+- [x] A bridge's sheet shows its clearance and category, matching web
+      (`test/structures_test.dart` pins 'Bascule · Vert clr 41.1 m' lines).
+- [x] At z14+ each structure is exactly one icon (the structure tier +
+      skip=BRIDGE,… flipped on in the same change; hideIcon dedupes joined
+      entries).
 
 ---
 

@@ -21,6 +21,8 @@ import 'debug_screen.dart';
 import 'fuel_screen.dart';
 import 'chart/navaid_icon.dart';
 import 'chart/navaids.dart';
+import 'chart/structure_icon.dart';
+import 'chart/structures.dart';
 import 'chart/bbox_source.dart';
 import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
@@ -217,6 +219,94 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // Structures vector layer (B2): bridges / overhead cables / pipes /
+  // conveyors, viewport-loaded, shown at z >= 14 where the tile skips them.
+  static const double structureMinZoom = 14;
+  late final BboxFeatureSource<StructureFeature> _structures =
+      BboxFeatureSource<StructureFeature>(
+    fetch: (w, s, e, n) =>
+        fetchStructures(AppConfig.tileBase.value, w, s, e, n),
+  )..addListener(_rebuildStructuresAndRepaint);
+  List<Marker> _structureMarkers = const [];
+  List<StructureFeature> _structuresInView = const [];
+
+  void _rebuildStructuresAndRepaint() {
+    _rebuildStructureMarkers();
+    if (mounted) setState(() {});
+  }
+
+  void _rebuildStructureMarkers() {
+    final MapCamera camera;
+    try {
+      camera = _map.camera;
+    } catch (_) {
+      return;
+    }
+    if (camera.zoom < structureMinZoom) {
+      _structureMarkers = const [];
+      _structuresInView = const [];
+      return;
+    }
+    final b = camera.visibleBounds;
+    final latM = (b.north - b.south) * 0.2;
+    final lonM = (b.east - b.west) * 0.2;
+    _structuresInView = [
+      for (final f in _structures.features)
+        if (f.anchor.latitude >= b.south - latM &&
+            f.anchor.latitude <= b.north + latM &&
+            f.anchor.longitude >= b.west - lonM &&
+            f.anchor.longitude <= b.east + lonM)
+          f,
+    ];
+    _structureMarkers = [
+      for (final f in _structuresInView)
+        if (!f.hideIcon)
+          Marker(
+            point: f.anchor,
+            width: 44,
+            height: 44,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _showStructureSheet(f),
+              child: Center(child: StructureIcon(class_: f.class_)),
+            ),
+          ),
+    ];
+  }
+
+  void _showStructureSheet(StructureFeature f) {
+    final lines = structureSheetLines(f.props);
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                StructureIcon(class_: f.class_),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(lines.first,
+                      style: Theme.of(ctx).textTheme.titleLarge),
+                ),
+              ]),
+              const SizedBox(height: 4),
+              for (final l in lines.skip(1))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Text(l, style: const TextStyle(fontSize: 15)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // Cached AIS marker layer (D10): rebuilt only when the AIS set or the
   // camera changes, never on the bare 1 Hz state tick, and bounded by a
   // viewport cull + cap so a busy harbour doesn't rebuild hundreds of
@@ -335,6 +425,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _persistViewDebounce?.cancel();
     _navaids.dispose();
+    _structures.dispose();
     AppConfig.tileBase.removeListener(_onTileBaseChanged);
     widget.state.removeListener(_onState);
     super.dispose();
@@ -642,6 +733,10 @@ class _MapScreenState extends State<MapScreen> {
                   _navaids.viewportChanged(camera.visibleBounds);
                 }
                 _rebuildNavaidMarkers();
+                if (camera.zoom >= structureMinZoom) {
+                  _structures.viewportChanged(camera.visibleBounds);
+                }
+                _rebuildStructureMarkers();
                 if (mounted) {
                   if (_wind.on) _wind.rebuildMarkers();
                   setState(() {});
@@ -657,6 +752,8 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
               navaidMarkers: _navaidMarkers,
+              structureMarkers: _structureMarkers,
+              structures: _structuresInView,
               aisProjections: _aisProjections,
               aisTracks: _aisTracks,
               ownProjection: (s.boatFixFresh && s.position != null)
