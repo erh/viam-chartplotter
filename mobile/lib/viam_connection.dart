@@ -567,6 +567,10 @@ class ViamConnection {
     // with them, right after a reconnect when the link is at its worst.
     if (_tickN % 5 == 2) await _pollSystems(robot);
 
+    // Machine/resource health (K1), slowest cadence: a failing sensor
+    // otherwise reads as a silently stale value with no explanation.
+    if (_tickN % 30 == 7) await _pollMachineStatus(robot);
+
     final windName = _windSensorName;
     if (windName != null) {
       try {
@@ -824,6 +828,26 @@ class ViamConnection {
   TankStatus _rememberTank(TankStatus t) {
     _tankLast[t.name] = t;
     return t;
+  }
+
+  /// Per-component health via GetMachineStatus (K1). Keeps only non-ready
+  /// components (leaf name → lowercased state) so the UI can flag a dead
+  /// depth transducer or wedged AIS receiver instead of showing stale
+  /// blanks. Mirrors the web app's findComponentStatus use of machineStatus.
+  Future<void> _pollMachineStatus(RobotClient robot) async {
+    try {
+      final resp = await robot.getMachineStatus().timeout(_sensorTimeout);
+      const stateReady = 3; // robot.v1.ResourceStatus.State.STATE_READY
+      final bad = <String, String>{};
+      for (final r in resp.resources) {
+        if (r.state.value == stateReady) continue;
+        bad[r.name.name] =
+            r.state.name.replaceFirst('STATE_', '').toLowerCase();
+      }
+      state.setResourceHealth(bad);
+    } catch (_) {
+      // Status API unavailable (older server) — leave health unknown.
+    }
   }
 
   /// Poll the boat-systems sensors (all generic Sensor readings), mirroring the

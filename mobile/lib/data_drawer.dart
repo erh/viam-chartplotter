@@ -58,6 +58,28 @@ class DataDrawer extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           children: [
             Text('Boat data', style: Theme.of(context).textTheme.titleLarge),
+            // Component health (K1): a failing sensor must be visibly
+            // flagged next to the readings it feeds, not silently blank.
+            if (state.resourceHealth.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.15),
+                    border: Border.all(color: Colors.orange),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final e in state.resourceHealth.entries)
+                        Text('⚠ ${e.key}: ${e.value}',
+                            style: const TextStyle(color: Colors.orange)),
+                    ],
+                  ),
+                ),
+              ),
             const SizedBox(height: 4),
             Row(
               children: [

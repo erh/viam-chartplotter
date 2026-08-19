@@ -81,6 +81,23 @@ class BoatState extends ChangeNotifier {
   int aisCapped = 0;
   // Own-boat live track (C2), recorded as positions arrive.
   final Track track = Track();
+
+  // Per-component health from GetMachineStatus (K1): leaf component name →
+  // short state ("unhealthy", "configuring", …). Only non-ready components
+  // are kept, so empty means all good.
+  Map<String, String> resourceHealth = const {};
+
+  void setResourceHealth(Map<String, String> health) {
+    if (mapEquals(health, resourceHealth)) return;
+    resourceHealth = health;
+    notifyListeners();
+  }
+
+  /// The unhealthy state for a (possibly remote-prefixed) component, or null
+  /// when it's fine/unknown.
+  String? healthFor(String? componentName) => componentName == null
+      ? null
+      : resourceHealth[componentName.split(':').last];
   String status = 'Starting…';
   DateTime? lastUpdate;
   // Why the last re-dial failed, and how many attempts the current outage has

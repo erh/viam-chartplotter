@@ -34,6 +34,13 @@ class DebugScreen extends StatelessWidget {
                   '${state.aisCulled} off-screen, ${state.aisCapped} over cap'),
             _Row('Wind', state.windInfo),
             const SizedBox(height: 16),
+            const _Section('Component health'),
+            if (state.resourceHealth.isEmpty)
+              const _Row('—', 'all components ready')
+            else
+              for (final e in state.resourceHealth.entries)
+                _Row('⚠ ${e.key}', e.value),
+            const SizedBox(height: 16),
             const _Section('Discovered sources'),
             if (state.sources.isEmpty)
               const _Row('—', 'not connected yet')

@@ -749,7 +749,7 @@ judge distance at a glance.
 
 ---
 
-### K1 · Surface machine/resource health `S` `P1`
+### K1 · Surface machine/resource health `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/debug_screen.dart`, `mobile/lib/data_drawer.dart`
 **Web ref:** `src/App.svelte:1609-1622` (`findComponentStatus`), `machineStatus`
@@ -764,7 +764,9 @@ state in the debug screen and next to the affected reading in the drawer
 (the `sources` map already tracks which component each reading came from).
 
 **Accept.**
-- [ ] A component in error is visibly flagged, not silently blank.
+- [x] A component in error is visibly flagged, not silently blank
+      (GetMachineStatus polled every 30 s; non-ready components show as an
+      orange banner in the drawer and a Component health section in Debug).
 
 ---
 
