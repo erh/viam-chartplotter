@@ -75,33 +75,103 @@ struct DiscoveryView: View {
     }
 }
 
+/// Display brightness for a salon TV: full day, dimmed dusk, and a
+/// heavily-dimmed red-tinted night palette.
+enum DisplayMode: String, CaseIterable {
+    case day, dusk, night
+
+    var next: DisplayMode {
+        let all = Self.allCases
+        return all[(all.firstIndex(of: self)! + 1) % all.count]
+    }
+
+    var icon: String {
+        switch self {
+        case .day: return "sun.max.fill"
+        case .dusk: return "sun.horizon.fill"
+        case .night: return "moon.fill"
+        }
+    }
+}
+
 struct ChartScreen: View {
     @EnvironmentObject var client: ChartplotterClient
     let baseURL: URL
 
     @State private var fullScreenCamera: CameraID?
+    @AppStorage("displayMode") private var displayModeRaw = DisplayMode.day.rawValue
+
+    private var displayMode: DisplayMode {
+        DisplayMode(rawValue: displayModeRaw) ?? .day
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
             ChartMapView(baseURL: baseURL, state: client.state, route: client.route, track: client.track)
                 .ignoresSafeArea()
+            // Night dimming sits over the chart + cameras but under the
+            // panels/buttons so controls stay readable. Plain alpha
+            // overlays — blend modes over UIKit-backed views are
+            // unreliable on tvOS.
+            if displayMode != .day {
+                Color.black.opacity(displayMode == .night ? 0.6 : 0.4)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                if displayMode == .night {
+                    Color.red.opacity(0.15)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
+            }
             HStack(alignment: .top) {
                 dataPanel
                 Spacer()
                 routePanel
             }
             .padding(40)
+            .opacity(client.isOffline ? 0.5 : 1)
             VStack {
                 Spacer()
-                HStack {
+                HStack(alignment: .bottom) {
                     CameraRow(fullScreen: $fullScreenCamera)
                     Spacer()
+                    Button {
+                        displayModeRaw = displayMode.next.rawValue
+                    } label: {
+                        Image(systemName: displayMode.icon)
+                            .font(.title3)
+                            .padding(18)
+                            .background(.black.opacity(0.55), in: Circle())
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.card)
                 }
             }
             .padding(40)
+            if client.isOffline {
+                VStack {
+                    Spacer()
+                    Text("Connection lost — reconnecting…")
+                        .font(.title3.bold())
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(.red.opacity(0.85), in: Capsule())
+                        .foregroundStyle(.white)
+                        .padding(.bottom, 120)
+                }
+                .allowsHitTesting(false)
+            }
         }
         .fullScreenCover(item: $fullScreenCamera) { cam in
             FullScreenCameraView(camera: cam)
+        }
+        .onAppear {
+            // A wall chartplotter must never hand the screen to the
+            // screensaver.
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 

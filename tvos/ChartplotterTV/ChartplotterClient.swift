@@ -11,6 +11,11 @@ final class ChartplotterClient: ObservableObject {
     @Published private(set) var route: RouteInfo?
     @Published private(set) var track: [TrackPoint] = []
     @Published private(set) var lastError: String?
+    /// Consecutive failed /api/state polls. The UI treats >= 3 (~3s) as
+    /// "connection lost": banner up, panels greyed, chart kept as-is.
+    @Published private(set) var consecutiveFailures = 0
+
+    var isOffline: Bool { consecutiveFailures >= 3 }
 
     private var pollTask: Task<Void, Never>?
 
@@ -56,6 +61,7 @@ final class ChartplotterClient: ObservableObject {
         route = nil
         track = []
         lastError = nil
+        consecutiveFailures = 0
         UserDefaults.standard.removeObject(forKey: Self.savedURLKey)
     }
 
@@ -83,8 +89,10 @@ final class ChartplotterClient: ObservableObject {
         do {
             state = try await get("api/state") as BoatState
             lastError = nil
+            consecutiveFailures = 0
         } catch {
             lastError = error.localizedDescription
+            consecutiveFailures += 1
         }
         if tick % 5 == 0 {
             route = try? await get("api/route")
