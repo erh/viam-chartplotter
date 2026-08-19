@@ -877,7 +877,7 @@ at **z ≥ 14** and flip A1's `VECTOR_TILE_STRUCTURE_MIN_Z` plus the
 
 ---
 
-### B4 · Viewport loading + feature cap `S` `P1`
+### B4 · Viewport loading + feature cap `S` `P1` — ✅ **done**
 
 **Files:** new `mobile/lib/chart/bbox_source.dart`
 **Web ref:** `src/marineMap.svelte:3640-3660` (`capVectorSource`), OL's
@@ -896,9 +896,13 @@ and coalesces in-flight requests. Unit-test the extent bookkeeping — that's
 where the bugs are.
 
 **Accept.**
-- [ ] Panning back over already-loaded water issues no new request.
-- [ ] Crossing the cap drops features and the current viewport repopulates.
-- [ ] Rapid panning issues a bounded number of requests, not one per frame.
+- [x] Panning back over already-loaded water issues no new request
+      (raw-viewport coverage against padded loaded extents,
+      `test/bbox_source_test.dart`).
+- [x] Crossing the cap drops features and the current viewport repopulates
+      (web's 3000 cap default).
+- [x] Rapid panning issues a bounded number of requests, not one per frame
+      (debounce + in-flight coalescing, newest-wins).
 
 ---
 
