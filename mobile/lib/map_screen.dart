@@ -19,6 +19,9 @@ import 'camera_screen.dart';
 import 'data_drawer.dart';
 import 'debug_screen.dart';
 import 'fuel_screen.dart';
+import 'chart/navaid_icon.dart';
+import 'chart/navaids.dart';
+import 'chart/bbox_source.dart';
 import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
@@ -126,6 +129,92 @@ class _MapScreenState extends State<MapScreen> {
       _trackSegsForDepthMode = depthMode;
     }
     return _trackSegs;
+  }
+
+  // Navaids vector layer (B1): viewport-loaded via B4, shown at z >= 12
+  // (below that the tile bakes nothing to replace — the tier is off — and
+  // symbols would be soup anyway).
+  static const double navaidMinZoom = 12;
+  late final BboxFeatureSource<NavaidFeature> _navaids =
+      BboxFeatureSource<NavaidFeature>(
+    fetch: (w, s, e, n) =>
+        fetchNavaids(AppConfig.tileBase.value, w, s, e, n),
+  )..addListener(_rebuildNavaidsAndRepaint);
+  List<Marker> _navaidMarkers = const [];
+
+  void _rebuildNavaidsAndRepaint() {
+    _rebuildNavaidMarkers();
+    if (mounted) setState(() {});
+  }
+
+  void _rebuildNavaidMarkers() {
+    final MapCamera camera;
+    try {
+      camera = _map.camera;
+    } catch (_) {
+      return;
+    }
+    if (camera.zoom < navaidMinZoom) {
+      _navaidMarkers = const [];
+      return;
+    }
+    final b = camera.visibleBounds;
+    final latM = (b.north - b.south) * 0.2;
+    final lonM = (b.east - b.west) * 0.2;
+    _navaidMarkers = [
+      for (final f in _navaids.features)
+        if (f.pos.latitude >= b.south - latM &&
+            f.pos.latitude <= b.north + latM &&
+            f.pos.longitude >= b.west - lonM &&
+            f.pos.longitude <= b.east + lonM)
+          Marker(
+            point: f.pos,
+            // 44 pt tap target around the 24 px symbol; the footprint pixel
+            // (12,18 of 24) sits at ~64% down the box — alignment keeps the
+            // chart fix under the structure, letting the flare float above.
+            width: 44,
+            height: 44,
+            alignment: const Alignment(0, 0.27),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _showNavaidSheet(f),
+              child: Center(child: NavaidIcon(feature: f)),
+            ),
+          ),
+    ];
+  }
+
+  void _showNavaidSheet(NavaidFeature f) {
+    final lines = navaidSheetLines(f.props);
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                NavaidIcon(feature: f),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(lines.first,
+                      style: Theme.of(ctx).textTheme.titleLarge),
+                ),
+              ]),
+              const SizedBox(height: 4),
+              for (final l in lines.skip(1))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Text(l, style: const TextStyle(fontSize: 15)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   // Cached AIS marker layer (D10): rebuilt only when the AIS set or the
@@ -245,6 +334,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _persistViewDebounce?.cancel();
+    _navaids.dispose();
     AppConfig.tileBase.removeListener(_onTileBaseChanged);
     widget.state.removeListener(_onState);
     super.dispose();
@@ -548,6 +638,10 @@ class _MapScreenState extends State<MapScreen> {
                 _wind.rotationDeg = camera.rotation;
                 _persistView();
                 _rebuildAisMarkers(); // viewport moved → re-cull (D10)
+                if (camera.zoom >= navaidMinZoom) {
+                  _navaids.viewportChanged(camera.visibleBounds);
+                }
+                _rebuildNavaidMarkers();
                 if (mounted) {
                   if (_wind.on) _wind.rebuildMarkers();
                   setState(() {});
@@ -562,6 +656,7 @@ class _MapScreenState extends State<MapScreen> {
               windOn: _wind.on,
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
+              navaidMarkers: _navaidMarkers,
               aisProjections: _aisProjections,
               aisTracks: _aisTracks,
               ownProjection: (s.boatFixFresh && s.position != null)

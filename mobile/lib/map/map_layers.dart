@@ -21,6 +21,7 @@ List<Widget> buildMapLayers({
   required bool windOn,
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
+  List<Marker> navaidMarkers = const [],
   List<List<LatLng>> aisProjections = const [],
   List<List<LatLng>> aisTracks = const [],
   List<LatLng> ownProjection = const [],
@@ -114,6 +115,9 @@ List<Widget> buildMapLayers({
           ),
         ],
       ),
+    // Navaids (B1): tappable buoys/beacons/lights, above the chart tiles
+    // and under the traffic picture.
+    if (navaidMarkers.isNotEmpty) MarkerLayer(markers: navaidMarkers),
     // AIS history tracks (D1), dim, under the projections and markers.
     if (aisTracks.isNotEmpty)
       PolylineLayer(

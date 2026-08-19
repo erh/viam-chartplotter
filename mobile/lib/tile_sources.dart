@@ -12,13 +12,12 @@ import 'app_config.dart';
 /// each chart feature has exactly one source of truth: once a vector layer
 /// takes over a feature class, the tile must stop baking that class in.
 ///
-/// Mobile has no navaid/structure vector layers yet, so both tiers ship "off"
-/// (null — every tile gets the overview render). B1 (navaids) flips the first
-/// to 12 and B2 (structures) the second to 14, matching the web app's
-/// VECTOR_TILE_NAVAID_MIN_Z / VECTOR_TILE_STRUCTURE_MIN_Z. Do not turn a tier
-/// on without landing its vector layer: the features the tile stops drawing
-/// would simply vanish from the chart.
-const int? vectorTileNavaidMinZ = null; // B1: set to 12
+/// A tier is only turned on when its vector layer exists — the features the
+/// tile stops drawing would otherwise simply vanish from the chart. B1
+/// landed the navaids vector layer (chart/navaids.dart, gated z>=12), so
+/// the navaid tier is ON, matching the web's VECTOR_TILE_NAVAID_MIN_Z. B2
+/// (structures) flips the second to 14.
+const int vectorTileNavaidMinZ = 12; // B1 landed
 const int? vectorTileStructureMinZ = null; // B2: set to 14
 
 /// Query params for a Checkmate chart tile at tile-zoom [z] — the web app's

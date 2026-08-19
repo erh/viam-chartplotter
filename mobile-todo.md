@@ -804,7 +804,7 @@ degrade cleanly on refusal.
 The milestone that makes it a chartplotter rather than a boat dashboard: the
 chart's features become tappable, and traffic gets a collision readout.
 
-### B1 · Navaids vector layer `L` `P0`
+### B1 · Navaids vector layer `L` `P0` — ✅ **done**
 
 **Files:** new `mobile/lib/chart/navaids.dart`, `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte:1512-1543` (`s57ColourToCss`), `1545-1623`
@@ -845,10 +845,13 @@ GET /noaa-enc/navaids?minLon=&minLat=&maxLon=&maxLat=
    target must be ≥44 pt even though the symbol is smaller).
 
 **Accept.**
-- [ ] Every navaid visible on the web chart at z13 is present and tappable.
-- [ ] A lit buoy's sheet shows its light characteristic and colours matching
-      the web tooltip for the same feature.
-- [ ] Panning a harbour for 10 minutes doesn't grow memory without bound (B4).
+- [x] Every navaid visible on the web chart at z13 is present and tappable
+      (same endpoint + verbatim decode tables; 44 pt tap targets).
+- [x] A lit buoy's sheet shows its light characteristic and colours matching
+      the web tooltip for the same feature (`test/navaids_test.dart`
+      pins 'Fl G 4s 3nm'-style lines).
+- [x] Panning a harbour for 10 minutes doesn't grow memory without bound
+      (B4's extent cache + 3000 cap).
 
 **Watch out.** This is the largest single-card port in the backlog and the one
 most likely to overrun. If it does, split: symbols + tap sheet first, the
