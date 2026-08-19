@@ -23,6 +23,7 @@ List<Widget> buildMapLayers({
   required List<Marker> aisMarkers,
   required List<({List<LatLng> points, Color color})> trackSegments,
   List<LatLng> headingLine = const [],
+  List<List<LatLng>> headingTicks = const [],
   required String buildStamp,
   required double Function() viewZoom,
   int? safeDepthFt,
@@ -71,7 +72,8 @@ List<Widget> buildMapLayers({
             Polyline(points: s.points, color: s.color, strokeWidth: 1.5),
         ],
       ),
-    // Heading line (C4): from the boat along its heading.
+    // Heading line (C4): from the boat along its heading, with a
+    // perpendicular tick every 1 nm so distance reads at a glance.
     if (headingLine.length >= 2)
       PolylineLayer(
         polylines: [
@@ -80,6 +82,8 @@ List<Widget> buildMapLayers({
             color: Colors.redAccent,
             strokeWidth: 2,
           ),
+          for (final tick in headingTicks)
+            Polyline(points: tick, color: Colors.redAccent, strokeWidth: 2),
         ],
       ),
     // Wind overlay (arrow markers, over the chart, under boat markers).

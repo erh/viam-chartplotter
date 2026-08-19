@@ -509,6 +509,13 @@ class _MapScreenState extends State<MapScreen> {
                   ? headingLinePoints(s.position!, s.effectiveHeadingDeg!,
                       _settings.headingLineLengthNm.toDouble())
                   : const [],
+              headingTicks: (_settings.headingLineOn &&
+                      s.boatFixFresh &&
+                      s.position != null &&
+                      s.effectiveHeadingDeg != null)
+                  ? headingLineTicks(s.position!, s.effectiveHeadingDeg!,
+                      _settings.headingLineLengthNm.toDouble())
+                  : const [],
               buildStamp: _settings.buildStamp,
               // Fractional VIEW zoom for the OSM suppression gate (A5) —
               // deliberately not the tile z; see OsmUnderlayTileProvider.

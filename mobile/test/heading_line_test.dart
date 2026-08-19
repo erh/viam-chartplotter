@@ -27,4 +27,22 @@ void main() {
     final pts = headingLinePoints(const LatLng(41.3, -72.0), 100, 15);
     expect(pts.length, greaterThan(4));
   });
+
+  test('ticks land every 1 nm, perpendicular to the line', () {
+    const from = LatLng(41.3, -72.0);
+    final ticks = headingLineTicks(from, 45, 5);
+    expect(ticks.length, 5); // 1..5 nm inclusive
+    for (var i = 0; i < ticks.length; i++) {
+      final mid = LatLng(
+        (ticks[i][0].latitude + ticks[i][1].latitude) / 2,
+        (ticks[i][0].longitude + ticks[i][1].longitude) / 2,
+      );
+      expect(d.distance(from, mid), closeTo((i + 1) * 1852.0, 20),
+          reason: 'tick \${i + 1}');
+      // Across the line: the tick's own bearing is ~heading ± 90.
+      final tickBrg = (d.bearing(ticks[i][0], ticks[i][1]) + 360) % 360;
+      expect((tickBrg - 315).abs() < 3 || (tickBrg - 135).abs() < 3, isTrue,
+          reason: 'tick bearing \$tickBrg');
+    }
+  });
 }
