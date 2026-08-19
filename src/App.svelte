@@ -2412,7 +2412,7 @@
 </script>
 
 {#if globalData.showYachtDetails}
-  <div class="w-dvw min-h-dvh p-2 bg-black text-white">
+  <div class="w-full min-h-dvh p-2 bg-black text-white">
     <a href="#dashboard" class="text-blue-400 hover:underline">← Back to Dashboard</a>
     <YachtDetails
       vicPowers={globalData.vicPowers}
@@ -2459,7 +2459,7 @@
   {/snippet}
 
   <main
-    class="w-dvw lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_22rem] grid-rows-3 lg:grid-rows-6 gap-2 bg-black"
+    class="w-full lg:h-dvh p-2 grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_22rem] grid-rows-3 lg:grid-rows-6 gap-2 bg-black"
   >
     <MarineMap
       myBoat={{

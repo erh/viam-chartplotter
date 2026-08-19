@@ -5,10 +5,23 @@
 html,
 body {
   /* Helm touchscreen: allow panning gestures only — no pinch page-zoom
-     (desktop Chrome ignores the viewport meta's user-scalable=no), and no
-     page scroll bars if something zooms/overflows anyway. */
+     (desktop Chrome ignores the viewport meta's user-scalable=no). */
   touch-action: pan-x pan-y;
-  overflow: hidden;
+  /* The layout is a single column below lg, so sideways scroll is always
+     junk (a wide table or a stray zoom); vertical scroll is handled below. */
+  overflow-x: hidden;
+}
+
+/* At lg and up `main` is h-dvh and every section is sized to fit, so the
+   page itself must never scroll — that's the helm display. Below lg the
+   grid stacks (map, then data panel, then cameras) and is far taller than
+   the viewport, so the page has to scroll or everything under the map is
+   unreachable. */
+@media (min-width: 1024px) {
+  html,
+  body {
+    overflow: hidden;
+  }
 }
 
 #map-container {
