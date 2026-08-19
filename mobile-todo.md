@@ -1437,8 +1437,8 @@ shows stale-but-labelled data rather than blanks.
 no API (open-meteo has no moon data). Keep the upstream attribution comment.
 
 **Accept.**
-- [ ] `moon.test.ts`'s cases pass in Dart.
-- [ ] Times match the web app for the same date and position.
+- [x] `moon.test.ts`'s cases pass in Dart.
+- [x] Times match the web app for the same date and position.
 
 ---
 
