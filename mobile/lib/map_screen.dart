@@ -101,7 +101,15 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
+  // Point weather sample callout (F7): where it was taken and what it read.
+  ({LatLng point, List<String> lines})? _weatherSample;
+
   void _onMapTap(LatLng point) {
+    // An open weather callout absorbs the tap: tap-away dismisses (F7).
+    if (_weatherSample != null) {
+      setState(() => _weatherSample = null);
+      return;
+    }
     // Armed waypoint edits (E1) take the tap first: move, then insert. Both
     // commit exactly one RPC per gesture (tap-to-place, not drag-per-frame).
     final movingId = _movingWaypointId;
@@ -151,9 +159,45 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Long-press arbitration (E1 vs F7), the interaction spec: while a
+  /// weather field is displayed (wind or waves on, within the zoom gate),
+  /// long-press SAMPLES WEATHER — you're looking at weather, and there is
+  /// no other way to read a point value on touch. With weather off,
+  /// long-press adds a waypoint. Never both.
   void _onMapLongPress(LatLng point) {
-    if (widget.connection.navApi == null) return;
     if (_measureMode || _waypointModeArmed) return; // don't fight other modes
+    final weatherShowing = (_wind.on || _wind.wavesOn) &&
+        WindOverlayController.weatherVisibleAtZoom(() {
+          try {
+            return _map.camera.zoom;
+          } catch (_) {
+            return 0.0;
+          }
+        }());
+    if (weatherShowing) {
+      final s = widget.state;
+      final sample = _wind.samplePoint(point.longitude, point.latitude);
+      double? rangeNm, brg;
+      final boat = s.position;
+      if (boat != null && _validPos(boat)) {
+        rangeNm = distanceNm(boat, point);
+        brg = bearingDeg(boat, point);
+      }
+      final lines = weatherSampleLines(
+        rangeNm: rangeNm,
+        bearingDeg: brg,
+        windKt: sample.windKt,
+        windFromDeg: sample.windFromDeg,
+        waveM: sample.waveM,
+        waveFromDeg: sample.waveFromDeg,
+      );
+      setState(() => _weatherSample = (
+            point: point,
+            lines: lines.isEmpty ? const ['no weather data here'] : lines,
+          ));
+      return;
+    }
+    if (widget.connection.navApi == null) return;
     _navEdit(() => widget.connection.addNavWaypoint(point));
   }
 
@@ -1254,6 +1298,44 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                   ],
                 ),
+              // Point weather callout (F7): pin dot + readout bubble at the
+              // long-pressed spot; any tap dismisses it.
+              if (_weatherSample case final ws?)
+                MarkerLayer(markers: [
+                  Marker(
+                    point: ws.point,
+                    width: 12,
+                    height: 12,
+                    child: const Icon(Icons.circle,
+                        size: 10, color: Colors.orangeAccent),
+                  ),
+                  Marker(
+                    point: ws.point,
+                    width: 190,
+                    height: 20.0 * ws.lines.length + 16,
+                    // Bubble floats above the sampled point.
+                    alignment: const Alignment(0, -1.4),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.8),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.orangeAccent),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final l in ws.lines)
+                            Text(l,
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ]),
               // Scale bar in nm (J7), lifted clear of the wind slider.
               NauticalScalebar(
                   liftPx: (_wind.on || _wind.wavesOn) ? 64 : 0),

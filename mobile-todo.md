@@ -1480,9 +1480,12 @@ and wave height at that point, plus range and bearing from the boat. Reuse
 `WindField.sampleInterp`, which already exists in `weather.dart`.
 
 **Accept.**
-- [ ] Long-press shows wind and wave at that point, and dismisses on tap-away.
-- [ ] Doesn't fight E1's long-press-to-add-waypoint — they must be in different
+- [x] Long-press shows wind and wave at that point, and dismisses on tap-away.
+- [x] Doesn't fight E1's long-press-to-add-waypoint — they must be in different
       modes, and the interaction spec must say which wins.
+      (Spec: while a weather field is displayed — wind or waves on, within
+      the zoom gate — long-press samples weather; with weather off,
+      long-press adds a waypoint. Never both.)
 
 ---
 

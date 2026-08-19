@@ -300,6 +300,31 @@ class WindOverlayController {
     waveCells = out;
   }
 
+  /// Point weather sample (F7) — the web cursorInfo's numbers for a
+  /// lon/lat, from whichever fields are loaded. Directions are
+  /// meteorological ("from", like the web readout): atan2(u,v) is the
+  /// direction of motion, +180 flips it to origin.
+  ({double? windKt, double? windFromDeg, double? waveM, double? waveFromDeg})
+      samplePoint(double lon, double lat) {
+    double? windKt, windFrom, waveM, waveFrom;
+    final w = on ? field?.sampleInterp(lon, lat) : null;
+    if (w != null) {
+      windKt = math.sqrt(w.u * w.u + w.v * w.v) * 1.94384;
+      windFrom = (math.atan2(w.u, w.v) * 180 / math.pi + 180) % 360;
+    }
+    final s = wavesOn ? waveField?.sampleInterp(lon, lat) : null;
+    if (s != null) {
+      waveM = math.sqrt(s.u * s.u + s.v * s.v);
+      waveFrom = (math.atan2(s.u, s.v) * 180 / math.pi + 180) % 360;
+    }
+    return (
+      windKt: windKt,
+      windFromDeg: windFrom,
+      waveM: waveM,
+      waveFromDeg: waveFrom
+    );
+  }
+
   /// Wind-speed colour ramp (knots). Shared with the legend when task F3 adds
   /// one.
   static Color colorFor(double kn) {
@@ -310,6 +335,29 @@ class WindOverlayController {
     if (kn < 34) return const Color(0xFFf46d43);
     return const Color(0xFFd73027);
   }
+}
+
+/// Callout lines for a point weather sample (F7), formatted like the web's
+/// cursor readout: `4.20 nm @ 130°`, `wind 12 kt from 245°`,
+/// `wave 3.2 ft from 180°`. Null inputs drop their line.
+List<String> weatherSampleLines({
+  double? rangeNm,
+  double? bearingDeg,
+  double? windKt,
+  double? windFromDeg,
+  double? waveM,
+  double? waveFromDeg,
+}) {
+  String deg(double d) => d.round().toString().padLeft(3, '0');
+  return [
+    if (rangeNm != null && bearingDeg != null)
+      '${rangeNm.toStringAsFixed(2)} nm @ ${deg(bearingDeg)}°',
+    if (windKt != null && windFromDeg != null)
+      'wind ${windKt.round()} kt from ${deg(windFromDeg)}°',
+    if (waveM != null && waveFromDeg != null)
+      'wave ${(waveM * metersToFeet).toStringAsFixed(1)} ft '
+          'from ${deg(waveFromDeg)}°',
+  ];
 }
 
 /// Compact model dropdown used by the forecast bar (F2 wind, F3 wave).
