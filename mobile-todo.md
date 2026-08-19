@@ -770,7 +770,7 @@ state in the debug screen and next to the affected reading in the drawer
 
 ---
 
-### L5 · Device-GPS fallback `S` `P1`
+### L5 · Device-GPS fallback `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/viam_connection.dart`, `mobile/lib/boat_state.dart`
 **Web ref:** none — mobile-only capability
@@ -787,9 +787,13 @@ know whether the fix is the boat's. Request permission lazily, at first use, and
 degrade cleanly on refusal.
 
 **Accept.**
-- [ ] Disconnecting the boat switches to a visibly-distinct phone-GPS marker.
-- [ ] Denying location permission leaves the app working with no position.
-- [ ] Boat GPS returning takes precedence again automatically.
+- [x] Disconnecting the boat switches to a visibly-distinct phone-GPS marker
+      (amber dot + PHONE GPS chip; 15 s boat-fix staleness window,
+      `test/phone_gps_fallback_test.dart`).
+- [x] Denying location permission leaves the app working with no position
+      (lazy request, one refusal ends asking for the run).
+- [x] Boat GPS returning takes precedence again automatically (and the phone
+      stream is dropped to save battery).
 
 ---
 

@@ -29,6 +29,8 @@ dependencies:
   package_info_plus: ^8.0.0
   # Top-down boat marker SVG (C1).
   flutter_svg: ^2.0.10
+  # Device-GPS fallback when the boat's fix is missing/stale (L5).
+  geolocator: ^13.0.0
 
 dev_dependencies:
   flutter_test:

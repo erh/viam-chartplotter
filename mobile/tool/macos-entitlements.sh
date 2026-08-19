@@ -57,6 +57,8 @@ remove_key() { # file key
 for f in macos/Runner/DebugProfile.entitlements macos/Runner/Release.entitlements; do
   grant_bool "$f" "com.apple.security.network.client"
   grant_bool "$f" "com.apple.security.network.server"
+  # Device-GPS fallback (L5).
+  grant_bool "$f" "com.apple.security.personal-information.location"
   remove_key "$f" "keychain-access-groups"
 done
 

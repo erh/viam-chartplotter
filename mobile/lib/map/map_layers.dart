@@ -112,16 +112,21 @@ List<Widget> buildMapLayers({
     // MapScreen (D10): culled to the viewport, capped, rebuilt only when the
     // AIS set or the camera changes — not on every 1 Hz state tick.
     if (aisMarkers.isNotEmpty) MarkerLayer(markers: aisMarkers),
-    if (state.position != null)
+    if (state.displayPosition != null)
       MarkerLayer(
         markers: [
-          // The marker box is the icon's diagonal so rotation never clips.
+          // Phone-GPS fallback (L5) renders as an unmistakably different
+          // marker — a helmsman must never confuse the phone's fix with the
+          // boat's. The marker box is the icon's diagonal so rotation never
+          // clips.
           Marker(
-            point: state.position!,
-            width: boatMarkerBoxSide(),
-            height: boatMarkerBoxSide(),
-            child:
-                BoatMarker(headingDeg: (state.headingDeg ?? 0) + rotationDeg),
+            point: state.displayPosition!,
+            width: state.usingPhoneGps ? 26 : boatMarkerBoxSide(),
+            height: state.usingPhoneGps ? 26 : boatMarkerBoxSide(),
+            child: state.usingPhoneGps
+                ? const PhoneGpsMarker()
+                : BoatMarker(
+                    headingDeg: (state.headingDeg ?? 0) + rotationDeg),
           ),
         ],
       ),

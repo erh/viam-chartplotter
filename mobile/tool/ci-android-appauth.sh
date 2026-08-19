@@ -46,3 +46,21 @@ else
   echo "no android/app/build.gradle{.kts} found; nothing to configure" >&2
   exit 1
 fi
+
+# --- Device-GPS fallback (L5): location permission in the app manifest -------
+# geolocator needs ACCESS_FINE_LOCATION declared; the manifest is regenerated
+# by `flutter create .`, so inject it here (idempotent, GNU/BSD-safe awk).
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST" ] && ! grep -q ACCESS_FINE_LOCATION "$MANIFEST"; then
+  awk '
+    /<manifest/ && !done {
+      print
+      print "    <uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>"
+      print "    <uses-permission android:name=\"android.permission.ACCESS_COARSE_LOCATION\"/>"
+      done = 1
+      next
+    }
+    { print }
+  ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+  echo "added location permissions to $MANIFEST"
+fi

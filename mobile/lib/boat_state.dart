@@ -82,6 +82,32 @@ class BoatState extends ChangeNotifier {
   // Own-boat live track (C2), recorded as positions arrive.
   final Track track = Track();
 
+  // Device-GPS fallback (L5): the phone knows where it is even when the
+  // boat's GPS (or the connection) is down. Phone fixes live in their own
+  // field — they must never pollute the boat's track or masquerade as the
+  // boat's position.
+  LatLng? phonePosition;
+  DateTime? lastBoatFixAt; // stamped whenever a BOAT position arrives
+
+  static const Duration boatFixFreshFor = Duration(seconds: 15);
+
+  bool get boatFixFresh =>
+      lastBoatFixAt != null &&
+      DateTime.now().difference(lastBoatFixAt!) < boatFixFreshFor;
+
+  /// The phone's fix is standing in for the boat's.
+  bool get usingPhoneGps => !boatFixFresh && phonePosition != null;
+
+  /// What the map should mark as "here": the boat's fresh fix, else the
+  /// phone's, else the boat's last known.
+  LatLng? get displayPosition =>
+      boatFixFresh ? position : (phonePosition ?? position);
+
+  void setPhonePosition(LatLng? p) {
+    phonePosition = p;
+    notifyListeners();
+  }
+
   // Per-component health from GetMachineStatus (K1): leaf component name →
   // short state ("unhealthy", "configuring", …). Only non-ready components
   // are kept, so empty means all good.
@@ -278,6 +304,7 @@ class BoatState extends ChangeNotifier {
   }) {
     if (position != null) {
       this.position = position;
+      lastBoatFixAt = DateTime.now();
       // Live track (C2): the Track applies its own minimum-move filter, so
       // a moored boat doesn't accumulate points.
       track.record(position, depthFt: depthFt ?? this.depthFt);

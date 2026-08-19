@@ -12,6 +12,7 @@ import 'connect.dart';
 import 'app_config.dart';
 import 'config.dart';
 import 'map_screen.dart';
+import 'phone_gps.dart';
 import 'screens/login_screen.dart';
 import 'screens/machine_picker_screen.dart';
 import 'settings.dart';
@@ -45,6 +46,9 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   BoatState _state = BoatState();
   final ViamSession _session = ViamSession();
   late ViamConnection _conn = ViamConnection(_state);
+  // Device-GPS fallback (L5): starts with the boat connection, watches for
+  // the boat fix going stale, and lazily asks for location permission.
+  late PhoneGps _phoneGps = PhoneGps(_state);
 
   // True once we have a live RobotClient (either via login→picker or the
   // API-key fallback), meaning we can show the map.
@@ -114,6 +118,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
         _state.setStatus('Chart-only server');
       } else {
         await _conn.startWithApiKey();
+        _phoneGps.start();
       }
       if (mounted) setState(() => _boatConnected = true);
     }
@@ -150,6 +155,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
         cachedFqdn: cached is String && cached.isNotEmpty ? cached : null,
       );
     };
+    _phoneGps.start();
     setState(() {
       _boatConnected = true;
       _skipAutoConnect = false;
@@ -161,8 +167,10 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   void _onSwitchBoat() {
     final oldConn = _conn;
     final oldState = _state;
+    unawaited(_phoneGps.stop());
     _state = BoatState();
     _conn = ViamConnection(_state);
+    _phoneGps = PhoneGps(_state);
     setState(() {
       _boatConnected = false;
       _skipAutoConnect = true;
@@ -174,6 +182,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _session.removeListener(_onSession);
+    unawaited(_phoneGps.stop());
     _conn.dispose();
     _session.dispose();
     _state.dispose();

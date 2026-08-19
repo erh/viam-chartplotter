@@ -36,3 +36,21 @@ class BoatMarker extends StatelessWidget {
     );
   }
 }
+
+/// The phone's own fix standing in for the boat (L5): an amber dot, nothing
+/// like the boat icon, so the source of the fix is never ambiguous.
+class PhoneGpsMarker extends StatelessWidget {
+  const PhoneGpsMarker({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.amber,
+        border: Border.all(color: Colors.white, width: 3),
+        boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black54)],
+      ),
+    );
+  }
+}

@@ -60,6 +60,10 @@ if [ -f ios/Runner.xcodeproj/project.pbxproj ]; then
 fi
 echo "pinned iOS deployment target $IOS_MIN"
 
+# --- Device-GPS fallback (L5) ------------------------------------------------
+set_str NSLocationWhenInUseUsageDescription "Shows your phone position when the boat GPS is unavailable."
+echo "ensured location usage description in $PLIST"
+
 # --- Export compliance ------------------------------------------------------
 # Only standard HTTPS/TLS encryption (exempt), declared up front — otherwise
 # every TestFlight upload sits in "Missing Compliance" until it's answered

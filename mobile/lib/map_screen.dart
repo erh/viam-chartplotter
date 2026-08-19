@@ -257,10 +257,11 @@ class _MapScreenState extends State<MapScreen> {
     return Offset(0, h * 0.3); // center (50%) + 30% = 80% down
   }
 
-  /// Keep the boat anchored while following (J4).
+  /// Keep the boat anchored while following (J4). Follows the displayed
+  /// fix — the phone's when the boat's has gone stale (L5).
   void _followTick() {
     if (!_followBoat) return;
-    final pos = widget.state.position;
+    final pos = widget.state.displayPosition;
     if (pos == null || !_validPos(pos)) return;
     try {
       _map.move(pos, _map.camera.zoom, offset: _followOffset());
@@ -502,7 +503,10 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
               trackSegments: _trackSegments(),
+              // Heading line only off a live BOAT fix — a stale heading off
+              // the phone's position would be a lie (L5).
               headingLine: (_settings.headingLineOn &&
+                      s.boatFixFresh &&
                       s.position != null &&
                       s.headingDeg != null)
                   ? headingLinePoints(s.position!, s.headingDeg!,
@@ -561,9 +565,33 @@ class _MapScreenState extends State<MapScreen> {
                       builder: (_) => DebugScreen(state: s),
                     ),
                   ),
-                  child: StatusChip(
-                    state: s,
-                    onReconnect: widget.connection.reconnectNow,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      StatusChip(
+                        state: s,
+                        onReconnect: widget.connection.reconnectNow,
+                      ),
+                      // Never a silent substitute (L5): when the marker is
+                      // the phone's fix, say so where the status lives.
+                      if (s.usingPhoneGps)
+                        Container(
+                          margin: const EdgeInsets.only(top: 6),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.amber,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'PHONE GPS',
+                            style: TextStyle(
+                                color: Colors.black,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -747,7 +775,7 @@ class _MapScreenState extends State<MapScreen> {
       // The follow affordance (J4): hidden while following (the boat is
       // already anchored); after a drag suspends follow it appears as the
       // way back.
-      floatingActionButton: (s.position == null || _followBoat)
+      floatingActionButton: (s.displayPosition == null || _followBoat)
           ? null
           : FloatingActionButton.extended(
               onPressed: _resumeFollow,
