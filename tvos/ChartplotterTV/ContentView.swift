@@ -145,17 +145,17 @@ struct ChartScreen: View {
                     CameraRow(fullScreen: $fullScreenCamera)
                     Spacer()
                     if isPanning {
-                        Button {
-                            isPanning = false
-                        } label: {
+                        VStack(spacing: 4) {
                             Label("Stop Panning", systemImage: "location.fill")
                                 .font(.body.bold())
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 12)
-                                .background(.blue.opacity(0.85), in: Capsule())
-                                .foregroundStyle(.white)
+                            Text("press Play/Pause or Menu")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.75))
                         }
-                        .buttonStyle(.card)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(.blue.opacity(0.85), in: RoundedRectangle(cornerRadius: 16))
+                        .foregroundStyle(.white)
                     }
                     Button {
                         displayModeRaw = displayMode.next.rawValue
@@ -188,6 +188,14 @@ struct ChartScreen: View {
         .fullScreenCover(item: $fullScreenCamera) { cam in
             FullScreenCameraView(camera: cam)
         }
+        // While the map has focus the arrow/swipe input pans it, so the
+        // on-screen button can be unreachable — Play/Pause always stops
+        // panning, and Menu does too (only intercepted while panning,
+        // so it keeps its normal leave-the-app meaning otherwise).
+        .onPlayPauseCommand {
+            isPanning = false
+        }
+        .onExitCommand(perform: isPanning ? { isPanning = false } : nil)
         .onAppear {
             // A wall chartplotter must never hand the screen to the
             // screensaver.
