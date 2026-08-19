@@ -134,7 +134,9 @@ class _MapScreenState extends State<MapScreen> {
   // rotated widgets per second.
   List<Marker> _aisMarkers = const [];
   List<List<LatLng>> _aisProjections = const []; // COG vectors (D2)
+  List<List<LatLng>> _aisTracks = const []; // history tracks (D1)
   List<AisBoat>? _aisMarkersFor; // the list identity the cache was built from
+  Map<String, List<LatLng>>? _aisTracksForHistory; // history-map identity
   static const int _aisCap = 500;
   static const double _aisMinZoom = 7; // chart gate; heading invisible below
 
@@ -151,7 +153,9 @@ class _MapScreenState extends State<MapScreen> {
       widget.state.aisCapped = 0;
       _aisMarkers = const [];
       _aisProjections = const [];
+      _aisTracks = const [];
       _aisMarkersFor = s.aisBoats;
+      _aisTracksForHistory = s.aisHistory;
       return;
     }
     final result = cullAisTargets(
@@ -182,7 +186,10 @@ class _MapScreenState extends State<MapScreen> {
           width: 30,
           height: 30,
           child: GestureDetector(
-            onTap: () => showAisDetails(context, b, own: widget.state),
+            onTap: () {
+              unawaited(widget.connection.fetchAisTrack(b.mmsi));
+              showAisDetails(context, b, own: widget.state);
+            },
             child: Transform.rotate(
               angle: (b.orientationDeg + _rotationDeg) * math.pi / 180.0,
               child: const Icon(Icons.navigation,
@@ -200,7 +207,17 @@ class _MapScreenState extends State<MapScreen> {
             case final p?)
           p,
     ];
+    // History tracks (D1) for the shown targets only (shares D10's cull).
+    _aisTracks = _settings.aisTracksOn
+        ? [
+            for (final b in result.shown)
+              if (s.aisHistory[b.mmsi] case final pts?
+                  when pts.length >= 2)
+                pts,
+          ]
+        : const [];
     _aisMarkersFor = s.aisBoats;
+    _aisTracksForHistory = s.aisHistory;
   }
 
   // Touch devices pinch-to-zoom, so the on-screen +/- buttons are redundant
@@ -337,6 +354,7 @@ class _MapScreenState extends State<MapScreen> {
     var headingLen = _settings.headingLineLengthNm;
     var boatBottom = _settings.boatPositionBottom;
     var projMin = _settings.aisProjectionMin;
+    var aisTracks = _settings.aisTracksOn;
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -362,6 +380,13 @@ class _MapScreenState extends State<MapScreen> {
               subtitle: const Text('Shoal water reads red, 10 ft+ green'),
               value: depthColor,
               onChanged: (v) => setDialogState(() => depthColor = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('AIS tracks'),
+              subtitle: const Text('History trails behind targets'),
+              value: aisTracks,
+              onChanged: (v) => setDialogState(() => aisTracks = v),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -430,6 +455,7 @@ class _MapScreenState extends State<MapScreen> {
       _settings.headingLineLengthNm = headingLen;
       _settings.boatPositionBottom = boatBottom;
       _settings.aisProjectionMin = projMin;
+      _settings.aisTracksOn = aisTracks;
     });
     _rebuildAisMarkers(); // projection minutes may have changed
     _followTick(); // re-anchor immediately if the screen position changed
@@ -473,7 +499,8 @@ class _MapScreenState extends State<MapScreen> {
     _followTick();
     // The AIS marker cache keys off the list identity: the poll loop swaps
     // in a fresh list per AIS tick, so identical() is a change detector.
-    if (!identical(widget.state.aisBoats, _aisMarkersFor)) {
+    if (!identical(widget.state.aisBoats, _aisMarkersFor) ||
+        !identical(widget.state.aisHistory, _aisTracksForHistory)) {
       _rebuildAisMarkers();
     }
     if (mounted) setState(() {});
@@ -536,6 +563,7 @@ class _MapScreenState extends State<MapScreen> {
               windMarkers: _wind.markers,
               aisMarkers: _aisMarkers,
               aisProjections: _aisProjections,
+              aisTracks: _aisTracks,
               ownProjection: (s.boatFixFresh && s.position != null)
                   ? (projectionPoints(s.position!, s.cogDeg, s.speedKn ?? 0,
                           _settings.aisProjectionMin) ??

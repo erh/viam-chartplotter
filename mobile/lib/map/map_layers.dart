@@ -22,6 +22,7 @@ List<Widget> buildMapLayers({
   required List<Marker> windMarkers,
   required List<Marker> aisMarkers,
   List<List<LatLng>> aisProjections = const [],
+  List<List<LatLng>> aisTracks = const [],
   List<LatLng> ownProjection = const [],
   required List<({List<LatLng> points, Color color})> trackSegments,
   List<LatLng> headingLine = const [],
@@ -111,6 +112,18 @@ List<Widget> buildMapLayers({
             child:
                 const Icon(Icons.flag, color: Colors.purpleAccent, size: 26),
           ),
+        ],
+      ),
+    // AIS history tracks (D1), dim, under the projections and markers.
+    if (aisTracks.isNotEmpty)
+      PolylineLayer(
+        polylines: [
+          for (final t in aisTracks)
+            Polyline(
+              points: t,
+              color: Colors.cyan.withValues(alpha: 0.35),
+              strokeWidth: 1.5,
+            ),
         ],
       ),
     // Projection vectors (D2): thin lines ahead of each target — and own

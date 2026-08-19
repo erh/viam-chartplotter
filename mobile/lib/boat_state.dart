@@ -115,6 +115,24 @@ class BoatState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // AIS position-history tracks by MMSI (D1), from the AIS sensor's
+  // all_history / history DoCommands.
+  Map<String, List<LatLng>> aisHistory = const {};
+
+  /// Replace the whole history map (the 60 s all_history poll).
+  void setAisHistory(Map<String, List<LatLng>> h) {
+    aisHistory = h;
+    notifyListeners();
+  }
+
+  /// Merge one vessel's history (fetched when its sheet opens, so the track
+  /// shows immediately instead of waiting for the next poll).
+  void mergeAisHistory(String mmsi, List<LatLng> points) {
+    if (points.isEmpty) return;
+    aisHistory = {...aisHistory, mmsi: points};
+    notifyListeners();
+  }
+
   // Per-component health from GetMachineStatus (K1): leaf component name →
   // short state ("unhealthy", "configuring", …). Only non-ready components
   // are kept, so empty means all good.

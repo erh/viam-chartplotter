@@ -111,6 +111,12 @@ class Settings {
   set boatPositionBottom(bool v) =>
       _prefs.setString('mapBoatPosition', v ? 'bottom' : 'center');
 
+  /// AIS history tracks (D1): gates both the drawing and the 60 s
+  /// all_history poll (web: the ais-track layer / aisTracksNeeded, default
+  /// off).
+  bool get aisTracksOn => _prefs.getBool('aisTracksOn') ?? false;
+  set aisTracksOn(bool v) => _prefs.setBool('aisTracksOn', v);
+
   /// AIS/own-boat projection vectors (D2): minutes ahead along COG at SOG.
   /// Web key `mapAisProjectionMin`, one of [1, 2, 5, 10], default 2.
   int get aisProjectionMin {

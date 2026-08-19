@@ -8,6 +8,7 @@ import 'ais.dart';
 import 'boat_state.dart';
 import 'config.dart';
 import 'history.dart';
+import 'settings.dart';
 
 /// Component names marked `chartplotter-hide: true` in a part's config JSON
 /// (H6). Mirrors the web app's findComponentConfig check: the attribute is
@@ -571,6 +572,13 @@ class ViamConnection {
     // otherwise reads as a silently stale value with no explanation.
     if (_tickN % 30 == 7) await _pollMachineStatus(robot);
 
+    // AIS history tracks (D1): every 60 s, only while the track layer is on
+    // (web gates on aisTracksNeeded the same way) — turning it off stops
+    // the poll entirely.
+    if (_tickN % 60 == 9 && Settings.instance.aisTracksOn) {
+      await _pollAisHistory(robot);
+    }
+
     final windName = _windSensorName;
     if (windName != null) {
       try {
@@ -828,6 +836,39 @@ class ViamConnection {
   TankStatus _rememberTank(TankStatus t) {
     _tankLast[t.name] = t;
     return t;
+  }
+
+  /// All targets' position history via the AIS sensor's all_history
+  /// DoCommand (D1) — `{ "<mmsi>": [ {Location: [lat,lng], …}, … ], … }`.
+  Future<void> _pollAisHistory(RobotClient robot) async {
+    final aisName = _aisSensorName;
+    if (aisName == null) return;
+    try {
+      final r = await Sensor.fromRobot(robot, aisName)
+          .doCommand({'command': 'all_history'}).timeout(_sensorTimeout);
+      final byMmsi = <String, List<LatLng>>{};
+      for (final e in r.entries) {
+        final pts = aisHistoryPoints(e.value);
+        if (pts.isNotEmpty) byMmsi[e.key] = pts;
+      }
+      state.setAisHistory(byMmsi);
+    } catch (_) {}
+  }
+
+  /// One vessel's history, fired when its sheet opens so the track shows
+  /// immediately instead of waiting up to 60 s for the next poll (D1).
+  Future<void> fetchAisTrack(String mmsi) async {
+    final robot = _robot;
+    final aisName = _aisSensorName;
+    if (robot == null || aisName == null) return;
+    if (!Settings.instance.aisTracksOn) return;
+    try {
+      final r = await Sensor.fromRobot(robot, aisName).doCommand(
+          {'command': 'history', 'mmsi': int.tryParse(mmsi) ?? mmsi}).timeout(
+          _sensorTimeout);
+      // Reply is keyed by mmsi, like all_history (web: result[mmsi]).
+      state.mergeAisHistory(mmsi, aisHistoryPoints(r[mmsi]));
+    } catch (_) {}
   }
 
   /// Per-component health via GetMachineStatus (K1). Keeps only non-ready

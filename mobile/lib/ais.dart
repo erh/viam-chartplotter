@@ -35,6 +35,25 @@ class AisBoat {
 
 double? _numOr(dynamic v) => v is num ? v.toDouble() : null;
 
+/// Parse one vessel's history samples (from the AIS sensor's `all_history`
+/// / `history` DoCommands) into positions, skipping entries without a valid
+/// 2-element Location — mirrors the web's aisSamplesToPoints
+/// (src/App.svelte:565).
+List<LatLng> aisHistoryPoints(dynamic samples) {
+  if (samples is! List) return const [];
+  final out = <LatLng>[];
+  for (final s in samples) {
+    if (s is! Map) continue;
+    final loc = s['Location'];
+    if (loc is! List || loc.length < 2) continue;
+    final lat = _numOr(loc[0]);
+    final lng = _numOr(loc[1]);
+    if (lat == null || lng == null || !lat.isFinite || !lng.isFinite) continue;
+    out.add(LatLng(lat, lng));
+  }
+  return out;
+}
+
 /// Parse a viamboat AIS sensor reading (map keyed by MMSI) into targets,
 /// tolerating the field-name variants across the `ais` and `airstream` models
 /// (Cog/COG/Course, Sog/SOG/Speed, Beam/Width). Entries without a valid

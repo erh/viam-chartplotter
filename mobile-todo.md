@@ -931,7 +931,7 @@ bottom sheet, and use it to prioritise which targets survive D10's cap.
 
 ---
 
-### D1 · AIS history tracks `M` `P1`
+### D1 · AIS history tracks `M` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/viam_connection.dart`, `mobile/lib/ais.dart`
 **Web ref:** `src/App.svelte:565-578` (`aisSamplesToPoints`), `579-601`
@@ -958,8 +958,10 @@ its sheet opens so the track appears immediately rather than up to 60 s later.
 Render as polylines under the AIS markers, subject to D10's viewport cull.
 
 **Accept.**
-- [ ] Opening a target's sheet shows its track without waiting for the poll.
-- [ ] Turning the track layer off stops the 60 s poll entirely.
+- [x] Opening a target's sheet shows its track without waiting for the poll
+      (per-vessel `history` DoCommand fired on tap).
+- [x] Turning the track layer off stops the 60 s poll entirely (both the
+      poll and the drawing gate on the persisted aisTracksOn setting).
 
 ---
 
