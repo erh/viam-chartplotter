@@ -13,6 +13,7 @@ import 'app_config.dart';
 import 'config.dart';
 import 'map_screen.dart';
 import 'phone_gps.dart';
+import 'tides.dart';
 import 'screens/login_screen.dart';
 import 'screens/machine_picker_screen.dart';
 import 'settings.dart';
@@ -49,6 +50,8 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   // Device-GPS fallback (L5): starts with the boat connection, watches for
   // the boat fix going stale, and lazily asks for location permission.
   late PhoneGps _phoneGps = PhoneGps(_state);
+  // Nearest-station tides (G1); refreshes as the boat moves.
+  late TideService _tides = TideService(_state);
 
   // True once we have a live RobotClient (either via login→picker or the
   // API-key fallback), meaning we can show the map.
@@ -119,6 +122,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
       } else {
         await _conn.startWithApiKey();
         _phoneGps.start();
+        _tides.start();
       }
       if (mounted) setState(() => _boatConnected = true);
     }
@@ -156,6 +160,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
       );
     };
     _phoneGps.start();
+    _tides.start();
     setState(() {
       _boatConnected = true;
       _skipAutoConnect = false;
@@ -168,9 +173,11 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     final oldConn = _conn;
     final oldState = _state;
     unawaited(_phoneGps.stop());
+    unawaited(_tides.stop());
     _state = BoatState();
     _conn = ViamConnection(_state);
     _phoneGps = PhoneGps(_state);
+    _tides = TideService(_state);
     setState(() {
       _boatConnected = false;
       _skipAutoConnect = true;
@@ -183,6 +190,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     WidgetsBinding.instance.removeObserver(this);
     _session.removeListener(_onSession);
     unawaited(_phoneGps.stop());
+    unawaited(_tides.stop());
     _conn.dispose();
     _session.dispose();
     _state.dispose();

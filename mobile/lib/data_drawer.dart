@@ -35,6 +35,9 @@ class DataDrawer extends StatelessWidget {
     return '${m.toStringAsFixed(0)} min ($hh:$mm)';
   }
 
+  static String _hhmm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
   String _seakeeper(BoatState s) {
     if (s.seakeeperStabilizing == true) {
       final p = s.seakeeperProgress;
@@ -144,6 +147,22 @@ class DataDrawer extends StatelessWidget {
                 _Row('Fresh water', _fmt(state.spotZeroFwGph, 'gph')),
               if (state.spotZeroSwGph != null)
                 _Row('Sea water', _fmt(state.spotZeroSwGph, 'gph')),
+            ],
+            if (state.tide case final tide?) ...[
+              const SizedBox(height: 16),
+              const _Section('Tides'),
+              _Row(
+                  tide.station.name,
+                  tide.currentFt == null
+                      ? '—'
+                      : '${tide.currentFt!.toStringAsFixed(1)} ft',
+                  spark: [for (final p in tide.series) p.v]),
+              if (tide.nextHigh case final h?)
+                _Row('Next high',
+                    '${h.v.toStringAsFixed(1)} ft at ${_hhmm(h.t)}'),
+              if (tide.nextLow case final l?)
+                _Row('Next low',
+                    '${l.v.toStringAsFixed(1)} ft at ${_hhmm(l.t)}'),
             ],
             if (state.tanks.isNotEmpty) ...[
               const SizedBox(height: 16),

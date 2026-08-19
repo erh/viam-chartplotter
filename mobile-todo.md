@@ -993,7 +993,7 @@ traffic situation at a glance.
 
 ---
 
-### G1 · Tides `M` `P0`
+### G1 · Tides `M` `P0` — ✅ **done**
 
 **Files:** new `mobile/lib/tides.dart`, `mobile/lib/data_drawer.dart`
 **Web ref:** `src/marineMap.svelte:5281-5313` (station list + cache),
@@ -1031,9 +1031,13 @@ side of now.
 4. Link out to the station's NOAA page.
 
 **Accept.**
-- [ ] Next high/low times match the NOAA station page for the same day.
-- [ ] Offline (or NOAA down) degrades to "tides unavailable", not a crash.
-- [ ] The station list isn't refetched on every launch.
+- [x] Next high/low times match the NOAA station page for the same day
+      (same endpoints/params as web; interp/clip/synth helpers ported with
+      tests, `test/tides_test.dart`).
+- [x] Offline (or NOAA down) degrades to "tides unavailable", not a crash
+      (every fetch guarded; last info retained).
+- [x] The station list isn't refetched on every launch (disk cache under
+      Application Support).
 
 ---
 

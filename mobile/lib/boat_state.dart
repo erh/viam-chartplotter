@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
+import 'tides.dart';
 import 'track.dart';
 
 /// One tank's live reading plus the two freshness timestamps the fuel page
@@ -112,6 +113,14 @@ class BoatState extends ChangeNotifier {
 
   void setPhonePosition(LatLng? p) {
     phonePosition = p;
+    notifyListeners();
+  }
+
+  // Nearest-station tide info (G1), refreshed by TideService.
+  TideInfo? tide;
+
+  void setTide(TideInfo t) {
+    tide = t;
     notifyListeners();
   }
 
