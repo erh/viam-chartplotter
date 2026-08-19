@@ -8,12 +8,22 @@ import 'auth/token_store.dart';
 import 'auth/viam_session.dart';
 import 'boat_state.dart';
 import 'connect.dart';
+import 'config.dart';
 import 'map_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/machine_picker_screen.dart';
+import 'settings.dart';
 import 'viam_connection.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Restore persisted map/tool state before the first frame so the map opens
+  // exactly where it was left, with no visible jump (J6).
+  await Settings.init();
+  // First launch: seed the safe depth from the --dart-define, if given (A2).
+  if (Settings.instance.safeDepthFt == null && Config.safeDepthFt.isNotEmpty) {
+    Settings.instance.safeDepthFt = int.tryParse(Config.safeDepthFt);
+  }
   runApp(const ChartplotterApp());
 }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
@@ -13,6 +15,7 @@ import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
 import 'map/wind_overlay.dart';
+import 'settings.dart';
 import 'tile_sources.dart';
 import 'viam_connection.dart';
 
@@ -48,12 +51,21 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final MapController _map = MapController();
-  TileSource _base = baseLayers.first;
+  final Settings _settings = Settings.instance;
+  late TileSource _base = baseLayers.firstWhere(
+      (b) => b.id == _settings.baseLayerId,
+      orElse: () => baseLayers.first);
   bool _followedFirstFix = false;
+
+  // A persisted view means the user deliberately left the map somewhere —
+  // the first GPS fix must not stomp it (J6).
+  late final bool _restoredView =
+      _settings.mapCenter != null && _settings.mapZoom != null;
+  Timer? _persistViewDebounce;
 
   // Chart orientation. north-up = rotation locked to 0; course-up = the chart
   // rotates so the boat's course-over-ground points to the top of the screen.
-  bool _courseUp = false;
+  late bool _courseUp = _settings.courseUp;
   double _rotationDeg = 0; // live map rotation, mirrored from the camera
 
   late final WindOverlayController _wind =
@@ -70,12 +82,31 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
+    // Wind was on last session: refetch it once the first frame is up
+    // (mobile launches are expensive enough that this is worth persisting
+    // even though the web app doesn't).
+    if (_settings.windOn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_wind.on) _toggleWind();
+      });
+    }
   }
 
   @override
   void dispose() {
+    _persistViewDebounce?.cancel();
     widget.state.removeListener(_onState);
     super.dispose();
+  }
+
+  /// Persist the camera after it settles — a debounce, not per-frame writes.
+  void _persistView() {
+    _persistViewDebounce?.cancel();
+    _persistViewDebounce = Timer(const Duration(seconds: 1), () {
+      final c = _map.camera;
+      _settings.mapCenter = c.center;
+      _settings.mapZoom = c.zoom;
+    });
   }
 
   Future<void> _toggleWind() async {
@@ -83,6 +114,7 @@ class _MapScreenState extends State<MapScreen> {
     _wind.bounds = _map.camera.visibleBounds;
     _wind.rotationDeg = _rotationDeg;
     setState(() {}); // reflect the spinner
+    _settings.windOn = !_wind.on;
     try {
       await _wind.toggle();
     } catch (e) {
@@ -115,6 +147,7 @@ class _MapScreenState extends State<MapScreen> {
 
   void _toggleOrientation() {
     setState(() => _courseUp = !_courseUp);
+    _settings.courseUp = _courseUp;
     if (_courseUp) {
       _applyCourseUp();
     } else {
@@ -131,12 +164,13 @@ class _MapScreenState extends State<MapScreen> {
 
   void _onState() {
     // Recenter once when the first GPS fix arrives, then leave the user in
-    // control of the viewport. (Task J4 replaces this with continuous follow
-    // plus pan-to-suspend.)
+    // control of the viewport — unless a persisted view was restored, which
+    // the user deliberately left somewhere (J6). (Task J4 replaces this with
+    // continuous follow plus pan-to-suspend.)
     final pos = widget.state.position;
     if (!_followedFirstFix && pos != null) {
       _followedFirstFix = true;
-      _map.move(pos, 13);
+      if (!_restoredView) _map.move(pos, 13);
     }
     _applyCourseUp(); // keep the chart aligned as the course changes
     if (mounted) setState(() {});
@@ -153,8 +187,11 @@ class _MapScreenState extends State<MapScreen> {
           FlutterMap(
             mapController: _map,
             options: MapOptions(
-              initialCenter: const LatLng(41.3, -72.0), // Long Island Sound-ish
-              initialZoom: 9,
+              // Resume the persisted view; Long Island Sound only on a truly
+              // fresh install (J6).
+              initialCenter:
+                  _settings.mapCenter ?? const LatLng(41.3, -72.0),
+              initialZoom: _settings.mapZoom ?? 9,
               // No free rotation: chart orientation is only ever north-up or
               // course-up via the toggle, so the two-finger rotate gesture is
               // disabled (an accidental rotate at the helm is disorienting
@@ -166,6 +203,7 @@ class _MapScreenState extends State<MapScreen> {
                 _wind.bounds = camera.visibleBounds;
                 _rotationDeg = camera.rotation;
                 _wind.rotationDeg = camera.rotation;
+                _persistView();
                 if (_wind.on && mounted) {
                   _wind.rebuildMarkers();
                   setState(() {});
@@ -223,7 +261,10 @@ class _MapScreenState extends State<MapScreen> {
                   children: [
                     LayerSwitcher(
                       current: _base,
-                      onChanged: (t) => setState(() => _base = t),
+                      onChanged: (t) {
+                        setState(() => _base = t);
+                        _settings.baseLayerId = t.id;
+                      },
                     ),
                     const SizedBox(height: 8),
                     MapRoundButton(

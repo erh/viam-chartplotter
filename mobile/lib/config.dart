@@ -30,6 +30,10 @@ class Config {
   /// Empty = skip depth.
   static const String depthSensor = String.fromEnvironment('DEPTH_SENSOR');
 
+  /// Optional initial safe depth in feet for the chart's DEPARE shading (A2);
+  /// seeds the persisted setting on first launch. Empty = server default.
+  static const String safeDepthFt = String.fromEnvironment('SAFE_DEPTH_FT');
+
   /// Optional override for the movement-sensor component name. Empty =
   /// auto-discover the first movement_sensor on the robot.
   static const String movementSensor =
