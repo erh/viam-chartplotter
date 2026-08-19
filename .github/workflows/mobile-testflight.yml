@@ -34,7 +34,10 @@ defaults:
 
 jobs:
   testflight:
-    runs-on: macos-15
+    # macos-26: App Store Connect requires apps be built with the iOS 26 SDK
+    # (Xcode 26+); older images' default Xcode gets the upload rejected with
+    # "SDK version issue".
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       TEAM_ID: 5582DW8S98
@@ -44,6 +47,14 @@ jobs:
       BUNDLE_ID: com.checkmate.viamChartplotterMobile
     steps:
       - uses: actions/checkout@v4
+
+      # Newest Xcode on the image, not its default — Apple's minimum-SDK
+      # requirement moves faster than the images' default selection.
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
 
       - uses: subosito/flutter-action@v2
         with:
