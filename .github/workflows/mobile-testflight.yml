@@ -23,6 +23,10 @@ on:
   push:
     tags:
       - "mobile-[0-9]+.[0-9]+.[0-9]+"
+      # Release candidates upload to TestFlight too — that's the beta
+      # channel. Safe: the tag never feeds the version string (marketing
+      # version comes from pubspec, build number from the run number).
+      - "mobile-[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
 
 concurrency:
   group: mobile-testflight
