@@ -536,6 +536,7 @@ class _MapScreenState extends State<MapScreen> {
     var boatBottom = _settings.boatPositionBottom;
     var projMin = _settings.aisProjectionMin;
     var aisTracks = _settings.aisTracksOn;
+    var webSenders = _settings.webSendersOn;
     final apply = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -566,6 +567,13 @@ class _MapScreenState extends State<MapScreen> {
               subtitle: const Text('Shoal water reads red, 10 ft+ green'),
               value: depthColor,
               onChanged: (v) => setDialogState(() => depthColor = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Web sender targets'),
+              subtitle: const Text('Positions rebroadcast via the web'),
+              value: webSenders,
+              onChanged: (v) => setDialogState(() => webSenders = v),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -644,6 +652,7 @@ class _MapScreenState extends State<MapScreen> {
       _settings.boatPositionBottom = boatBottom;
       _settings.aisProjectionMin = projMin;
       _settings.aisTracksOn = aisTracks;
+      _settings.webSendersOn = webSenders;
     });
     _rebuildAisMarkers(); // projection minutes may have changed
     _followTick(); // re-anchor immediately if the screen position changed

@@ -7,6 +7,7 @@ class AisBoat {
   const AisBoat({
     required this.mmsi,
     required this.name,
+    this.source = 'ais',
     required this.location,
     required this.sogKn,
     this.headingDeg,
@@ -17,6 +18,11 @@ class AisBoat {
   });
 
   final String mmsi;
+
+  /// Which feed reported this target: 'ais' (receiver) or 'web'
+  /// (ais-web-sender rebroadcast) — mirrors the web app's per-source layer
+  /// toggle (D6).
+  final String source;
   final String name;
   final LatLng location;
   final double sogKn;
@@ -58,7 +64,8 @@ List<LatLng> aisHistoryPoints(dynamic samples) {
 /// tolerating the field-name variants across the `ais` and `airstream` models
 /// (Cog/COG/Course, Sog/SOG/Speed, Beam/Width). Entries without a valid
 /// 2-element Location are skipped.
-List<AisBoat> parseAisReadings(Map<String, dynamic> raw) {
+List<AisBoat> parseAisReadings(Map<String, dynamic> raw,
+    {String source = 'ais'}) {
   final out = <AisBoat>[];
   raw.forEach((mmsi, value) {
     if (value is! Map) return;
@@ -81,6 +88,7 @@ List<AisBoat> parseAisReadings(Map<String, dynamic> raw) {
 
     out.add(AisBoat(
       mmsi: mmsi,
+      source: source,
       name: (value['Name'] is String) ? (value['Name'] as String).trim() : '',
       location: LatLng(lat, lng),
       sogKn: sog,

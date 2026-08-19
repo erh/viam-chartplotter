@@ -1626,7 +1626,7 @@ demand. Each still has a full gap entry in `MOBILE_PARITY_GAPS.md`.
 | F6 | Satellite cloud imagery | M | `WeatherOverlays.svelte:310-340,518` — NASA GIBS colour/visible/infrared variants as an image overlay. |
 | F5 | Lightning | S | `WeatherOverlays.svelte:506-517` — nowCOAST strike overlay. |
 | B3 | Areas from `area` components | M | `App.svelte:1072-1147` (discovery + `areaVisibleToday`), `marineMap.svelte:893-951,1761-1789,4176`. Folder grouping and date-range visibility included. |
-| D6 | `ais-web-sender` + `airstream` sources | L | `App.svelte:728-780,1049-1071`. Airstream needs viewport-bbox DoCommand with debounce; mind the cellular cost of a global AIS feed. |
+| D6 | `ais-web-sender` + `airstream` sources | L | **web-sender half ✅ done** (discovery probe + merged poll + persisted toggle). Airstream remains: needs viewport-bbox DoCommand with debounce; mind the cellular cost of a global AIS feed. |
 | D7 | Boats panel (fleet) | M | `marineMap.svelte:474-503,613-660`. Search, per-boat visibility, select/deselect all, fit-all-visible. Needs a real touch design — it's a dense desktop panel today. |
 | D8 | ADS-B aircraft | M | `App.svelte:532-546`, `marineMap.svelte:2145-2440`. Sparse fields: render whatever keys are present, don't assume a fixed set. Projection options `[1,2,5]` min. |
 | D9 | Detections overlay | M | `marineMap.svelte:2652-2695`, `src/lib/BoatInfo.ts`. |

@@ -67,6 +67,7 @@ class ViamConnection {
   String? _windSensorName;
   String? _seatempSensorName;
   String? _aisSensorName;
+  List<String> _aisWebSenderNames = const []; // D6: ais-web-sender components
   String? _routeSensorName;
   String? _spotZeroFwName;
   String? _spotZeroSwName;
@@ -248,6 +249,7 @@ class ViamConnection {
     _windSensorName = _discoverSensorByName(robot, 'wind', '');
     _seatempSensorName = _discoverSensorByName(robot, 'seatemp', '');
     _aisSensorName = _discoverSensorEndingWith(robot, 'ais');
+    await _discoverAisWebSenders(robot);
     _routeSensorName = _discoverSensorEndingWith(robot, 'route');
     _spotZeroFwName = _discoverSensorByName(robot, 'spotzero-fw', '');
     _spotZeroSwName = _discoverSensorByName(robot, 'spotzero-sw', '');
@@ -622,14 +624,37 @@ class ViamConnection {
 
     // AIS targets move continuously but the feed is heavy, so poll it at
     // ~5 s rather than every 1 s tick (matches the web app's slower cadence).
-    final aisName = _aisSensorName;
-    if (aisName != null && _tickN % 5 == 0) {
-      try {
-        final r = await Sensor.fromRobot(robot, aisName)
-            .readings()
-            .timeout(_sensorTimeout);
-        state.setAis(parseAisReadings(r));
-      } catch (_) {}
+    if (_tickN % 5 == 0 &&
+        (_aisSensorName != null || _aisWebSenderNames.isNotEmpty)) {
+      // Receiver AIS keyed by MMSI; web senders (D6) keyed by user id —
+      // merged web-last so a target reported by both keeps one entry.
+      final byId = <String, AisBoat>{};
+      final aisName = _aisSensorName;
+      if (aisName != null) {
+        try {
+          final r = await Sensor.fromRobot(robot, aisName)
+              .readings()
+              .timeout(_sensorTimeout);
+          for (final b in parseAisReadings(r)) {
+            byId[b.mmsi] = b;
+          }
+        } catch (_) {}
+      }
+      if (Settings.instance.webSendersOn) {
+        for (final name in _aisWebSenderNames) {
+          try {
+            final r = await Generic.fromRobot(robot, name)
+                .doCommand({'command': 'sending'}).timeout(_sensorTimeout);
+            // The 'total' count is a non-map entry parseAisReadings skips.
+            for (final b in parseAisReadings(
+                r.map((k, v) => MapEntry(k.toString(), v)),
+                source: 'web')) {
+              byId[b.mmsi] = b;
+            }
+          } catch (_) {}
+        }
+      }
+      state.setAis(byId.values.toList());
     }
 
     // Active route destination from the `route` sensor (rarely changes, so
@@ -836,6 +861,37 @@ class ViamConnection {
   TankStatus _rememberTank(TankStatus t) {
     _tankLast[t.name] = t;
     return t;
+  }
+
+  /// ais-web-senders aren't exposed via resourceNames' subtypes, so probe
+  /// every generic component with the 'sending' DoCommand: a real sender
+  /// answers with a numeric "total" (mirrors the web app's
+  /// discoverAisWebSenders). Probes run concurrently and a failure just
+  /// means "not a sender".
+  Future<void> _discoverAisWebSenders(RobotClient robot) async {
+    final generics = <String>[];
+    try {
+      for (final rn in robot.resourceNames) {
+        if (_isHidden(rn.name)) continue;
+        if (rn.subtype == 'generic') generics.add(rn.name);
+      }
+    } catch (_) {}
+    if (generics.isEmpty) {
+      _aisWebSenderNames = const [];
+      return;
+    }
+    final found = await Future.wait([
+      for (final name in generics)
+        Generic.fromRobot(robot, name)
+            .doCommand({'command': 'sending'})
+            .timeout(_sensorTimeout)
+            .then<String?>((r) => r['total'] is num ? name : null)
+            .catchError((_) => null),
+    ]);
+    _aisWebSenderNames = [
+      for (final n in found)
+        if (n != null) n
+    ]..sort();
   }
 
   /// All targets' position history via the AIS sensor's all_history

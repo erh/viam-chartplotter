@@ -111,6 +111,11 @@ class Settings {
   set boatPositionBottom(bool v) =>
       _prefs.setString('mapBoatPosition', v ? 'bottom' : 'center');
 
+  /// Web-sender AIS targets (D6): rebroadcast positions from ais-web-sender
+  /// components, togglable like the web app's "web senders" layer checkbox.
+  bool get webSendersOn => _prefs.getBool('webSendersOn') ?? true;
+  set webSendersOn(bool v) => _prefs.setBool('webSendersOn', v);
+
   /// AIS history tracks (D1): gates both the drawing and the 60 s
   /// all_history poll (web: the ais-track layer / aisTracksNeeded, default
   /// off).
