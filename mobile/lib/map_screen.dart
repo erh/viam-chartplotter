@@ -541,12 +541,17 @@ class _MapScreenState extends State<MapScreen> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
         title: const Text('Chart settings'),
-        content: Column(
+        // The settings list outgrew the dialog box: scroll it, size it to
+        // the screen, and don't autofocus the depth field — the keyboard
+        // eating half the height is what made it unusable on the phone.
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: controller,
-              autofocus: true,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
                 labelText: 'Safe depth (ft)',
@@ -611,6 +616,8 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
           ],
+            ),
+          ),
         ),
         actions: [
           TextButton(
