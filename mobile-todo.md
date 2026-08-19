@@ -1086,19 +1086,22 @@ while the camera screen is open, plus tiles. That's a shore-Wi-Fi budget being
 spent on a cellular or satellite link, and a battery being drained in a pocket.
 
 **Do.**
-1. **Pause polling when backgrounded.** `main.dart` already observes
-   `didChangeAppLifecycleState` for reconnect on resume — extend it: stop the
-   timer on pause, resume and immediately `checkNow()` on resume.
+1. ~~**Pause polling when backgrounded.**~~ Done: `main.dart` cancels the poll
+   timer on `paused`/`hidden` via `ViamConnection.pause()`, and `resume()`
+   restarts it plus settles the connection immediately (skipping the probe
+   outright when the app was away long enough that the peer is certainly gone).
 2. **Adapt the rate.** Full 1 Hz when the map is visible and the boat is moving;
    back off hard when stationary or when only the drawer is open. The existing
    `_tickN % 5` staggering for AIS/route/systems is the right pattern to extend.
 3. **Budget cellular.** Track bytes for tiles + polls; surface it in settings;
    offer a "low data" mode that lengthens intervals and leans on the L1 cache.
-4. Keep the connection watchdog behaviour intact — the reconnect logic in
-   `viam_connection.dart` is good and must not regress.
+4. Keep the connection watchdog behaviour intact — every boat RPC in
+   `viam_connection.dart` is deadline-bounded and the heartbeat outcome is
+   recorded the moment it's known (`_noteHeartbeat`), so a slower poll cadence
+   must not slow down or mask death detection.
 
 **Accept.**
-- [ ] Backgrounded for 10 minutes: no network traffic, and resume reconnects.
+- [x] Backgrounded for 10 minutes: no network traffic, and resume reconnects.
 - [ ] Stationary at anchor uses measurably less data than under way.
 - [ ] A measured baseline for "1 hour under way" exists in the PR description.
 

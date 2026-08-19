@@ -383,7 +383,10 @@ class _MapScreenState extends State<MapScreen> {
                       builder: (_) => DebugScreen(state: s),
                     ),
                   ),
-                  child: _StatusChip(state: s),
+                  child: _StatusChip(
+                    state: s,
+                    onReconnect: widget.connection.reconnectNow,
+                  ),
                 ),
               ),
             ),
@@ -617,14 +620,23 @@ class _EtaPill extends StatelessWidget {
 }
 
 /// Small pill in the top-left: a colour-coded dot plus the connection status.
+/// While disconnected it also carries a retry button, so a helm that's back in
+/// range doesn't have to wait out the reconnect backoff.
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.state});
+  const _StatusChip({required this.state, this.onReconnect});
   final BoatState state;
+  final VoidCallback? onReconnect;
 
   @override
   Widget build(BuildContext context) {
+    final connected = state.connected;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.only(
+        left: 10,
+        right: (connected || onReconnect == null) ? 10 : 2,
+        top: 6,
+        bottom: 6,
+      ),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(20),
@@ -634,8 +646,7 @@ class _StatusChip extends StatelessWidget {
         children: [
           Icon(Icons.circle,
               size: 10,
-              color:
-                  state.connected ? Colors.greenAccent : Colors.orangeAccent),
+              color: connected ? Colors.greenAccent : Colors.orangeAccent),
           const SizedBox(width: 6),
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 220),
@@ -645,6 +656,16 @@ class _StatusChip extends StatelessWidget {
               style: const TextStyle(color: Colors.white, fontSize: 12),
             ),
           ),
+          if (!connected && onReconnect != null)
+            IconButton(
+              tooltip: 'Reconnect now',
+              onPressed: onReconnect,
+              icon: const Icon(Icons.refresh, size: 16),
+              color: Colors.white,
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
         ],
       ),
     );
