@@ -106,7 +106,7 @@ struct ChartScreen: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack(alignment: .topLeading) {
             ChartMapView(baseURL: baseURL, state: client.state, route: client.route, track: client.track)
                 .ignoresSafeArea()
             // Night dimming sits over the chart + cameras but under the
@@ -123,12 +123,17 @@ struct ChartScreen: View {
                         .allowsHitTesting(false)
                 }
             }
-            HStack(alignment: .top) {
-                dataPanel
-                Spacer()
+            // Basic data: one tight strip along the top.
+            dataBar
+                .padding(24)
+                .opacity(client.isOffline ? 0.5 : 1)
+            // Route data: compact block on the right edge.
+            VStack {
                 routePanel
+                Spacer()
             }
-            .padding(40)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(24)
             .opacity(client.isOffline ? 0.5 : 1)
             VStack {
                 Spacer()
@@ -140,14 +145,14 @@ struct ChartScreen: View {
                     } label: {
                         Image(systemName: displayMode.icon)
                             .font(.title3)
-                            .padding(18)
+                            .padding(14)
                             .background(.black.opacity(0.55), in: Circle())
                             .foregroundStyle(.white)
                     }
                     .buttonStyle(.card)
                 }
             }
-            .padding(40)
+            .padding(24)
             if client.isOffline {
                 VStack {
                     Spacer()
@@ -159,6 +164,7 @@ struct ChartScreen: View {
                         .foregroundStyle(.white)
                         .padding(.bottom, 120)
                 }
+                .frame(maxWidth: .infinity)
                 .allowsHitTesting(false)
             }
         }
@@ -175,30 +181,72 @@ struct ChartScreen: View {
         }
     }
 
-    private var dataPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let s = client.state {
-                if let sog = s.sogKn {
-                    row("SOG", String(format: "%.1f kn", sog))
+    /// Horizontal strip of the basics — MFD-style label-over-value
+    /// cells keep it much tighter than label/value rows.
+    private var dataBar: some View {
+        HStack(spacing: 0) {
+            let cells = statCells
+            if cells.isEmpty {
+                if let err = client.lastError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 16)
+                } else {
+                    ProgressView()
+                        .padding(.horizontal, 16)
                 }
-                if let d = s.depthFt {
-                    row("Depth", String(format: "%.0f ft", d))
+            }
+            ForEach(Array(cells.enumerated()), id: \.offset) { i, cell in
+                if i > 0 {
+                    Rectangle()
+                        .fill(.white.opacity(0.15))
+                        .frame(width: 1, height: 44)
                 }
-                if let h = s.headingDeg {
-                    row("HDG", String(format: "%03.0f°", h))
-                }
-                if let c = s.cogDeg {
-                    row("COG", String(format: "%03.0f°", c))
-                }
-            } else if let err = client.lastError {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            } else {
-                ProgressView()
+                statCell(cell.0, cell.1, cell.2)
             }
         }
-        .panelStyle()
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var statCells: [(String, String, String?)] {
+        guard let s = client.state else { return [] }
+        var out: [(String, String, String?)] = []
+        if let sog = s.sogKn {
+            out.append(("SOG", String(format: "%.1f", sog), "kn"))
+        }
+        if let d = s.depthFt {
+            out.append(("Depth", String(format: "%.0f", d), "ft"))
+        }
+        if let h = s.headingDeg {
+            out.append(("HDG", String(format: "%03.0f°", h), nil))
+        }
+        if let c = s.cogDeg {
+            out.append(("COG", String(format: "%03.0f°", c), nil))
+        }
+        return out
+    }
+
+    private func statCell(_ label: String, _ value: String, _ unit: String?) -> some View {
+        VStack(alignment: .center, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .textCase(.uppercase)
+                .foregroundStyle(.white.opacity(0.6))
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value)
+                    .font(.title3.monospacedDigit().bold())
+                    .foregroundStyle(.white)
+                if let unit {
+                    Text(unit)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
     }
 
     /// One leg of the route summary: distance plus (with a usable
@@ -242,8 +290,8 @@ struct ChartScreen: View {
     private var routePanel: some View {
         let wpCount = client.route?.waypoints?.count ?? 0
         if let next = nextLeg {
-            VStack(alignment: .trailing, spacing: 8) {
-                row("Next WPT", String(format: "%.2f nm", next.nm))
+            VStack(alignment: .trailing, spacing: 6) {
+                row("Next", String(format: "%.2f nm", next.nm))
                 if let v = client.route?.closingVelocityMS, v > 0.1 {
                     row("Closing", String(format: "%.1f kn", v * 1.94384))
                 }
@@ -252,29 +300,45 @@ struct ChartScreen: View {
                     row("ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
                 }
                 if let final = finalLeg {
+                    panelDivider
                     row("Final", String(format: "%.2f nm", final.nm))
                     if let s = final.seconds {
-                        row("Final Time", Self.formatDuration(s))
-                        row("Final ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
+                        row("Time", Self.formatDuration(s))
+                        row("ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
                     }
                 }
                 if wpCount > 1 {
-                    row("Waypoints", "\(wpCount)")
+                    panelDivider
+                    row("WPTS", "\(wpCount)")
                 }
             }
             .panelStyle()
         }
     }
 
+    private var panelDivider: some View {
+        Rectangle()
+            .fill(.white.opacity(0.15))
+            .frame(width: 250, height: 1)
+            .padding(.vertical, 3)
+    }
+
     private func row(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             Text(label)
-                .foregroundStyle(.secondary)
+                .font(.caption)
+                .textCase(.uppercase)
+                .foregroundStyle(.white.opacity(0.6))
+                .lineLimit(1)
+                .fixedSize()
             Spacer(minLength: 0)
             Text(value)
-                .font(.title3.monospacedDigit().bold())
+                .font(.body.monospacedDigit().bold())
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .fixedSize()
         }
-        .frame(minWidth: 300)
+        .frame(width: 250)
     }
 
     static func formatDuration(_ seconds: Double) -> String {
@@ -286,8 +350,8 @@ struct ChartScreen: View {
 
 extension View {
     func panelStyle() -> some View {
-        padding(24)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18))
+        padding(16)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
             .foregroundStyle(.white)
     }
 }
