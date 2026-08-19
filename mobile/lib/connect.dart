@@ -139,7 +139,19 @@ class MachineConnector {
 
   Future<RobotClient> _dialWithKey(String fqdn, ({String id, String key}) k) {
     final options = RobotClientOptions.withApiKey(k.id, k.key)
-      ..dialOptions.attemptMdns = false;
+      ..dialOptions.attemptMdns = false
+      // The SDK default is 3 attempts × 10 s, and a timed-out attempt
+      // throws away ALL signaling/ICE progress and restarts the handshake
+      // from scratch. A remote boat on cellular routinely needs >10 s for
+      // the TURN negotiation, so the default either never completes an
+      // attempt or burns 20 s of restarts first. One uninterrupted 25 s
+      // window connects in the time the negotiation actually takes; the
+      // retry policy lives in [connect], which understands auth vs link
+      // failures — not in a blind attempt loop.
+      ..dialOptions.initialConnectionAttempts = 1
+      ..dialOptions.initialConnectionAttemptTimeout =
+          const Duration(seconds: 25)
+      ..dialOptions.timeout = const Duration(seconds: 25);
     return RobotClient.atAddress(fqdn, options);
   }
 }
