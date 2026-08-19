@@ -133,16 +133,15 @@ func TestBuildAreaFeatureCollectionGeoJSON(t *testing.T) {
 	})
 }
 
-// distFromCenterM returns the equirectangular distance (m) of a [lng,lat] point
-// from (40, -70).
+// distFromCenterM returns the haversine distance (m) of a [lng,lat] point from
+// (40, -70) — the same measurement the arrival logic uses, so these tests hold
+// the drawn boundary to the distance the rest of the module would report.
 func distFromCenterM(t *testing.T, p interface{}) float64 {
 	t.Helper()
 	pt := p.([]interface{})
 	lng := pt[0].(float64)
 	lat := pt[1].(float64)
-	dLatM := (lat - 40) * metersPerDegLat
-	dLngM := (lng - -70) * metersPerDegLat * math.Cos(40*math.Pi/180)
-	return math.Hypot(dLatM, dLngM)
+	return haversineMeters(40, -70, lat, lng)
 }
 
 func TestCircleFeature(t *testing.T) {
@@ -158,8 +157,8 @@ func TestCircleFeature(t *testing.T) {
 	}
 	rings := geom["coordinates"].([]interface{})
 	ring := rings[0].([]interface{})
-	if len(ring) != circleSteps+1 {
-		t.Fatalf("ring has %d points, want %d", len(ring), circleSteps+1)
+	if want := fullCircleSteps(10*nmToMeters) + 1; len(ring) != want {
+		t.Fatalf("ring has %d points, want %d", len(ring), want)
 	}
 	// Ring must be closed: first point equals last.
 	first := ring[0].([]interface{})
@@ -167,12 +166,44 @@ func TestCircleFeature(t *testing.T) {
 	if first[0] != last[0] || first[1] != last[1] {
 		t.Fatalf("ring not closed: first=%v last=%v", first, last)
 	}
-	// Every vertex should be ~10 nm from the center (allow 2% slop for the
-	// equirectangular approximation).
+	// Every vertex sits exactly on the radius (spherical direct and haversine
+	// are inverses on the same sphere; 1 cm covers float rounding).
 	wantM := 10 * nmToMeters
 	for _, p := range ring {
-		if d := distFromCenterM(t, p); math.Abs(d-wantM) > wantM*0.02 {
-			t.Fatalf("vertex distance %.1f m, want ~%.0f m", d, wantM)
+		if d := distFromCenterM(t, p); math.Abs(d-wantM) > 0.01 {
+			t.Fatalf("vertex distance %.3f m, want %.0f m", d, wantM)
+		}
+	}
+}
+
+// TestCircleFeatureLargeRadius is the regression test for the equirectangular
+// bug: at 100 nm the old math drew the north/south boundary ~0.25 nm inside the
+// configured radius. Every vertex must now sit on the radius, and adjacent
+// vertices must be close enough that the chord between them sags less than
+// maxChordSagM inside the circle.
+func TestCircleFeatureLargeRadius(t *testing.T) {
+	cfg := &AreaConfig{Center: []float64{40, -70}, RadiusNM: 100}
+	feats := features(t, cfg, "#ff0000")
+	fm := feats[0].(map[string]interface{})
+	geom := fm["geometry"].(map[string]interface{})
+	ring := geom["coordinates"].([]interface{})[0].([]interface{})
+
+	wantM := 100 * nmToMeters
+	for _, p := range ring {
+		if d := distFromCenterM(t, p); math.Abs(d-wantM) > 0.01 {
+			t.Fatalf("vertex distance %.3f m, want %.0f m (off by %.1f m)", d, wantM, d-wantM)
+		}
+	}
+	// Chord midpoints: (radius − midpoint distance) is the sag.
+	for i := 0; i+1 < len(ring); i++ {
+		a := ring[i].([]interface{})
+		b := ring[i+1].([]interface{})
+		mid := []interface{}{
+			(a[0].(float64) + b[0].(float64)) / 2,
+			(a[1].(float64) + b[1].(float64)) / 2,
+		}
+		if sag := wantM - distFromCenterM(t, mid); sag > maxChordSagM*1.1 {
+			t.Fatalf("chord %d sags %.1f m inside the circle, want <= %.0f m", i, sag, maxChordSagM)
 		}
 	}
 }
@@ -198,8 +229,8 @@ func TestSectorFeature(t *testing.T) {
 	// the sector faces south: all arc vertices should be south of the center.
 	arc := ring[1 : len(ring)-1]
 	for _, p := range arc {
-		if d := distFromCenterM(t, p); math.Abs(d-10*nmToMeters) > 10*nmToMeters*0.02 {
-			t.Fatalf("arc vertex distance %.1f m, want ~%.0f m", d, 10*nmToMeters)
+		if d := distFromCenterM(t, p); math.Abs(d-10*nmToMeters) > 0.01 {
+			t.Fatalf("arc vertex distance %.3f m, want %.0f m", d, 10*nmToMeters)
 		}
 		if p.([]interface{})[1].(float64) >= 40.0 {
 			t.Fatalf("arc vertex %v not south of center", p)

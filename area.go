@@ -23,13 +23,17 @@ var AreaModel = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").W
 // this color is drawn by the frontend; here we just carry the stroke color.
 const defaultAreaColor = "#ff3b30"
 
-// circleSteps is the number of vertices used to approximate a center+radius
-// circle as a GeoJSON polygon.
+// circleSteps is the minimum number of vertices used to approximate a
+// center+radius circle as a GeoJSON polygon; fullCircleSteps raises it for
+// large radii so the straight chords between vertices don't sag visibly
+// inside the true circle.
 const circleSteps = 64
 
-// metersPerDegLat is the (approximate, spherical) meters covered by one degree
-// of latitude. Good enough for drawing an area outline on a chart.
-const metersPerDegLat = 111320.0
+// earthRadiusM is the mean Earth radius (metres) of the sphere all of this
+// module's great-circle math uses — keep it equal to the R in haversineMeters
+// (arrival.go) so a drawn radius boundary sits exactly at the distance the
+// arrival logic and measurement tools report.
+const earthRadiusM = 6371000.0
 
 // nmToMeters converts nautical miles (the `radius_nm` unit) to meters.
 const nmToMeters = 1852.0
@@ -235,22 +239,58 @@ func setFeatureColor(feat map[string]interface{}, color string) {
 	}
 }
 
+// maxChordSagM caps how far (metres) the straight chord between two adjacent
+// arc vertices may cut inside the true circle. 20 m is invisible at any zoom a
+// large area is viewed at, and keeps the vertex count modest (~215 for a
+// 100 nm radius).
+const maxChordSagM = 20.0
+
+// fullCircleSteps returns the vertex count for a full circle of the given
+// radius. An inscribed n-gon's chords sag radiusM·(1−cos(π/n)) ≈ radiusM·π²/2n²
+// inside the circle, so n = π·√(radiusM/(2·sag)) holds the sag to maxChordSagM.
+// Clamped to [circleSteps, 512] — small circles keep the traditional 64-gon,
+// and the payload stays bounded for absurd radii.
+func fullCircleSteps(radiusM float64) int {
+	n := int(math.Ceil(math.Pi * math.Sqrt(radiusM/(2*maxChordSagM))))
+	if n < circleSteps {
+		return circleSteps
+	}
+	if n > 512 {
+		return 512
+	}
+	return n
+}
+
+// destinationPoint returns the [lng, lat] reached by travelling distM metres
+// from (lat, lng) along the given initial compass bearing (degrees clockwise
+// from true north), on the earthRadiusM sphere. This is the exact spherical
+// direct solution, so every returned point is at haversine distance distM from
+// the start — the equirectangular version this replaced drew large-radius
+// boundaries up to ~0.4% (≈0.25 nm at 100 nm) short of the configured radius.
+func destinationPoint(lat, lng, distM, bearingDeg float64) []interface{} {
+	φ1 := lat * math.Pi / 180
+	λ1 := lng * math.Pi / 180
+	θ := bearingDeg * math.Pi / 180
+	δ := distM / earthRadiusM
+	sinφ2 := math.Sin(φ1)*math.Cos(δ) + math.Cos(φ1)*math.Sin(δ)*math.Cos(θ)
+	φ2 := math.Asin(sinφ2)
+	λ2 := λ1 + math.Atan2(
+		math.Sin(θ)*math.Sin(δ)*math.Cos(φ1),
+		math.Cos(δ)-math.Sin(φ1)*sinφ2)
+	return []interface{}{λ2 * 180 / math.Pi, φ2 * 180 / math.Pi}
+}
+
 // sectorFeature builds a GeoJSON Polygon Feature for a center (lat, lng) +
 // radius (meters) region. With no bearings it's a full circle; with bearingMin
 // / bearingMax (compass degrees, clockwise from north) it's a pie slice from
-// bearingMin around to bearingMax — wrapping through north when min > max. Uses
-// an equirectangular approximation, accurate enough for chart display.
+// bearingMin around to bearingMax — wrapping through north when min > max.
+// Vertices are placed with the exact spherical direct formula (destinationPoint)
+// on the same sphere haversineMeters measures, so the drawn boundary sits at
+// the configured distance at every bearing.
 func sectorFeature(centerLat, centerLng, radiusM float64, bearingMin, bearingMax *float64, color string) map[string]interface{} {
-	cosLat := math.Cos(centerLat * math.Pi / 180)
-	if math.Abs(cosLat) < 1e-6 {
-		cosLat = 1e-6
-	}
 	// arcPoint returns the [lng, lat] on the radius circle at a compass bearing.
 	arcPoint := func(bearingDeg float64) []interface{} {
-		b := bearingDeg * math.Pi / 180
-		dLat := (radiusM / metersPerDegLat) * math.Cos(b)          // north component
-		dLng := (radiusM / (metersPerDegLat * cosLat)) * math.Sin(b) // east component
-		return []interface{}{centerLng + dLng, centerLat + dLat}
+		return destinationPoint(centerLat, centerLng, radiusM, bearingDeg)
 	}
 
 	props := map[string]interface{}{
@@ -258,13 +298,17 @@ func sectorFeature(centerLat, centerLng, radiusM float64, bearingMin, bearingMax
 		"radius_nm": radiusM / nmToMeters,
 	}
 
+	fullSteps := fullCircleSteps(radiusM)
 	var ring []interface{}
 	if bearingMin == nil || bearingMax == nil {
-		// Full circle: closed ring of vertices around the center.
-		ring = make([]interface{}, 0, circleSteps+1)
-		for i := 0; i <= circleSteps; i++ {
-			ring = append(ring, arcPoint(360*float64(i)/circleSteps))
+		// Full circle: ring of vertices around the center, closed by repeating
+		// the first vertex exactly (arcPoint(0) and arcPoint(360) differ by
+		// float rounding, and GeoJSON requires exact closure).
+		ring = make([]interface{}, 0, fullSteps+1)
+		for i := 0; i < fullSteps; i++ {
+			ring = append(ring, arcPoint(360*float64(i)/float64(fullSteps)))
 		}
+		ring = append(ring, ring[0])
 	} else {
 		// Pie slice: apex at the center, arc from min to max (wrapping through
 		// north when min > max), back to the apex.
@@ -275,8 +319,8 @@ func sectorFeature(centerLat, centerLng, radiusM float64, bearingMin, bearingMax
 		}
 		props["bearing_min"] = *bearingMin
 		props["bearing_max"] = *bearingMax
-		// One arc vertex roughly every 360/circleSteps degrees, at least 2.
-		steps := int(math.Ceil((end - start) / (360.0 / circleSteps)))
+		// One arc vertex roughly every 360/fullSteps degrees, at least 2.
+		steps := int(math.Ceil((end - start) / (360.0 / float64(fullSteps))))
 		if steps < 2 {
 			steps = 2
 		}
