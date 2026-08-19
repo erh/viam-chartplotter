@@ -669,6 +669,11 @@ class _MapScreenState extends State<MapScreen> {
         if (mounted && !_wind.on) _toggleWind();
       });
     }
+    if (_settings.wavesOn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_wind.wavesOn) _toggleWaves();
+      });
+    }
   }
 
   @override
@@ -759,6 +764,32 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Toggle the wave overlay (F3) — same shape as _toggleWind.
+  Future<void> _toggleWaves() async {
+    _wind.bounds = _map.camera.visibleBounds;
+    setState(() {}); // reflect the spinner
+    try {
+      await _wind.toggleWaves();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Waves unavailable: $e')));
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _selectWaveModel(WeatherModel m) async {
+    setState(() {});
+    try {
+      await _wind.selectWaveModel(m);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${m.displayName}: $e')));
+    }
+    if (mounted) setState(() {});
+  }
+
   /// Switch weather models (F2) — the controller persists, reshapes fh and
   /// refetches; failure rolls the selection back and gets a snackbar.
   Future<void> _selectWindModel(WeatherModel m) async {
@@ -773,18 +804,25 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  /// Fetch the wind field at forecast hour [fh] and show it.
+  /// Fetch the active weather fields at forecast hour [fh] — the one slider
+  /// drives wind and waves together (web parity: one weatherForecastHour).
   Future<void> _loadWind(int fh) async {
     _wind.bounds = _map.camera.visibleBounds;
     _wind.rotationDeg = _rotationDeg;
     setState(() => _wind.loading = true);
     try {
-      await _wind.load(fh);
+      if (_wind.on) {
+        await _wind.load(fh); // clamps fh to the wind model's range
+      } else {
+        _wind.fh = fh;
+      }
+      if (_wind.wavesOn) await _wind.loadWaves(_wind.fh);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Wind unavailable: $e')));
+          .showSnackBar(SnackBar(content: Text('Weather unavailable: $e')));
     }
+    _wind.loading = false;
     if (mounted) setState(() {});
   }
 
@@ -1122,6 +1160,7 @@ class _MapScreenState extends State<MapScreen> {
               rotationDeg: _rotationDeg,
               windOn: _wind.on,
               windMarkers: _wind.markers,
+              wavePolygons: _wind.wavesOn ? _wind.waveCells : const [],
               aisMarkers: _aisMarkers,
               areas: _visibleAreas,
               navaidMarkers: _navaidMarkers,
@@ -1203,7 +1242,8 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
               // Scale bar in nm (J7), lifted clear of the wind slider.
-              NauticalScalebar(liftPx: _wind.on ? 64 : 0),
+              NauticalScalebar(
+                  liftPx: (_wind.on || _wind.wavesOn) ? 64 : 0),
             ],
           ),
           // Top-left: compact connection status.
@@ -1371,6 +1411,14 @@ class _MapScreenState extends State<MapScreen> {
                       busy: _wind.loading,
                       onTap: _toggleWind,
                     ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
+                      icon: Icons.waves,
+                      tooltip: 'Waves',
+                      active: _wind.wavesOn,
+                      busy: _wind.waveLoading,
+                      onTap: _toggleWaves,
+                    ),
                     if (widget.connection.navApi != null) ...[
                       const SizedBox(height: 8),
                       MapRoundButton(
@@ -1467,8 +1515,16 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          // Bottom: wind forecast-time slider (only while wind is on).
-          if (_wind.on)
+          // Wave-height legend (F3), above the forecast bar.
+          if (_wind.wavesOn)
+            const Positioned(
+              left: 12,
+              bottom: 64,
+              child: SafeArea(child: WaveLegend()),
+            ),
+          // Bottom: forecast-time slider, shown while any weather field is
+          // up — one hour drives wind and waves together (web parity).
+          if (_wind.on || _wind.wavesOn)
             Positioned(
               left: 12,
               right: 76, // clear the center-on-boat FAB
@@ -1476,12 +1532,15 @@ class _MapScreenState extends State<MapScreen> {
               child: SafeArea(
                 child: WindForecastBar(
                   fh: _wind.fh,
-                  loading: _wind.loading,
+                  loading: _wind.loading || _wind.waveLoading,
                   onScrub: (v) => setState(() => _wind.fh = v),
                   onCommit: _loadWind,
                   model: _wind.model,
                   models: _wind.windModels,
                   onModel: _selectWindModel,
+                  waveModel: _wind.wavesOn ? _wind.waveModel : null,
+                  waveModels: _wind.waveModels,
+                  onWaveModel: _selectWaveModel,
                 ),
               ),
             ),

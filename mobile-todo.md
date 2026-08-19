@@ -1378,8 +1378,8 @@ or contour band with the web's `WAVE_COLOR_SCALE`, plus a legend in feet
 `colorForValue` so both apps colour the same sea state identically.
 
 **Accept.**
-- [ ] Wave colours match the web app for the same forecast hour and area.
-- [ ] Legend reads in feet.
+- [x] Wave colours match the web app for the same forecast hour and area.
+- [x] Legend reads in feet.
 
 ---
 

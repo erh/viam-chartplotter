@@ -126,6 +126,15 @@ class Settings {
   set windModel(String? v) =>
       v == null ? _prefs.remove('windModel') : _prefs.setString('windModel', v);
 
+  /// Selected wave model (F3), e.g. "pacioos-ww3".
+  String? get waveModel => _prefs.getString('waveModel');
+  set waveModel(String? v) =>
+      v == null ? _prefs.remove('waveModel') : _prefs.setString('waveModel', v);
+
+  /// Wave overlay on/off (F3), persisted like windOn.
+  bool get wavesOn => _prefs.getBool('wavesOn') ?? false;
+  set wavesOn(bool v) => _prefs.setBool('wavesOn', v);
+
   /// Night mode (L4): red-multiply the whole chart UI to protect night
   /// vision. The server has no night render, so this is client-side.
   bool get nightModeOn => _prefs.getBool('nightModeOn') ?? false;

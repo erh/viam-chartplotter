@@ -1,8 +1,48 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' show Color;
 
 import 'package:http/http.dart' as http;
+
+/// Wave colour scale (F3), ported verbatim from src/lib/windLayer.ts
+/// (WAVE_COLOR_SCALE) so both apps colour the same sea state identically.
+/// Stops span 0 → [waveRangeMaxM] metres.
+const List<Color> waveColorScale = [
+  Color(0xFFf0f7ff), // 0.0 m (0 ft) — near-white (visible on blue basemap)
+  Color(0xFFc8e4ff), // 0.21
+  Color(0xFF8dcaff), // 0.43 — sky blue
+  Color(0xFF3eb1ff), // 0.64 (~2 ft, legend tick) — bright cyan
+  Color(0xFF1ad3c4), // 0.86 — saturated teal
+  Color(0xFF27d77a), // 1.07
+  Color(0xFF3ed24a), // 1.29 — bright green
+  Color(0xFFbde534), // 1.50 (~5 ft, legend tick) — chartreuse
+  Color(0xFFfff200), // 1.71 — saturated yellow
+  Color(0xFFffb627), // 1.93
+  Color(0xFFff7a1a), // 2.14 (~7 ft, legend tick) — saturated orange
+  Color(0xFFff4d17), // 2.36
+  Color(0xFFe51d1d), // 2.57 — saturated red
+  Color(0xFFb51010), // 2.79
+  Color(0xFF6e0606), // 3.0+ m (~10 ft, legend tick) — deep red
+];
+
+/// Top of the wave colour ramp, metres (web WAVE_RANGE_MAX_M).
+const double waveRangeMaxM = 3.0;
+const double metersToFeet = 3.28084;
+
+/// Resolve a value to its colour on [scale] — the web's colorForValue:
+/// linear interpolation between adjacent stops so a mid value doesn't snap
+/// to either neighbour (ol-wind's internal behaviour).
+Color colorForValue(List<Color> scale, double value, double maxValue) {
+  if (scale.isEmpty) return const Color(0xFF000000);
+  if (!value.isFinite || maxValue <= 0) return scale.first;
+  final t = (value / maxValue).clamp(0.0, 1.0);
+  final idx = t * (scale.length - 1);
+  final i0 = idx.floor();
+  final i1 = math.min(scale.length - 1, i0 + 1);
+  final f = idx - i0;
+  return Color.lerp(scale[i0], scale[i1], f)!;
+}
 
 /// A GFS-shape wind field decoded from the server's
 /// /noaa-weather/data/{model}/latest.json (the same ol-wind JSON the web app

@@ -22,6 +22,8 @@ List<Widget> buildMapLayers({
   required double rotationDeg,
   required bool windOn,
   required List<Marker> windMarkers,
+  // Wave colour cells (F3), drawn under the wind arrows.
+  List<Polygon> wavePolygons = const [],
   required List<Marker> aisMarkers,
   List<AreaInfo> areas = const [],
   List<Marker> navaidMarkers = const [],
@@ -181,6 +183,9 @@ List<Widget> buildMapLayers({
         ],
       ),
     ],
+    // Wave field (F3): translucent height-coloured cells under the wind
+    // arrows so both weather overlays read together.
+    if (wavePolygons.isNotEmpty) PolygonLayer(polygons: wavePolygons),
     // Wind overlay (arrow markers, over the chart, under boat markers).
     if (windOn && windMarkers.isNotEmpty) MarkerLayer(markers: windMarkers),
     // Active route. With nav-service waypoints (E1) the full chain draws

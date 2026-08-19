@@ -44,6 +44,82 @@ class WindOverlayController {
   List<WeatherModel> get windModels =>
       [for (final m in models) if (m.kind == 'wind') m];
 
+  List<WeatherModel> get waveModels =>
+      [for (final m in models) if (m.kind == 'wave') m];
+
+  // ---- wave overlay (F3) ------------------------------------------------
+  // Waves ride the same 2-record U/V JSON as wind (the server re-stamps
+  // HTSGW/DIRPW): magnitude = significant wave height in metres, direction
+  // = propagation. Height drives the colour, exactly like the web.
+  WindField? waveField;
+  bool wavesOn = false;
+  bool waveLoading = false;
+  WeatherModel? waveModel;
+  List<Polygon> waveCells = const [];
+
+  WeatherModel? _resolveWaveModel() {
+    final wanted = Settings.instance.waveModel;
+    final usable = [for (final m in waveModels) if (!m.disabled) m];
+    if (usable.isEmpty) return null;
+    return usable.firstWhere((m) => m.name == wanted, orElse: () => usable.first);
+  }
+
+  /// Toggle the wave overlay; fetches the field on first use. Throws like
+  /// [toggle] so the caller can surface why.
+  Future<void> toggleWaves() async {
+    if (wavesOn) {
+      wavesOn = false;
+      Settings.instance.wavesOn = false;
+      waveCells = const [];
+      return;
+    }
+    await ensureModels();
+    final m = _resolveWaveModel();
+    if (m == null) throw StateError('No wave model available on this server');
+    waveModel = m;
+    Settings.instance.wavesOn = true;
+    if (waveField != null) {
+      wavesOn = true;
+      rebuildMarkers();
+      return;
+    }
+    await loadWaves(fh);
+  }
+
+  Future<void> selectWaveModel(WeatherModel next) async {
+    if (next.disabled || next.name == waveModel?.name) return;
+    final prev = waveModel;
+    waveModel = next;
+    Settings.instance.waveModel = next.name;
+    try {
+      await loadWaves(fh);
+    } catch (_) {
+      waveModel = prev;
+      Settings.instance.waveModel = prev?.name;
+      rethrow;
+    }
+  }
+
+  /// Fetch the wave field at forecast hour [hour] (clamped to the wave
+  /// model's own range) and show it.
+  Future<void> loadWaves(int hour) async {
+    final m = waveModel;
+    if (m == null) return;
+    waveLoading = true;
+    try {
+      final f = await fetchWindField(AppConfig.tileBase.value, m.name,
+          fh: m.clampFh(hour));
+      waveField = f;
+      wavesOn = true;
+      waveLoading = false;
+      rebuildMarkers();
+    } catch (e) {
+      waveLoading = false;
+      state.setWindInfo('wave error: $e');
+      rethrow;
+    }
+  }
+
   /// Fetch the catalogue once and re-resolve the persisted selection
   /// against it. Never throws — a failure keeps the GFS defaults.
   Future<void> ensureModels() async {
@@ -127,6 +203,7 @@ class WindOverlayController {
   /// and reporting the count into the Debug wind row. Uses MarkerLayer (proven
   /// to render) rather than a CustomPainter.
   void rebuildMarkers() {
+    _rebuildWaveCells();
     final f = field;
     final b = bounds;
     if (!on || f == null || b == null) {
@@ -174,6 +251,48 @@ class WindOverlayController {
     );
   }
 
+  /// Rebuild the wave colour cells (F3) for the current field + viewport:
+  /// a ground-anchored lattice of translucent rectangles, each coloured by
+  /// significant wave height through the web's WAVE_COLOR_SCALE. A grid of
+  /// polygons, not particles — magnitude is what a helmsman reads.
+  void _rebuildWaveCells() {
+    final f = waveField;
+    final b = bounds;
+    if (!wavesOn || f == null || b == null) {
+      waveCells = const [];
+      return;
+    }
+    const maxCells = 900;
+    final out = <Polygon>[];
+    final span = math.max(b.east - b.west, b.north - b.south);
+    // ~24 cells across the view: fine enough to read gradients, coarse
+    // enough that the polygon count stays trivial.
+    final step = (span / 24).clamp(0.02, 5.0).toDouble();
+    final lat0 = (b.south / step).floorToDouble() * step;
+    final lon0 = (b.west / step).floorToDouble() * step;
+    for (double lat = lat0; lat <= b.north; lat += step) {
+      for (double lon = lon0; lon <= b.east; lon += step) {
+        final nlon = ((lon + 540) % 360) - 180;
+        final s = f.sampleInterp(nlon + step / 2, lat + step / 2);
+        if (s == null) continue;
+        final heightM = math.sqrt(s.u * s.u + s.v * s.v);
+        out.add(Polygon(
+          points: [
+            LatLng(lat, nlon),
+            LatLng(lat, nlon + step),
+            LatLng(lat + step, nlon + step),
+            LatLng(lat + step, nlon),
+          ],
+          color: colorForValue(waveColorScale, heightM, waveRangeMaxM)
+              .withValues(alpha: 0.45),
+        ));
+        if (out.length >= maxCells) break;
+      }
+      if (out.length >= maxCells) break;
+    }
+    waveCells = out;
+  }
+
   /// Wind-speed colour ramp (knots). Shared with the legend when task F3 adds
   /// one.
   static Color colorFor(double kn) {
@@ -183,6 +302,120 @@ class WindOverlayController {
     if (kn < 25) return const Color(0xFFfdae61);
     if (kn < 34) return const Color(0xFFf46d43);
     return const Color(0xFFd73027);
+  }
+}
+
+/// Compact model dropdown used by the forecast bar (F2 wind, F3 wave).
+/// Disabled entries stay listed, greyed, with their `reason` as a subtitle
+/// (the web puts it in the option tooltip; touch has no hover).
+class _ModelPicker extends StatelessWidget {
+  const _ModelPicker({
+    required this.current,
+    required this.models,
+    required this.enabled,
+    required this.onPick,
+  });
+
+  final WeatherModel current;
+  final List<WeatherModel> models;
+  final bool enabled;
+  final ValueChanged<WeatherModel> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: DropdownButton<String>(
+        value: current.name,
+        dropdownColor: Colors.black87,
+        underline: const SizedBox.shrink(),
+        isDense: true,
+        style: const TextStyle(color: Colors.white, fontSize: 13),
+        items: [
+          for (final m in models)
+            DropdownMenuItem(
+              value: m.name,
+              enabled: !m.disabled,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    m.disabled ? '${m.displayName} (n/a)' : m.displayName,
+                    style: TextStyle(
+                        color: m.disabled ? Colors.white38 : Colors.white,
+                        fontSize: 13),
+                  ),
+                  if (m.disabled && (m.reason ?? '').isNotEmpty)
+                    Text(m.reason!,
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 10)),
+                ],
+              ),
+            ),
+        ],
+        selectedItemBuilder: (_) => [
+          for (final m in models)
+            Center(
+                child: Text(m.displayName,
+                    style:
+                        const TextStyle(color: Colors.white, fontSize: 13))),
+        ],
+        onChanged: !enabled
+            ? null
+            : (name) {
+                final m = models.where((x) => x.name == name);
+                if (m.isNotEmpty) onPick(m.first);
+              },
+      ),
+    );
+  }
+}
+
+/// Wave-height legend (F3): the colour strip with tick labels in FEET
+/// (web: WAVE_RANGE_MAX_M ticks at 0/25/50/75/100% × METERS_TO_FEET).
+class WaveLegend extends StatelessWidget {
+  const WaveLegend({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final ticks = [
+      for (final f in [0.0, 0.25, 0.5, 0.75, 1.0])
+        '${(waveRangeMaxM * f * metersToFeet).round()} ft'
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            height: 8,
+            width: 180,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(4),
+              gradient: const LinearGradient(colors: waveColorScale),
+            ),
+          ),
+          const SizedBox(height: 2),
+          SizedBox(
+            width: 180,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                for (final t in ticks)
+                  Text(t,
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 10)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -200,6 +433,9 @@ class WindForecastBar extends StatelessWidget {
     this.model = WeatherModel.gfsFallback,
     this.models = const [],
     this.onModel,
+    this.waveModel,
+    this.waveModels = const [],
+    this.onWaveModel,
   });
 
   final int fh;
@@ -209,6 +445,11 @@ class WindForecastBar extends StatelessWidget {
   final WeatherModel model;
   final List<WeatherModel> models;
   final ValueChanged<WeatherModel>? onModel;
+  // Wave model picker (F3), shown when a wave overlay is up and there's a
+  // choice. Null waveModel = waves off.
+  final WeatherModel? waveModel;
+  final List<WeatherModel> waveModels;
+  final ValueChanged<WeatherModel>? onWaveModel;
 
   @override
   Widget build(BuildContext context) {
@@ -232,58 +473,16 @@ class WindForecastBar extends StatelessWidget {
                     strokeWidth: 2, color: Colors.white)
                 : const Icon(Icons.air, color: Colors.white, size: 18),
           ),
-          // Model picker (F2), only when there's a real choice (web parity).
-          if (models.length > 1)
-            Padding(
-              padding: const EdgeInsets.only(left: 6),
-              child: DropdownButton<String>(
-                value: model.name,
-                dropdownColor: Colors.black87,
-                underline: const SizedBox.shrink(),
-                isDense: true,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
-                items: [
-                  for (final m in models)
-                    DropdownMenuItem(
-                      value: m.name,
-                      enabled: !m.disabled,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            m.disabled ? '${m.displayName} (n/a)' : m.displayName,
-                            style: TextStyle(
-                                color: m.disabled
-                                    ? Colors.white38
-                                    : Colors.white,
-                                fontSize: 13),
-                          ),
-                          // The web puts `reason` in the option tooltip;
-                          // touch has no hover, so it's a subtitle here.
-                          if (m.disabled && (m.reason ?? '').isNotEmpty)
-                            Text(m.reason!,
-                                style: const TextStyle(
-                                    color: Colors.white38, fontSize: 10)),
-                        ],
-                      ),
-                    ),
-                ],
-                selectedItemBuilder: (_) => [
-                  for (final m in models)
-                    Center(
-                        child: Text(m.displayName,
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 13))),
-                ],
-                onChanged: loading || onModel == null
-                    ? null
-                    : (name) {
-                        final m = models.where((x) => x.name == name);
-                        if (m.isNotEmpty) onModel!(m.first);
-                      },
-              ),
-            ),
+          // Model pickers (F2 wind / F3 wave), only when there's a real
+          // choice (web parity).
+          if (models.length > 1 && onModel != null)
+            _ModelPicker(
+                current: model, models: models,
+                enabled: !loading, onPick: onModel!),
+          if (waveModel != null && waveModels.length > 1 && onWaveModel != null)
+            _ModelPicker(
+                current: waveModel!, models: waveModels,
+                enabled: !loading, onPick: onWaveModel!),
           SizedBox(
             width: 48,
             child: Text(
