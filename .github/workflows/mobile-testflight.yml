@@ -1,0 +1,129 @@
+# Build a signed iOS release and upload it to TestFlight whenever the mobile
+# app changes on main (plus on demand via workflow_dispatch / `gh workflow
+# run mobile-testflight.yml --ref <branch>`).
+#
+# Signing is fully cloud-managed: xcodebuild authenticates with the App Store
+# Connect API key (secrets ASC_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8) and
+# -allowProvisioningUpdates creates/uses the distribution certificate and
+# profile itself — no certificate files live in CI. The export step uploads
+# straight to App Store Connect (destination: upload), so there's no separate
+# altool/transporter step to keep working.
+#
+# The build number is the workflow run number, so every upload is unique and
+# monotonic (App Store Connect rejects re-used build numbers). The OAuth
+# client id baked into the build is the public Checkmate PKCE client — same
+# values as run-local-checkmate.sh; PKCE means it is not a secret.
+
+name: mobile-testflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "mobile/**"
+      - ".github/workflows/mobile-testflight.yml"
+
+concurrency:
+  group: mobile-testflight
+  cancel-in-progress: false # queue behind an in-flight upload, never kill it
+
+defaults:
+  run:
+    working-directory: mobile
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      TEAM_ID: 5582DW8S98
+      # Must match the App Store Connect app record's bundle id. Authoritative:
+      # a step below stamps it over whatever `flutter create` generated.
+      BUNDLE_ID: com.viam.viamChartplotterMobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: mobile/.fvmrc
+          cache: true
+
+      # ios/ is gitignored and regenerated every run; --org pinned so the
+      # generated project is deterministic (matches Makefile MOBILE_ORG).
+      - name: Materialize platform folders
+        run: flutter create --org com.viam .
+
+      - name: Configure iOS Info.plist (AppAuth redirect, usage descriptions)
+        run: bash tool/ios-appauth.sh
+
+      - name: Pin bundle identifier
+        run: |
+          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = com.viam.viamChartplotterMobile;/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" \
+            ios/Runner.xcodeproj/project.pbxproj
+          grep -m1 "PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;" ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_API_KEY_P8" > "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+
+      # Compile the Flutter side and generate the Xcode config (dart-defines,
+      # build number) without signing; the signed archive happens next, in
+      # xcodebuild, where cloud signing can authenticate with the ASC key.
+      - name: Build Flutter app (no codesign)
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-number="$GITHUB_RUN_NUMBER" \
+            --dart-define=VIAM_OAUTH_ISSUER=https://auth.viam.com \
+            --dart-define=VIAM_OAUTH_CLIENT_ID=b588caad-1657-42e9-bb7b-026e8a1b00db
+
+      - name: Archive (cloud-managed signing)
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace \
+            -scheme Runner -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            archive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+      - name: Export and upload to TestFlight
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}

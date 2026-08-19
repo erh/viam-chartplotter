@@ -33,6 +33,14 @@ set_str NSCameraUsageDescription "Shows the boat's camera feeds."
 set_str NSMicrophoneUsageDescription "Required by the Viam robot connection."
 echo "ensured camera/microphone usage descriptions in $PLIST"
 
+# --- Export compliance ------------------------------------------------------
+# Only standard HTTPS/TLS encryption (exempt), declared up front — otherwise
+# every TestFlight upload sits in "Missing Compliance" until it's answered
+# manually in App Store Connect.
+"$PB" -c "Set :ITSAppUsesNonExemptEncryption false" "$PLIST" 2>/dev/null \
+  || "$PB" -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+echo "ensured export-compliance key in $PLIST"
+
 # --- Local network / mDNS ---------------------------------------------------
 # The Viam SDK finds the machine on the LAN via Bonsoir mDNS browsing for the
 # `_rpc._tcp` service (the fast on-boat direct connection). iOS silently blocks
