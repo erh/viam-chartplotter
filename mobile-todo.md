@@ -372,7 +372,7 @@ cache" action alongside it when L1 lands.
 
 ---
 
-### D10 · Bound the AIS marker layer `S` `P0`
+### D10 · Bound the AIS marker layer `S` `P0` — ✅ **done**
 
 **Files:** `mobile/lib/map/map_layers.dart`, `mobile/lib/boat_state.dart`
 **Web ref:** `src/marineMap.svelte:2582-2637` (style fn), `4082` (layer)
@@ -397,8 +397,11 @@ only on event handlers, capped at 1500 (`_rebuildWindMarkers`). AIS didn't.
 
 **Accept.**
 - [ ] 300 synthetic targets hold 60 fps while panning (profile mode).
-- [ ] Panning away and back shows the same targets.
-- [ ] The drop count is visible in the debug screen when the cap trips.
+      *(manual, on-device profile run)*
+- [x] Panning away and back shows the same targets
+      (`test/ais_cull_test.dart`).
+- [x] The drop count is visible in the debug screen when the cap trips
+      ("AIS not drawn" row).
 
 ---
 

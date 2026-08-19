@@ -73,6 +73,11 @@ class BoatState extends ChangeNotifier {
   // Which component each reading came from (for the drawer's Sources section).
   Map<String, String?> sources = const {};
   String windInfo = 'off'; // wind-overlay fetch state, shown in Debug
+  // AIS marker cull/cap counters (D10), written by the map layer builder for
+  // the debug screen. Plain fields, no notify — they ride along with the
+  // rebuilds that produced them.
+  int aisCulled = 0;
+  int aisCapped = 0;
   String status = 'Starting…';
   DateTime? lastUpdate;
   // Why the last re-dial failed, and how many attempts the current outage has

@@ -28,6 +28,9 @@ class DebugScreen extends StatelessWidget {
             if (state.lastConnectError != null)
               _Row('Last error', state.lastConnectError!),
             _Row('AIS targets', '${state.aisBoats.length}'),
+            if (state.aisCulled > 0 || state.aisCapped > 0)
+              _Row('AIS not drawn',
+                  '${state.aisCulled} off-screen, ${state.aisCapped} over cap'),
             _Row('Wind', state.windInfo),
             const SizedBox(height: 16),
             const _Section('Discovered sources'),

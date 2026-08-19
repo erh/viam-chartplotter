@@ -1,9 +1,6 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 
-import '../ais.dart';
 import '../boat_state.dart';
 import '../tile_sources.dart';
 import 'boat_marker.dart';
@@ -21,7 +18,7 @@ List<Widget> buildMapLayers({
   required double rotationDeg,
   required bool windOn,
   required List<Marker> windMarkers,
-  required void Function(AisBoat) onAisTap,
+  required List<Marker> aisMarkers,
   required String buildStamp,
   int? safeDepthFt,
 }) {
@@ -72,26 +69,10 @@ List<Widget> buildMapLayers({
           ),
         ],
       ),
-    // AIS targets (drawn under the own-boat marker).
-    if (state.aisBoats.isNotEmpty)
-      MarkerLayer(
-        markers: [
-          for (final b in state.aisBoats)
-            Marker(
-              point: b.location,
-              width: 30,
-              height: 30,
-              child: GestureDetector(
-                onTap: () => onAisTap(b),
-                child: Transform.rotate(
-                  angle: (b.orientationDeg + rotationDeg) * math.pi / 180.0,
-                  child: const Icon(Icons.navigation,
-                      color: Colors.cyanAccent, size: 22),
-                ),
-              ),
-            ),
-        ],
-      ),
+    // AIS targets (drawn under the own-boat marker). Prebuilt and cached by
+    // MapScreen (D10): culled to the viewport, capped, rebuilt only when the
+    // AIS set or the camera changes — not on every 1 Hz state tick.
+    if (aisMarkers.isNotEmpty) MarkerLayer(markers: aisMarkers),
     if (state.position != null)
       MarkerLayer(
         markers: [

@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+
+import 'ais.dart';
+import 'map/ais_markers.dart';
 
 import 'boat_state.dart';
 import 'camera_screen.dart';
@@ -70,6 +74,61 @@ class _MapScreenState extends State<MapScreen> {
 
   late final WindOverlayController _wind =
       WindOverlayController(state: widget.state);
+
+  // Cached AIS marker layer (D10): rebuilt only when the AIS set or the
+  // camera changes, never on the bare 1 Hz state tick, and bounded by a
+  // viewport cull + cap so a busy harbour doesn't rebuild hundreds of
+  // rotated widgets per second.
+  List<Marker> _aisMarkers = const [];
+  List<AisBoat>? _aisMarkersFor; // the list identity the cache was built from
+  static const int _aisCap = 500;
+  static const double _aisMinZoom = 7; // chart gate; heading invisible below
+
+  void _rebuildAisMarkers() {
+    final s = widget.state;
+    final MapCamera camera;
+    try {
+      camera = _map.camera;
+    } catch (_) {
+      return; // map not built yet — the first onPositionChanged re-runs this
+    }
+    if (camera.zoom < _aisMinZoom) {
+      widget.state.aisCulled = s.aisBoats.length;
+      widget.state.aisCapped = 0;
+      _aisMarkers = const [];
+      _aisMarkersFor = s.aisBoats;
+      return;
+    }
+    final result = cullAisTargets(
+      boats: s.aisBoats,
+      bounds: camera.visibleBounds,
+      reference: camera.center,
+      cap: _aisCap,
+    );
+    widget.state.aisCulled = result.culled;
+    widget.state.aisCapped = result.capped;
+    if (result.capped > 0) {
+      debugPrint('AIS cap: drawing ${result.shown.length}, '
+          'dropped ${result.capped} beyond cap (+${result.culled} off-screen)');
+    }
+    _aisMarkers = [
+      for (final b in result.shown)
+        Marker(
+          point: b.location,
+          width: 30,
+          height: 30,
+          child: GestureDetector(
+            onTap: () => showAisDetails(context, b),
+            child: Transform.rotate(
+              angle: (b.orientationDeg + _rotationDeg) * math.pi / 180.0,
+              child: const Icon(Icons.navigation,
+                  color: Colors.cyanAccent, size: 22),
+            ),
+          ),
+        ),
+    ];
+    _aisMarkersFor = s.aisBoats;
+  }
 
   // Touch devices pinch-to-zoom, so the on-screen +/- buttons are redundant
   // there; keep them for mouse/trackpad (desktop, web).
@@ -214,6 +273,11 @@ class _MapScreenState extends State<MapScreen> {
       if (!_restoredView) _map.move(pos, 13);
     }
     _applyCourseUp(); // keep the chart aligned as the course changes
+    // The AIS marker cache keys off the list identity: the poll loop swaps
+    // in a fresh list per AIS tick, so identical() is a change detector.
+    if (!identical(widget.state.aisBoats, _aisMarkersFor)) {
+      _rebuildAisMarkers();
+    }
     if (mounted) setState(() {});
   }
 
@@ -245,8 +309,9 @@ class _MapScreenState extends State<MapScreen> {
                 _rotationDeg = camera.rotation;
                 _wind.rotationDeg = camera.rotation;
                 _persistView();
-                if (_wind.on && mounted) {
-                  _wind.rebuildMarkers();
+                _rebuildAisMarkers(); // viewport moved → re-cull (D10)
+                if (mounted) {
+                  if (_wind.on) _wind.rebuildMarkers();
                   setState(() {});
                 }
               },
@@ -257,7 +322,7 @@ class _MapScreenState extends State<MapScreen> {
               rotationDeg: _rotationDeg,
               windOn: _wind.on,
               windMarkers: _wind.markers,
-              onAisTap: (b) => showAisDetails(context, b),
+              aisMarkers: _aisMarkers,
               buildStamp: _settings.buildStamp,
               safeDepthFt: _settings.safeDepthFt,
             ),
