@@ -54,6 +54,10 @@ struct ChartMapView: UIViewRepresentable {
     let state: BoatState?
     let route: RouteInfo?
     let track: [TrackPoint]
+    /// Set true (by the map, via pan detection) when the user has taken
+    /// the camera; while true auto-follow/zoom leave the map alone. The
+    /// chart screen clears it from its "stop panning" button.
+    @Binding var isPanning: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -73,6 +77,9 @@ struct ChartMapView: UIViewRepresentable {
 
     func updateUIView(_ map: MKMapView, context: Context) {
         let co = context.coordinator
+        co.onUserPan = {
+            Task { @MainActor in isPanning = true }
+        }
         guard let state else { return }
         let center = CLLocationCoordinate2D(latitude: state.lat, longitude: state.lng)
 
@@ -101,32 +108,47 @@ struct ChartMapView: UIViewRepresentable {
         // undamped zoom flips between adjacent levels every poll — the
         // map strobes. Smooth the SOG and require the new band to hold
         // for a stretch before honoring it.
-        let sog = state.sogKn ?? 0
-        co.smoothedSog = co.smoothedSog < 0 ? sog : co.smoothedSog * 0.9 + sog * 0.1
-        let zoom = autoZoomLevel(sogKn: co.smoothedSog)
-        if co.lastZoom < 0 {
-            // First fix: jump straight there.
-            co.lastZoom = zoom
-            map.setRegion(region(center: center, zoom: zoom, size: map.bounds.size), animated: false)
-        } else if zoom != co.lastZoom {
-            if zoom == co.pendingZoom {
-                co.pendingZoomTicks += 1
-            } else {
-                co.pendingZoom = zoom
-                co.pendingZoomTicks = 1
-            }
-            if co.pendingZoomTicks >= 15 {
-                co.lastZoom = zoom
-                co.pendingZoomTicks = 0
-                map.setRegion(region(center: center, zoom: zoom, size: map.bounds.size), animated: true)
-            }
+        //
+        // While the user is panning, the camera is theirs — annotations
+        // and overlays keep updating, but follow/zoom stand down until
+        // the "stop panning" button clears the flag, then snap back.
+        if isPanning {
+            co.wasPanning = true
         } else {
-            co.pendingZoomTicks = 0
-            let span = map.region.span
-            let dLat = abs(center.latitude - map.centerCoordinate.latitude)
-            let dLng = abs(center.longitude - map.centerCoordinate.longitude)
-            if dLat > span.latitudeDelta * 0.2 || dLng > span.longitudeDelta * 0.2 {
-                map.setCenter(center, animated: true)
+            if co.wasPanning {
+                co.wasPanning = false
+                co.lastZoom = -1
+            }
+            let sog = state.sogKn ?? 0
+            co.smoothedSog = co.smoothedSog < 0 ? sog : co.smoothedSog * 0.9 + sog * 0.1
+            let zoom = autoZoomLevel(sogKn: co.smoothedSog)
+            if co.lastZoom < 0 {
+                // First fix (or just resumed from panning): jump there.
+                co.lastZoom = zoom
+                co.programmaticMove(map)
+                map.setRegion(region(center: center, zoom: zoom, size: map.bounds.size), animated: false)
+            } else if zoom != co.lastZoom {
+                if zoom == co.pendingZoom {
+                    co.pendingZoomTicks += 1
+                } else {
+                    co.pendingZoom = zoom
+                    co.pendingZoomTicks = 1
+                }
+                if co.pendingZoomTicks >= 15 {
+                    co.lastZoom = zoom
+                    co.pendingZoomTicks = 0
+                    co.programmaticMove(map)
+                    map.setRegion(region(center: center, zoom: zoom, size: map.bounds.size), animated: true)
+                }
+            } else {
+                co.pendingZoomTicks = 0
+                let span = map.region.span
+                let dLat = abs(center.latitude - map.centerCoordinate.latitude)
+                let dLng = abs(center.longitude - map.centerCoordinate.longitude)
+                if dLat > span.latitudeDelta * 0.2 || dLng > span.longitudeDelta * 0.2 {
+                    co.programmaticMove(map)
+                    map.setCenter(center, animated: true)
+                }
             }
         }
 
@@ -225,6 +247,35 @@ struct ChartMapView: UIViewRepresentable {
         var trackLine: TrackPolyline?
         var lastTrackCount = 0
         var lastTrackTs: Double = 0
+
+        // Pan detection: camera moves we made are counted before they
+        // start, so a region change with no pending count — that lands
+        // meaningfully away from where we last put the camera — is the
+        // user panning. Layout/first-load region changes don't qualify.
+        var onUserPan: (() -> Void)?
+        var wasPanning = false
+        var pendingProgrammaticMoves = 0
+        var lastSetCenter: CLLocationCoordinate2D?
+
+        func programmaticMove(_ map: MKMapView) {
+            pendingProgrammaticMoves += 1
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            if pendingProgrammaticMoves > 0 {
+                pendingProgrammaticMoves -= 1
+                lastSetCenter = mapView.centerCoordinate
+                return
+            }
+            guard lastZoom >= 0, let expected = lastSetCenter else { return }
+            let span = mapView.region.span
+            let dLat = abs(mapView.centerCoordinate.latitude - expected.latitude)
+            let dLng = abs(mapView.centerCoordinate.longitude - expected.longitude)
+            if dLat > span.latitudeDelta * 0.05 || dLng > span.longitudeDelta * 0.05 {
+                lastSetCenter = mapView.centerCoordinate
+                onUserPan?()
+            }
+        }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let tiles = overlay as? MKTileOverlay {

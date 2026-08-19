@@ -99,6 +99,7 @@ struct ChartScreen: View {
     let baseURL: URL
 
     @State private var fullScreenCamera: CameraID?
+    @State private var isPanning = false
     @AppStorage("displayMode") private var displayModeRaw = DisplayMode.day.rawValue
 
     private var displayMode: DisplayMode {
@@ -107,8 +108,11 @@ struct ChartScreen: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ChartMapView(baseURL: baseURL, state: client.state, route: client.route, track: client.track)
-                .ignoresSafeArea()
+            ChartMapView(
+                baseURL: baseURL, state: client.state, route: client.route,
+                track: client.track, isPanning: $isPanning
+            )
+            .ignoresSafeArea()
             // Night dimming sits over the chart + cameras but under the
             // panels/buttons so controls stay readable. Plain alpha
             // overlays — blend modes over UIKit-backed views are
@@ -140,6 +144,19 @@ struct ChartScreen: View {
                 HStack(alignment: .bottom) {
                     CameraRow(fullScreen: $fullScreenCamera)
                     Spacer()
+                    if isPanning {
+                        Button {
+                            isPanning = false
+                        } label: {
+                            Label("Stop Panning", systemImage: "location.fill")
+                                .font(.body.bold())
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 12)
+                                .background(.blue.opacity(0.85), in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.card)
+                    }
                     Button {
                         displayModeRaw = displayMode.next.rawValue
                     } label: {
