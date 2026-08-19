@@ -39,7 +39,7 @@ void main() {
   });
 
   group('checkmate tile source', () {
-    final checkmate = baseLayers.singleWhere((s) => s.id == 'checkmate');
+    final checkmate = baseLayersFor('https://tiles.example').singleWhere((s) => s.id == 'checkmate');
 
     test('uses the per-zoom params builder and keeps the z>=7 gate', () {
       expect(checkmate.paramsForZoom, isNotNull);
@@ -57,7 +57,7 @@ void main() {
     });
 
     test('no base layer template mentions landfill', () {
-      for (final s in baseLayers) {
+      for (final s in baseLayersFor('https://tiles.example')) {
         expect(s.urlTemplate, isNot(contains('landfill=')), reason: s.id);
       }
     });

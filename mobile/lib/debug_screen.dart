@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'auth/oauth_config.dart';
+import 'app_config.dart';
 import 'boat_state.dart';
 import 'config.dart';
 
@@ -41,7 +42,7 @@ class DebugScreen extends StatelessWidget {
                 _Row(e.key, e.value ?? '(none found)'),
             const SizedBox(height: 16),
             const _Section('Config'),
-            const _Row('Tile base', Config.tileBase),
+            _Row('Tile base', AppConfig.tileBase.value),
             _Row('Auth',
                 OAuthConfig.configured ? 'app.viam.com login' : 'API key / chart-only'),
             _Row('Host', Config.host.isEmpty ? '—' : Config.host),

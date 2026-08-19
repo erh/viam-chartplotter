@@ -1,6 +1,6 @@
 import 'package:flutter_map/flutter_map.dart';
 
-import 'config.dart';
+import 'app_config.dart';
 
 /// Base map layers, each an XYZ raster URL into the existing Go tile server
 /// (or, for satellite, Esri). This is the crux of the port: the phone renders
@@ -95,9 +95,20 @@ class TileSource {
   /// When set, tiles are fetched as `urlTemplate?paramsForZoom(tileZ)` via
   /// [ZoomParamsTileProvider] instead of the bare template.
   final String Function(int z)? paramsForZoom;
+
+  // The base-layer list is rebuilt whenever the runtime tile base changes
+  // (A6); identity by id keeps dropdown selections stable across rebuilds.
+  @override
+  bool operator ==(Object other) => other is TileSource && other.id == id;
+  @override
+  int get hashCode => id.hashCode;
 }
 
-final List<TileSource> baseLayers = [
+/// Base layers for the current runtime tile base (A6). A getter, not a
+/// constant: /app-config can move the tile server at runtime.
+List<TileSource> get baseLayers => baseLayersFor(AppConfig.tileBase.value);
+
+List<TileSource> baseLayersFor(String tileBase) => [
   // Checkmate — the merged ENC + OSM chart, and the web app's DEFAULT base
   // layer (the "checkmate" layer in src/marineMap.svelte). Same /noaa-enc/tile
   // endpoint, with the query params picked per tile zoom by chartTileParams.
@@ -106,27 +117,27 @@ final List<TileSource> baseLayers = [
   // shard.) Like the web app, the chart is only shown at z>=7 — a lower-z
   // request would trigger a ~10s server-side overview render for a tile
   // nobody sees.
-  const TileSource(
+  TileSource(
     'checkmate',
     'Checkmate',
-    '${Config.tileBase}/noaa-enc/tile/{z}/{x}/{y}.png',
+    '$tileBase/noaa-enc/tile/{z}/{x}/{y}.png',
     minZoom: 7,
     maxZoom: 16,
     paramsForZoom: chartTileParams,
   ),
   // Plain NOAA ENC render (default WMS style, solid land fills) — a fallback if
   // the merged Checkmate tiles look off on a given tile server.
-  const TileSource(
+  TileSource(
     'noaa-enc',
     'NOAA ENC',
-    '${Config.tileBase}/noaa-enc/tile/{z}/{x}/{y}.png',
+    '$tileBase/noaa-enc/tile/{z}/{x}/{y}.png',
     maxZoom: 16,
   ),
   // OSM land underlay served by the same module.
-  const TileSource(
+  TileSource(
     'osm',
     'OpenStreetMap',
-    '${Config.tileBase}/noaa-enc/osm-tile/{z}/{x}/{y}.png',
+    '$tileBase/noaa-enc/osm-tile/{z}/{x}/{y}.png',
   ),
   // Free Esri World Imagery aerial base (matches the web app's satellite layer).
   const TileSource(

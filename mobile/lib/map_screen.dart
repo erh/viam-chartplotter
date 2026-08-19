@@ -8,6 +8,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'ais.dart';
+import 'app_config.dart';
 import 'map/ais_markers.dart';
 
 import 'boat_state.dart';
@@ -141,6 +142,7 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
+    AppConfig.tileBase.addListener(_onTileBaseChanged);
     // Wind was on last session: refetch it once the first frame is up
     // (mobile launches are expensive enough that this is worth persisting
     // even though the web app doesn't).
@@ -154,8 +156,19 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _persistViewDebounce?.cancel();
+    AppConfig.tileBase.removeListener(_onTileBaseChanged);
     widget.state.removeListener(_onState);
     super.dispose();
+  }
+
+  /// /app-config moved the tile server (A6): re-resolve the selected base
+  /// against the fresh layer list so tile traffic switches hosts live.
+  void _onTileBaseChanged() {
+    if (!mounted) return;
+    setState(() {
+      _base = baseLayers.firstWhere((b) => b.id == _base.id,
+          orElse: () => baseLayers.first);
+    });
   }
 
   /// Persist the camera after it settles — a debounce, not per-frame writes.

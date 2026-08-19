@@ -6,7 +6,7 @@ import 'package:viam_chartplotter_mobile/tile_sources.dart';
 // which referenced a nonexistent `package:mobile`.
 void main() {
   test('base map layers are defined', () {
-    expect(baseLayers, isNotEmpty);
-    expect(baseLayers.first.urlTemplate, contains('{z}/{x}/{y}'));
+    expect(baseLayersFor('https://tiles.example'), isNotEmpty);
+    expect(baseLayersFor('https://tiles.example').first.urlTemplate, contains('{z}/{x}/{y}'));
   });
 }

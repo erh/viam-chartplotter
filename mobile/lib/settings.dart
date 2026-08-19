@@ -100,6 +100,19 @@ class Settings {
   bool get windOn => _prefs.getBool('windOn') ?? false;
   set windOn(bool v) => _prefs.setBool('windOn', v);
 
+  /// Tile server base resolved from /app-config (A6), cached so the next
+  /// launch starts on it without re-probing. Null = use the built-in default.
+  String? get tileBaseOverride {
+    final v = _prefs.getString('tileServerBaseURL');
+    return (v != null && (v.startsWith('http://') || v.startsWith('https://')))
+        ? v
+        : null;
+  }
+
+  set tileBaseOverride(String? v) => v == null
+      ? _prefs.remove('tileServerBaseURL')
+      : _prefs.setString('tileServerBaseURL', v);
+
   /// Safe depth in feet for the chart's DEPARE shading (A2). Null = never
   /// set → the tile URL omits `sd` and the server default applies.
   int? get safeDepthFt {

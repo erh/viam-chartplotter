@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'auth/token_store.dart';
 import 'auth/viam_session.dart';
 import 'boat_state.dart';
 import 'connect.dart';
+import 'app_config.dart';
 import 'config.dart';
 import 'map_screen.dart';
 import 'screens/login_screen.dart';
@@ -26,6 +28,10 @@ Future<void> main() async {
   }
   runApp(const ChartplotterApp());
 }
+
+// Note: AppConfig.load() runs from _bootstrap, not here — it can take up to
+// its 5 s timeout when the module server is unreachable, and the map should
+// paint immediately on the cached/default base meanwhile (A6).
 
 class ChartplotterApp extends StatefulWidget {
   const ChartplotterApp({super.key});
@@ -94,12 +100,21 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   Future<void> _bootstrap() async {
     if (OAuthConfig.configured) {
       // Login-based path: restore any stored session, then let the widget tree
-      // route to login / picker / map based on auth status.
+      // route to login / picker / map based on auth status. /app-config is
+      // probed in the background — the map paints on the cached/default tile
+      // base immediately and switches live if the server names another (A6).
+      unawaited(AppConfig.load());
       await _session.restore();
     } else {
-      // No OAuth configured → preserve the spike's API-key path so the app
-      // still runs. Connects straight to the configured boat (or chart-only).
-      await _conn.startWithApiKey();
+      // No OAuth configured → the spike's API-key path. Await the config
+      // probe here: a server declaring chartOnly means show the chart and
+      // poll no boat at all (A6).
+      await AppConfig.load();
+      if (AppConfig.chartOnly) {
+        _state.setStatus('Chart-only server');
+      } else {
+        await _conn.startWithApiKey();
+      }
       if (mounted) setState(() => _boatConnected = true);
     }
   }

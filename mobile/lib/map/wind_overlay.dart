@@ -5,7 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
-import '../config.dart';
+import '../app_config.dart';
 import '../weather.dart';
 
 /// Owns the wind overlay: the fetched field, the on/off + forecast-hour state,
@@ -63,7 +63,7 @@ class WindOverlayController {
     loading = true;
     state.setWindInfo('fetching gfs fh=$hour …');
     try {
-      final f = await fetchWindField(Config.tileBase, 'gfs', fh: hour);
+      final f = await fetchWindField(AppConfig.tileBase.value, 'gfs', fh: hour);
       field = f;
       on = true;
       fh = hour;

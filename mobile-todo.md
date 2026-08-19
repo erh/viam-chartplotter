@@ -537,7 +537,7 @@ still load OSM, so there are no blank seams. OSM is skipped only when
 
 ---
 
-### A6 · Runtime `/app-config` `M` `P1`
+### A6 · Runtime `/app-config` `M` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/config.dart`, connection bootstrap
 **Web ref:** `src/marineMap.svelte:3500-3524`, server side `module.go:374-381`
@@ -558,11 +558,12 @@ only ever talk to one tile server. The web app fetches `/app-config` at runtime:
    rebuild tile layers when it changes.
 
 **Accept.**
-- [ ] Pointing at a server with a different `tileServerBaseURL` moves tile
-      traffic to that host with no rebuild.
-- [ ] A server returning `chartOnly: true` yields a working chart and no boat
-      polling.
-- [ ] An unreachable `/app-config` falls back silently to the default.
+- [x] Pointing at a server with a different `tileServerBaseURL` moves tile
+      traffic to that host with no rebuild (ValueNotifier-driven layer swap;
+      resolved base cached in Settings so relaunches skip the probe).
+- [x] A server returning `chartOnly: true` yields a working chart and no boat
+      polling (API-key path awaits the probe and skips connect).
+- [x] An unreachable `/app-config` falls back silently to the default.
 
 ---
 
