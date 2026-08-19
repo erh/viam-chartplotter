@@ -1271,8 +1271,8 @@ the map is foregrounded, as an explicit toggle rather than always-on. Both
 persisted via J6. Consider an auto-switch at sunset using G2's sun times.
 
 **Accept.**
-- [ ] Night mode leaves the chart readable without a bright white field.
-- [ ] Screen stays awake with the toggle on, sleeps normally with it off.
+- [x] Night mode leaves the chart readable without a bright white field.
+- [x] Screen stays awake with the toggle on, sleeps normally with it off.
 
 ---
 

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'ais.dart';
 import 'app_config.dart';
@@ -633,11 +634,32 @@ class _MapScreenState extends State<MapScreen> {
       (defaultTargetPlatform == TargetPlatform.iOS ||
           defaultTargetPlatform == TargetPlatform.android);
 
+  // Night mode (L4): red-multiply over the whole chart stack. Rods in the
+  // eye are nearly insensitive to red, so a red-scale chart preserves night
+  // vision where a dimmed white field would not.
+  late bool _nightMode = _settings.nightModeOn;
+
+  void _toggleNightMode() {
+    setState(() => _nightMode = !_nightMode);
+    _settings.nightModeOn = _nightMode;
+  }
+
+  /// Helm keep-awake (L4): applied while this screen exists and the toggle
+  /// is on. The OS handles backgrounding; dispose releases it. Failures
+  /// (no platform channel under test/headless) must never take the map down.
+  void _applyWakelock() {
+    unawaited((_settings.keepAwakeOn
+            ? WakelockPlus.enable()
+            : WakelockPlus.disable())
+        .catchError((_) {}));
+  }
+
   @override
   void initState() {
     super.initState();
     widget.state.addListener(_onState);
     AppConfig.tileBase.addListener(_onTileBaseChanged);
+    _applyWakelock();
     // Wind was on last session: refetch it once the first frame is up
     // (mobile launches are expensive enough that this is worth persisting
     // even though the web app doesn't).
@@ -650,6 +672,7 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   void dispose() {
+    unawaited(WakelockPlus.disable().catchError((_) {}));
     _persistViewDebounce?.cancel();
     _navaids.dispose();
     _structures.dispose();
@@ -768,6 +791,7 @@ class _MapScreenState extends State<MapScreen> {
     var aisTracks = _settings.aisTracksOn;
     var webSenders = _settings.webSendersOn;
     var lowData = _settings.lowDataOn;
+    var keepAwake = _settings.keepAwakeOn;
     final areaToggles = Map<String, bool>.of(_areaOn);
     final apply = await showDialog<bool>(
       context: context,
@@ -820,6 +844,13 @@ class _MapScreenState extends State<MapScreen> {
               subtitle: const Text('Slower polling for metered links'),
               value: lowData,
               onChanged: (v) => setDialogState(() => lowData = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Keep screen awake'),
+              subtitle: const Text('Helm mode — never sleeps on the chart'),
+              value: keepAwake,
+              onChanged: (v) => setDialogState(() => keepAwake = v),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -936,12 +967,14 @@ class _MapScreenState extends State<MapScreen> {
       _settings.aisTracksOn = aisTracks;
       _settings.webSendersOn = webSenders;
       _settings.lowDataOn = lowData;
+      _settings.keepAwakeOn = keepAwake;
       _areaOn
         ..clear()
         ..addAll(areaToggles);
     });
     _rebuildAisMarkers(); // projection minutes may have changed
     _followTick(); // re-anchor immediately if the screen position changed
+    _applyWakelock(); // helm mode may have flipped (L4)
   }
 
   void _zoom(double delta) {
@@ -989,13 +1022,25 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Night mode (L4): multiply the whole chart stack — tiles, markers AND
+  /// the floating controls — by red, turning it red-on-black. Transient
+  /// overlays (sheets, dialogs, drawer) render above/outside and stay
+  /// normal, which is fine: they're momentary.
+  Widget _nightFilter(Widget child) => _nightMode
+      ? ColorFiltered(
+          colorFilter:
+              const ColorFilter.mode(Color(0xFFCC3333), BlendMode.multiply),
+          child: child,
+        )
+      : child;
+
   @override
   Widget build(BuildContext context) {
     final s = widget.state;
     return Scaffold(
       key: _scaffoldKey,
       endDrawer: DataDrawer(state: s, history: widget.connection.history),
-      body: Stack(
+      body: _nightFilter(Stack(
         children: [
           FlutterMap(
             mapController: _map,
@@ -1316,6 +1361,13 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                     const SizedBox(height: 8),
                     MapRoundButton(
+                      icon: _nightMode ? Icons.dark_mode : Icons.dark_mode_outlined,
+                      tooltip: 'Night mode',
+                      active: _nightMode,
+                      onTap: _toggleNightMode,
+                    ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
                       icon: Icons.settings,
                       tooltip: 'Chart settings',
                       onTap: _editChartSettings,
@@ -1404,7 +1456,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
         ],
-      ),
+      )),
       // The follow affordance (J4): hidden while following (the boat is
       // already anchored); after a drag suspends follow it appears as the
       // way back.

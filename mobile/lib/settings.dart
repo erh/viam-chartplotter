@@ -121,6 +121,16 @@ class Settings {
   bool get lowDataOn => _prefs.getBool('lowDataOn') ?? false;
   set lowDataOn(bool v) => _prefs.setBool('lowDataOn', v);
 
+  /// Night mode (L4): red-multiply the whole chart UI to protect night
+  /// vision. The server has no night render, so this is client-side.
+  bool get nightModeOn => _prefs.getBool('nightModeOn') ?? false;
+  set nightModeOn(bool v) => _prefs.setBool('nightModeOn', v);
+
+  /// Helm mode (L4): keep the screen awake while the chart is foregrounded.
+  /// Explicitly opt-in — always-on would silently eat the battery ashore.
+  bool get keepAwakeOn => _prefs.getBool('keepAwakeOn') ?? false;
+  set keepAwakeOn(bool v) => _prefs.setBool('keepAwakeOn', v);
+
   /// AIS history tracks (D1): gates both the drawing and the 60 s
   /// all_history poll (web: the ais-track layer / aisTracksNeeded, default
   /// off).
