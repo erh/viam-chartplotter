@@ -1,38 +1,21 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
-import 'boat_icon.dart';
-
-/// The own-boat marker (C1): the web app's top-down boat SVG, rotated to
-/// heading, sized by [MyBoatIcon.renderedSize] — or the operator's
-/// /myboat-icon override when the module exposes one. Only the own boat
-/// uses the override; AIS targets keep their own icon (D5).
+/// The own-boat marker, rotated to the effective heading (COG under way).
+///
+/// C1's scaled top-down boat SVG was tried and reverted — it read worse on
+/// the phone than the plain arrow. If it comes back, bring back the sizing
+/// helpers and the /myboat-icon override from the C1 commit (df44309).
 class BoatMarker extends StatelessWidget {
-  const BoatMarker({
-    super.key,
-    required this.headingDeg,
-    this.sx = 1,
-    this.sy = 1,
-  });
-
+  const BoatMarker({super.key, required this.headingDeg});
   final double headingDeg;
-  final double sx; // across the boat (beam)
-  final double sy; // along the boat (length)
 
   @override
   Widget build(BuildContext context) {
-    final size = MyBoatIcon.renderedSize(sx, sy);
-    final bytes = MyBoatIcon.overrideBytes;
-    final icon = bytes != null
-        ? Image.memory(bytes,
-            width: size.width, height: size.height, fit: BoxFit.fill)
-        : SvgPicture.asset('assets/topdown-boat.svg',
-            width: size.width, height: size.height, fit: BoxFit.fill);
     return Transform.rotate(
       angle: headingDeg * math.pi / 180.0,
-      child: icon,
+      child: const Icon(Icons.navigation, color: Colors.red, size: 36),
     );
   }
 }

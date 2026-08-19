@@ -4,7 +4,6 @@ import 'package:latlong2/latlong.dart';
 
 import '../boat_state.dart';
 import '../tile_sources.dart';
-import 'boat_icon.dart';
 import 'boat_marker.dart';
 import 'osm_underlay.dart';
 
@@ -117,12 +116,11 @@ List<Widget> buildMapLayers({
         markers: [
           // Phone-GPS fallback (L5) renders as an unmistakably different
           // marker — a helmsman must never confuse the phone's fix with the
-          // boat's. The marker box is the icon's diagonal so rotation never
-          // clips.
+          // boat's.
           Marker(
             point: state.displayPosition!,
-            width: state.usingPhoneGps ? 26 : boatMarkerBoxSide(),
-            height: state.usingPhoneGps ? 26 : boatMarkerBoxSide(),
+            width: state.usingPhoneGps ? 26 : 40,
+            height: state.usingPhoneGps ? 26 : 40,
             child: state.usingPhoneGps
                 ? const PhoneGpsMarker()
                 : BoatMarker(

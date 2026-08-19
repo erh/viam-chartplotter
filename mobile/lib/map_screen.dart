@@ -10,7 +10,6 @@ import 'package:latlong2/latlong.dart';
 import 'ais.dart';
 import 'app_config.dart';
 import 'map/ais_markers.dart';
-import 'map/boat_icon.dart';
 import 'map/heading_line.dart';
 import 'map/measure.dart';
 import 'map/nautical_scalebar.dart';
@@ -196,9 +195,6 @@ class _MapScreenState extends State<MapScreen> {
     super.initState();
     widget.state.addListener(_onState);
     AppConfig.tileBase.addListener(_onTileBaseChanged);
-    // Operator's own-boat icon, probed once per session (C1). Repaints on
-    // the next state tick if an override loads.
-    unawaited(MyBoatIcon.probe());
     // Wind was on last session: refetch it once the first frame is up
     // (mobile launches are expensive enough that this is worth persisting
     // even though the web app doesn't).

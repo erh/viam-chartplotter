@@ -570,7 +570,9 @@ only ever talk to one tile server. The web app fetches `/app-config` at runtime:
 
 ---
 
-### C1 · Real boat icon, scaled `S` `P1` — ✅ **done**
+### C1 · Real boat icon, scaled `S` `P1` — ⏪ **reverted**: the
+SVG read worse on the phone than the plain arrow (df44309 has the
+implementation if it's ever wanted back)
 
 **Files:** `mobile/lib/map/boat_marker.dart`, assets
 **Web ref:** `src/marineMap.svelte:155-184` (`dimScaleFactor`, `boatScaleAxes`),
