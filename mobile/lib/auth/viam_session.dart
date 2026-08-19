@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_appauth/flutter_appauth.dart';
 import 'package:viam_sdk/viam_sdk.dart';
@@ -41,6 +43,25 @@ class ViamSession extends ChangeNotifier {
   DateTime? _expiry;
 
   bool get isSignedIn => status == AuthStatus.signedIn && viam != null;
+
+  /// Who is signed in, from the access token's JWT claims (email, falling
+  /// back to name/subject) — decoded locally, no network. Null when signed
+  /// out or the token isn't a readable JWT.
+  String? get userEmail {
+    final t = _accessToken;
+    if (t == null) return null;
+    try {
+      final parts = t.split('.');
+      if (parts.length != 3) return null;
+      final payload = json.decode(
+              utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))))
+          as Map<String, dynamic>;
+      return (payload['email'] ?? payload['name'] ?? payload['sub'])
+          ?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Called once on startup: restore a stored session (refreshing if the
   /// access token has expired) so the user doesn't re-auth every launch.

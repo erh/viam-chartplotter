@@ -123,33 +123,79 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     }
   }
 
+  // Sorted by name so a long org/machine list is scannable — the API returns
+  // them in no particular order, which read as "my org is missing" — and
+  // deduped by id, since an org can come back twice (e.g. two membership
+  // paths to it).
+  static List<dynamic> _byName(List<dynamic> items) {
+    final seen = <String>{};
+    final unique = [
+      for (final it in items)
+        if (seen.add(it.id?.toString() ?? identityHashCode(it).toString())) it
+    ];
+    return unique
+      ..sort((a, b) => (a.name?.toString().toLowerCase() ?? '')
+          .compareTo(b.name?.toString().toLowerCase() ?? ''));
+  }
+
+  // Selection path, so back/refresh can rebuild the current or parent level.
+  dynamic _selectedOrg;
+  dynamic _selectedLoc;
+
   Future<void> _loadOrgs() => _guard(() async {
         final orgs = await _viam.appClient.listOrganizations();
         setState(() {
           _level = _Level.orgs;
           _title = 'Select organization';
-          _items = orgs;
+          _items = _byName(orgs);
         });
       });
 
   Future<void> _loadLocations(dynamic org) => _guard(() async {
         _orgId = org.id;
+        _selectedOrg = org;
         final locs = await _viam.appClient.listLocations(org.id);
         setState(() {
           _level = _Level.locations;
           _title = 'Select location';
-          _items = locs;
+          _items = _byName(locs);
         });
       });
 
   Future<void> _loadRobots(dynamic loc) => _guard(() async {
+        _selectedLoc = loc;
         final robots = await _viam.appClient.listRobots(loc.id);
         setState(() {
           _level = _Level.robots;
           _title = 'Select machine';
-          _items = robots;
+          _items = _byName(robots);
         });
       });
+
+  /// Reload whatever level is showing (pull-to-refresh) — e.g. an org that
+  /// just enabled OAuth access, or a machine that just came online.
+  Future<void> _refresh() {
+    switch (_level) {
+      case _Level.orgs:
+        return _loadOrgs();
+      case _Level.locations:
+        return _loadLocations(_selectedOrg);
+      case _Level.robots:
+        return _loadRobots(_selectedLoc);
+    }
+  }
+
+  /// One level up: machines → locations → organizations.
+  void _goBack() {
+    switch (_level) {
+      case _Level.robots:
+        _loadLocations(_selectedOrg);
+      case _Level.locations:
+        _loadOrgs();
+      case _Level.orgs:
+        break; // top level — no back button shown
+    }
+  }
 
   Future<void> _connect(dynamic robot) async {
     final gen = ++_connectGen;
@@ -236,6 +282,16 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
     final warning = widget.session.warning;
     return Scaffold(
       appBar: AppBar(
+        // Back one level (machines → locations → orgs) at every level below
+        // the top; without this the only way out of a wrong tap was signing
+        // out and starting over.
+        leading: (_level != _Level.orgs && !_connecting)
+            ? IconButton(
+                tooltip: 'Back',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _goBack,
+              )
+            : null,
         title: Text(_title),
         actions: [
           IconButton(
@@ -250,6 +306,21 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
           if (warning != null) _SessionWarning(message: warning),
           Expanded(child: _body()),
         ],
+      ),
+      // Who this session belongs to — the answer to "why can't I see my
+      // org" is usually "wrong account".
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(
+            'Signed in as ${widget.session.userEmail ?? 'unknown user'}',
+            textAlign: TextAlign.center,
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Colors.white54),
+          ),
+        ),
       ),
     );
   }
@@ -286,7 +357,12 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
               ? const Center(child: CircularProgressIndicator())
               : _error != null
                   ? _ErrorRetry(message: _error!, onRetry: _loadOrgs)
-                  : ListView.separated(
+                  : RefreshIndicator(
+                      onRefresh: _refresh,
+                      child: ListView.separated(
+                      // Scrollable even when short, so pull-to-refresh works
+                      // on a two-row list.
+                      physics: const AlwaysScrollableScrollPhysics(),
                       itemCount: _items.length,
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (context, i) {
@@ -302,7 +378,8 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
                           onTap: () => _onTap(item),
                         );
                       },
-                    );
+                    ),
+                  );
   }
 }
 
