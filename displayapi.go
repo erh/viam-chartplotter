@@ -18,12 +18,15 @@ package vc
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"go.viam.com/rdk/app"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/components/sensor"
@@ -65,6 +68,10 @@ type DisplayAPI struct {
 
 	cameraNames []string // sorted, for /api/info
 
+	// Movement sensor's configured name; the cloud track seed queries
+	// captured data by its component name.
+	msName string
+
 	trackMu     sync.Mutex
 	track       []trackPoint
 	trackCancel context.CancelFunc
@@ -84,6 +91,7 @@ func NewDisplayAPI(deps resource.Dependencies, cfg *ChartplotterConfig, logger l
 			logger.Warnf("display api: movement_sensor %q unavailable: %v", cfg.MovementSensor, err)
 		} else {
 			a.ms = ms
+			a.msName = cfg.MovementSensor
 		}
 	}
 	if cfg.DepthSensor != "" {
@@ -144,13 +152,19 @@ func (a *DisplayAPI) Register(mux *http.ServeMux) {
 
 // startTrackRecorder samples the movement sensor every
 // trackSampleInterval and appends to the in-memory track, pruning
-// entries older than trackKeep.
+// entries older than trackKeep. It first seeds the track with the last
+// trackKeep of captured position history from the Viam cloud (when the
+// machine has cloud credentials), so the line doesn't start empty on
+// every module restart.
 func (a *DisplayAPI) startTrackRecorder() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.trackCancel = cancel
 	a.trackDone = make(chan struct{})
 	go func() {
 		defer close(a.trackDone)
+		seedCtx, seedCancel := context.WithTimeout(ctx, time.Minute)
+		a.seedTrackFromCloud(seedCtx)
+		seedCancel()
 		ticker := time.NewTicker(trackSampleInterval)
 		defer ticker.Stop()
 		for {
@@ -172,6 +186,124 @@ func (a *DisplayAPI) startTrackRecorder() {
 			a.recordTrackPoint(trackPoint{Lat: lat, Lng: lng, Ts: time.Now().UnixMilli()})
 		}
 	}()
+}
+
+// seedTrackFromCloud pulls the last trackKeep of captured Position
+// readings for the movement sensor from the Viam data API — callable
+// from inside the module via the machine's own credentials env vars —
+// and prepends them to the in-memory track. Best-effort: any failure
+// logs and leaves the recorder running live-only. Hot storage is tried
+// first (fast); standard storage is the fallback.
+func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
+	orgID := os.Getenv(rutils.PrimaryOrgIDEnvVar)
+	robotID := os.Getenv(rutils.MachineIDEnvVar)
+	locationID := os.Getenv(rutils.LocationIDEnvVar)
+	if orgID == "" || robotID == "" {
+		a.logger.Infof("track seed skipped: no cloud identity in env (%s/%s)",
+			rutils.PrimaryOrgIDEnvVar, rutils.MachineIDEnvVar)
+		return
+	}
+	vc, err := app.CreateViamClientFromEnvVars(ctx, nil, a.logger)
+	if err != nil {
+		a.logger.Warnf("track seed skipped: viam client: %v", err)
+		return
+	}
+	defer func() { _ = vc.Close() }()
+
+	query := trackSeedQuery(locationID, robotID, a.msName, time.Now().Add(-trackKeep))
+	rows, err := vc.DataClient().TabularDataByMQL(ctx, orgID, query,
+		&app.TabularDataByMQLOptions{TabularDataSourceType: app.TabularDataSourceTypeHotStorage})
+	if err != nil || len(rows) == 0 {
+		if err != nil {
+			a.logger.Debugf("track seed: hot storage query: %v", err)
+		}
+		rows, err = vc.DataClient().TabularDataByMQL(ctx, orgID, query, nil)
+		if err != nil {
+			a.logger.Warnf("track seed failed: %v", err)
+			return
+		}
+	}
+
+	points := trackPointsFromRows(rows)
+	if len(points) == 0 {
+		a.logger.Infof("track seed: no captured positions in the last %s", trackKeep)
+		return
+	}
+	a.trackMu.Lock()
+	a.track = append(points, a.track...)
+	a.trackMu.Unlock()
+	a.logger.Infof("track seeded with %d historical points (%s → %s)",
+		len(points),
+		time.UnixMilli(points[0].Ts).Format(time.RFC3339),
+		time.UnixMilli(points[len(points)-1].Ts).Format(time.RFC3339))
+}
+
+// trackSeedQuery builds the MQL pipeline for the seed: per-minute
+// buckets of the movement sensor's captured Position readings, oldest
+// first — the same bucketing the web app's position-history query uses.
+func trackSeedQuery(locationID, robotID, msName string, start time.Time) []map[string]any {
+	leaf := msName
+	if i := strings.LastIndex(leaf, ":"); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	match := map[string]any{
+		"robot_id":       robotID,
+		"component_name": leaf,
+		"method_name":    "Position",
+		"time_received":  map[string]any{"$gte": start},
+	}
+	if locationID != "" {
+		match["location_id"] = locationID
+	}
+	str := func(expr any) any { return map[string]any{"$toString": expr} }
+	bucket := map[string]any{"$concat": []any{
+		str(map[string]any{"$year": "$time_received"}), "-",
+		str(map[string]any{"$month": "$time_received"}), "-",
+		str(map[string]any{"$dayOfMonth": "$time_received"}), " ",
+		str(map[string]any{"$hour": "$time_received"}), ":",
+		str(map[string]any{"$minute": "$time_received"}),
+	}}
+	return []map[string]any{
+		{"$match": match},
+		{"$sort": map[string]any{"time_received": -1}},
+		{"$group": map[string]any{
+			"_id": bucket,
+			"ts":  map[string]any{"$min": "$time_received"},
+			"pos": map[string]any{"$first": "$data"},
+		}},
+		{"$sort": map[string]any{"ts": 1}},
+	}
+}
+
+// trackPointsFromRows converts seed-query rows to track points,
+// dropping anything malformed, non-finite, or at null island.
+func trackPointsFromRows(rows []map[string]any) []trackPoint {
+	points := make([]trackPoint, 0, len(rows))
+	for _, row := range rows {
+		ts, ok := row["ts"].(time.Time)
+		if !ok {
+			continue
+		}
+		pos, ok := row["pos"].(map[string]any)
+		if !ok {
+			continue
+		}
+		coord, ok := pos["coordinate"].(map[string]any)
+		if !ok {
+			continue
+		}
+		lat, latOK := toFloat(coord["latitude"])
+		lng, lngOK := toFloat(coord["longitude"])
+		if !latOK || !lngOK || !isFiniteCoord(lat, lng) || (lat == 0 && lng == 0) {
+			continue
+		}
+		points = append(points, trackPoint{Lat: lat, Lng: lng, Ts: ts.UnixMilli()})
+	}
+	return points
+}
+
+func isFiniteCoord(lat, lng float64) bool {
+	return !math.IsNaN(lat) && !math.IsInf(lat, 0) && !math.IsNaN(lng) && !math.IsInf(lng, 0)
 }
 
 func (a *DisplayAPI) recordTrackPoint(p trackPoint) {

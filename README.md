@@ -72,6 +72,7 @@ server still comes up if one is missing; that endpoint answers 503.
 | `GET /api/info` | which endpoints are configured + camera names |
 | `GET /api/state` | `{lat, lng, sog_kn, heading_deg, cog_deg, depth_ft, ts}` |
 | `GET /api/route` | `{destination_lat/lng, distance_to_waypoint_m, closing_velocity_m_s, waypoints[]}` |
+| `GET /api/track` | own-boat track `{points: [{lat, lng, ts}]}`, oldest first — sampled every 10 s in memory (24 h kept), seeded on start with captured position history from the Viam data API when the machine has cloud credentials |
 | `GET /api/camera/{name}.jpg` | latest still frame from the named camera |
 
 ---

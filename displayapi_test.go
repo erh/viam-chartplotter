@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/golang/geo/r3"
 	geo "github.com/kellydunn/golang-geo"
@@ -224,6 +225,47 @@ func TestDisplayAPITrack(t *testing.T) {
 	api3 := &DisplayAPI{logger: logging.NewTestLogger(t)}
 	srv3 := displayAPIServer(t, api3)
 	getJSON(t, srv3.URL+"/api/track", http.StatusServiceUnavailable)
+}
+
+func TestTrackSeedQuery(t *testing.T) {
+	start := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	q := trackSeedQuery("loc1", "robot1", "remote:garmin", start)
+	if len(q) != 4 {
+		t.Fatalf("expected 4 stages, got %d", len(q))
+	}
+	match := q[0]["$match"].(map[string]any)
+	if match["component_name"] != "garmin" {
+		t.Fatalf("expected remote prefix stripped, got %v", match["component_name"])
+	}
+	if match["robot_id"] != "robot1" || match["location_id"] != "loc1" || match["method_name"] != "Position" {
+		t.Fatalf("bad match: %v", match)
+	}
+
+	// Without a location id the key is omitted entirely.
+	q2 := trackSeedQuery("", "robot1", "garmin", start)
+	if _, ok := q2[0]["$match"].(map[string]any)["location_id"]; ok {
+		t.Fatal("expected no location_id key")
+	}
+}
+
+func TestTrackPointsFromRows(t *testing.T) {
+	ts := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	rows := []map[string]any{
+		{"ts": ts, "pos": map[string]any{"coordinate": map[string]any{"latitude": 39.1, "longitude": -72.4}}},
+		{"ts": ts, "pos": map[string]any{"coordinate": map[string]any{"latitude": 0.0, "longitude": 0.0}}}, // null island
+		{"ts": "not a time", "pos": map[string]any{}},                                                      // malformed
+		{"ts": ts.Add(time.Minute), "pos": map[string]any{"coordinate": map[string]any{"latitude": 39.2, "longitude": -72.5}}},
+	}
+	pts := trackPointsFromRows(rows)
+	if len(pts) != 2 {
+		t.Fatalf("expected 2 valid points, got %v", pts)
+	}
+	if pts[0].Lat != 39.1 || pts[0].Ts != ts.UnixMilli() {
+		t.Fatalf("bad first point: %v", pts[0])
+	}
+	if pts[1].Lat != 39.2 {
+		t.Fatalf("bad second point: %v", pts[1])
+	}
 }
 
 func TestChartplotterConfigValidate(t *testing.T) {
