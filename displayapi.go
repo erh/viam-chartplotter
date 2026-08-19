@@ -188,12 +188,27 @@ func (a *DisplayAPI) startTrackRecorder() {
 	}()
 }
 
+// trackSeedScope is one (location, robot) candidate to query for
+// captured position history.
+type trackSeedScope struct {
+	locationID string
+	robotID    string
+	desc       string
+}
+
 // seedTrackFromCloud pulls the last trackKeep of captured Position
 // readings for the movement sensor from the Viam data API — callable
 // from inside the module via the machine's own credentials env vars —
 // and prepends them to the in-memory track. Best-effort: any failure
-// logs and leaves the recorder running live-only. Hot storage is tried
-// first (fast); standard storage is the fallback.
+// logs and leaves the recorder running live-only.
+//
+// The data isn't necessarily captured under this machine's own ids:
+// the movement sensor is often a resource of a remote machine (its own
+// robot_id, possibly a different location), same as the web app's
+// dataClientForComponent handles. So candidates are tried in order:
+// this machine, then each cloud-addressed remote in this machine's
+// config (resolved to its robot/location via the app API), then — if
+// exactly one robot in the org has matching data — that robot.
 func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
 	orgID := os.Getenv(rutils.PrimaryOrgIDEnvVar)
 	robotID := os.Getenv(rutils.MachineIDEnvVar)
@@ -209,33 +224,154 @@ func (a *DisplayAPI) seedTrackFromCloud(ctx context.Context) {
 		return
 	}
 	defer func() { _ = vc.Close() }()
+	dc := vc.DataClient()
+	start := time.Now().Add(-trackKeep)
 
-	query := trackSeedQuery(locationID, robotID, a.msName, time.Now().Add(-trackKeep))
-	rows, err := vc.DataClient().TabularDataByMQL(ctx, orgID, query,
-		&app.TabularDataByMQLOptions{TabularDataSourceType: app.TabularDataSourceTypeHotStorage})
-	if err != nil || len(rows) == 0 {
-		if err != nil {
-			a.logger.Debugf("track seed: hot storage query: %v", err)
-		}
-		rows, err = vc.DataClient().TabularDataByMQL(ctx, orgID, query, nil)
-		if err != nil {
-			a.logger.Warnf("track seed failed: %v", err)
+	scopes := []trackSeedScope{{locationID, robotID, "this machine"}}
+	scopes = append(scopes, a.remoteSeedScopes(ctx, vc.AppClient())...)
+	for _, scope := range scopes {
+		if a.trySeedScope(ctx, dc, orgID, scope, start) {
 			return
 		}
 	}
+	if rid := a.discoverSeedRobot(ctx, dc, orgID, start); rid != "" {
+		if a.trySeedScope(ctx, dc, orgID, trackSeedScope{"", rid, "discovered robot " + rid}, start) {
+			return
+		}
+	}
+	a.logger.Infof("track seed: no captured positions found for %q in the last %s", a.msName, trackKeep)
+}
 
+// trySeedScope queries one scope (hot storage first, standard as the
+// fallback) and seeds the track when it yields points.
+func (a *DisplayAPI) trySeedScope(
+	ctx context.Context, dc *app.DataClient, orgID string, scope trackSeedScope, start time.Time,
+) bool {
+	query := trackSeedQuery(scope.locationID, scope.robotID, a.msName, start)
+	rows, err := dc.TabularDataByMQL(ctx, orgID, query,
+		&app.TabularDataByMQLOptions{TabularDataSourceType: app.TabularDataSourceTypeHotStorage})
+	if err != nil || len(rows) == 0 {
+		if err != nil {
+			a.logger.Debugf("track seed (%s): hot storage: %v", scope.desc, err)
+		}
+		rows, err = dc.TabularDataByMQL(ctx, orgID, query, nil)
+		if err != nil {
+			a.logger.Debugf("track seed (%s): %v", scope.desc, err)
+			return false
+		}
+	}
 	points := trackPointsFromRows(rows)
 	if len(points) == 0 {
-		a.logger.Infof("track seed: no captured positions in the last %s", trackKeep)
-		return
+		return false
 	}
 	a.trackMu.Lock()
 	a.track = append(points, a.track...)
 	a.trackMu.Unlock()
-	a.logger.Infof("track seeded with %d historical points (%s → %s)",
-		len(points),
+	a.logger.Infof("track seeded from %s with %d historical points (%s → %s)",
+		scope.desc, len(points),
 		time.UnixMilli(points[0].Ts).Format(time.RFC3339),
 		time.UnixMilli(points[len(points)-1].Ts).Format(time.RFC3339))
+	return true
+}
+
+// remoteSeedScopes resolves this machine's cloud-addressed remotes to
+// (location, robot) scopes. A remote's address embeds its location id
+// ("<part-fqdn>.<location-id>.viam.cloud"); the robot id comes from
+// matching the address against part FQDNs in that location.
+func (a *DisplayAPI) remoteSeedScopes(ctx context.Context, ac *app.AppClient) []trackSeedScope {
+	partID := os.Getenv(rutils.MachinePartIDEnvVar)
+	if partID == "" {
+		return nil
+	}
+	part, _, err := ac.GetRobotPart(ctx, partID)
+	if err != nil || part == nil {
+		a.logger.Debugf("track seed: get own part config: %v", err)
+		return nil
+	}
+	remotes, _ := part.RobotConfig["remotes"].([]any)
+	var scopes []trackSeedScope
+	for _, r := range remotes {
+		rm, _ := r.(map[string]any)
+		addr, _ := rm["address"].(string)
+		locID := locationIDFromRemoteAddress(addr)
+		if locID == "" {
+			continue
+		}
+		robots, err := ac.ListRobots(ctx, locID)
+		if err != nil {
+			a.logger.Debugf("track seed: list robots in %s: %v", locID, err)
+			continue
+		}
+		for _, robot := range robots {
+			parts, err := ac.GetRobotParts(ctx, robot.ID)
+			if err != nil {
+				continue
+			}
+			for _, p := range parts {
+				if p.FQDN == addr {
+					name, _ := rm["name"].(string)
+					scopes = append(scopes, trackSeedScope{locID, robot.ID, "remote " + name})
+				}
+			}
+		}
+	}
+	return scopes
+}
+
+// locationIDFromRemoteAddress extracts the location id from a Viam
+// cloud remote address like "boat-main.abc123xyz.viam.cloud"; returns
+// "" for anything else (e.g. LAN addresses).
+func locationIDFromRemoteAddress(addr string) string {
+	if !strings.HasSuffix(addr, ".viam.cloud") {
+		return ""
+	}
+	segs := strings.Split(addr, ".")
+	if len(segs) != 4 {
+		return ""
+	}
+	return segs[1]
+}
+
+// discoverSeedRobot asks the data store which robots captured Position
+// readings for this component name recently. Only an unambiguous
+// answer (exactly one robot) is used — with several, guessing could
+// seed another boat's track.
+func (a *DisplayAPI) discoverSeedRobot(ctx context.Context, dc *app.DataClient, orgID string, start time.Time) string {
+	leaf := a.msName
+	if i := strings.LastIndex(leaf, ":"); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	query := []map[string]any{
+		{"$match": map[string]any{
+			"component_name": leaf,
+			"method_name":    "Position",
+			"time_received":  map[string]any{"$gte": start},
+		}},
+		{"$group": map[string]any{"_id": "$robot_id"}},
+		{"$limit": 5},
+	}
+	rows, err := dc.TabularDataByMQL(ctx, orgID, query,
+		&app.TabularDataByMQLOptions{TabularDataSourceType: app.TabularDataSourceTypeHotStorage})
+	if err != nil || len(rows) == 0 {
+		rows, err = dc.TabularDataByMQL(ctx, orgID, query, nil)
+		if err != nil {
+			a.logger.Debugf("track seed: robot discovery: %v", err)
+			return ""
+		}
+	}
+	if len(rows) != 1 {
+		ids := make([]string, 0, len(rows))
+		for _, r := range rows {
+			if s, ok := r["_id"].(string); ok {
+				ids = append(ids, s)
+			}
+		}
+		a.logger.Infof("track seed: %d robots have %q Position data (%v) — can't pick one automatically",
+			len(rows), leaf, ids)
+		return ""
+	}
+	rid, _ := rows[0]["_id"].(string)
+	return rid
 }
 
 // trackSeedQuery builds the MQL pipeline for the seed: per-minute
@@ -247,10 +383,12 @@ func trackSeedQuery(locationID, robotID, msName string, start time.Time) []map[s
 		leaf = leaf[i+1:]
 	}
 	match := map[string]any{
-		"robot_id":       robotID,
 		"component_name": leaf,
 		"method_name":    "Position",
 		"time_received":  map[string]any{"$gte": start},
+	}
+	if robotID != "" {
+		match["robot_id"] = robotID
 	}
 	if locationID != "" {
 		match["location_id"] = locationID

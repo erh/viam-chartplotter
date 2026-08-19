@@ -241,10 +241,27 @@ func TestTrackSeedQuery(t *testing.T) {
 		t.Fatalf("bad match: %v", match)
 	}
 
-	// Without a location id the key is omitted entirely.
-	q2 := trackSeedQuery("", "robot1", "garmin", start)
-	if _, ok := q2[0]["$match"].(map[string]any)["location_id"]; ok {
+	// Without a location or robot id the keys are omitted entirely.
+	q2 := trackSeedQuery("", "", "garmin", start)
+	m2 := q2[0]["$match"].(map[string]any)
+	if _, ok := m2["location_id"]; ok {
 		t.Fatal("expected no location_id key")
+	}
+	if _, ok := m2["robot_id"]; ok {
+		t.Fatal("expected no robot_id key")
+	}
+}
+
+func TestLocationIDFromRemoteAddress(t *testing.T) {
+	for addr, want := range map[string]string{
+		"cm90-garmin1-main.rphjbz36x7.viam.cloud": "rphjbz36x7",
+		"192.168.1.5:8080":                        "",
+		"garmin.local":                            "",
+		"a.b.c.d.viam.cloud":                      "",
+	} {
+		if got := locationIDFromRemoteAddress(addr); got != want {
+			t.Fatalf("locationIDFromRemoteAddress(%q) = %q, want %q", addr, got, want)
+		}
 	}
 }
 
