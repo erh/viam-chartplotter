@@ -61,8 +61,18 @@ fi
 echo "pinned iOS deployment target $IOS_MIN"
 
 # --- Device-GPS fallback (L5) ------------------------------------------------
+# geolocator's binary also references the Always location API, so Apple
+# requires the combined key even though the app never requests Always
+# (ITMS-90683 rejection, Aug 2026). No apostrophes — see the note above.
 set_str NSLocationWhenInUseUsageDescription "Shows your phone position when the boat GPS is unavailable."
-echo "ensured location usage description in $PLIST"
+set_str NSLocationAlwaysAndWhenInUseUsageDescription "Shows your phone position when the boat GPS is unavailable. Location is used only while the app is open."
+for key in NSLocationWhenInUseUsageDescription NSLocationAlwaysAndWhenInUseUsageDescription; do
+  "$PB" -c "Print :$key" "$PLIST" >/dev/null 2>&1 || {
+    echo "ERROR: $key did not land in $PLIST (PlistBuddy parse failure?)" >&2
+    exit 1
+  }
+done
+echo "ensured location usage descriptions in $PLIST"
 
 # --- Export compliance ------------------------------------------------------
 # Only standard HTTPS/TLS encryption (exempt), declared up front — otherwise
