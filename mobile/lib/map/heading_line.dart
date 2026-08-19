@@ -12,7 +12,10 @@ List<LatLng> headingLinePoints(
   const d = Distance();
   final meters = lengthNm * 1852.0;
   return [
-    for (var i = 0; i <= segments; i++)
+    // Exactly the boat position — a zero-distance offset() can return a
+    // float-noise-different point on some latlong2 builds.
+    from,
+    for (var i = 1; i <= segments; i++)
       d.offset(from, meters * i / segments, headingDeg),
   ];
 }
