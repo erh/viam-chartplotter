@@ -248,7 +248,7 @@ logic) and leave the rest for you.
 | # | Milestone | Cards | Est. | Status |
 |---|-----------|-------|------|--------|
 | M0 | Correctness quick-wins | A1 A2 A3 D10 J6 H6 (+README ✅) | 2–3 d | ☑ |
-| M1 | Helm fundamentals | A5 A6 C1 C2 C4 J1 J2 J4 J7 K1 L5 | 1.5 wk | ☐ |
+| M1 | Helm fundamentals | A5 A6 C1 C2 C4 J1 J2 J4 J7 K1 L5 | 1.5 wk | ☑ |
 | M2 | Safety overlays | B1 B2 B4 D1 D2 D3 G1 | 1.5 wk | ☐ |
 | M3 | Routes & waypoints | E1 E2 E3 E4 E5 | 2 wk | ☐ |
 | M4 | Marine hardening | C3 L1 L3 L4 L6 | 1.5 wk | ☐ |
