@@ -375,9 +375,11 @@ class _AgeChip extends StatelessWidget {
           const SizedBox(height: 2),
           Text(
             _text,
+            // bodySmall (12) rather than titleSmall (14): the ages update
+            // every second and were shouting over the tank levels.
             style: Theme.of(context)
                 .textTheme
-                .titleSmall
+                .bodySmall
                 ?.copyWith(color: _color, fontWeight: FontWeight.bold),
           ),
         ],
