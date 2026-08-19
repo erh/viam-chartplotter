@@ -13,6 +13,7 @@ import 'map/ais_markers.dart';
 import 'map/boat_icon.dart';
 import 'map/heading_line.dart';
 import 'map/measure.dart';
+import 'map/nautical_scalebar.dart';
 
 import 'boat_state.dart';
 import 'camera_screen.dart';
@@ -544,6 +545,8 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                   ],
                 ),
+              // Scale bar in nm (J7), lifted clear of the wind slider.
+              NauticalScalebar(liftPx: _wind.on ? 64 : 0),
             ],
           ),
           // Top-left: compact connection status.

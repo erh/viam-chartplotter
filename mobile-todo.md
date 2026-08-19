@@ -732,7 +732,7 @@ Panning"** button while suspended, and resumes on tap.
 
 ---
 
-### J7 · Scale line `S` `P1`
+### J7 · Scale line `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map/map_layers.dart`
 **Web ref:** `src/marineMap.svelte` — OL's `ScaleLine` control
@@ -742,8 +742,10 @@ clear of the existing bottom-left wind slider. Without it there is no way to
 judge distance at a glance.
 
 **Accept.**
-- [ ] Scale bar reads in nm and updates with zoom.
-- [ ] It doesn't collide with the wind slider when wind is on.
+- [x] Scale bar reads in nm and updates with zoom (custom NauticalScalebar —
+      flutter_map's built-in is metric-only; nice-length picker tested).
+- [x] It doesn't collide with the wind slider when wind is on (lifted 64 px
+      while the slider shows).
 
 ---
 
