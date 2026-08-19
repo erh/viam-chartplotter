@@ -659,7 +659,7 @@ layer controls.
 
 ---
 
-### J1 · Measure tool `S` `P1`
+### J1 · Measure tool `S` `P1` — ✅ **done**
 
 **Files:** `mobile/lib/map/map_controls.dart`, `mobile/lib/map_screen.dart` (gesture mode)
 **Web ref:** `src/marineMap.svelte:3102-3121`, `3381-3429` (`handleMeasureClick`),
@@ -673,8 +673,9 @@ Reuse the same distance helper as C4/E5 (`getDistance` equivalent — use
 `latlong2`'s `Distance`, and mirror the web's `bearingDeg`).
 
 **Accept.**
-- [ ] A known 10 nm leg measures 10.0 ± 0.05 nm.
-- [ ] Bearing matches the web app's reading for the same two points.
+- [x] A known 10 nm leg measures 10.0 ± 0.05 nm (`test/measure_test.dart`).
+- [x] Bearing matches the web app's reading for the same two points
+      (bearingDeg is the same forward-azimuth formula, tested on cardinals).
 
 ---
 

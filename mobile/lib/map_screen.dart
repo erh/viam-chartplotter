@@ -12,6 +12,7 @@ import 'app_config.dart';
 import 'map/ais_markers.dart';
 import 'map/boat_icon.dart';
 import 'map/heading_line.dart';
+import 'map/measure.dart';
 
 import 'boat_state.dart';
 import 'camera_screen.dart';
@@ -74,6 +75,32 @@ class _MapScreenState extends State<MapScreen> {
   // Follow mode (J4): keep the boat anchored on screen on every position
   // update; a user drag suspends it, the FAB resumes.
   late bool _followBoat = !_restoredView;
+
+  // Measure tool (J1): tap sets the anchor, a second tap the end, further
+  // taps restart from a new anchor; toggling the tool off clears.
+  bool _measureMode = false;
+  LatLng? _measureA;
+  LatLng? _measureB;
+
+  void _toggleMeasure() {
+    setState(() {
+      _measureMode = !_measureMode;
+      _measureA = null;
+      _measureB = null;
+    });
+  }
+
+  void _onMapTap(LatLng point) {
+    if (!_measureMode) return;
+    setState(() {
+      if (_measureA == null || _measureB != null) {
+        _measureA = point; // first tap, or restart after a complete leg
+        _measureB = null;
+      } else {
+        _measureB = point;
+      }
+    });
+  }
 
   // Chart orientation. north-up = rotation locked to 0; course-up = the chart
   // rotates so the boat's course-over-ground points to the top of the screen.
@@ -440,6 +467,7 @@ class _MapScreenState extends State<MapScreen> {
               interactionOptions: const InteractionOptions(
                 flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
               ),
+              onTap: (_, point) => _onMapTap(point),
               // Suspend follow on a user DRAG only (J4) — not pinch-zoom,
               // which should keep the boat anchored (J2), and not
               // programmatic moves. The web app documents why a
@@ -464,7 +492,8 @@ class _MapScreenState extends State<MapScreen> {
                 }
               },
             ),
-            children: buildMapLayers(
+            children: [
+              ...buildMapLayers(
               state: s,
               base: _base,
               rotationDeg: _rotationDeg,
@@ -489,7 +518,33 @@ class _MapScreenState extends State<MapScreen> {
                 }
               },
               safeDepthFt: _settings.safeDepthFt,
-            ),
+              ),
+              // Measure tool overlay (J1): anchor/end pins and the leg.
+              if (_measureA != null && _measureB != null)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: [_measureA!, _measureB!],
+                      color: Colors.yellowAccent,
+                      strokeWidth: 2,
+                    ),
+                  ],
+                ),
+              if (_measureMode)
+                MarkerLayer(
+                  markers: [
+                    for (final p in [_measureA, _measureB])
+                      if (p != null)
+                        Marker(
+                          point: p,
+                          width: 18,
+                          height: 18,
+                          child: const Icon(Icons.circle,
+                              size: 12, color: Colors.yellowAccent),
+                        ),
+                  ],
+                ),
+            ],
           ),
           // Top-left: compact connection status.
           SafeArea(
@@ -511,6 +566,35 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          // Measure readout (J1): top-center, clear of thumbs on the pins.
+          if (_measureMode)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 56),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.yellowAccent),
+                    ),
+                    child: Text(
+                      _measureA == null
+                          ? 'Measure: tap the start point'
+                          : _measureB == null
+                              ? 'Measure: tap the far end'
+                              : measureLabel(_measureA!, _measureB!),
+                      style: const TextStyle(
+                          color: Colors.yellowAccent,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           // Top-center: glanceable next-waypoint distance + ETA while navigating.
           if (s.navigating)
             SafeArea(
@@ -558,6 +642,13 @@ class _MapScreenState extends State<MapScreen> {
                       active: _wind.on,
                       busy: _wind.loading,
                       onTap: _toggleWind,
+                    ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
+                      icon: Icons.straighten,
+                      tooltip: 'Measure distance/bearing',
+                      active: _measureMode,
+                      onTap: _toggleMeasure,
                     ),
                     const SizedBox(height: 8),
                     MapRoundButton(
