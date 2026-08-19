@@ -473,6 +473,7 @@ func StartChartplotterServer(
 		tileCache:      encTileCache,
 		encHandlers:    encHandlers,
 		mdnsServer:     mdnsServer,
+		api:            api,
 		tracerShutdown: tracerShutdown,
 	}, nil
 }
@@ -486,6 +487,7 @@ type chartplotterResource struct {
 	tileCache      *render.ENCTileCache
 	encHandlers    *render.ENCHandlers
 	mdnsServer     *zeroconf.Server
+	api            *DisplayAPI
 	tracerShutdown func(context.Context) error
 }
 
@@ -500,6 +502,9 @@ func (r *chartplotterResource) Status(ctx context.Context) (map[string]interface
 func (r *chartplotterResource) Close(ctx context.Context) error {
 	if r.mdnsServer != nil {
 		r.mdnsServer.Shutdown()
+	}
+	if r.api != nil {
+		r.api.Close()
 	}
 	if r.weatherCache != nil {
 		r.weatherCache.Close()

@@ -194,6 +194,38 @@ func TestDisplayAPICamera(t *testing.T) {
 	}
 }
 
+func TestDisplayAPITrack(t *testing.T) {
+	ms := &inject.MovementSensor{}
+	api := &DisplayAPI{logger: logging.NewTestLogger(t), ms: ms}
+	api.recordTrackPoint(trackPoint{Lat: 39.0, Lng: -72.0, Ts: 1000})
+	api.recordTrackPoint(trackPoint{Lat: 39.1, Lng: -72.1, Ts: 2000})
+	srv := displayAPIServer(t, api)
+
+	out := getJSON(t, srv.URL+"/api/track", http.StatusOK)
+	pts := out["points"].([]any)
+	if len(pts) != 2 {
+		t.Fatalf("expected 2 points, got %v", out)
+	}
+	first := pts[0].(map[string]any)
+	if first["lat"] != 39.0 || first["lng"] != -72.0 || first["ts"] != 1000.0 {
+		t.Fatalf("bad first point: %v", first)
+	}
+
+	// Points older than the retention window get pruned on append.
+	old := trackPoint{Lat: 1, Lng: 1, Ts: 1000}
+	api2 := &DisplayAPI{logger: logging.NewTestLogger(t), ms: ms}
+	api2.recordTrackPoint(old)
+	api2.recordTrackPoint(trackPoint{Lat: 2, Lng: 2, Ts: 1000 + trackKeep.Milliseconds() + 1})
+	if len(api2.track) != 1 || api2.track[0].Lat != 2 {
+		t.Fatalf("expected old point pruned, got %v", api2.track)
+	}
+
+	// No movement sensor → 503.
+	api3 := &DisplayAPI{logger: logging.NewTestLogger(t)}
+	srv3 := displayAPIServer(t, api3)
+	getJSON(t, srv3.URL+"/api/track", http.StatusServiceUnavailable)
+}
+
 func TestChartplotterConfigValidate(t *testing.T) {
 	cfg := &ChartplotterConfig{
 		MovementSensor: "gps",

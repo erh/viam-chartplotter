@@ -9,6 +9,7 @@ final class ChartplotterClient: ObservableObject {
     @Published private(set) var info: ServerInfo?
     @Published private(set) var state: BoatState?
     @Published private(set) var route: RouteInfo?
+    @Published private(set) var track: [TrackPoint] = []
     @Published private(set) var lastError: String?
 
     private var pollTask: Task<Void, Never>?
@@ -53,6 +54,7 @@ final class ChartplotterClient: ObservableObject {
         info = nil
         state = nil
         route = nil
+        track = []
         lastError = nil
         UserDefaults.standard.removeObject(forKey: Self.savedURLKey)
     }
@@ -86,6 +88,13 @@ final class ChartplotterClient: ObservableObject {
         }
         if tick % 5 == 0 {
             route = try? await get("api/route")
+        }
+        if tick % 30 == 0 {
+            // Older module deployments don't have /api/track; leave the
+            // track empty rather than erroring.
+            if let resp = try? await get("api/track") as TrackResponse {
+                track = resp.points
+            }
         }
     }
 

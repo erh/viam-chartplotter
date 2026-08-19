@@ -9,10 +9,11 @@ package vc
 //	GET /api/info               what's configured (capability probe)
 //	GET /api/state              position / heading / SOG / depth
 //	GET /api/route              nav-system route + nav-service waypoints
+//	GET /api/track              recent own-boat track (in-memory, 24h)
 //	GET /api/camera/{name}.jpg  latest frame from the named camera
 //
 // Every endpoint is a cheap read; clients poll (state ~1s, route ~5s,
-// cameras ~2s). All responses are uncacheable.
+// cameras ~2s, track ~30s). All responses are uncacheable.
 
 import (
 	"context"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/camera"
@@ -35,6 +37,19 @@ import (
 const metersPerSecToKnots = 1.94384
 const metersToFeet = 3.28084
 
+// Track recorder: sample the movement sensor on this cadence and keep
+// this much history in memory. 24h at 10s is 8640 points — trivial to
+// hold and cheap to serialize. The track restarts with the module; a
+// display client just shows what's been recorded since.
+const trackSampleInterval = 10 * time.Second
+const trackKeep = 24 * time.Hour
+
+type trackPoint struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+	Ts  int64   `json:"ts"` // millis
+}
+
 // DisplayAPI holds the resolved resources behind the /api endpoints.
 // Every field is optional; endpoints whose resources aren't configured
 // answer 503 with an explanatory error, so a partially-configured
@@ -49,6 +64,11 @@ type DisplayAPI struct {
 	cameras map[string]camera.Camera
 
 	cameraNames []string // sorted, for /api/info
+
+	trackMu     sync.Mutex
+	track       []trackPoint
+	trackCancel context.CancelFunc
+	trackDone   chan struct{}
 }
 
 // NewDisplayAPI resolves the display-API resource names from deps. The
@@ -100,14 +120,85 @@ func NewDisplayAPI(deps resource.Dependencies, cfg *ChartplotterConfig, logger l
 		a.cameraNames = append(a.cameraNames, name)
 	}
 	sort.Strings(a.cameraNames)
+	if a.ms != nil {
+		a.startTrackRecorder()
+	}
 	return a
+}
+
+// Close stops the background track recorder, if running.
+func (a *DisplayAPI) Close() {
+	if a.trackCancel != nil {
+		a.trackCancel()
+		<-a.trackDone
+	}
 }
 
 func (a *DisplayAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/info", a.handleInfo)
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("GET /api/route", a.handleRoute)
+	mux.HandleFunc("GET /api/track", a.handleTrack)
 	mux.HandleFunc("GET /api/camera/{name}", a.handleCamera)
+}
+
+// startTrackRecorder samples the movement sensor every
+// trackSampleInterval and appends to the in-memory track, pruning
+// entries older than trackKeep.
+func (a *DisplayAPI) startTrackRecorder() {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.trackCancel = cancel
+	a.trackDone = make(chan struct{})
+	go func() {
+		defer close(a.trackDone)
+		ticker := time.NewTicker(trackSampleInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			callCtx, callCancel := context.WithTimeout(ctx, 5*time.Second)
+			pos, _, err := a.ms.Position(callCtx, nil)
+			callCancel()
+			if err != nil || pos == nil {
+				continue
+			}
+			lat, lng := pos.Lat(), pos.Lng()
+			if lat == 0 && lng == 0 { // no fix yet
+				continue
+			}
+			a.recordTrackPoint(trackPoint{Lat: lat, Lng: lng, Ts: time.Now().UnixMilli()})
+		}
+	}()
+}
+
+func (a *DisplayAPI) recordTrackPoint(p trackPoint) {
+	a.trackMu.Lock()
+	defer a.trackMu.Unlock()
+	a.track = append(a.track, p)
+	dropBefore := p.Ts - trackKeep.Milliseconds()
+	drop := 0
+	for drop < len(a.track) && a.track[drop].Ts < dropBefore {
+		drop++
+	}
+	if drop > 0 {
+		a.track = a.track[drop:]
+	}
+}
+
+// handleTrack returns the recorded own-boat track, oldest first.
+func (a *DisplayAPI) handleTrack(w http.ResponseWriter, r *http.Request) {
+	if a.ms == nil {
+		writeAPIJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "no movement_sensor configured"})
+		return
+	}
+	a.trackMu.Lock()
+	points := make([]trackPoint, len(a.track))
+	copy(points, a.track)
+	a.trackMu.Unlock()
+	writeAPIJSON(w, http.StatusOK, map[string]any{"points": points})
 }
 
 func writeAPIJSON(w http.ResponseWriter, status int, body any) {
@@ -124,6 +215,7 @@ func (a *DisplayAPI) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"depth":   a.depth != nil,
 		"route":   a.route != nil,
 		"nav":     a.nav != nil,
+		"track":   a.ms != nil,
 		"cameras": append([]string{}, a.cameraNames...),
 	})
 }

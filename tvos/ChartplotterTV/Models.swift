@@ -21,6 +21,16 @@ struct BoatState: Decodable {
     let ts: Double
 }
 
+struct TrackPoint: Decodable, Equatable {
+    let lat: Double
+    let lng: Double
+    let ts: Double
+}
+
+struct TrackResponse: Decodable {
+    let points: [TrackPoint]
+}
+
 struct Waypoint: Decodable, Identifiable, Equatable {
     let id: String
     let lat: Double

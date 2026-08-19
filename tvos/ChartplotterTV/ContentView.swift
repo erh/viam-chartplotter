@@ -79,9 +79,11 @@ struct ChartScreen: View {
     @EnvironmentObject var client: ChartplotterClient
     let baseURL: URL
 
+    @State private var fullScreenCamera: CameraID?
+
     var body: some View {
         ZStack(alignment: .top) {
-            ChartMapView(baseURL: baseURL, state: client.state, route: client.route)
+            ChartMapView(baseURL: baseURL, state: client.state, route: client.route, track: client.track)
                 .ignoresSafeArea()
             HStack(alignment: .top) {
                 dataPanel
@@ -89,6 +91,17 @@ struct ChartScreen: View {
                 routePanel
             }
             .padding(40)
+            VStack {
+                Spacer()
+                HStack {
+                    CameraRow(fullScreen: $fullScreenCamera)
+                    Spacer()
+                }
+            }
+            .padding(40)
+        }
+        .fullScreenCover(item: $fullScreenCamera) { cam in
+            FullScreenCameraView(camera: cam)
         }
     }
 
@@ -125,8 +138,12 @@ struct ChartScreen: View {
                 if let nm = r.distanceToWaypointNM {
                     row("Next WPT", String(format: "%.2f nm", nm))
                 }
+                if let v = r.closingVelocityMS, v > 0.1 {
+                    row("Closing", String(format: "%.1f kn", v * 1.94384))
+                }
                 if let eta = r.etaSeconds {
-                    row("ETA", Self.formatDuration(eta))
+                    row("Time", Self.formatDuration(eta))
+                    row("ETA", Date(timeIntervalSinceNow: eta).formatted(date: .omitted, time: .shortened))
                 }
                 if let wps = r.waypoints, !wps.isEmpty {
                     row("Waypoints", "\(wps.count)")

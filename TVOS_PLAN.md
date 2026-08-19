@@ -54,12 +54,19 @@ every poll keeps MapKit from ever committing tiles.
    zoom with the web app's formula (`floor(sog)^0.41`, marineMap.svelte
    ~1220), mapped onto MapKit camera altitude.
 
-## Phase 3 — Cameras + route panel
+## Phase 3 — Cameras + route panel + track — DONE
 
-1. Camera grid polling `/api/camera/*.jpg` every ~2 s; click/remote
-   select to go full screen, Menu to return.
-2. Route panel overlaid on the chart: next waypoint, DTW, ETA; draw the
-   route line from `/api/route` waypoints as a map overlay.
+1. Camera thumbnails (bottom-left) polling `/api/camera/*.jpg` every
+   2 s; select for full screen (1 s polling), Menu to return.
+2. Route panel: DTW, closing speed, time-to-go + clock ETA (rows appear
+   when the nav system has an active route), waypoint count; route line
+   drawn boat → waypoints.
+3. Own-boat track: new module endpoint `GET /api/track` — an in-memory
+   recorder samples the movement sensor every 10 s and keeps 24 h
+   (restarts with the module). The app refetches every 30 s and draws
+   it as a blue line, rebuilding the overlay only when data grew (same
+   flash-avoidance rule as the route line). Needs the module redeployed
+   to serve it.
 
 ## Phase 4 — Polish
 

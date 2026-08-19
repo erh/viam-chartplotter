@@ -31,6 +31,10 @@ final class ChartTileOverlay: MKTileOverlay {
 
 final class BoatAnnotation: MKPointAnnotation {}
 
+/// Marker class so the renderer can style the own-boat track
+/// differently from the magenta route line.
+final class TrackPolyline: MKPolyline {}
+
 /// The TV hangs on a wall across the room, so sit two zoom levels
 /// further out than the web app does at every speed.
 let tvZoomOffset: Double = 2
@@ -49,6 +53,7 @@ struct ChartMapView: UIViewRepresentable {
     let baseURL: URL
     let state: BoatState?
     let route: RouteInfo?
+    let track: [TrackPoint]
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -126,6 +131,28 @@ struct ChartMapView: UIViewRepresentable {
         }
 
         updateRouteOverlay(map, co: co, boat: center)
+        updateTrackOverlay(map, co: co)
+    }
+
+    /// Own-boat track from /api/track. The server samples every 10s and
+    /// the client refetches every 30s, so rebuild only when the data
+    /// actually grew — same flash-avoidance rule as the route line.
+    private func updateTrackOverlay(_ map: MKMapView, co: Coordinator) {
+        guard track.count >= 2 else { return }
+        let lastTs = track.last?.ts ?? 0
+        if track.count == co.lastTrackCount, lastTs == co.lastTrackTs, co.trackLine != nil {
+            return
+        }
+        co.lastTrackCount = track.count
+        co.lastTrackTs = lastTs
+        let coords = track.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng) }
+        let line = TrackPolyline(coordinates: coords, count: coords.count)
+        let old = co.trackLine
+        co.trackLine = line
+        map.addOverlay(line, level: .aboveLabels)
+        if let old {
+            map.removeOverlay(old)
+        }
     }
 
     /// Convert a web-map tile zoom to a coordinate region for this view
@@ -195,10 +222,19 @@ struct ChartMapView: UIViewRepresentable {
         var pendingZoomTicks = 0
         var lastRouteKey = ""
         var lastRouteBoat = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+        var trackLine: TrackPolyline?
+        var lastTrackCount = 0
+        var lastTrackTs: Double = 0
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let tiles = overlay as? MKTileOverlay {
                 return MKTileOverlayRenderer(tileOverlay: tiles)
+            }
+            if let line = overlay as? TrackPolyline {
+                let r = MKPolylineRenderer(polyline: line)
+                r.strokeColor = UIColor.systemBlue.withAlphaComponent(0.7)
+                r.lineWidth = 3
+                return r
             }
             if let line = overlay as? MKPolyline {
                 let r = MKPolylineRenderer(polyline: line)
