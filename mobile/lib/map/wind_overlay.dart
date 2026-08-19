@@ -27,6 +27,13 @@ class WindOverlayController {
   /// Arrow cap, mirroring the same protection the AIS layer needs (task D10).
   static const int _maxMarkers = 1500;
 
+  /// Weather zoom gate (F8), web parity (LayerOption.maxZoom = 12): past
+  /// this zoom one 0.25° model cell spans hundreds of screen pixels and the
+  /// field is a meaningless wash, so it hides — with a hint, not silently.
+  static const double weatherMaxZoom = 12;
+
+  static bool weatherVisibleAtZoom(double zoom) => zoom <= weatherMaxZoom;
+
   WindField? field;
   bool on = false;
   bool loading = false;

@@ -1394,7 +1394,7 @@ via each layer's `maxZoom`. Show a short "zoom out for weather" hint rather than
 silently vanishing.
 
 **Accept.**
-- [ ] Zooming to chart detail hides the field and explains why.
+- [x] Zooming to chart detail hides the field and explains why.
 
 ---
 

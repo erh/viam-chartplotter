@@ -1097,6 +1097,17 @@ class _MapScreenState extends State<MapScreen> {
     // One adaptive layout (L6), breakpoint-driven — no forked screens.
     // Phone: full-screen chart, data behind the drawer. ≥840 px (tablet
     // landscape): the drawer's content becomes a persistent side panel.
+    // Weather zoom gate (F8): past weatherMaxZoom the 0.25° fields hide and
+    // a hint takes the forecast bar's place.
+    double viewZoomNow;
+    try {
+      viewZoomNow = _map.camera.zoom;
+    } catch (_) {
+      viewZoomNow = _settings.mapZoom ?? 9;
+    }
+    final weatherZoomOk =
+        WindOverlayController.weatherVisibleAtZoom(viewZoomNow);
+    final weatherOn = _wind.on || _wind.wavesOn;
     return LayoutBuilder(builder: (context, box) {
       final tablet = box.maxWidth >= 840;
       final chart = Stack(
@@ -1158,9 +1169,11 @@ class _MapScreenState extends State<MapScreen> {
               state: s,
               base: _base,
               rotationDeg: _rotationDeg,
-              windOn: _wind.on,
+              windOn: _wind.on && weatherZoomOk,
               windMarkers: _wind.markers,
-              wavePolygons: _wind.wavesOn ? _wind.waveCells : const [],
+              wavePolygons: (_wind.wavesOn && weatherZoomOk)
+                  ? _wind.waveCells
+                  : const [],
               aisMarkers: _aisMarkers,
               areas: _visibleAreas,
               navaidMarkers: _navaidMarkers,
@@ -1516,15 +1529,39 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           // Wave-height legend (F3), above the forecast bar.
-          if (_wind.wavesOn)
+          if (_wind.wavesOn && weatherZoomOk)
             const Positioned(
               left: 12,
               bottom: 64,
               child: SafeArea(child: WaveLegend()),
             ),
+          // Zoomed past the weather gate (F8): say why the field is gone
+          // rather than silently vanishing.
+          if (weatherOn && !weatherZoomOk)
+            Positioned(
+              left: 12,
+              right: 76,
+              bottom: 12,
+              child: SafeArea(
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Text(
+                      'Zoom out for weather',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           // Bottom: forecast-time slider, shown while any weather field is
           // up — one hour drives wind and waves together (web parity).
-          if (_wind.on || _wind.wavesOn)
+          if (weatherOn && weatherZoomOk)
             Positioned(
               left: 12,
               right: 76, // clear the center-on-boat FAB
