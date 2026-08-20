@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../boat_state.dart';
@@ -179,36 +181,78 @@ class StatusChip extends StatelessWidget {
 
 /// Top-center pill shown while a route is active: distance to the next
 /// waypoint and estimated time, from the `route` sensor.
-/// Always-visible SOG/COG readout at the top of the chart — the two numbers
-/// a helmsman glances at constantly. Dashes until data arrives, so the pill
-/// never jumps in and out of the layout.
-class SogCogPill extends StatelessWidget {
+/// Always-visible readout at the top of the chart: the current time over
+/// SOG/COG — the clock and the two numbers a helmsman glances at
+/// constantly. Dashes until data arrives, so the pill never jumps in and
+/// out of the layout. Owns a 1 s tick: piggybacking on boat-state
+/// notifications would freeze the clock in chart-only mode.
+class SogCogPill extends StatefulWidget {
   const SogCogPill({super.key, required this.state});
   final BoatState state;
 
   @override
+  State<SogCogPill> createState() => _SogCogPillState();
+}
+
+class _SogCogPillState extends State<SogCogPill> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final state = widget.state;
     final sog = state.speedKn;
     final cog = state.cogDeg;
     final sogStr = sog == null ? '–.–' : sog.toStringAsFixed(1);
     final cogStr =
         cog == null ? '–––' : cog.round().toString().padLeft(3, '0');
+    final now = DateTime.now();
+    final clock = '${now.hour.toString().padLeft(2, '0')}:'
+        '${now.minute.toString().padLeft(2, '0')}:'
+        '${now.second.toString().padLeft(2, '0')}';
+    // Ticking numbers must not make the pill wobble.
+    const figures = [FontFeature.tabularFigures()];
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Text(
-        '$sogStr kn   $cogStr°',
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 16,
-          fontWeight: FontWeight.w700,
-          // Tabular figures: the numbers tick every second and must not
-          // make the pill wobble.
-          fontFeatures: [FontFeature.tabularFigures()],
-        ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            clock,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              fontFeatures: figures,
+            ),
+          ),
+          Text(
+            '$sogStr kn   $cogStr°',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              fontFeatures: figures,
+            ),
+          ),
+        ],
       ),
     );
   }
