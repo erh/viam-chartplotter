@@ -6352,12 +6352,13 @@
           <div class="data-panel-row">
             <span class="data-panel-label">Time</span>
             <span class="data-panel-value">
-              <span class="data-panel-bold"
-                >{clockNow.toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })}</span
+              <!-- Zero-padded + tabular figures: locale hour formatting and
+                   proportional digits made the panel width bounce every
+                   second. -->
+              <span class="data-panel-bold data-panel-clock"
+                >{String(clockNow.getHours()).padStart(2, "0")}:{String(
+                  clockNow.getMinutes()
+                ).padStart(2, "0")}:{String(clockNow.getSeconds()).padStart(2, "0")}</span
               >
             </span>
           </div>
@@ -6853,6 +6854,11 @@
   }
   .data-panel-bold {
     font-weight: 700;
+  }
+  /* Ticking digits must not resize the panel (1 is narrower than 8 in the
+     proportional face). */
+  .data-panel-clock {
+    font-variant-numeric: tabular-nums;
   }
   /* Small colour chip placed before a wind/wave readout in the cursor
      popup so the displayed magnitude is visually tied to the gradient
