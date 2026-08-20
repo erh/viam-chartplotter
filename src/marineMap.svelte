@@ -271,6 +271,7 @@
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
+  const COOKIE_NIGHT = "mapNightMode";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_AIS_PROJECTION_MIN = "mapAisProjectionMin";
   const COOKIE_AIRCRAFT_PROJECTION_MIN = "mapAircraftProjectionMin";
@@ -282,6 +283,15 @@
   // Cleared when the user returns to boat-follow mode.
   const COOKIE_VIEW_CENTER = "mapViewCenter";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
+
+  // Night mode: CSS-inverts the chart tile layers only (className
+  // "chart-tile-layer" — satellite photos and the vector overlays stay
+  // as-is). Persisted like the layer toggles.
+  let nightMode = $state(getCookie(COOKIE_NIGHT) === "1");
+  function setNightMode(on: boolean) {
+    nightMode = on;
+    setCookie(COOKIE_NIGHT, on ? "1" : "0", COOKIE_OPTS);
+  }
 
   // Default view when no cookie is present: centred between NYC and
   // Hudson Canyon (~40°N, 73°W in user coords because we use
@@ -3532,6 +3542,7 @@
       name: "open street map",
       on: true,
       layer: new TileLayer({
+        className: "chart-tile-layer",
         opacity: 1,
         preload: Infinity, // Preload all tiles at lower zoom levels
         zIndex: 1,
@@ -3604,6 +3615,7 @@
       on: false,
       minZoom: 7,
       layer: new TileLayer({
+        className: "chart-tile-layer",
         opacity: 0.7,
         preload: 2,
         zIndex: 4,
@@ -3770,6 +3782,7 @@
         // in updateOnLayers, which is gated to z>=7 to match).
         minZoom: 7,
         layer: new TileLayer({
+          className: "chart-tile-layer",
           opacity: 1,
           preload: 2,
           zIndex: 5,
@@ -3836,6 +3849,7 @@
         displayName: "seamarks (OpenSeaMap)",
         on: false,
         layer: new TileLayer({
+          className: "chart-tile-layer",
           opacity: 1,
           zIndex: 7,
           source: new XYZ({
@@ -3860,6 +3874,7 @@
         on: false,
         minZoom: 7,
         layer: new TileLayer({
+          className: "chart-tile-layer",
           opacity: 0.7,
           preload: 2,
           zIndex: 6,
@@ -5644,7 +5659,7 @@
   class:full-width={fullWidth}
   class:chart-only={chartOnly}
 >
-  <div id="map" class="w-full aspect-video bg-white"></div>
+  <div id="map" class="w-full aspect-video bg-white" class:map-night={nightMode}></div>
 
   <WeatherOverlays
     {mapGlobal}
@@ -5983,6 +5998,19 @@
         <span class="depth-color-legend-label">0–10 ft</span>
       </label>
     {/if}
+
+    <hr class="layer-divider" />
+    <!-- Style toggle, not a layer: CSS-inverts the chart tiles for night
+         vision. Vector overlays (boat, AIS, routes) and satellite photos
+         keep their real colours. -->
+    <label>
+      <input
+        type="checkbox"
+        checked={nightMode}
+        onchange={(e) => setNightMode((e.currentTarget as HTMLInputElement).checked)}
+      />
+      night mode (invert chart)
+    </label>
   </div>
 
   <div class="bottom-controls">
@@ -6859,6 +6887,18 @@
      proportional face). */
   .data-panel-clock {
     font-variant-numeric: tabular-nums;
+  }
+  /* Night mode: invert the chart raster only. invert flips white paper to
+     black; hue-rotate(180deg) flips the inverted hues back so water stays
+     blue-ish and daymark colours keep their identity; brightness/saturate
+     tame the result so it reads as a dimmed chart, not a negative. The
+     className is set on the chart tile layers (never satellite photos or
+     the vector overlays). */
+  :global(#map.map-night) {
+    background: #0b0b0e;
+  }
+  :global(#map.map-night .chart-tile-layer) {
+    filter: invert(100%) hue-rotate(180deg) brightness(0.9) saturate(0.85);
   }
   /* Small colour chip placed before a wind/wave readout in the cursor
      popup so the displayed magnitude is visually tied to the gradient
