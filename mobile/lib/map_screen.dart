@@ -754,6 +754,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     unawaited(WakelockPlus.disable().catchError((_) {}));
+    _wxPlayTimer?.cancel();
     _forecastTimer?.cancel();
     _persistViewDebounce?.cancel();
     _navaids.dispose();
@@ -879,6 +880,40 @@ class _MapScreenState extends State<MapScreen> {
           .showSnackBar(SnackBar(content: Text('${m.displayName}: $e')));
     }
     if (mounted) setState(() {});
+  }
+
+  // Forecast time-lapse: play steps the forecast hour every ~2.5 s through
+  // the 24 h after the anchor (where play was pressed), then loops back —
+  // windy-style. Each frame is a real fetch, so a frame that's still
+  // loading just holds; pause, weather-off, or leaving the screen stops it.
+  bool _wxPlaying = false;
+  Timer? _wxPlayTimer;
+  int _wxPlayStartFh = 0;
+
+  void _toggleWxPlay() {
+    _wxPlayTimer?.cancel();
+    _wxPlayTimer = null;
+    setState(() => _wxPlaying = !_wxPlaying);
+    if (_wxPlaying) {
+      _wxPlayStartFh = _wind.fh;
+      _wxPlayTimer = Timer.periodic(
+          const Duration(milliseconds: 2500), (_) => _wxPlayStep());
+    }
+  }
+
+  Future<void> _wxPlayStep() async {
+    if (!mounted || !_wxPlaying) return;
+    if (!(_wind.on || _wind.wavesOn || _wind.isobarsOn)) {
+      _toggleWxPlay(); // weather went off — stop the lapse
+      return;
+    }
+    if (_wind.loading || _wind.waveLoading || _wind.isobarLoading) {
+      return; // previous frame still fetching — hold this tick
+    }
+    final m = _wind.model;
+    var next = _wind.fh + (m.stepFh > 0 ? m.stepFh : 3);
+    if (next > m.maxFh || next > _wxPlayStartFh + 24) next = _wxPlayStartFh;
+    await _loadWind(next);
   }
 
   /// Switch weather models (F2) — the controller persists, reshapes fh and
@@ -1731,6 +1766,8 @@ class _MapScreenState extends State<MapScreen> {
                   waveModel: _wind.wavesOn ? _wind.waveModel : null,
                   waveModels: _wind.waveModels,
                   onWaveModel: _selectWaveModel,
+                  playing: _wxPlaying,
+                  onPlay: _toggleWxPlay,
                 ),
               ),
             ),

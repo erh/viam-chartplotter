@@ -539,6 +539,8 @@ class WindForecastBar extends StatelessWidget {
     this.waveModel,
     this.waveModels = const [],
     this.onWaveModel,
+    this.playing = false,
+    this.onPlay,
   });
 
   final int fh;
@@ -553,6 +555,10 @@ class WindForecastBar extends StatelessWidget {
   final WeatherModel? waveModel;
   final List<WeatherModel> waveModels;
   final ValueChanged<WeatherModel>? onWaveModel;
+
+  /// Forecast time-lapse: play steps the hour forward on a timer and loops.
+  final bool playing;
+  final VoidCallback? onPlay;
 
   @override
   Widget build(BuildContext context) {
@@ -576,6 +582,18 @@ class WindForecastBar extends StatelessWidget {
                     strokeWidth: 2, color: Colors.white)
                 : const Icon(Icons.air, color: Colors.white, size: 18),
           ),
+          // Forecast time-lapse (windy-style): step the next 24 h and loop.
+          if (onPlay != null)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: Icon(
+                playing ? Icons.pause_circle : Icons.play_circle,
+                color: Colors.white,
+                size: 22,
+              ),
+              tooltip: playing ? 'Pause' : 'Play next 24 h',
+              onPressed: onPlay,
+            ),
           // Model pickers (F2 wind / F3 wave), only when there's a real
           // choice (web parity).
           if (models.length > 1 && onModel != null)
