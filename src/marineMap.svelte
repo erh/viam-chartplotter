@@ -271,7 +271,6 @@
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
-  const COOKIE_NIGHT = "mapNightMode";
   const COOKIE_HEADING_LINE_LENGTH = "mapHeadingLineLengthNm";
   const COOKIE_AIS_PROJECTION_MIN = "mapAisProjectionMin";
   const COOKIE_AIRCRAFT_PROJECTION_MIN = "mapAircraftProjectionMin";
@@ -283,15 +282,6 @@
   // Cleared when the user returns to boat-follow mode.
   const COOKIE_VIEW_CENTER = "mapViewCenter";
   const COOKIE_OPTS = { expires: 365, sameSite: "lax" as const, path: "/" };
-
-  // Night mode: CSS-inverts the chart tile layers only (className
-  // "chart-tile-layer" — satellite photos and the vector overlays stay
-  // as-is). Persisted like the layer toggles.
-  let nightMode = $state(getCookie(COOKIE_NIGHT) === "1");
-  function setNightMode(on: boolean) {
-    nightMode = on;
-    setCookie(COOKIE_NIGHT, on ? "1" : "0", COOKIE_OPTS);
-  }
 
   // Default view when no cookie is present: centred between NYC and
   // Hudson Canyon (~40°N, 73°W in user coords because we use
@@ -709,6 +699,10 @@
     showOfflineBoatsInPanel = true,
     defaultAisVisible = true,
     fullWidth = false,
+    // Night mode (owned by App.svelte: button + sunset/sunrise auto-switch):
+    // CSS-inverts the chart tile layers only — satellite photos and the
+    // vector overlays stay as-is.
+    nightMode = false,
     chartOnly = false,
     navWaypoints,
     routePreview,
@@ -753,6 +747,7 @@
     depthSensorAvailable?: boolean;
     enableBoatsPanel?: boolean;
     fullWidth?: boolean;
+    nightMode?: boolean;
     /** Chart-extended (kiosk) mode: no boat/robot — hide the map toolbar and
      *  controls and show only the chart. */
     chartOnly?: boolean;
@@ -5999,18 +5994,6 @@
       </label>
     {/if}
 
-    <hr class="layer-divider" />
-    <!-- Style toggle, not a layer: CSS-inverts the chart tiles for night
-         vision. Vector overlays (boat, AIS, routes) and satellite photos
-         keep their real colours. -->
-    <label>
-      <input
-        type="checkbox"
-        checked={nightMode}
-        onchange={(e) => setNightMode((e.currentTarget as HTMLInputElement).checked)}
-      />
-      night mode (invert chart)
-    </label>
   </div>
 
   <div class="bottom-controls">

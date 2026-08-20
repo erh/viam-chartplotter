@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCookie, setCookie } from "typescript-cookie";
+  import { isNightAt } from "./lib/sun";
   // import '@viamrobotics/prime-core/prime.css';
   import { onMount, onDestroy } from "svelte";
   import { Icon as PrimeIcon } from "@viamrobotics/prime-core";
@@ -166,6 +167,33 @@
     globalData.hideDataPanel = !globalData.hideDataPanel;
     setCookie("hideDataPanel", globalData.hideDataPanel ? "1" : "0", SETTINGS_COOKIE_OPTS);
   }
+
+  // Night mode (chart-tile inversion, applied inside MarineMap). Manual
+  // toggle via the top-right button; auto-switches on at sunset+15 min and
+  // off at sunrise−15 min, edge-triggered so a manual override holds until
+  // the next sun boundary rather than being stomped every minute.
+  let nightMode = $state(getCookie("nightMode") === "1");
+  function setNightMode(on: boolean) {
+    nightMode = on;
+    setCookie("nightMode", on ? "1" : "0", SETTINGS_COOKIE_OPTS);
+  }
+  let lastAutoNight: boolean | null = null;
+  function autoNightTick() {
+    const lat = globalData.pos.getLat();
+    const lng = globalData.pos.getLng();
+    if (lat === 0 && lng === 0) return; // no fix yet
+    const want = isNightAt(new Date(), lat, lng);
+    if (want !== lastAutoNight) {
+      // Only act on a boundary crossing (or the first evaluation).
+      if (lastAutoNight !== null || want !== nightMode) setNightMode(want);
+      lastAutoNight = want;
+    }
+  }
+  $effect(() => {
+    autoNightTick();
+    const id = setInterval(autoNightTick, 60 * 1000);
+    return () => clearInterval(id);
+  });
 
   var globalConfig = $state({
     movementSensorName: "",
@@ -2488,6 +2516,7 @@
       depthSensorAvailable={globalConfig.depthSensorName !== ""}
       defaultAisVisible={false}
       fullWidth={globalData.hideDataPanel}
+      {nightMode}
       {chartOnly}
       navWaypoints={globalData.navWaypoints}
       {routePreview}
@@ -2890,6 +2919,16 @@
       title={globalData.hideDataPanel ? "Show data panel" : "Hide data panel"}
     >
       {globalData.hideDataPanel ? "◀" : "▶"}
+    </button>
+
+    <button
+      onclick={() => setNightMode(!nightMode)}
+      class="fixed top-2 right-[5.5rem] z-[10000] px-3 py-1 bg-black bg-opacity-60 border {nightMode
+        ? 'border-blue-400 text-blue-300'
+        : 'border-gray-500 text-white'} hover:bg-gray-700 rounded text-sm"
+      title="Night mode (inverts the chart; auto on 15 min after sunset, off 15 min before sunrise)"
+    >
+      ☾
     </button>
 
     {#if globalData.enlargedImage}
