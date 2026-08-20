@@ -314,8 +314,12 @@ struct ChartScreen: View {
     @ViewBuilder
     private var routePanel: some View {
         let wpCount = client.route?.waypoints?.count ?? 0
-        if let next = nextLeg {
-            VStack(alignment: .trailing, spacing: 6) {
+        VStack(alignment: .trailing, spacing: 6) {
+            // Wall-clock now — the panel re-renders on every 1s state
+            // poll, which keeps a minutes-resolution clock current.
+            row("Now", Date().formatted(date: .omitted, time: .shortened))
+            if let next = nextLeg {
+                panelDivider
                 row("Next", String(format: "%.2f nm", next.nm))
                 if let v = client.route?.closingVelocityMS, v > 0.1 {
                     row("Closing", String(format: "%.1f kn", v * 1.94384))
@@ -337,8 +341,8 @@ struct ChartScreen: View {
                     row("WPTS", "\(wpCount)")
                 }
             }
-            .panelStyle()
         }
+        .panelStyle()
     }
 
     private var panelDivider: some View {
