@@ -1694,13 +1694,17 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-          // Center-right: zoom controls. Hidden on touch devices (pinch-zoom).
+          // Zoom controls, desktop only (touch pinch-zooms). Bottom-right,
+          // NOT center-right: centered they painted over the toolbar's
+          // lowest buttons (routes, the ⋯ menu) whenever the window was
+          // short — on macOS the ⋯ was literally hidden under the +.
+          // Lifted clear of the Follow FAB and the forecast bar.
           if (!_isTouch)
             SafeArea(
               child: Align(
-                alignment: Alignment.centerRight,
+                alignment: Alignment.bottomRight,
                 child: Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.only(right: 12, bottom: 96),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
