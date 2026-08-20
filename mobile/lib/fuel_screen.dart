@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'boat_state.dart';
 import 'history.dart';
+import 'map/map_controls.dart' show StatusChip;
 
 /// Fuel mode: every tank sensor with its level and two freshness ages —
 /// when the app last got data from the boat, and when the boat-side sensor
@@ -11,12 +12,18 @@ import 'history.dart';
 /// a minute red, so a dead sender or a dropped connection is obvious at a
 /// glance. Ages tick every second while the page is open.
 class FuelScreen extends StatefulWidget {
-  const FuelScreen({super.key, required this.state, this.history});
+  const FuelScreen(
+      {super.key, required this.state, this.history, this.onReconnect});
   final BoatState state;
 
   /// Cloud tabular backfill (hot store, falling back to cold) for the hour
   /// graphs; null on the API-key path, where graphs are live-only.
   final HistoryService? history;
+
+  /// Manual reconnect (the status chip's retry) — the fuel page used to
+  /// have no connection status at all, so a dead link just looked like the
+  /// page being broken until an app restart.
+  final VoidCallback? onReconnect;
 
   @override
   State<FuelScreen> createState() => _FuelScreenState();
@@ -24,6 +31,8 @@ class FuelScreen extends StatefulWidget {
 
 class _FuelScreenState extends State<FuelScreen> {
   Timer? _ticker;
+  Timer? _mergeTimer;
+  bool _merging = false;
 
   @override
   void initState() {
@@ -33,25 +42,40 @@ class _FuelScreenState extends State<FuelScreen> {
       if (mounted) setState(() {});
     });
     _backfill();
+    // Re-merge every minute while the page is open: the boat records tank
+    // levels even while the phone is locked, so this bridges the series gap
+    // a reconnect leaves — without it the fill/burn rate (which needs
+    // ≥2.5 min of samples in its 5-minute window) blanks for minutes after
+    // every resume.
+    _mergeTimer =
+        Timer.periodic(const Duration(seconds: 60), (_) => _backfill());
   }
 
-  /// Seed each tank's series from the recorded data store (hot → cold), once
-  /// per session — after that the live poll keeps the series growing locally.
+  /// Merge each tank's series from the recorded data store (hot → cold).
+  /// A MERGE, not a prepend: points land wherever the local series has
+  /// holes, including the mid-series gap of a lock/resume cycle.
   Future<void> _backfill() async {
     final h = widget.history;
-    if (h == null) return;
-    for (final t in List.of(widget.state.tanks)) {
-      final key = 'tank:${t.name}';
-      if (widget.state.backfilled.contains(key) || !h.hasMetric(key)) continue;
-      final pts = await h.fetch(key, const Duration(hours: 1));
-      if (!mounted) return;
-      widget.state.backfill(key, pts);
+    if (h == null || _merging) return;
+    _merging = true;
+    try {
+      for (final t in List.of(widget.state.tanks)) {
+        final key = 'tank:${t.name}';
+        if (!h.hasMetric(key)) continue;
+        final pts = await h.fetch(key, const Duration(hours: 1));
+        if (!mounted) return;
+        widget.state.mergeSeries(key, pts);
+        widget.state.backfilled.add(key); // graphs elsewhere skip a re-seed
+      }
+    } finally {
+      _merging = false;
     }
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
+    _mergeTimer?.cancel();
     widget.state.removeListener(_onState);
     super.dispose();
   }
@@ -64,7 +88,20 @@ class _FuelScreenState extends State<FuelScreen> {
   Widget build(BuildContext context) {
     final tanks = widget.state.tanks;
     return Scaffold(
-      appBar: AppBar(title: const Text('Fuel')),
+      appBar: AppBar(
+        title: const Text('Fuel'),
+        // Connection status lives here too: a dead link on this page used
+        // to be invisible — stale ages with no explanation or retry.
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(
+              child: StatusChip(
+                  state: widget.state, onReconnect: widget.onReconnect),
+            ),
+          ),
+        ],
+      ),
       body: tanks.isEmpty
           ? const Center(child: Text('No tank sensors found'))
           : ListView.separated(

@@ -119,4 +119,40 @@ void main() {
           reason: 'flat carried-forward samples read as "burning nothing"');
     });
   });
+
+  group('mergeSeries (bridging the reconnect gap)', () {
+    final t0 = DateTime(2026, 8, 20, 10);
+
+    test('cloud samples land inside the gap and restore the rate', () {
+      final s = BoatState();
+      // Live series with a 6-minute hole (phone was locked): pre-gap and
+      // one fresh post-resume sample.
+      s.history['tank:fuel'] = [
+        (t: t0, v: 60.0),
+        (t: t0.add(const Duration(minutes: 8)), v: 68.0),
+      ];
+      // Boat-side recorded samples spanning the hole.
+      s.mergeSeries('tank:fuel', [
+        (t: t0.add(const Duration(minutes: 2)), v: 62.0),
+        (t: t0.add(const Duration(minutes: 4)), v: 64.0),
+        (t: t0.add(const Duration(minutes: 6)), v: 66.0),
+        (t: t0.add(const Duration(minutes: 8)), v: 68.0), // dup of live
+      ]);
+      final series = s.series('tank:fuel');
+      expect(series, hasLength(5)); // dup dropped, gap filled
+      final times = [for (final p in series) p.t];
+      expect(times, List.of(times)..sort()); // chronological
+      // The 5-minute window now spans real samples → a rate exists.
+      expect(levelRatePerMin(series), closeTo(1.0, 0.05)); // %/min
+    });
+
+    test('near-duplicates within 10 s are dropped', () {
+      final s = BoatState();
+      s.history['tank:fuel'] = [(t: t0, v: 60.0)];
+      s.mergeSeries('tank:fuel', [
+        (t: t0.add(const Duration(seconds: 5)), v: 60.1),
+      ]);
+      expect(s.series('tank:fuel'), hasLength(1));
+    });
+  });
 }

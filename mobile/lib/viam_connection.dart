@@ -1063,6 +1063,11 @@ class ViamConnection {
     try {
       final old = _robot;
       _robot = null;
+      // A poll frozen mid-await by OS suspension holds the _polling latch —
+      // its RPCs will never finish against the robot we're discarding, and
+      // the latch would gate every post-resume tick until the watchdog
+      // budget expired. The old poll is moot with a fresh robot; unlatch.
+      _polling = false;
       // Closing unblocks any RPCs hung on the dead connection — but close()
       // can itself hang on a dead peer, so bound it too.
       try {

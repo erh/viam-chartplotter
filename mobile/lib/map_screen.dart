@@ -1679,6 +1679,8 @@ class _MapScreenState extends State<MapScreen> {
                                 builder: (_) => FuelScreen(
                                   state: widget.state,
                                   history: widget.connection.history,
+                                  onReconnect:
+                                      widget.connection.reconnectNow,
                                 ),
                               ),
                             );

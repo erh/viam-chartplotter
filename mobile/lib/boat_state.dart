@@ -236,6 +236,32 @@ class BoatState extends ChangeNotifier {
     _notify();
   }
 
+  /// Merge cloud-recorded samples into [key]'s series ANYWHERE, not just
+  /// before the first live point — the boat keeps recording while the phone
+  /// is locked, so this bridges the mid-series gap a reconnect leaves.
+  /// (The fuel rate needs ≥2.5 min of samples in its 5-minute window;
+  /// without the bridge it blanks for minutes after every resume.) Points
+  /// within 10 s of an existing sample are dropped as duplicates.
+  void mergeSeries(String key, List<({DateTime t, double v})> points) {
+    if (points.isEmpty) return;
+    final list = history.putIfAbsent(key, () => []);
+    var added = false;
+    for (final p in points) {
+      final dup = list.any(
+          (e) => (e.t.difference(p.t)).abs() < const Duration(seconds: 10));
+      if (!dup) {
+        list.add(p);
+        added = true;
+      }
+    }
+    if (!added) return;
+    list.sort((a, b) => a.t.compareTo(b.t));
+    if (list.length > _histCap) {
+      list.removeRange(0, list.length - _histCap);
+    }
+    _notify();
+  }
+
   bool get connected => status.startsWith('Connected');
 
   /// True when there's an active waypoint to navigate to.
