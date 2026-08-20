@@ -5184,6 +5184,14 @@
     return Math.round(norm).toString().padStart(3, "0") + "°";
   }
 
+  // Wall clock for the data panel's top row (1 s tick, like the mobile
+  // app's SOG/COG pill).
+  let clockNow = $state(new Date());
+  $effect(() => {
+    const id = setInterval(() => (clockNow = new Date()), 1000);
+    return () => clearInterval(id);
+  });
+
   // True when the data panel has at least one row to show.
   let hasSensorData = $derived(sog != null || hdg != null || cog != null || depth != null);
   let hasDataPanel = $derived(
@@ -6341,6 +6349,18 @@
     <div class="data-panel" class:edit={addWaypointActive}>
       {#if hasSensorData}
         <div class="data-panel-section">
+          <div class="data-panel-row">
+            <span class="data-panel-label">Time</span>
+            <span class="data-panel-value">
+              <span class="data-panel-bold"
+                >{clockNow.toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })}</span
+              >
+            </span>
+          </div>
           {#if sog != null}
             <div class="data-panel-row">
               <span class="data-panel-label">SOG</span>
