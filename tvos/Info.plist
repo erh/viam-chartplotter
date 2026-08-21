@@ -16,5 +16,11 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- Export compliance: only standard/exempt encryption (HTTPS to the
+	     tile server, plain HTTP on the LAN) — no proprietary crypto. This
+	     answers the App Encryption Documentation question up front so
+	     TestFlight builds don't sit in "Missing Compliance". -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
