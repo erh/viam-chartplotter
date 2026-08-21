@@ -71,18 +71,29 @@ class ViamSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    try {
-      _accessToken = await _store.read(key: _kAccess);
-      _refreshToken = await _store.read(key: _kRefresh);
-      final exp = await _store.read(key: _kExpiry);
-      _expiry = exp == null ? null : DateTime.tryParse(exp);
-    } catch (_) {
-      // Secure storage unavailable (e.g. macOS keychain entitlement missing on
-      // a locally-signed build) — treat as no stored session rather than
-      // crashing/hanging startup.
-      _accessToken = _refreshToken = null;
-      _expiry = null;
+    // Two attempts: a keychain read can fail transiently right at launch
+    // (device just unlocked, keychain service not ready), and treating that
+    // as "no stored session" is a spurious lockout — the tokens are on disk.
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        _accessToken = await _store.read(key: _kAccess);
+        _refreshToken = await _store.read(key: _kRefresh);
+        final exp = await _store.read(key: _kExpiry);
+        _expiry = exp == null ? null : DateTime.tryParse(exp);
+        break;
+      } catch (_) {
+        // Secure storage unavailable (e.g. macOS keychain entitlement missing
+        // on a locally-signed build) — retry once, then treat as no stored
+        // session rather than crashing/hanging startup.
+        _accessToken = _refreshToken = null;
+        _expiry = null;
+        if (attempt == 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+      }
     }
+
+    await _loadSignoutLog();
 
     // Either token is enough to try with: a partially-written store (the
     // access token saved, the refresh token not, or vice versa) should still
@@ -180,8 +191,11 @@ class ViamSession extends ChangeNotifier {
           issuer: OAuthConfig.issuer,
           scopes: OAuthConfig.scopes,
           // System browser + PKCE are flutter_appauth defaults; PKCE lets us
-          // run as a public client with no secret.
-          promptValues: const ['login'],
+          // run as a public client with no secret. Deliberately NO
+          // prompt=login: with the auth server's SSO cookie still in the
+          // system browser, a re-sign-in after a lockout is one tap instead
+          // of the full credential dance. (To switch accounts, sign out on
+          // app.viam.com in the browser first.)
         ),
       );
       await _persist(
@@ -358,11 +372,41 @@ class ViamSession extends ChangeNotifier {
   /// Drop the stored session and land on the login screen. Only for a real
   /// sign-out or a credential Viam has rejected — never for "we couldn't
   /// reach the network", which is what [_establish] keeps the tokens for.
+  ///
+  /// The reason is recorded durably: "why do I keep getting locked out"
+  /// is unanswerable after the fact without it — the next login screen
+  /// shows when and why the previous session ended.
   Future<void> _forgetSession(String message) async {
+    try {
+      await _store.write(
+        key: _kSignoutLog,
+        value: jsonEncode(
+            {'when': DateTime.now().toIso8601String(), 'why': message}),
+      );
+    } catch (_) {}
     await _clear();
     viam = null;
     error = message;
     _set(AuthStatus.signedOut);
+  }
+
+  static const _kSignoutLog = 'viam_last_signout';
+
+  /// When/why the last session was dropped, for the login screen — e.g.
+  /// "Signed out by Viam … (invalid_grant)" with a timestamp. Null when
+  /// nothing was recorded (fresh install, or a deliberate sign-out).
+  String? lastSignoutInfo;
+
+  Future<void> _loadSignoutLog() async {
+    try {
+      final raw = await _store.read(key: _kSignoutLog);
+      if (raw == null) return;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final when = DateTime.tryParse(m['when']?.toString() ?? '');
+      lastSignoutInfo =
+          'Previous session ended${when != null ? ' ${when.toLocal()}' : ''}: '
+          '${m['why']}';
+    } catch (_) {}
   }
 
   Future<void> _clear() async {

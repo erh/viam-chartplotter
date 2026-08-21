@@ -66,6 +66,16 @@ class LoginScreen extends StatelessWidget {
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ],
+              // Forensics for recurring lockouts: when and why the previous
+              // session was dropped (recorded at the moment it happened).
+              if (session.lastSignoutInfo case final info?) ...[
+                const SizedBox(height: 12),
+                SelectableText(
+                  info,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12, color: Colors.white54),
+                ),
+              ],
             ],
           ),
         ),

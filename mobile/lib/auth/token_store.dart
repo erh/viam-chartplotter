@@ -20,7 +20,16 @@ class TokenStore {
   factory TokenStore() => _instance;
   TokenStore._();
 
-  final FlutterSecureStorage _secure = const FlutterSecureStorage();
+  // first_unlock (not the default whenUnlocked): the default makes keychain
+  // reads fail whenever iOS considers the device locked, and a transient
+  // failure at launch reads as "no stored session" — i.e. a spurious trip to
+  // the login screen with perfectly good tokens on disk.
+  final FlutterSecureStorage _secure = const FlutterSecureStorage(
+    iOptions: IOSOptions(
+        accessibility: KeychainAccessibility.first_unlock_this_device),
+    mOptions: MacOsOptions(
+        accessibility: KeychainAccessibility.first_unlock_this_device),
+  );
   Map<String, String>? _fileCache;
 
   // Same named-parameter shape as FlutterSecureStorage, so this is a
