@@ -26,7 +26,6 @@ class RouteActivityService {
 
   final BoatState state;
   Timer? _timer;
-  bool _active = false; // an activity we started is showing
 
   bool get _supported => !kIsWeb && Platform.isIOS;
 
@@ -74,7 +73,6 @@ class RouteActivityService {
     try {
       final status = await _ch.invokeMethod('update', args);
       state.liveActivityInfo = '$status';
-      _active = true;
     } catch (e) {
       // Missing extension / old iOS / channel not up — visible in Debug.
       state.liveActivityInfo = 'channel: $e';
@@ -82,7 +80,6 @@ class RouteActivityService {
   }
 
   Future<void> _end() async {
-    _active = false;
     if (!_supported) return;
     try {
       await _ch.invokeMethod('end');
