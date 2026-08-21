@@ -611,11 +611,22 @@
     return points;
   }
 
-  async function historyFromSensor(
+  // An AIS history source: the regular ais sensor is a sensor
+  // component, web senders are generic components — same DoCommand
+  // contract, different client class.
+  type AisSource = { name: string; web: boolean };
+
+  function aisHistoryClient(client: any, src: AisSource) {
+    return src.web
+      ? new VIAM.GenericComponentClient(client, src.name)
+      : new VIAM.SensorClient(client, src.name);
+  }
+
+  async function historyFromSource(
     client: any,
-    sensorName: string
+    src: AisSource
   ): Promise<Record<string, PositionPoint[]>> {
-    const result = (await new VIAM.SensorClient(client, sensorName).doCommand(
+    const result = (await aisHistoryClient(client, src).doCommand(
       VIAM.Struct.fromJson({ command: "all_history" })
     )) as Record<string, any>;
     const byMmsi: Record<string, PositionPoint[]> = {};
@@ -634,14 +645,19 @@
   // both report a vessel; web senders mainly fill in boats only they
   // can see.
   async function fetchAllAisHistory(client: any) {
-    const names: string[] = [...globalConfig.aisWebSenderNames];
-    if (globalConfig.aisSensorName != "") names.push(globalConfig.aisSensorName);
+    const sources: AisSource[] = globalConfig.aisWebSenderNames.map((n) => ({
+      name: n,
+      web: true,
+    }));
+    if (globalConfig.aisSensorName != "") {
+      sources.push({ name: globalConfig.aisSensorName, web: false });
+    }
     const results = await Promise.all(
-      names.map(async (n) => {
+      sources.map(async (src) => {
         try {
-          return await historyFromSensor(client, n);
+          return await historyFromSource(client, src);
         } catch (e: any) {
-          errorHandler(e, "ais history [" + n + "]");
+          errorHandler(e, "ais history [" + src.name + "]");
           return {} as Record<string, PositionPoint[]>;
         }
       })
@@ -661,14 +677,14 @@
     if (!globalClient) return;
     const boat = globalData.aisBoats.find((b) => b.mmsi === mmsi);
     const webFirst = boat?.sources?.includes("web") && !boat?.sources?.includes("ais");
-    let names: string[] = [];
-    if (globalConfig.aisSensorName) names.push(globalConfig.aisSensorName);
-    names = webFirst
-      ? [...globalConfig.aisWebSenderNames, ...names]
-      : [...names, ...globalConfig.aisWebSenderNames];
-    for (const sensorName of names) {
+    const web: AisSource[] = globalConfig.aisWebSenderNames.map((n) => ({ name: n, web: true }));
+    const ais: AisSource[] = globalConfig.aisSensorName
+      ? [{ name: globalConfig.aisSensorName, web: false }]
+      : [];
+    const sources = webFirst ? [...web, ...ais] : [...ais, ...web];
+    for (const src of sources) {
       try {
-        const result = (await new VIAM.SensorClient(globalClient, sensorName).doCommand(
+        const result = (await aisHistoryClient(globalClient, src).doCommand(
           VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) })
         )) as Record<string, any>;
         const samples = result[mmsi];
@@ -681,7 +697,7 @@
         );
         return;
       } catch (e: any) {
-        errorHandler(e, "ais boat history [" + sensorName + "]");
+        errorHandler(e, "ais boat history [" + src.name + "]");
       }
     }
   }
