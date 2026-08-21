@@ -1,0 +1,111 @@
+# Build a signed tvOS release and upload it to TestFlight on a tvOS release
+# tag — `tvos-<semver>`, e.g. `tvos-0.1.0` (plus on demand via
+# workflow_dispatch / `gh workflow run tvos-testflight.yml --ref <branch>`).
+# Same tag rules as the mobile app (mobile-testflight.yml), tvos- prefix.
+#
+# Signing is fully cloud-managed: xcodebuild authenticates with the App Store
+# Connect API key (secrets ASC_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8) and
+# -allowProvisioningUpdates creates/uses the distribution certificate and
+# profile itself — no certificate files live in CI. The export step uploads
+# straight to App Store Connect (destination: upload).
+#
+# The build number is the workflow run number, so every upload is unique and
+# monotonic (App Store Connect rejects re-used build numbers); the marketing
+# version comes from the Xcode project (MARKETING_VERSION), never the tag.
+#
+# One-time setup: the App Store Connect app record ("Checkmate Chartplotter
+# TV", platform tvOS) must exist with this bundle id.
+
+name: tvos-testflight
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "tvos-[0-9]+.[0-9]+.[0-9]+"
+      # Release candidates upload to TestFlight too — that's the beta
+      # channel. Safe: the tag never feeds the version string.
+      - "tvos-[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
+
+concurrency:
+  group: tvos-testflight
+  cancel-in-progress: false # queue behind an in-flight upload, never kill it
+
+defaults:
+  run:
+    working-directory: tvos
+
+jobs:
+  testflight:
+    # macos-26: App Store Connect requires apps built with current SDKs
+    # (Xcode 26+); older images' default Xcode gets the upload rejected.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      TEAM_ID: 5582DW8S98
+      # Must match the App Store Connect app record's bundle id; the Xcode
+      # project uses the same id, so no pinning step is needed.
+      BUNDLE_ID: com.checkmate.viamChartplotterTV
+    steps:
+      - uses: actions/checkout@v4
+
+      # Newest Xcode on the image, not its default — Apple's minimum-SDK
+      # requirement moves faster than the images' default selection.
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_API_KEY_P8" > "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+
+      - name: Archive (cloud-managed signing)
+        run: |
+          xcodebuild -project ChartplotterTV.xcodeproj \
+            -scheme ChartplotterTV -configuration Release \
+            -destination 'generic/platform=tvOS' \
+            -archivePath "$RUNNER_TEMP/ChartplotterTV.xcarchive" \
+            archive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+      - name: Export and upload to TestFlight
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/ChartplotterTV.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
