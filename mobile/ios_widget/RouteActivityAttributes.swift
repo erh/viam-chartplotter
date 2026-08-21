@@ -25,6 +25,10 @@ struct RouteActivityAttributes: ActivityAttributes {
     var finalDistNm: Double
     var finalEtaEpoch: Double
     var waypointCount: Int
+    /// Speed over ground, knots, at push time — the widget dead-reckons an
+    /// estimated remaining distance from it once the data goes stale
+    /// (remaining time × SOG), shown with a leading "~".
+    var sogKn: Double
     /// When the app last pushed real numbers — distances freeze while the
     /// phone is locked (iOS suspends the app); the countdowns keep ticking.
     var updatedEpoch: Double

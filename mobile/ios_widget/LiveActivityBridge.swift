@@ -54,9 +54,17 @@ class LiveActivityBridge: NSObject {
       finalDistNm: d("finalDistNm"),
       finalEtaEpoch: d("finalEtaEpoch"),
       waypointCount: (args["waypointCount"] as? NSNumber)?.intValue ?? 0,
+      sogKn: d("sogKn"),
       updatedEpoch: Date().timeIntervalSince1970)
+    // staleDate (16.2+) makes the widget re-render once when the data ages
+    // out, flipping the display to the ~estimated form.
     if let activity = Activity<RouteActivityAttributes>.activities.first {
-      await activity.update(using: state)
+      if #available(iOS 16.2, *) {
+        await activity.update(ActivityContent(
+          state: state, staleDate: Date().addingTimeInterval(90)))
+      } else {
+        await activity.update(using: state)
+      }
       return "updated"
     }
     guard ActivityAuthorizationInfo().areActivitiesEnabled else {
@@ -65,8 +73,15 @@ class LiveActivityBridge: NSObject {
       return "disabled-in-settings"
     }
     do {
-      _ = try Activity.request(
-        attributes: RouteActivityAttributes(), contentState: state)
+      if #available(iOS 16.2, *) {
+        _ = try Activity.request(
+          attributes: RouteActivityAttributes(),
+          content: ActivityContent(
+            state: state, staleDate: Date().addingTimeInterval(90)))
+      } else {
+        _ = try Activity.request(
+          attributes: RouteActivityAttributes(), contentState: state)
+      }
       return "started"
     } catch {
       return "error: \(error)"

@@ -38,7 +38,7 @@ end
 # ---- Extension target ------------------------------------------------------
 ext = proj.targets.find { |t| t.name == EXT_NAME }
 unless ext
-  ext = proj.new_target(:app_extension, EXT_NAME, :ios, '16.1')
+  ext = proj.new_target(:app_extension, EXT_NAME, :ios, '16.2')
 
   group = proj.main_group.find_subpath(EXT_NAME, true)
   group.set_source_tree('<group>')
@@ -79,7 +79,7 @@ ext.build_configurations.each do |c|
   bs['PRODUCT_BUNDLE_IDENTIFIER'] = ext_bundle_id
   bs['INFOPLIST_FILE'] = "#{EXT_NAME}/Info.plist"
   bs['SWIFT_VERSION'] = '5.0'
-  bs['IPHONEOS_DEPLOYMENT_TARGET'] = '16.1'
+  bs['IPHONEOS_DEPLOYMENT_TARGET'] = '16.2'
   bs['TARGETED_DEVICE_FAMILY'] = '1,2'
   bs['DEVELOPMENT_TEAM'] = TEAM
   bs['CODE_SIGN_STYLE'] = 'Automatic'

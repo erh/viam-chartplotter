@@ -50,6 +50,7 @@ class RouteActivityService {
         'finalDistNm': stats.finalNm,
         'finalEtaEpoch': etaEpoch(stats.finalMinutes),
         'waypointCount': stats.waypointCount,
+        'sogKn': state.speedKn ?? 0,
       };
     } else if (state.navigating && state.wpDistanceNm != null) {
       args = {
@@ -58,6 +59,7 @@ class RouteActivityService {
         'finalDistNm': state.wpDistanceNm!,
         'finalEtaEpoch': etaEpoch(state.wpEtaMinutes),
         'waypointCount': 1,
+        'sogKn': state.speedKn ?? 0,
       };
     }
     if (args == null) {
