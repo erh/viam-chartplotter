@@ -65,6 +65,11 @@ jobs:
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
 
+      # CODE_SIGN_IDENTITY="Apple Distribution": archive straight with the
+      # cloud-managed distribution identity (the same one export uses).
+      # Without it, xcodebuild signs archives with a *development* cert and
+      # wants to mint a new tvOS one — which fails once the account's
+      # certificate slots are full ("Choose a certificate to revoke").
       - name: Archive (cloud-managed signing)
         run: |
           xcodebuild -project ChartplotterTV.xcodeproj \
@@ -78,6 +83,7 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
