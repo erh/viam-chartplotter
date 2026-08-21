@@ -79,6 +79,11 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   @override
   void initState() {
     super.initState();
+    // `late` initializers are LAZY, and nothing else ever reads this field
+    // during normal operation — without this touch the service (and its
+    // update timer) was never constructed and the lock-screen card never
+    // appeared (Debug row stuck on 'idle').
+    _routeActivity;
     WidgetsBinding.instance.addObserver(this);
     _session.addListener(_onSession);
     _bootstrap();
