@@ -72,6 +72,57 @@ struct CameraRow: View {
     }
 }
 
+/// Cameras-big mode: the cameras fill the screen (side by side up to
+/// two, a two-column grid beyond), each still selectable for single
+/// full screen. The chart shrinks to a corner inset (see ChartScreen).
+struct CameraGridView: View {
+    @EnvironmentObject var client: ChartplotterClient
+    @Binding var fullScreen: CameraID?
+
+    var body: some View {
+        let names = client.info?.cameras ?? []
+        Group {
+            if names.count <= 2 {
+                HStack(spacing: 6) {
+                    ForEach(names, id: \.self) { cell($0) }
+                }
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
+                    spacing: 6
+                ) {
+                    ForEach(names, id: \.self) { cell($0) }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+    }
+
+    @ViewBuilder
+    private func cell(_ name: String) -> some View {
+        if let url = client.cameraURL(name) {
+            Button {
+                fullScreen = CameraID(name: name)
+            } label: {
+                PolledCameraImage(url: url, interval: 1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .overlay(alignment: .bottomLeading) {
+                        Text(name)
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(.black.opacity(0.6), in: Capsule())
+                            .foregroundStyle(.white)
+                            .padding(10)
+                    }
+            }
+            .buttonStyle(.card)
+        }
+    }
+}
+
 /// Full-screen camera; Menu / back returns to the chart.
 struct FullScreenCameraView: View {
     let camera: CameraID

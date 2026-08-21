@@ -100,6 +100,9 @@ struct ChartScreen: View {
 
     @State private var fullScreenCamera: CameraID?
     @State private var isPanning = false
+    /// Cameras-big mode: cameras fill the screen, the chart shrinks to
+    /// a corner inset. Toggled with Play/Pause; Menu also exits.
+    @State private var camerasBig = false
     @AppStorage("displayMode") private var displayModeRaw = DisplayMode.day.rawValue
 
     private var displayMode: DisplayMode {
@@ -108,11 +111,16 @@ struct ChartScreen: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ChartMapView(
-                baseURL: baseURL, state: client.state, route: client.route,
-                track: client.track, isPanning: $isPanning
-            )
-            .ignoresSafeArea()
+            if camerasBig {
+                CameraGridView(fullScreen: $fullScreenCamera)
+                    .ignoresSafeArea()
+            } else {
+                ChartMapView(
+                    baseURL: baseURL, state: client.state, route: client.route,
+                    track: client.track, isPanning: $isPanning
+                )
+                .ignoresSafeArea()
+            }
             // Night dimming sits over the chart + cameras but under the
             // panels/buttons so controls stay readable. Plain alpha
             // overlays — blend modes over UIKit-backed views are
@@ -131,14 +139,38 @@ struct ChartScreen: View {
             dataBar
                 .padding(24)
                 .opacity(client.isOffline ? 0.5 : 1)
-            // Route data: compact block on the right edge.
-            VStack {
-                routePanel
-                Spacer()
+            // Route data: compact block on the right edge (chart mode
+            // only — cameras-big gives the pixels to the cameras).
+            if !camerasBig {
+                VStack {
+                    routePanel
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(24)
+                .opacity(client.isOffline ? 0.5 : 1)
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(24)
-            .opacity(client.isOffline ? 0.5 : 1)
+            // Cameras-big: live mini-chart inset, bottom-right.
+            if camerasBig {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        ChartMapView(
+                            baseURL: baseURL, state: client.state, route: client.route,
+                            track: client.track, isPanning: .constant(false)
+                        )
+                        .frame(width: 560, height: 315)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(.white.opacity(0.7), lineWidth: 2)
+                        )
+                    }
+                }
+                .padding(24)
+            }
+            if !camerasBig {
             VStack {
                 Spacer()
                 HStack(alignment: .bottom) {
@@ -170,6 +202,7 @@ struct ChartScreen: View {
                 }
             }
             .padding(24)
+            }
             if client.isOffline {
                 VStack {
                     Spacer()
@@ -188,14 +221,25 @@ struct ChartScreen: View {
         .fullScreenCover(item: $fullScreenCamera) { cam in
             FullScreenCameraView(camera: cam)
         }
-        // While the map has focus the arrow/swipe input pans it, so the
-        // on-screen button can be unreachable — Play/Pause always stops
-        // panning, and Menu does too (only intercepted while panning,
-        // so it keeps its normal leave-the-app meaning otherwise).
+        // Play/Pause: stop panning if panning, otherwise toggle
+        // cameras-big mode (works regardless of focus — while the map
+        // has focus, directional input pans it, so on-screen buttons
+        // can be unreachable). Menu backs out of either state but is
+        // only intercepted when one is active, keeping its normal
+        // leave-the-app meaning otherwise.
         .onPlayPauseCommand {
-            isPanning = false
+            if isPanning {
+                isPanning = false
+            } else if !(client.info?.cameras ?? []).isEmpty {
+                camerasBig.toggle()
+            }
         }
-        .onExitCommand(perform: isPanning ? { isPanning = false } : nil)
+        .onExitCommand(
+            perform: (isPanning || camerasBig)
+                ? {
+                    isPanning = false
+                    camerasBig = false
+                } : nil)
         .onAppear {
             // A wall chartplotter must never hand the screen to the
             // screensaver.
