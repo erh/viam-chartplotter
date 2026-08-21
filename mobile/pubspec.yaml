@@ -13,7 +13,7 @@ dependencies:
   flutter:
     sdk: flutter
   # Viam Flutter SDK — boat (RobotClient/WebRTC) + cloud (app/data) access.
-  viam_sdk: ^0.19.0
+  viam_sdk: ^0.19.5
   # Leaflet-style map: reuses the Go server's XYZ raster tiles directly.
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
