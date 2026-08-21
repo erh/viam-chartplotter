@@ -63,7 +63,11 @@ class RouteActivityService {
       };
     }
     if (args == null) {
-      if (_active) await _end();
+      // End UNCONDITIONALLY, not just when this process started one:
+      // activities outlive the app (iOS keeps them up to 8 h), so a
+      // relaunch with no route was leaving the previous run's card
+      // orphaned on the lock screen. A no-op when nothing is showing.
+      await _end();
       state.liveActivityInfo = 'no active route';
       return;
     }
