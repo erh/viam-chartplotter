@@ -14,6 +14,7 @@ import 'config.dart';
 import 'map/tile_cache.dart';
 import 'map_screen.dart';
 import 'phone_gps.dart';
+import 'route_activity.dart';
 import 'tides.dart';
 import 'screens/login_screen.dart';
 import 'screens/machine_picker_screen.dart';
@@ -56,6 +57,8 @@ class _ChartplotterAppState extends State<ChartplotterApp>
   late PhoneGps _phoneGps = PhoneGps(_state);
   // Nearest-station tides (G1); refreshes as the boat moves.
   late TideService _tides = TideService(_state);
+  // Lock-screen route Live Activity (iOS): next/final distance + ETA.
+  late RouteActivityService _routeActivity = RouteActivityService(_state);
 
   // True once we have a live RobotClient (either via login→picker or the
   // API-key fallback), meaning we can show the map.
@@ -179,10 +182,12 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     final oldState = _state;
     unawaited(_phoneGps.stop());
     unawaited(_tides.stop());
+    _routeActivity.dispose(); // ends the lock-screen card for the old boat
     _state = BoatState();
     _conn = ViamConnection(_state);
     _phoneGps = PhoneGps(_state);
     _tides = TideService(_state);
+    _routeActivity = RouteActivityService(_state);
     setState(() {
       _boatConnected = false;
       _skipAutoConnect = true;
@@ -196,6 +201,7 @@ class _ChartplotterAppState extends State<ChartplotterApp>
     _session.removeListener(_onSession);
     unawaited(_phoneGps.stop());
     unawaited(_tides.stop());
+    _routeActivity.dispose();
     _conn.dispose();
     _session.dispose();
     _state.dispose();

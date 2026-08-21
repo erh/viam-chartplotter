@@ -79,6 +79,11 @@ jobs:
             ios/Runner.xcodeproj/project.pbxproj
           grep -m1 "PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;" ios/Runner.xcodeproj/project.pbxproj
 
+      # AFTER the pin: the extension's bundle id is derived from Runner's
+      # (an embedded appex must be prefixed with the parent app's id).
+      - name: Wire route Live Activity (lock-screen widget extension)
+        run: bash tool/ios-live-activity.sh
+
       - name: Resolve dependencies
         run: flutter pub get
 
