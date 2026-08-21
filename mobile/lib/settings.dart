@@ -121,6 +121,27 @@ class Settings {
   bool get lowDataOn => _prefs.getBool('lowDataOn') ?? false;
   set lowDataOn(bool v) => _prefs.setBool('lowDataOn', v);
 
+  /// Favourite boats for the machine picker: JSON records
+  /// `{robotId, orgId, name, orgName}` — everything a one-tap connect from
+  /// the top of the picker needs.
+  List<Map<String, dynamic>> get favoriteBoats {
+    final raw = _prefs.getString('favoriteBoats');
+    if (raw == null) return const [];
+    try {
+      final v = jsonDecode(raw);
+      if (v is! List) return const [];
+      return [
+        for (final e in v)
+          if (e is Map) e.cast<String, dynamic>()
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  set favoriteBoats(List<Map<String, dynamic>> v) =>
+      _prefs.setString('favoriteBoats', jsonEncode(v));
+
   /// Selected wind-forecast model (F2), e.g. "gfs" / "hrrr".
   String? get windModel => _prefs.getString('windModel');
   set windModel(String? v) =>

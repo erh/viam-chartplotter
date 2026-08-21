@@ -6,6 +6,7 @@ import 'package:viam_sdk/viam_sdk.dart';
 import '../auth/token_store.dart';
 import '../auth/viam_session.dart';
 import '../connect.dart';
+import '../settings.dart';
 
 /// After login, walk the user's org → location → machine and open a
 /// RobotClient for the chosen boat via `viam.getRobotClient`. Hands the
@@ -159,6 +160,66 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
   // Selection path, so back/refresh can rebuild the current or parent level.
   dynamic _selectedOrg;
   dynamic _selectedLoc;
+
+  // ---- favourites --------------------------------------------------------
+  // Starred boats, shown at the top of the org screen for one-tap connect
+  // (records carry robotId/orgId/name, all a direct dial needs).
+  List<Map<String, dynamic>> _favorites = Settings.instance.favoriteBoats;
+
+  bool _isFavorite(String robotId) =>
+      _favorites.any((f) => f['robotId'] == robotId);
+
+  void _toggleFavorite(dynamic robot) {
+    final id = robot.id.toString();
+    final next = List<Map<String, dynamic>>.of(_favorites);
+    if (_isFavorite(id)) {
+      next.removeWhere((f) => f['robotId'] == id);
+    } else {
+      next.add({
+        'robotId': id,
+        'orgId': _orgId,
+        'name': robot.name?.toString() ?? '',
+        'orgName': _selectedOrg?.name?.toString() ?? '',
+      });
+    }
+    setState(() => _favorites = next);
+    Settings.instance.favoriteBoats = next;
+  }
+
+  /// Connect straight to a favourite — the auto-connect path with a
+  /// user-supplied record instead of the remembered one.
+  Future<void> _connectFavorite(Map<String, dynamic> fav) async {
+    final robotId = fav['robotId'];
+    final orgId = fav['orgId'];
+    if (robotId is! String || orgId is! String) return;
+    final gen = ++_connectGen;
+    setState(() {
+      _connecting = true;
+      _connectingName = fav['name']?.toString() ?? '';
+    });
+    _orgId = orgId;
+    try {
+      final client = await _connectRobot(robotId);
+      if (gen != _connectGen) {
+        await client.close();
+        return;
+      }
+      await _rememberMachine(
+        robotId: robotId,
+        orgId: orgId,
+        name: fav['name']?.toString() ?? '',
+      );
+      widget.onConnected(client, robotId, fav['name']?.toString() ?? '');
+    } catch (e) {
+      if (mounted && gen == _connectGen) {
+        setState(() {
+          _connecting = false;
+          _connectingName = '';
+          _error = 'Connect failed: $e';
+        });
+      }
+    }
+  }
 
   // ---- search box (per page) ---------------------------------------------
   // Filters whatever list is showing; nothing is fetched beyond it.
@@ -436,30 +497,72 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
 
   Widget _levelList() {
     final shown = filterByName(_items, _query);
-    if (shown.isEmpty && _query.trim().isNotEmpty) {
+    // Favourites live on the top (org) screen, above the org list, and
+    // respect the search box like everything else.
+    final q = _query.trim().toLowerCase();
+    final favs = _level == _Level.orgs
+        ? [
+            for (final f in _favorites)
+              if (q.isEmpty ||
+                  (f['name']?.toString().toLowerCase() ?? '').contains(q))
+                f
+          ]
+        : const <Map<String, dynamic>>[];
+    if (shown.isEmpty && favs.isEmpty && q.isNotEmpty) {
       return const Center(child: Text('No matches'));
     }
     return RefreshIndicator(
       onRefresh: _refresh,
-      child: ListView.separated(
+      child: ListView(
         // Scrollable even when short, so pull-to-refresh works
         // on a two-row list.
         physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: shown.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
-        itemBuilder: (context, i) {
-          final item = shown[i];
-          return ListTile(
-            leading: Icon(_level == _Level.robots
-                ? Icons.sailing
-                : Icons.folder_outlined),
-            title: Text(item.name?.toString() ?? '(unnamed)'),
-            trailing: Icon(_level == _Level.robots
-                ? Icons.link
-                : Icons.chevron_right),
-            onTap: () => _onTap(item),
-          );
-        },
+        children: [
+          if (favs.isNotEmpty) ...[
+            for (final f in favs)
+              ListTile(
+                leading: const Icon(Icons.star, color: Colors.amber),
+                title: Text(f['name']?.toString() ?? '(unnamed)'),
+                subtitle: (f['orgName']?.toString().isNotEmpty ?? false)
+                    ? Text(f['orgName'].toString())
+                    : null,
+                trailing: const Icon(Icons.link),
+                onTap: () => _connectFavorite(f),
+              ),
+            const Divider(height: 8, thickness: 2),
+          ],
+          for (final (i, item) in shown.indexed) ...[
+            if (i > 0) const Divider(height: 1),
+            ListTile(
+              leading: Icon(_level == _Level.robots
+                  ? Icons.sailing
+                  : Icons.folder_outlined),
+              title: Text(item.name?.toString() ?? '(unnamed)'),
+              trailing: _level == _Level.robots
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Star toggles the favourite; the row itself connects.
+                        IconButton(
+                          icon: Icon(
+                            _isFavorite(item.id.toString())
+                                ? Icons.star
+                                : Icons.star_border,
+                            color: _isFavorite(item.id.toString())
+                                ? Colors.amber
+                                : null,
+                          ),
+                          tooltip: 'Favorite',
+                          onPressed: () => _toggleFavorite(item),
+                        ),
+                        const Icon(Icons.link),
+                      ],
+                    )
+                  : const Icon(Icons.chevron_right),
+              onTap: () => _onTap(item),
+            ),
+          ],
+        ],
       ),
     );
   }
