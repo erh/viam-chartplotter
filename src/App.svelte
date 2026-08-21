@@ -136,10 +136,11 @@
     componentFolders: {} as Record<string, string>,
     aisBoats: [] as BoatInfo[],
     // Module-side AIS position history, keyed by MMSI. Populated by
-    // a 60-second poll of the viamboat AIS sensor's "all_history"
-    // DoCommand — replaces the per-tick in-browser accumulation that
-    // was making the UI sluggish with many vessels. Each tick that
-    // rebuilds aisBoats attaches the matching entry as
+    // polling the "all_history" DoCommand of every configured AIS
+    // source — the viamboat AIS sensor and any web senders, which
+    // store history the same way — replacing the per-tick in-browser
+    // accumulation that was making the UI sluggish with many vessels.
+    // Each tick that rebuilds aisBoats attaches the matching entry as
     // BoatInfo.positionHistory, so MarineMap's existing historical
     // track renderer picks it up unchanged.
     aisHistoryByMmsi: {} as Record<string, PositionPoint[]>,
@@ -580,8 +581,14 @@
     // don't pile up). Gated on aisTracksNeeded so toggling the AIS
     // track layer off stops the network/CPU work — single-vessel
     // history is still fetched on popup-open via onBoatPopupOpen.
-    if (loopNumber % 10 == 5 && globalConfig.aisSensorName != "" && globalData.aisTracksNeeded) {
-      fetchAisHistory(client, globalConfig.aisSensorName);
+    // Web senders store history the same way the ais sensor does, so
+    // they're polled too.
+    if (
+      loopNumber % 10 == 5 &&
+      (globalConfig.aisSensorName != "" || globalConfig.aisWebSenderNames.length > 0) &&
+      globalData.aisTracksNeeded
+    ) {
+      fetchAllAisHistory(client);
     }
   }
 
@@ -604,22 +611,42 @@
     return points;
   }
 
-  async function fetchAisHistory(client: any, sensorName: string) {
-    try {
-      const result = (await new VIAM.SensorClient(client, sensorName).doCommand(
-        VIAM.Struct.fromJson({ command: "all_history" })
-      )) as Record<string, any>;
-      const byMmsi: Record<string, PositionPoint[]> = {};
-      for (const mmsi in result) {
-        const samples = result[mmsi];
-        if (!Array.isArray(samples)) continue;
-        const points = aisSamplesToPoints(samples);
-        if (points.length > 0) byMmsi[mmsi] = points;
-      }
-      globalData.aisHistoryByMmsi = byMmsi;
-    } catch (e: any) {
-      errorHandler(e, "ais history");
+  async function historyFromSensor(
+    client: any,
+    sensorName: string
+  ): Promise<Record<string, PositionPoint[]>> {
+    const result = (await new VIAM.SensorClient(client, sensorName).doCommand(
+      VIAM.Struct.fromJson({ command: "all_history" })
+    )) as Record<string, any>;
+    const byMmsi: Record<string, PositionPoint[]> = {};
+    for (const mmsi in result) {
+      const samples = result[mmsi];
+      if (!Array.isArray(samples)) continue;
+      const points = aisSamplesToPoints(samples);
+      if (points.length > 0) byMmsi[mmsi] = points;
     }
+    return byMmsi;
+  }
+
+  // Poll every configured AIS source's history — the regular ais sensor
+  // and any web senders, which share the all_history DoCommand — and
+  // merge by MMSI. The regular sensor is merged last so it wins when
+  // both report a vessel; web senders mainly fill in boats only they
+  // can see.
+  async function fetchAllAisHistory(client: any) {
+    const names: string[] = [...globalConfig.aisWebSenderNames];
+    if (globalConfig.aisSensorName != "") names.push(globalConfig.aisSensorName);
+    const results = await Promise.all(
+      names.map(async (n) => {
+        try {
+          return await historyFromSensor(client, n);
+        } catch (e: any) {
+          errorHandler(e, "ais history [" + n + "]");
+          return {} as Record<string, PositionPoint[]>;
+        }
+      })
+    );
+    globalData.aisHistoryByMmsi = Object.assign({}, ...results);
   }
 
   // Fetch one vessel's history on demand — fired when the user clicks
@@ -627,26 +654,35 @@
   // the popup-focused boat's track shows up immediately. The cached
   // entry is updated and the matching aisBoats row's positionHistory
   // is replaced so the renderer sees fresh data without a 10s lag.
+  // Web senders answer the same `history` command; sources are tried
+  // in the order this boat was actually seen by (ais first when both),
+  // stopping at the first that has samples.
   async function fetchAisBoatHistory(mmsi: string) {
-    if (!globalClient || !globalConfig.aisSensorName) return;
-    try {
-      const result = (await new VIAM.SensorClient(
-        globalClient,
-        globalConfig.aisSensorName
-      ).doCommand(VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) }))) as Record<
-        string,
-        any
-      >;
-      const samples = result[mmsi];
-      if (!Array.isArray(samples)) return;
-      const points = aisSamplesToPoints(samples);
-      if (points.length === 0) return;
-      globalData.aisHistoryByMmsi[mmsi] = points;
-      globalData.aisBoats = globalData.aisBoats.map((b) =>
-        b.mmsi === mmsi ? { ...b, positionHistory: points } : b
-      );
-    } catch (e: any) {
-      errorHandler(e, "ais boat history");
+    if (!globalClient) return;
+    const boat = globalData.aisBoats.find((b) => b.mmsi === mmsi);
+    const webFirst = boat?.sources?.includes("web") && !boat?.sources?.includes("ais");
+    let names: string[] = [];
+    if (globalConfig.aisSensorName) names.push(globalConfig.aisSensorName);
+    names = webFirst
+      ? [...globalConfig.aisWebSenderNames, ...names]
+      : [...names, ...globalConfig.aisWebSenderNames];
+    for (const sensorName of names) {
+      try {
+        const result = (await new VIAM.SensorClient(globalClient, sensorName).doCommand(
+          VIAM.Struct.fromJson({ command: "history", mmsi: Number(mmsi) })
+        )) as Record<string, any>;
+        const samples = result[mmsi];
+        if (!Array.isArray(samples)) continue;
+        const points = aisSamplesToPoints(samples);
+        if (points.length === 0) continue;
+        globalData.aisHistoryByMmsi[mmsi] = points;
+        globalData.aisBoats = globalData.aisBoats.map((b) =>
+          b.mmsi === mmsi ? { ...b, positionHistory: points } : b
+        );
+        return;
+      } catch (e: any) {
+        errorHandler(e, "ais boat history [" + sensorName + "]");
+      }
     }
   }
 
