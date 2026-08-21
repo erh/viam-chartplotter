@@ -30,11 +30,15 @@ class LiveActivityBridge: NSObject {
           result(FlutterError(code: "args", message: "bad args", details: nil))
           return
         }
-        Task { await Self.update(args) }
-        result(true)
+        // Await and report the outcome — a silently-swallowed failure here
+        // is indistinguishable from "working" ("not showing on lock screen").
+        Task {
+          let status = await Self.update(args)
+          DispatchQueue.main.async { result(status) }
+        }
       case "end":
         Task { await Self.endAll() }
-        result(true)
+        result("ended")
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -42,7 +46,7 @@ class LiveActivityBridge: NSObject {
   }
 
   @available(iOS 16.1, *)
-  static func update(_ args: [String: Any]) async {
+  static func update(_ args: [String: Any]) async -> String {
     func d(_ k: String) -> Double { (args[k] as? NSNumber)?.doubleValue ?? 0 }
     let state = RouteActivityAttributes.ContentState(
       nextDistNm: d("nextDistNm"),
@@ -53,9 +57,19 @@ class LiveActivityBridge: NSObject {
       updatedEpoch: Date().timeIntervalSince1970)
     if let activity = Activity<RouteActivityAttributes>.activities.first {
       await activity.update(using: state)
-    } else if ActivityAuthorizationInfo().areActivitiesEnabled {
-      _ = try? Activity.request(
+      return "updated"
+    }
+    guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+      // The per-app "Live Activities" switch in Settings, or a device that
+      // doesn't allow them.
+      return "disabled-in-settings"
+    }
+    do {
+      _ = try Activity.request(
         attributes: RouteActivityAttributes(), contentState: state)
+      return "started"
+    } catch {
+      return "error: \(error)"
     }
   }
 

@@ -32,28 +32,46 @@ class RouteActivityService {
 
   Future<void> _push() async {
     if (!_supported) return;
-    final stats = state.routeStats;
-    if (stats == null || state.navWaypoints.isEmpty) {
-      if (_active) await _end();
-      return;
-    }
     double etaEpoch(double? minutes) => minutes == null
         ? 0
         : DateTime.now()
                 .add(Duration(seconds: (minutes * 60).round()))
                 .millisecondsSinceEpoch /
             1000.0;
-    try {
-      await _ch.invokeMethod('update', {
+
+    // Nav-service route first; fall back to the route sensor's single
+    // destination (an MFD/PGN route) so the lock screen works for both.
+    final stats = state.routeStats;
+    Map<String, dynamic>? args;
+    if (stats != null && state.navWaypoints.isNotEmpty) {
+      args = {
         'nextDistNm': stats.nextNm,
         'nextEtaEpoch': etaEpoch(stats.nextMinutes),
         'finalDistNm': stats.finalNm,
         'finalEtaEpoch': etaEpoch(stats.finalMinutes),
         'waypointCount': stats.waypointCount,
-      });
+      };
+    } else if (state.navigating && state.wpDistanceNm != null) {
+      args = {
+        'nextDistNm': state.wpDistanceNm!,
+        'nextEtaEpoch': etaEpoch(state.wpEtaMinutes),
+        'finalDistNm': state.wpDistanceNm!,
+        'finalEtaEpoch': etaEpoch(state.wpEtaMinutes),
+        'waypointCount': 1,
+      };
+    }
+    if (args == null) {
+      if (_active) await _end();
+      state.liveActivityInfo = 'no active route';
+      return;
+    }
+    try {
+      final status = await _ch.invokeMethod('update', args);
+      state.liveActivityInfo = '$status';
       _active = true;
-    } catch (_) {
-      // Missing extension / old iOS / channel not up — stay quiet.
+    } catch (e) {
+      // Missing extension / old iOS / channel not up — visible in Debug.
+      state.liveActivityInfo = 'channel: $e';
     }
   }
 

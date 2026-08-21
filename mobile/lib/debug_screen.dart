@@ -36,6 +36,7 @@ class DebugScreen extends StatelessWidget {
               _Row('AIS not drawn',
                   '${state.aisCulled} off-screen, ${state.aisCapped} over cap'),
             _Row('Wind', state.windInfo),
+            _Row('Live Activity', state.liveActivityInfo),
             const SizedBox(height: 16),
             // Session data budget (L3) — the instrumentation for the
             // "1 hour under way" baseline: read these after a run.

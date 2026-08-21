@@ -208,7 +208,9 @@ MOBILE_DART_DEFINES := \
 MOBILE_SETUP_STAMP := mobile/.dart_tool/chartplotter-setup.stamp
 MOBILE_SETUP_DEPS := mobile/pubspec.yaml mobile/.fvmrc \
 	mobile/tool/ci-android-appauth.sh mobile/tool/ios-appauth.sh \
-	mobile/tool/macos-entitlements.sh
+	mobile/tool/macos-entitlements.sh mobile/tool/ios-live-activity.sh \
+	mobile/tool/ios-live-activity.rb \
+	$(wildcard mobile/ios_widget/*)
 
 # Incremental setup: a no-op when the stamp is up to date.
 mobile-setup: $(MOBILE_SETUP_STAMP)
@@ -228,7 +230,8 @@ $(MOBILE_SETUP_STAMP): $(MOBILE_SETUP_DEPS)
 	command -v pod >/dev/null 2>&1 || brew install cocoapods
 	cd mobile && \
 		if [ ! -d ios ] || [ ! -d android ] || [ ! -d macos ]; then $(FLUTTER) create --org $(MOBILE_ORG) . ; fi && \
-		bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && bash tool/macos-entitlements.sh && \
+		bash tool/ci-android-appauth.sh && bash tool/ios-appauth.sh && \
+		bash tool/ios-live-activity.sh && bash tool/macos-entitlements.sh && \
 		$(FLUTTER) pub get
 	@mkdir -p $(@D) && touch $@
 

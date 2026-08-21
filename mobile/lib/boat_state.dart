@@ -89,6 +89,10 @@ class BoatState extends ChangeNotifier {
   // instrumentation for the "1 hour under way" measurement.
   int pollSweeps = 0;
   int aisFetches = 0;
+  // Last outcome of the lock-screen Live Activity push (Debug row): the
+  // native side reports started/updated/disabled-in-settings/error so a
+  // missing lock-screen card is diagnosable instead of silent.
+  String liveActivityInfo = 'idle';
   // Own-boat live track (C2), recorded as positions arrive.
   final Track track = Track();
 
