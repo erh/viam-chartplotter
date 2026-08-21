@@ -37,6 +37,10 @@ class DebugScreen extends StatelessWidget {
                   '${state.aisCulled} off-screen, ${state.aisCapped} over cap'),
             _Row('Wind', state.windInfo),
             _Row('Live Activity', state.liveActivityInfo),
+            // Which binary this is — with a TestFlight install and a dev
+            // install side by side, "the fix isn't in" is usually "wrong
+            // icon" (dev builds stamp 'dev').
+            _Row('Build', Settings.instance.buildStamp),
             const SizedBox(height: 16),
             // Session data budget (L3) — the instrumentation for the
             // "1 hour under way" baseline: read these after a run.
