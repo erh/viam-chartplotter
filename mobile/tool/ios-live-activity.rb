@@ -70,7 +70,15 @@ if embed && thin
   end
 end
 
+# The appex's CFBundleVersion/CFBundleShortVersionString MUST match the
+# app's exactly (ITMS-90473). The app's come from Flutter's Generated
+# .xcconfig (FLUTTER_BUILD_NAME / FLUTTER_BUILD_NUMBER, driven by pubspec
+# and --build-number), so the extension inherits the same file and
+# references the same variables instead of hardcoding a version.
+generated = proj.files.find { |f| f.path&.end_with?('Generated.xcconfig') }
+
 ext.build_configurations.each do |c|
+  c.base_configuration_reference ||= generated if generated
   bs = c.build_settings
   # Explicit: Flutter's project defines no project-level PRODUCT_NAME, and
   # xcodeproj's app_extension defaults leave it unset → the product built
@@ -83,8 +91,8 @@ ext.build_configurations.each do |c|
   bs['TARGETED_DEVICE_FAMILY'] = '1,2'
   bs['DEVELOPMENT_TEAM'] = TEAM
   bs['CODE_SIGN_STYLE'] = 'Automatic'
-  bs['MARKETING_VERSION'] = '1.0'
-  bs['CURRENT_PROJECT_VERSION'] = '1'
+  bs['MARKETING_VERSION'] = '$(FLUTTER_BUILD_NAME)'
+  bs['CURRENT_PROJECT_VERSION'] = '$(FLUTTER_BUILD_NUMBER)'
   bs['SKIP_INSTALL'] = 'YES'
 end
 
