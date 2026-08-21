@@ -65,29 +65,24 @@ jobs:
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
 
-      # CODE_SIGN_IDENTITY="Apple Distribution": archive straight with the
-      # cloud-managed distribution identity (the same one export uses).
-      # Without it, xcodebuild signs archives with a *development* cert and
-      # wants to mint a new tvOS one — which fails once the account's
-      # certificate slots are full ("Choose a certificate to revoke").
-      - name: Archive (cloud-managed signing)
+      # The archive is UNSIGNED (CODE_SIGNING_ALLOWED=NO); the export step
+      # does the only signing, with the cloud-managed distribution identity.
+      # Archiving with default automatic signing wants a *development*
+      # certificate, and development certs can't be cloud-managed — every
+      # ephemeral runner tries to mint a fresh one and dies once the
+      # account's cert slots fill ("Choose a certificate to revoke").
+      # Forcing Apple Distribution at archive is rejected as conflicting
+      # with automatic signing, so: don't sign here at all.
+      - name: Archive (unsigned)
         run: |
           xcodebuild -project ChartplotterTV.xcodeproj \
             -scheme ChartplotterTV -configuration Release \
             -destination 'generic/platform=tvOS' \
             -archivePath "$RUNNER_TEMP/ChartplotterTV.xcarchive" \
             archive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
-        env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
 
       - name: Export and upload to TestFlight
         run: |
