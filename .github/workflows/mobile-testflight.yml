@@ -105,22 +105,22 @@ jobs:
             --dart-define=VIAM_OAUTH_ISSUER=https://auth.viam.com \
             --dart-define=VIAM_OAUTH_CLIENT_ID=b588caad-1657-42e9-bb7b-026e8a1b00db
 
-      - name: Archive (cloud-managed signing)
+      # Archive UNSIGNED. Signing here used a Development certificate, and a
+      # fresh runner keychain each run meant -allowProvisioningUpdates minted
+      # a NEW one every build — until the account hit Apple's certificate cap
+      # ("Choose a certificate to revoke", run 32513715909). The export step
+      # signs everything (app + appex) with the cloud-managed Apple
+      # Distribution certificate, which is reused across runs.
+      - name: Archive (unsigned; export signs)
         run: |
           xcodebuild -workspace ios/Runner.xcworkspace \
             -scheme Runner -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
             archive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic
-        env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 
       - name: Export and upload to TestFlight
         run: |
