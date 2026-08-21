@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 struct DiscoveredServer: Identifiable, Hashable {
     let name: String
@@ -40,13 +41,20 @@ final class ServerDiscovery: ObservableObject {
     nonisolated func resolveURL(for server: DiscoveredServer) async -> URL? {
         await withCheckedContinuation { cont in
             let conn = NWConnection(to: server.endpoint, using: .tcp)
-            // stateUpdateHandler can fire more than once; resume exactly once.
-            var finished = false
+            // stateUpdateHandler can fire more than once; resume exactly
+            // once. Lock-guarded so the capture is Swift 6-sendable.
+            let finished = OSAllocatedUnfairLock(initialState: false)
+            func finishOnce() -> Bool {
+                finished.withLock { done in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+            }
             conn.stateUpdateHandler = { st in
                 switch st {
                 case .ready:
-                    guard !finished else { return }
-                    finished = true
+                    guard finishOnce() else { return }
                     var url: URL?
                     if let path = conn.currentPath,
                         case let .hostPort(host, port) = path.remoteEndpoint
@@ -56,8 +64,7 @@ final class ServerDiscovery: ObservableObject {
                     conn.cancel()
                     cont.resume(returning: url)
                 case .failed, .cancelled:
-                    if !finished {
-                        finished = true
+                    if finishOnce() {
                         cont.resume(returning: nil)
                     }
                 default:
