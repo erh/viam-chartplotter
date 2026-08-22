@@ -21,7 +21,6 @@ import 'weather_particles.dart';
 List<Widget> buildMapLayers({
   required BoatState state,
   required TileSource base,
-  required double rotationDeg,
   // Weather particle fields (null = overlay off / zoom-gated). Rendered as
   // ol-wind-style animated particles, matching the web app's display.
   WindField? windField,
@@ -331,11 +330,14 @@ List<Widget> buildMapLayers({
             point: state.displayPosition!,
             width: state.usingPhoneGps ? 26 : 40,
             height: state.usingPhoneGps ? 26 : 40,
+            // Markers default to rotate:false in flutter_map, which means
+            // they render INSIDE the rotated map space and already turn
+            // with the chart — the child angle must be the plain map-north
+            // heading. Adding the camera rotation here double-counted it,
+            // so in course-up the boat matched neither COG nor heading.
             child: state.usingPhoneGps
                 ? const PhoneGpsMarker()
-                : BoatMarker(
-                    headingDeg:
-                        (state.effectiveHeadingDeg ?? 0) + rotationDeg),
+                : BoatMarker(headingDeg: state.effectiveHeadingDeg ?? 0),
           ),
         ],
       ),

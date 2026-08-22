@@ -663,8 +663,11 @@ class _MapScreenState extends State<MapScreen> {
               unawaited(widget.connection.fetchAisTrack(b.mmsi));
               showAisDetails(context, b, own: widget.state);
             },
+            // Plain map-north angle: markers rotate with the chart already
+            // (rotate:false renders inside the rotated map space) — adding
+            // the camera rotation double-counted it in course-up.
             child: Transform.rotate(
-              angle: (b.orientationDeg + _rotationDeg) * math.pi / 180.0,
+              angle: b.orientationDeg * math.pi / 180.0,
               child: const Icon(Icons.navigation,
                   color: Colors.cyanAccent, size: 22),
             ),
@@ -1296,7 +1299,6 @@ class _MapScreenState extends State<MapScreen> {
               ...buildMapLayers(
               state: s,
               base: _base,
-              rotationDeg: _rotationDeg,
               windField:
                   (_wind.on && weatherZoomOk) ? _wind.field : null,
               waveField:
