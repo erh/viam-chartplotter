@@ -255,6 +255,8 @@ func (s *navService) startArrivalPoller() {
 					"interval", arrivalCheckInterval.String(),
 					"arrival_m", arrivalDistanceMeters,
 					"near_m", nearWaypointMeters,
+					"rejoin_leg", s.rejoinState.LegStartID,
+					"rejoin_ticks", s.rejoinState.Ticks,
 				)
 			}
 		}
@@ -317,6 +319,14 @@ func (s *navService) checkArrival(ctx context.Context) {
 		rwps[i] = RejoinWaypoint{ID: w.ID.Hex(), Lat: w.Lat, Lng: w.Long}
 	}
 	rejoin := decideRejoin(pt.Lat(), pt.Lng(), rwps, s.rejoinState)
+	// One line when a candidate leg STARTS being tracked, so "rejoin didn't
+	// fire" is diagnosable from logs instead of silent (the Long Island
+	// Sound field debug had nothing to go on).
+	if rejoin.NewState.Ticks == 1 && rejoin.NewState.LegStartID != s.rejoinState.LegStartID {
+		s.logger.Infow("route rejoin: tracking candidate leg",
+			"leg_start_id", rejoin.NewState.LegStartID,
+			"along_m", rejoin.NewState.FirstAlongM)
+	}
 	s.rejoinState = rejoin.NewState
 	if rejoin.SkipCount > 0 {
 		s.logger.Infof("route rejoin: marking %d leading waypoints visited (%s)",

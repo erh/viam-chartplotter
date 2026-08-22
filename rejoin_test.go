@@ -139,6 +139,32 @@ func TestRejoinNearWaypointStaysAmbiguous(t *testing.T) {
 	}
 }
 
+// Regression, from the field (part 4bfe0e5c, Long Island Sound): a ~100 km
+// offshore leg. The boat ~2 km past the leg's start is only t≈0.02 along
+// it — the original FRACTIONAL edge margin (5%) treated everything within
+// 5 km of the waypoint as ambiguous and never fired; fractional progress
+// had the same disease (1% of 100 km per window). Real coordinates from
+// the deployed route.
+func TestRejoinLongOffshoreLeg(t *testing.T) {
+	wps := []RejoinWaypoint{
+		{ID: "w23", Lat: 40.9662872, Lng: -73.4915713},
+		{ID: "w24", Lat: 40.997715, Lng: -73.3542559},
+		{ID: "w25", Lat: 41.0342062, Lng: -73.1431587},
+		{ID: "w26", Lat: 41.2470329, Lng: -71.986997},
+		{ID: "w27", Lat: 41.3198892, Lng: -71.4867542},
+	}
+	// Boat just east of w25, advancing ENE along the w25→w26 leg
+	// (~370 m per 5 s tick ≈ 40 kn is generous; any progress ≥ 20 m works).
+	d := runTicks(t, wps, [][2]float64{
+		{41.0421496, -73.1219855},
+		{41.0428, -73.1180},
+		{41.0435, -73.1140},
+	})
+	if d.SkipCount != 3 { // w23, w24, w25 behind; w26 is next
+		t.Fatalf("SkipCount = %d, want 3 (%+v)", d.SkipCount, d)
+	}
+}
+
 func TestRejoinShortRoute(t *testing.T) {
 	d := runTicks(t, rejoinRoute(2), [][2]float64{
 		{41.020, -72.0}, {41.025, -72.0}, {41.030, -72.0},

@@ -27,13 +27,18 @@ import "math"
 const (
 	// Max perpendicular distance from the leg for "on the route": 0.5 nm.
 	rejoinMaxCrossTrackMeters = 926.0
-	// Along-leg fraction margin excluded at each end of a leg.
-	rejoinEdgeMargin = 0.05
+	// Fixed exclusion around each leg endpoint, where which-leg is
+	// ambiguous and the arrival rules operate. FIXED distance, not a
+	// fraction of the leg: a 5% margin was a 5 km dead zone on a 100 km
+	// offshore leg — the real bug found on Long Island Sound, where the
+	// boat 2 km past a waypoint (t=0.019 of a 100 km leg) never fired.
+	// Matches the arrival logic's "near" zone.
+	rejoinEndpointExclusionMeters = nearWaypointMeters
 	// Same-leg verdicts required before acting (~15 s at 5 s ticks).
 	rejoinConfirmTicks = 3
-	// Minimum along-leg fraction advanced across the confirmation window —
+	// Minimum along-leg advance across the confirmation window, metres —
 	// proves the boat is moving TOWARD the leg's end, not drifting.
-	rejoinMinAlongProgress = 0.01
+	rejoinMinAlongProgressMeters = 20.0
 )
 
 // RejoinWaypoint is the minimal per-waypoint input: id (to survive list
@@ -50,10 +55,12 @@ type RejoinState struct {
 	// ID of the leg's STARTING waypoint (W[j]); identifies the leg across
 	// ticks even if indices shift under an edit.
 	LegStartID string `json:"leg_start_id,omitempty"`
-	// Along-leg fraction on the first and most recent matching tick.
-	FirstT float64 `json:"first_t,omitempty"`
-	LastT  float64 `json:"last_t,omitempty"`
-	Ticks  int     `json:"ticks,omitempty"`
+	// Metres along the leg on the first and most recent matching tick.
+	// Metres, not fractions — fractional progress never confirmed on a
+	// long offshore leg (1% of 100 km can't be covered in one window).
+	FirstAlongM float64 `json:"first_along_m,omitempty"`
+	LastAlongM  float64 `json:"last_along_m,omitempty"`
+	Ticks       int     `json:"ticks,omitempty"`
 }
 
 // RejoinDecision reports how many leading waypoints to mark visited
@@ -76,21 +83,29 @@ func decideRejoin(boatLat, boatLng float64, wps []RejoinWaypoint, prev RejoinSta
 	// Furthest leg (j >= 1) the boat is strictly between and close to —
 	// with a self-crossing route the furthest match is the honest position.
 	best := -1
-	bestT := 0.0
+	bestAlongM := 0.0
 	for j := 1; j < len(wps)-1; j++ {
 		t, xt := legProjection(
 			boatLat, boatLng,
 			wps[j].Lat, wps[j].Lng,
 			wps[j+1].Lat, wps[j+1].Lng,
 		)
-		if t <= rejoinEdgeMargin || t >= 1-rejoinEdgeMargin {
+		if t <= 0 || t >= 1 {
 			continue
 		}
 		if xt > rejoinMaxCrossTrackMeters {
 			continue
 		}
+		// Fixed-distance endpoint exclusion (see the constant's comment).
+		if haversineMeters(boatLat, boatLng, wps[j].Lat, wps[j].Lng) < rejoinEndpointExclusionMeters {
+			continue
+		}
+		if haversineMeters(boatLat, boatLng, wps[j+1].Lat, wps[j+1].Lng) < rejoinEndpointExclusionMeters {
+			continue
+		}
 		best = j
-		bestT = t
+		legLen := haversineMeters(wps[j].Lat, wps[j].Lng, wps[j+1].Lat, wps[j+1].Lng)
+		bestAlongM = t * legLen
 	}
 	if best < 0 {
 		return RejoinDecision{NewState: RejoinState{}}
@@ -98,13 +113,13 @@ func decideRejoin(boatLat, boatLng float64, wps []RejoinWaypoint, prev RejoinSta
 
 	state := prev
 	if state.LegStartID != wps[best].ID {
-		state = RejoinState{LegStartID: wps[best].ID, FirstT: bestT, LastT: bestT, Ticks: 1}
+		state = RejoinState{LegStartID: wps[best].ID, FirstAlongM: bestAlongM, LastAlongM: bestAlongM, Ticks: 1}
 	} else {
-		state.LastT = bestT
+		state.LastAlongM = bestAlongM
 		state.Ticks++
 	}
 
-	if state.Ticks >= rejoinConfirmTicks && state.LastT >= state.FirstT+rejoinMinAlongProgress {
+	if state.Ticks >= rejoinConfirmTicks && state.LastAlongM >= state.FirstAlongM+rejoinMinAlongProgressMeters {
 		return RejoinDecision{
 			SkipCount: best + 1, // W[0..best] are behind; W[best+1] is next
 			Reason:    "rejoined route mid-way (confirmed between later waypoints, advancing)",
