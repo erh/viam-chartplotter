@@ -191,6 +191,9 @@ type navService struct {
 	// so no synchronisation needed.
 	arrivalState   ArrivalState
 	lastArrivalLog time.Time
+	// Rolling confirmation memory for mid-route rejoin detection
+	// (rejoin.go). Same single-goroutine discipline as arrivalState.
+	rejoinState RejoinState
 
 	// Lazily-created Viam app client used to read/write saved routes in the
 	// location metadata (see nav_routes.go). It authenticates with the
@@ -304,6 +307,32 @@ func (s *navService) checkArrival(ctx context.Context) {
 		return
 	}
 	waypoint := wps[0]
+
+	// Mid-route rejoin (rejoin.go): the boat is demonstrably between two
+	// LATER waypoints and advancing along that leg, so everything behind
+	// it is reached — the per-waypoint arrival rules below only ever watch
+	// wps[0] and would steer for a mark behind the beam forever.
+	rwps := make([]RejoinWaypoint, len(wps))
+	for i, w := range wps {
+		rwps[i] = RejoinWaypoint{ID: w.ID.Hex(), Lat: w.Lat, Lng: w.Long}
+	}
+	rejoin := decideRejoin(pt.Lat(), pt.Lng(), rwps, s.rejoinState)
+	s.rejoinState = rejoin.NewState
+	if rejoin.SkipCount > 0 {
+		s.logger.Infof("route rejoin: marking %d leading waypoints visited (%s)",
+			rejoin.SkipCount, rejoin.Reason)
+		for i := 0; i < rejoin.SkipCount; i++ {
+			if err := s.store.WaypointVisited(ctx, wps[i].ID); err != nil {
+				s.logger.Warnw("route rejoin: WaypointVisited failed",
+					"err", err, "id", wps[i].ID.Hex())
+				break // keep order; retry from a fresh list next tick
+			}
+		}
+		// The active pair just changed wholesale — stale approach memory
+		// must not colour the next arrival decision.
+		s.arrivalState = ArrivalState{}
+		return
+	}
 
 	// Build the per-tick input for decideArrival. The decision logic is
 	// pure (see arrival.go); call sites do the I/O and logging.
