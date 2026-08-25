@@ -29,7 +29,8 @@ class _Folder {
 void main() {
   group('machineStatusFromName', () {
     test('maps the proto states', () {
-      expect(machineStatusFromName('ONLINE_STATE_ONLINE'), MachineStatus.online);
+      expect(
+          machineStatusFromName('ONLINE_STATE_ONLINE'), MachineStatus.online);
       expect(
           machineStatusFromName('ONLINE_STATE_OFFLINE'), MachineStatus.offline);
       expect(machineStatusFromName('ONLINE_STATE_AWAITING_SETUP'),
@@ -56,6 +57,22 @@ void main() {
     test('an item with no liveness fields reads as unknown, not a crash', () {
       expect(machineStatusOf(_Folder('Newport')), MachineStatus.unknown);
       expect(machineSecondsSinceOnline(_Folder('Newport')), isNull);
+    });
+
+    test('an offline record carries how long it has been down, end to end', () {
+      final down =
+          _Robot('Andiamo', 'ONLINE_STATE_OFFLINE', secondsSinceOnline: 7200);
+      expect(machineSecondsSinceOnline(down), 7200);
+      expect(
+        machineStatusLabel(
+            machineStatusOf(down), machineSecondsSinceOnline(down)),
+        'Offline \u00b7 last seen 2h ago',
+      );
+    });
+
+    test('a record that reported no duration yields null, not zero', () {
+      final up = _Robot('Checkmate', 'ONLINE_STATE_ONLINE');
+      expect(machineSecondsSinceOnline(up), isNull);
     });
   });
 
