@@ -47,6 +47,76 @@ List<dynamic> filterByName(List<dynamic> items, String query) {
   ];
 }
 
+/// Machine liveness, exactly as app.viam.com reports it. `listRobots`
+/// returns it on every `Robot` record (`onlineState`, `secondsSinceOnline`),
+/// so the picker never dials a machine to find out whether it is up — which
+/// on a list of boats would mean one WebRTC handshake per row.
+enum MachineStatus { online, offline, awaitingSetup, unknown }
+
+/// Map the `OnlineState` proto enum's name onto [MachineStatus].
+///
+/// Takes the name rather than the enum value so it is testable without
+/// building protos, and so a state added upstream degrades to
+/// [MachineStatus.unknown] — rendered plainly, i.e. the way every row looked
+/// before — instead of being mislabelled.
+MachineStatus machineStatusFromName(String? name) => switch (name) {
+      'ONLINE_STATE_ONLINE' => MachineStatus.online,
+      'ONLINE_STATE_OFFLINE' => MachineStatus.offline,
+      'ONLINE_STATE_AWAITING_SETUP' => MachineStatus.awaitingSetup,
+      _ => MachineStatus.unknown,
+    };
+
+/// [MachineStatus] for one row of the machine list. The list is `dynamic`
+/// (it holds orgs, locations or machines depending on the level), so this
+/// read is unchecked; an item that isn't a `Robot` reads as unknown rather
+/// than blanking the picker, which is the one screen the user needs to get
+/// anywhere.
+MachineStatus machineStatusOf(dynamic robot) {
+  try {
+    return machineStatusFromName(robot.onlineState?.name?.toString());
+  } catch (_) {
+    return MachineStatus.unknown;
+  }
+}
+
+/// `Robot.secondsSinceOnline`, as a plain int (the proto field is an Int64).
+int? machineSecondsSinceOnline(dynamic robot) {
+  try {
+    final v = robot.secondsSinceOnline;
+    return v == null ? null : v.toInt() as int;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// How long a machine has been down, coarsely — "3h", "2d". Boats drop off
+/// for hours or days, so minute precision past the first hour is noise.
+/// Null when the API didn't say (no value, or a nonsensical one), in which
+/// case the row just reads "Offline".
+String? offlineForLabel(int? seconds) {
+  if (seconds == null || seconds <= 0) return null;
+  if (seconds < 60) return '${seconds}s';
+  if (seconds < 3600) return '${seconds ~/ 60}m';
+  if (seconds < 86400) return '${seconds ~/ 3600}h';
+  return '${seconds ~/ 86400}d';
+}
+
+/// The subtitle under a machine's name: its state, plus how long an offline
+/// one has been gone.
+String? machineStatusLabel(MachineStatus status, int? secondsSinceOnline) {
+  switch (status) {
+    case MachineStatus.online:
+      return 'Online';
+    case MachineStatus.awaitingSetup:
+      return 'Awaiting setup';
+    case MachineStatus.offline:
+      final ago = offlineForLabel(secondsSinceOnline);
+      return ago == null ? 'Offline' : 'Offline \u00b7 last seen $ago ago';
+    case MachineStatus.unknown:
+      return null;
+  }
+}
+
 class _MachinePickerScreenState extends State<MachinePickerScreen> {
   _Level _level = _Level.orgs;
   List<dynamic> _items = [];
@@ -533,40 +603,73 @@ class _MachinePickerScreenState extends State<MachinePickerScreen> {
           ],
           for (final (i, item) in shown.indexed) ...[
             if (i > 0) const Divider(height: 1),
-            ListTile(
-              leading: Icon(_level == _Level.robots
-                  ? Icons.sailing
-                  : Icons.folder_outlined),
-              title: Text(item.name?.toString() ?? '(unnamed)'),
-              trailing: _level == _Level.robots
-                  ? Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Star toggles the favourite; the row itself connects.
-                        IconButton(
-                          icon: Icon(
-                            _isFavorite(item.id.toString())
-                                ? Icons.star
-                                : Icons.star_border,
-                            color: _isFavorite(item.id.toString())
-                                ? Colors.amber
-                                : null,
-                          ),
-                          tooltip: 'Favorite',
-                          onPressed: () => _toggleFavorite(item),
-                        ),
-                        const Icon(Icons.link),
-                      ],
-                    )
-                  : const Icon(Icons.chevron_right),
-              onTap: () => _onTap(item),
-            ),
+            if (_level == _Level.robots)
+              _machineTile(item)
+            else
+              ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: Text(item.name?.toString() ?? '(unnamed)'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _onTap(item),
+              ),
           ],
         ],
       ),
     );
   }
 
+  /// One machine row, tinted and labelled by the liveness app.viam.com
+  /// reported on the record — see [machineStatusOf]. Colour alone would be
+  /// unreadable to a colour-blind skipper in sunlight, so the state is
+  /// spelled out under the name too.
+  ///
+  /// An offline boat still connects on tap: the list is a snapshot and it may
+  /// have come back since. The marking is a heads-up, not a lock.
+  Widget _machineTile(dynamic robot) {
+    final scheme = Theme.of(context).colorScheme;
+    final status = machineStatusOf(robot);
+    final color = _statusColor(status, scheme);
+    final label = machineStatusLabel(status, machineSecondsSinceOnline(robot));
+    final id = robot.id.toString();
+    return ListTile(
+      leading: Icon(Icons.sailing, color: color),
+      title: Text(
+        robot.name?.toString() ?? '(unnamed)',
+        style: status == MachineStatus.offline
+            ? TextStyle(color: scheme.error)
+            : null,
+      ),
+      subtitle: label == null
+          ? null
+          : Text(label, style: TextStyle(fontSize: 12, color: color)),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Star toggles the favourite; the row itself connects.
+          IconButton(
+            icon: Icon(
+              _isFavorite(id) ? Icons.star : Icons.star_border,
+              color: _isFavorite(id) ? Colors.amber : null,
+            ),
+            tooltip: 'Favorite',
+            onPressed: () => _toggleFavorite(robot),
+          ),
+          const Icon(Icons.link),
+        ],
+      ),
+      onTap: () => _onTap(robot),
+    );
+  }
+
+  /// Null for [MachineStatus.unknown] — an unmarked row, as before, rather
+  /// than a colour asserting something the API never told us.
+  static Color? _statusColor(MachineStatus status, ColorScheme scheme) =>
+      switch (status) {
+        MachineStatus.online => Colors.greenAccent,
+        MachineStatus.offline => scheme.error,
+        MachineStatus.awaitingSetup => Colors.amber,
+        MachineStatus.unknown => null,
+      };
 }
 
 /// Banner for a session that is signed in but won't survive — the two causes
