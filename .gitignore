@@ -51,3 +51,6 @@ module.tar.gz
 test.make
 tile*.png
 /run-local-*.sh
+
+# --- tvOS app derived data (make tvappsim) ---
+/tvos/build

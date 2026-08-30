@@ -38,9 +38,26 @@ final class ServerDiscovery: ObservableObject {
         browser = nil
     }
 
+    /// Prefer IPv4: the resolved address gets baked into a URL, and an
+    /// IPv6 link-local address can't survive that — the interface zone
+    /// ("%en0") isn't valid in a URL, and without it fe80:: is
+    /// unroutable. A Mac advertises several link-local AAAAs, and a
+    /// connection that happened to pick one produced a URL whose every
+    /// poll then failed. Fall back to any-family only if v4 gets nowhere.
     nonisolated func resolveURL(for server: DiscoveredServer) async -> URL? {
+        if let url = await resolveURL(for: server, ipv4Only: true) { return url }
+        return await resolveURL(for: server, ipv4Only: false)
+    }
+
+    private nonisolated func resolveURL(for server: DiscoveredServer, ipv4Only: Bool) async -> URL? {
         await withCheckedContinuation { cont in
-            let conn = NWConnection(to: server.endpoint, using: .tcp)
+            let params = NWParameters.tcp
+            if ipv4Only,
+                let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options
+            {
+                ip.version = .v4
+            }
+            let conn = NWConnection(to: server.endpoint, using: params)
             // stateUpdateHandler can fire more than once; resume exactly
             // once. Lock-guarded so the capture is Swift 6-sendable.
             let finished = OSAllocatedUnfairLock(initialState: false)

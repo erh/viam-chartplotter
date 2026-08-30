@@ -12,14 +12,17 @@ struct ContentView: View {
     }
 }
 
-/// Connect flow: Bonjour list (auto-connects when exactly one boat is
-/// found), with manual host:port entry as the fallback.
+/// Connect flow: Bonjour list of every chartplotter on the network, with
+/// manual host:port entry as the fallback. Reconnects to the remembered
+/// boat as soon as it's seen online; with nothing remembered and exactly
+/// one boat around, connects on its own after a short grace period.
 struct DiscoveryView: View {
     @EnvironmentObject var client: ChartplotterClient
     @StateObject private var discovery = ServerDiscovery()
     @State private var manualHost = ""
     @State private var connecting = false
-    @State private var autoConnectTried = false
+    @State private var autoConnectTask: Task<Void, Never>?
+    @State private var probedSavedURL = false
 
     var body: some View {
         VStack(spacing: 32) {
@@ -32,8 +35,24 @@ struct DiscoveryView: View {
             } else {
                 VStack(spacing: 16) {
                     ForEach(discovery.servers) { server in
-                        Button(server.name) { connect(server) }
+                        Button { connect(server) } label: {
+                            HStack(spacing: 12) {
+                                Text(server.name)
+                                if server.name == client.savedServerName {
+                                    Text("last used")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
                     }
+                }
+                if let saved = client.savedServerName,
+                    !discovery.servers.contains(where: { $0.name == saved })
+                {
+                    Text("“\(saved)” is offline — it connects automatically when it appears, or pick a boat above.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             HStack(spacing: 16) {
@@ -45,22 +64,69 @@ struct DiscoveryView: View {
             .padding(.top, 24)
         }
         .padding(60)
-        .onAppear { discovery.start() }
-        .onDisappear { discovery.stop() }
+        .onAppear {
+            discovery.start()
+            probeSavedURL()
+        }
+        .onDisappear {
+            discovery.stop()
+            autoConnectTask?.cancel()
+        }
         .onChange(of: discovery.servers) { _, servers in
-            // Zero-config path: exactly one boat on the network → just go.
-            if servers.count == 1, !autoConnectTried, !connecting {
-                autoConnectTried = true
-                connect(servers[0])
+            autoConnect(servers)
+        }
+    }
+
+    /// Zero-config rules, in priority order:
+    /// 1. The remembered boat is online → connect to it, even with others
+    ///    around (that's the whole point of remembering).
+    /// 2. Nothing remembered and exactly one boat stays alone for a couple
+    ///    of seconds → connect (the grace period lets a second boat show
+    ///    up and turn this into a choice instead).
+    /// A remembered boat that stays offline never silently falls through
+    /// to a different one — switching boats is the user's call.
+    private func autoConnect(_ servers: [DiscoveredServer]) {
+        guard !connecting, client.baseURL == nil, !client.userIsChoosing else { return }
+        autoConnectTask?.cancel()
+        if let saved = client.savedServerName {
+            if let match = servers.first(where: { $0.name == saved }) {
+                connect(match)
             }
+            return
+        }
+        guard client.savedURL == nil, servers.count == 1 else { return }
+        let candidate = servers[0]
+        autoConnectTask = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled, !connecting, client.baseURL == nil,
+                discovery.servers.map(\.name) == [candidate.name]
+            else { return }
+            connect(candidate)
+        }
+    }
+
+    /// A remembered manual URL has no Bonjour name to watch for; probe it
+    /// once and reconnect only when a chartplotter actually answers there.
+    private func probeSavedURL() {
+        guard client.savedServerName == nil, let url = client.savedURL, !probedSavedURL else {
+            return
+        }
+        probedSavedURL = true
+        connecting = true
+        Task {
+            if await ChartplotterClient.isReachable(url) {
+                client.connect(to: url)
+            }
+            connecting = false
         }
     }
 
     private func connect(_ server: DiscoveredServer) {
         connecting = true
+        autoConnectTask?.cancel()
         Task {
             if let url = await discovery.resolveURL(for: server) {
-                client.connect(to: url)
+                client.connect(to: url, rememberName: server.name)
             }
             connecting = false
         }
@@ -103,6 +169,12 @@ struct ChartScreen: View {
     /// Cameras-big mode: cameras fill the screen, the chart shrinks to
     /// a corner inset. Toggled with Play/Pause; Menu also exits.
     @State private var camerasBig = false
+    /// Options dialog, opened with Menu when nothing else is active.
+    /// The chart map swallows every directional press for panning, so
+    /// the floating buttons are unreachable by focus once the map has
+    /// it — the dialog's buttons are how those actions are reached from
+    /// the remote (and the simulator's arrow keys).
+    @State private var showOptions = false
     @AppStorage("displayMode") private var displayModeRaw = DisplayMode.day.rawValue
 
     private var displayMode: DisplayMode {
@@ -189,6 +261,18 @@ struct ChartScreen: View {
                         .background(.blue.opacity(0.85), in: RoundedRectangle(cornerRadius: 16))
                         .foregroundStyle(.white)
                     }
+                    // Back to the boat chooser (e.g. several chartplotters
+                    // on the network, or a mistyped manual address).
+                    Button {
+                        client.switchServer()
+                    } label: {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.title3)
+                            .padding(14)
+                            .background(.black.opacity(0.55), in: Circle())
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.card)
                     Button {
                         displayModeRaw = displayMode.next.rawValue
                     } label: {
@@ -224,9 +308,11 @@ struct ChartScreen: View {
         // Play/Pause: stop panning if panning, otherwise toggle
         // cameras-big mode (works regardless of focus — while the map
         // has focus, directional input pans it, so on-screen buttons
-        // can be unreachable). Menu backs out of either state but is
-        // only intercepted when one is active, keeping its normal
-        // leave-the-app meaning otherwise.
+        // can be unreachable). Menu backs out of panning/cameras-big,
+        // and otherwise opens the options dialog — a wall chartplotter
+        // shouldn't drop to the home screen on a stray Menu press, and
+        // the dialog is the focus-reachable path to the floating
+        // buttons' actions. The TV/Home button still leaves the app.
         .onPlayPauseCommand {
             if isPanning {
                 isPanning = false
@@ -234,12 +320,21 @@ struct ChartScreen: View {
                 camerasBig.toggle()
             }
         }
-        .onExitCommand(
-            perform: (isPanning || camerasBig)
-                ? {
-                    isPanning = false
-                    camerasBig = false
-                } : nil)
+        .onExitCommand {
+            if isPanning || camerasBig {
+                isPanning = false
+                camerasBig = false
+            } else {
+                showOptions = true
+            }
+        }
+        .confirmationDialog("Options", isPresented: $showOptions) {
+            Button("Switch boat") { client.switchServer() }
+            Button("Display: \(displayMode.next.rawValue)") {
+                displayModeRaw = displayMode.next.rawValue
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .onAppear {
             // A wall chartplotter must never hand the screen to the
             // screensaver.

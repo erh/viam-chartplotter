@@ -16,10 +16,21 @@ xcodebuild -project ChartplotterTV.xcodeproj -scheme ChartplotterTV \
   -destination 'generic/platform=tvOS Simulator' build
 ```
 
-On launch the app browses Bonjour for `_viam-chartplotter._tcp`;
-with exactly one boat on the network it connects automatically.
-Manual `host:port` entry is the fallback. The chosen server persists
-across launches.
+On launch the app browses Bonjour for `_viam-chartplotter._tcp` and
+lists every chartplotter it finds (a machine can advertise several —
+the module suffixes the resource name onto the hostname to keep
+instance names unique). The remembered boat reconnects automatically
+as soon as it's seen online; with nothing remembered and exactly one
+boat on the network, it connects by itself after a ~2 s grace period
+(long enough for a second boat to show up and turn it into a choice).
+A remembered boat that's offline shows a hint and waits — it never
+silently falls through to a different boat. Manual `host:port` entry
+is the fallback; manual choices are re-probed on launch rather than
+blindly trusted. Menu (Esc in the simulator) opens the options
+dialog — Switch boat, display mode — which is also the only
+focus-reachable path to those actions, since the chart map consumes
+every directional press for panning. Going back to the chooser is
+deliberate: it then waits for a pick instead of auto-connecting.
 
 ## Layout
 

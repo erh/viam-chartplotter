@@ -253,3 +253,23 @@ mobile-analyze:
 	cd mobile && $(FLUTTER) analyze
 mobile-test:
 	cd mobile && $(FLUTTER) test
+
+
+# -- tvOS (Apple TV) app -----------------------------------------------------
+# Build the SwiftUI thin client (tvos/, see tvos/README.md) and run it in an
+# Apple TV simulator. Pick a different simulator with TV_SIM=<name from
+# `xcrun simctl list devices`>.
+TV_SIM ?= Apple TV
+TV_BUNDLE_ID := com.checkmate.viamChartplotterTV
+TV_DERIVED := tvos/build
+
+.PHONY: tvappsim
+tvappsim:
+	xcodebuild -project tvos/ChartplotterTV.xcodeproj -scheme ChartplotterTV \
+		-configuration Debug -derivedDataPath $(TV_DERIVED) \
+		-destination 'platform=tvOS Simulator,name=$(TV_SIM)' build
+	xcrun simctl boot '$(TV_SIM)' 2>/dev/null || true
+	open -a Simulator
+	xcrun simctl install '$(TV_SIM)' $(TV_DERIVED)/Build/Products/Debug-appletvsimulator/ChartplotterTV.app
+	xcrun simctl terminate '$(TV_SIM)' $(TV_BUNDLE_ID) 2>/dev/null || true
+	xcrun simctl launch '$(TV_SIM)' $(TV_BUNDLE_ID)
