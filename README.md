@@ -67,6 +67,14 @@ mDNS/Bonjour as `_viam-chartplotter._tcp` so clients can discover it
 with zero configuration. All names are optional dependencies: the
 server still comes up if one is missing; that endpoint answers 503.
 
+The attributes are also optional in practice: whenever the web app
+connects it reports the resources it discovered for itself to the nav
+service (`set_display_resources` DoCommand), and the display API falls
+back to those picks for anything the config doesn't name — explicit
+config always wins, field by field. Picks persist across module
+restarts, so opening the web app once against a machine is enough to
+light up the display API for good.
+
 | endpoint | returns |
 |----------|---------|
 | `GET /api/info` | which endpoints are configured + camera names |

@@ -211,6 +211,10 @@ type navService struct {
 	// routesStoreFn is this machine's location; parentStoresFn the ancestors.
 	routesStoreFn  func(ctx context.Context) (metadataStore, error)
 	parentStoresFn func(ctx context.Context) ([]metadataStore, error)
+
+	// Test seam: where set_display_resources persists picks; empty = the
+	// real cache-dir location (displayPicksPath).
+	picksPath string
 }
 
 // maybeArrivalInfo throttles a poller-status info log to one per
@@ -483,6 +487,7 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 //	{"routes_rename":   {"id": "<id>", "name"?: ..., "notes"?: ..., "color"?: ..., "updatedAt"?: ...}}
 //	{"arrival_status":  true}
 //	{"send_waypoints_n2k": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
+//	{"set_display_resources": {"movement_sensor"?: ..., "depth_sensor"?: ..., "route_sensor"?: ..., "cameras"?: [...]}}
 //
 // The routes_* verbs read/write saved routes in the location metadata via the
 // Viam app API (see nav_routes.go), so the browser doesn't need its own cloud
@@ -492,6 +497,10 @@ func (s *navService) Properties(ctx context.Context) (navigation.Properties, err
 // as a Route and WP Service transfer (PGNs 130066 + 130067) via the
 // configured n2k_sender component (see nav_n2k.go). All payload fields are
 // optional; pass true for the defaults.
+//
+// set_display_resources records which machine resources the web app picked
+// during its own discovery (see displaypicks.go); the LAN display API falls
+// back to them for anything the chartplotter config doesn't name.
 //
 // move_waypoint updates an existing waypoint in place (preserving its ID and
 // order). insert_waypoint inserts a new waypoint immediately before the
@@ -529,7 +538,42 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	if raw, ok := cmd["send_waypoints_n2k"]; ok {
 		return s.doSendWaypointsN2K(ctx, raw)
 	}
+	if raw, ok := cmd["set_display_resources"]; ok {
+		return s.doSetDisplayResources(raw)
+	}
 	return nil, resource.ErrDoUnimplemented
+}
+
+// doSetDisplayResources stores the web app's resource picks in the shared
+// registry (displaypicks.go) for the display API to fall back on.
+func (s *navService) doSetDisplayResources(raw interface{}) (map[string]interface{}, error) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("set_display_resources payload must be an object")
+	}
+	str := func(key string) string { v, _ := m[key].(string); return v }
+	p := DisplayPicks{
+		MovementSensor: str("movement_sensor"),
+		DepthSensor:    str("depth_sensor"),
+		RouteSensor:    str("route_sensor"),
+	}
+	if rawCams, ok := m["cameras"].([]interface{}); ok {
+		for i, c := range rawCams {
+			name, ok := c.(string)
+			if !ok {
+				return nil, errors.Errorf("set_display_resources.cameras[%d] must be a string", i)
+			}
+			if name != "" {
+				p.Cameras = append(p.Cameras, name)
+			}
+		}
+	}
+	path := s.picksPath
+	if path == "" {
+		path = displayPicksPath()
+	}
+	setDisplayPicks(p, s, path, s.logger)
+	return map[string]interface{}{"ok": true}, nil
 }
 
 // doArrivalStatus returns a snapshot of the arrival poller's current

@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/erh/vmodutils"
+
 	"go.viam.com/rdk/app"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/movementsensor"
@@ -33,6 +35,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
+	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/services/navigation"
 	rutils "go.viam.com/rdk/utils"
 )
@@ -76,6 +79,29 @@ type DisplayAPI struct {
 	track       []trackPoint
 	trackCancel context.CancelFunc
 	trackDone   chan struct{}
+
+	// Fallback resources resolved from the web app's reported picks
+	// (displaypicks.go) for anything the config doesn't name; config
+	// always wins. The picked names aren't declared dependencies, so
+	// they're resolved by dialing this machine with its own env
+	// credentials — done in a background goroutine (never on a poll's
+	// request path) and throttled on failure.
+	fbMu          sync.Mutex
+	fbGen         int // picks generation the fields below were resolved from
+	fbWarnedGen   int // picks generation already warned about; repeats log at debug
+	fbResolving   bool
+	fbNextDial    time.Time
+	fbRobot       robot.Robot
+	fbMS          movementsensor.MovementSensor
+	fbMSName      string
+	fbDepth       sensor.Sensor
+	fbRoute       sensor.Sensor
+	fbNav         navigation.Service
+	fbCameras     map[string]camera.Camera
+	fbCameraNames []string
+
+	// Test seam: when set, used instead of dialing the machine.
+	fbDeps func(ctx context.Context) (resource.Dependencies, error)
 }
 
 // NewDisplayAPI resolves the display-API resource names from deps. The
@@ -131,15 +157,235 @@ func NewDisplayAPI(deps resource.Dependencies, cfg *ChartplotterConfig, logger l
 	if a.ms != nil {
 		a.startTrackRecorder()
 	}
+	loadDisplayPicks(displayPicksPath(), logger)
 	return a
 }
 
-// Close stops the background track recorder, if running.
+// Close stops the background track recorder, if running, and any machine
+// client dialed to resolve web-picked fallback resources.
 func (a *DisplayAPI) Close() {
 	if a.trackCancel != nil {
 		a.trackCancel()
 		<-a.trackDone
 	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	if a.fbRobot != nil {
+		_ = a.fbRobot.Close(context.Background())
+		a.fbRobot = nil
+	}
+}
+
+// fbDialThrottle spaces out machine-dial attempts when resolving picked
+// resources fails (e.g. no cloud credentials in a local run).
+const fbDialThrottle = time.Minute
+
+// refreshFallback kicks off re-resolution of the fallback resources when
+// the web app's picks have changed. Called at the top of every /api
+// handler; a no-op (one mutex hop) when the generation is unchanged.
+func (a *DisplayAPI) refreshFallback() {
+	picks, nav, gen := getDisplayPicks()
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	if gen == a.fbGen {
+		return
+	}
+	a.fbNav = nav
+	needDial := (a.ms == nil && picks.MovementSensor != "") ||
+		(a.depth == nil && picks.DepthSensor != "") ||
+		(a.route == nil && picks.RouteSensor != "") ||
+		(len(a.cameras) == 0 && len(picks.Cameras) > 0)
+	if !needDial {
+		a.fbGen = gen
+		return
+	}
+	if a.fbResolving || time.Now().Before(a.fbNextDial) {
+		return // keep the old resolution; retry after the throttle
+	}
+	a.fbResolving = true
+	go a.resolvePicks(picks, gen)
+}
+
+// resolvePicks resolves the picked names to resource handles and installs
+// them as the fallbacks. Runs off the request path. The generation only
+// advances once every picked resource has resolved; until then a later
+// request retries (throttled) — a remote's resources can appear well after
+// the first dial, and the first boat deployment hit exactly that.
+func (a *DisplayAPI) resolvePicks(picks DisplayPicks, gen int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	deps, err := a.pickDeps(ctx)
+
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	a.fbResolving = false
+	a.fbNextDial = time.Now().Add(fbDialThrottle)
+	if err != nil {
+		a.logger.Warnf("display api: can't resolve web-picked resources (%v); retrying in %s", err, fbDialThrottle)
+		return
+	}
+	if a.ms == nil && picks.MovementSensor != "" {
+		if ms, err := movementsensor.FromProvider(deps, picks.MovementSensor); err != nil {
+			a.logger.Debugf("display api: picked movement_sensor %q unavailable: %v", picks.MovementSensor, err)
+		} else {
+			a.fbMS = ms
+			a.fbMSName = picks.MovementSensor
+		}
+	}
+	if a.depth == nil && picks.DepthSensor != "" {
+		if s, err := sensor.FromProvider(deps, picks.DepthSensor); err != nil {
+			a.logger.Debugf("display api: picked depth_sensor %q unavailable: %v", picks.DepthSensor, err)
+		} else {
+			a.fbDepth = s
+		}
+	}
+	if a.route == nil && picks.RouteSensor != "" {
+		if s, err := sensor.FromProvider(deps, picks.RouteSensor); err != nil {
+			a.logger.Debugf("display api: picked route_sensor %q unavailable: %v", picks.RouteSensor, err)
+		} else {
+			a.fbRoute = s
+		}
+	}
+	if len(a.cameras) == 0 {
+		cams := map[string]camera.Camera{}
+		names := make([]string, 0, len(picks.Cameras))
+		for _, name := range picks.Cameras {
+			c, err := camera.FromProvider(deps, name)
+			if err != nil {
+				a.logger.Debugf("display api: picked camera %q unavailable: %v", name, err)
+				continue
+			}
+			cams[name] = c
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		a.fbCameras, a.fbCameraNames = cams, names
+	}
+	// A movement sensor arriving via picks enables the track recorder,
+	// which config-only construction couldn't start. msName feeds the
+	// cloud seed query; set before the goroutine starts so it's visible.
+	if a.fbMS != nil && a.trackCancel == nil {
+		a.msName = a.fbMSName
+		a.startTrackRecorder()
+	}
+	if missing := a.unresolvedPicks(picks); len(missing) > 0 {
+		msg := "display api: web-picked resources unresolved: %s — retrying every %s"
+		if gen != a.fbWarnedGen {
+			a.fbWarnedGen = gen
+			a.logger.Warnf(msg, strings.Join(missing, ", "), fbDialThrottle)
+		} else {
+			a.logger.Debugf(msg, strings.Join(missing, ", "), fbDialThrottle)
+		}
+		return
+	}
+	a.fbGen = gen
+	a.logger.Infof("display api: using web-picked fallbacks (movement_sensor=%q, depth=%q, route=%q, %d cameras)",
+		picks.MovementSensor, picks.DepthSensor, picks.RouteSensor, len(a.fbCameraNames))
+}
+
+// unresolvedPicks lists picked-but-unresolved resources. Caller holds fbMu.
+func (a *DisplayAPI) unresolvedPicks(picks DisplayPicks) []string {
+	var missing []string
+	if a.ms == nil && picks.MovementSensor != "" && a.fbMS == nil {
+		missing = append(missing, "movement_sensor "+picks.MovementSensor)
+	}
+	if a.depth == nil && picks.DepthSensor != "" && a.fbDepth == nil {
+		missing = append(missing, "depth_sensor "+picks.DepthSensor)
+	}
+	if a.route == nil && picks.RouteSensor != "" && a.fbRoute == nil {
+		missing = append(missing, "route_sensor "+picks.RouteSensor)
+	}
+	if len(a.cameras) == 0 {
+		for _, name := range picks.Cameras {
+			if _, ok := a.fbCameras[name]; !ok {
+				missing = append(missing, "camera "+name)
+			}
+		}
+	}
+	return missing
+}
+
+// pickDeps returns the machine's resources as a Dependencies map, so picked
+// names resolve through the same FromProvider helpers as configured ones.
+// The machine client is dialed once and kept for later refreshes.
+func (a *DisplayAPI) pickDeps(ctx context.Context) (resource.Dependencies, error) {
+	if a.fbDeps != nil {
+		return a.fbDeps(ctx)
+	}
+	a.fbMu.Lock()
+	machine := a.fbRobot
+	a.fbMu.Unlock()
+	if machine == nil {
+		m, err := vmodutils.ConnectToMachineFromEnv(ctx, a.logger)
+		if err != nil {
+			return nil, err
+		}
+		a.fbMu.Lock()
+		a.fbRobot = m
+		a.fbMu.Unlock()
+		machine = m
+	}
+	return vmodutils.MachineToDependencies(machine)
+}
+
+// currentMS returns the effective movement sensor: configured, else picked.
+func (a *DisplayAPI) currentMS() movementsensor.MovementSensor {
+	if a.ms != nil {
+		return a.ms
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	return a.fbMS
+}
+
+func (a *DisplayAPI) currentDepth() sensor.Sensor {
+	if a.depth != nil {
+		return a.depth
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	return a.fbDepth
+}
+
+func (a *DisplayAPI) currentRoute() sensor.Sensor {
+	if a.route != nil {
+		return a.route
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	return a.fbRoute
+}
+
+func (a *DisplayAPI) currentNav() navigation.Service {
+	if a.nav != nil {
+		return a.nav
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	return a.fbNav
+}
+
+// currentCamera looks the name up in the configured cameras when any are
+// configured, else in the picked fallbacks — per-field config-wins, same
+// as the other resources.
+func (a *DisplayAPI) currentCamera(name string) (camera.Camera, bool) {
+	if len(a.cameras) > 0 {
+		c, ok := a.cameras[name]
+		return c, ok
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	c, ok := a.fbCameras[name]
+	return c, ok
+}
+
+func (a *DisplayAPI) currentCameraNames() []string {
+	if len(a.cameraNames) > 0 {
+		return append([]string{}, a.cameraNames...)
+	}
+	a.fbMu.Lock()
+	defer a.fbMu.Unlock()
+	return append([]string{}, a.fbCameraNames...)
 }
 
 func (a *DisplayAPI) Register(mux *http.ServeMux) {
@@ -173,8 +419,12 @@ func (a *DisplayAPI) startTrackRecorder() {
 				return
 			case <-ticker.C:
 			}
+			ms := a.currentMS()
+			if ms == nil {
+				continue
+			}
 			callCtx, callCancel := context.WithTimeout(ctx, 5*time.Second)
-			pos, _, err := a.ms.Position(callCtx, nil)
+			pos, _, err := ms.Position(callCtx, nil)
 			callCancel()
 			if err != nil || pos == nil {
 				continue
@@ -537,7 +787,8 @@ func (a *DisplayAPI) recordTrackPoint(p trackPoint) {
 
 // handleTrack returns the recorded own-boat track, oldest first.
 func (a *DisplayAPI) handleTrack(w http.ResponseWriter, r *http.Request) {
-	if a.ms == nil {
+	a.refreshFallback()
+	if a.currentMS() == nil {
 		writeAPIJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "no movement_sensor configured"})
 		return
 	}
@@ -556,14 +807,15 @@ func writeAPIJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func (a *DisplayAPI) handleInfo(w http.ResponseWriter, r *http.Request) {
+	a.refreshFallback()
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"service": "viam-chartplotter",
-		"state":   a.ms != nil,
-		"depth":   a.depth != nil,
-		"route":   a.route != nil,
-		"nav":     a.nav != nil,
-		"track":   a.ms != nil,
-		"cameras": append([]string{}, a.cameraNames...),
+		"state":   a.currentMS() != nil,
+		"depth":   a.currentDepth() != nil,
+		"route":   a.currentRoute() != nil,
+		"nav":     a.currentNav() != nil,
+		"track":   a.currentMS() != nil,
+		"cameras": a.currentCameraNames(),
 	})
 }
 
@@ -572,13 +824,15 @@ func (a *DisplayAPI) handleInfo(w http.ResponseWriter, r *http.Request) {
 // reading; everything else is best-effort so a movement sensor that
 // doesn't support e.g. LinearVelocity still yields a usable response.
 func (a *DisplayAPI) handleState(w http.ResponseWriter, r *http.Request) {
-	if a.ms == nil {
+	a.refreshFallback()
+	ms := a.currentMS()
+	if ms == nil {
 		writeAPIJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "no movement_sensor configured"})
 		return
 	}
 	ctx := r.Context()
 
-	pos, _, err := a.ms.Position(ctx, nil)
+	pos, _, err := ms.Position(ctx, nil)
 	if err != nil || pos == nil {
 		writeAPIJSON(w, http.StatusBadGateway, map[string]any{"error": "position: " + errString(err)})
 		return
@@ -588,13 +842,13 @@ func (a *DisplayAPI) handleState(w http.ResponseWriter, r *http.Request) {
 		"lng": pos.Lng(),
 		"ts":  time.Now().UnixMilli(),
 	}
-	if vel, err := a.ms.LinearVelocity(ctx, nil); err == nil {
+	if vel, err := ms.LinearVelocity(ctx, nil); err == nil {
 		out["sog_kn"] = vel.Y * metersPerSecToKnots
 	}
-	if hdg, err := a.ms.CompassHeading(ctx, nil); err == nil {
+	if hdg, err := ms.CompassHeading(ctx, nil); err == nil {
 		out["heading_deg"] = hdg
 	}
-	if readings, err := a.ms.Readings(ctx, nil); err == nil {
+	if readings, err := ms.Readings(ctx, nil); err == nil {
 		// Same COG key hunt as the web app — different NMEA sources
 		// name the field differently.
 		for _, k := range []string{"Course Over Ground", "course_over_ground", "CourseOverGround", "cog", "COG"} {
@@ -604,8 +858,8 @@ func (a *DisplayAPI) handleState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if a.depth != nil {
-		if readings, err := a.depth.Readings(ctx, nil); err == nil {
+	if depth := a.currentDepth(); depth != nil {
+		if readings, err := depth.Readings(ctx, nil); err == nil {
 			if m, ok := toFloat(readings["Depth"]); ok {
 				out["depth_ft"] = m * metersToFeet
 			}
@@ -618,15 +872,17 @@ func (a *DisplayAPI) handleState(w http.ResponseWriter, r *http.Request) {
 // route sensor, e.g. a viamboat N2K sensor) with the chartplotter nav
 // service's waypoint list. Either half is optional.
 func (a *DisplayAPI) handleRoute(w http.ResponseWriter, r *http.Request) {
-	if a.route == nil && a.nav == nil {
+	a.refreshFallback()
+	route, nav := a.currentRoute(), a.currentNav()
+	if route == nil && nav == nil {
 		writeAPIJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "no route_sensor or nav_service configured"})
 		return
 	}
 	ctx := r.Context()
 	out := map[string]any{"ts": time.Now().UnixMilli()}
 
-	if a.route != nil {
-		if readings, err := a.route.Readings(ctx, nil); err != nil {
+	if route != nil {
+		if readings, err := route.Readings(ctx, nil); err != nil {
 			a.logger.Debugf("display api: route sensor readings: %v", err)
 		} else {
 			// Key names match what the web app reads off the same sensor
@@ -644,8 +900,8 @@ func (a *DisplayAPI) handleRoute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if a.nav != nil {
-		wps, err := a.nav.Waypoints(ctx, nil)
+	if nav != nil {
+		wps, err := nav.Waypoints(ctx, nil)
 		if err != nil {
 			a.logger.Debugf("display api: nav waypoints: %v", err)
 		} else {
@@ -668,10 +924,11 @@ func (a *DisplayAPI) handleRoute(w http.ResponseWriter, r *http.Request) {
 // The client polls; an optional ".jpg" suffix on the name is accepted
 // so URLs read naturally.
 func (a *DisplayAPI) handleCamera(w http.ResponseWriter, r *http.Request) {
+	a.refreshFallback()
 	name := strings.TrimSuffix(r.PathValue("name"), ".jpg")
-	cam, ok := a.cameras[name]
+	cam, ok := a.currentCamera(name)
 	if !ok {
-		writeAPIJSON(w, http.StatusNotFound, map[string]any{"error": "unknown camera", "cameras": a.cameraNames})
+		writeAPIJSON(w, http.StatusNotFound, map[string]any{"error": "unknown camera", "cameras": a.currentCameraNames()})
 		return
 	}
 	ctx := r.Context()

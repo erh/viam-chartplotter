@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,6 +137,54 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// /app-config; the frontend also auto-enters it when no host is resolvable.
 	chartOnly := config.Attributes.Bool("chart_only", false)
 	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly, api)
+}
+
+// mdnsInstanceName returns the Bonjour instance name for the display
+// API: the hostname (sans macOS's ".local" suffix), plus the resource
+// name when it isn't the plain default — a machine can run several
+// chartplotters (different ports) and mDNS instance names must be
+// unique per network. Resource names are unique per machine, so at most
+// one can be the default "chartplotter", which keeps the bare hostname
+// existing TVs were paired with.
+//
+// Any remaining dot is replaced: the zeroconf lib encodes the instance
+// into the PTR target unescaped, so a dotted instance grows an extra
+// DNS label and mDNSResponder-based browsers (macOS, tvOS) silently
+// drop the service — verified against a live advertisement; a macOS
+// hostname used verbatim is exactly that failure.
+func mdnsInstanceName(hostname string, name resource.Name) string {
+	host := strings.ReplaceAll(strings.TrimSuffix(hostname, ".local"), ".", "-")
+	instance := firstNonEmpty(host, name.ShortName(), "chartplotter")
+	if short := name.ShortName(); host != "" && short != "chartplotter" {
+		instance = host + " " + short
+	}
+	return strings.ReplaceAll(instance, ".", "-")
+}
+
+// machineUnicastIPs collects this machine's non-loopback unicast
+// addresses for the mDNS host records, mirroring what the zeroconf lib
+// gathers on its own Register path.
+func machineUnicastIPs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				out = append(out, ipnet.IP.String())
+			}
+		}
+	}
+	return out
 }
 
 // firstNonEmpty returns the first non-empty string in vals, or "".
@@ -445,11 +494,27 @@ func StartChartplotterServer(
 	var mdnsServer *zeroconf.Server
 	if api != nil {
 		api.Register(mux)
-		host, _ := os.Hostname()
-		instance := firstNonEmpty(host, name.ShortName(), "chartplotter")
-		mdnsServer, err = zeroconf.Register(
-			instance, "_viam-chartplotter._tcp", "local.", port,
-			[]string{"path=/api"}, nil, logger.Sublogger("mdns").AsZap())
+		hostname, _ := os.Hostname()
+		instance := mdnsInstanceName(hostname, name)
+		txt := []string{"path=/api"}
+		// macOS hostnames already carry a ".local" suffix; fed through
+		// zeroconf.Register (which appends the domain to os.Hostname()
+		// itself), the advertised host records become a bogus
+		// "name.local.local." that mDNSResponder silently discards — the
+		// service answers raw multicast queries but never shows up in
+		// any Apple browser, the tvOS app included. Register with an
+		// explicit stripped host + our own address list instead; plain
+		// Register stays as the fallback when either can't be determined.
+		host := strings.TrimSuffix(hostname, ".local")
+		if ips := machineUnicastIPs(); host != "" && len(ips) > 0 {
+			mdnsServer, err = zeroconf.RegisterProxy(
+				instance, "_viam-chartplotter._tcp", "local.", port,
+				host, ips, txt, nil, logger.Sublogger("mdns").AsZap())
+		} else {
+			mdnsServer, err = zeroconf.Register(
+				instance, "_viam-chartplotter._tcp", "local.", port,
+				txt, nil, logger.Sublogger("mdns").AsZap())
+		}
 		if err != nil {
 			logger.Warnf("mdns advertisement failed (display clients need a manual address): %v", err)
 			mdnsServer = nil
