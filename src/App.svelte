@@ -1118,6 +1118,40 @@
     console.log("globalConfig", $state.snapshot(globalConfig));
 
     await discoverAreas(client, resources);
+
+    await reportDisplayResources(client, resources);
+  }
+
+  // Report the resources we just picked to the chartplotter nav service, so
+  // the module's LAN display API (/api/*, used by the tvOS app) can fall back
+  // to them for anything its config doesn't name explicitly (config wins on
+  // the module side). Best-effort: an older or third-party nav service just
+  // errors on the unknown command and we move on.
+  async function reportDisplayResources(client: VIAM.RobotClient, resources) {
+    if (globalConfig.navServiceName == "") {
+      return;
+    }
+    const cameras = filterFilteredCameras(filterResources(resources, "component", "camera"))
+      .filter((r) => {
+        const cc = findComponentConfig(r.name);
+        return !(cc && cc.attributes && cc.attributes["chartplotter-hide"]);
+      })
+      .map((r) => r.name)
+      .sort();
+    try {
+      await new VIAM.NavigationClient(client, globalConfig.navServiceName).doCommand(
+        VIAM.Struct.fromJson({
+          set_display_resources: {
+            movement_sensor: globalConfig.movementSensorName,
+            depth_sensor: globalConfig.depthSensorName,
+            route_sensor: globalConfig.routeSensorName,
+            cameras: cameras,
+          },
+        })
+      );
+    } catch (e) {
+      console.log("set_display_resources not supported by nav service", e);
+    }
   }
 
   // Discover viamboat ais-web-senders on the machine. Like areas, the model
