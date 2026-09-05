@@ -83,6 +83,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "backfill-noaa-lowzoom: %v\n", err)
 			os.Exit(1)
 		}
+	case "ingest-poi":
+		if err := runIngestPOI(args); err != nil {
+			fmt.Fprintf(os.Stderr, "ingest-poi: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		topUsage()
 	default:
@@ -105,6 +110,10 @@ func topUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  NOAA (noaa collection):")
 	fmt.Fprintln(os.Stderr, "    backfill-noaa-lowzoom  Build the curated noaa_lowzoom collection (z7..z10 band, valid-simplified geometry)")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  Points of interest (poi collection):")
+	fmt.Fprintln(os.Stderr, "    ingest-poi    Load wrecks / artificial reefs / platforms from a public dataset")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "NOAA ENC ingest lives in the datasync binary (see `make ingest-noaa`).")
 	fmt.Fprintln(os.Stderr)

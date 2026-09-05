@@ -234,10 +234,11 @@ Two details that matter for matching:
   searcher types "chandlers wharf", and treating that as a mismatch buries the
   exact answer under everything sharing the word "wharf".
 
-Results are tagged `source: "chart"` or `"osm"`, because the two answer
+Results are tagged `source: "chart"`, `"osm"` or `"poi"`, because they answer
 different questions: the ENC names lights, wrecks and channels; OSM names
-marinas, fuel docks, boatyards and towns. With `lat`/`lon` the results are
-ranked nearest-first among equally good name matches.
+marinas, fuel docks, boatyards and towns; `poi` is the non-chart datasets
+below. With `lat`/`lon` the results are ranked nearest-first among equally good
+name matches.
 
 Where the gazetteer hasn't been built, search falls back to the old regex path
 over the source collections — correct, but slow and unreliable for rare names.
@@ -245,6 +246,63 @@ over the source collections — correct, but slow and unreliable for rare names.
 In the web app it's the magnifier at the top of the map toolbar: type three or
 more characters, and picking a result centres a point feature or frames an
 area one.
+
+### wrecks, reefs and other points of interest
+
+The ENC is a chart, not a fishing guide. It carries the wrecks and obstructions
+that matter to surface navigation and leaves out the rest — NOAA's wrecks and
+obstructions database holds roughly 19,000 features, most of them never
+charted. Artificial reefs are worse off: S-57 has no object class for one, so a
+reef is an `OBSTRN` with `CATOBS=5` ("fish haven"), drawn as a generic
+obstruction cross and labelled "Obstruction" in search.
+
+Two things follow from that:
+
+**Fish havens are now first-class.** They draw the INT1 K46 dotted-circle
+symbol from z12 (rather than an obstruction cross at z15) and present as
+"Fish haven" in search results. This is chart data we already had — no new
+ingest, though the earlier zoom needs a re-ingest to recompute the stored
+`minZoom` (see `noaa.MinZoomForFeature`).
+
+**Non-chart datasets load into a `poi` collection.** Its documents are
+`noaa.FeatureDoc`-shaped, so they flow through the same tile query, decode and
+draw path as chart features, and the same gazetteer build makes them
+searchable. They stay in their own collection so provenance is visible, a bad
+feed is one command away from gone, and the `noaa` collection remains exactly
+what NOAA published.
+
+| dataset | what it is |
+|---|---|
+| `ocs-wrecks` | NOAA Office of Coast Survey wrecks and obstructions (ENC + AWOIS) |
+| `artificial-reefs` | national artificial-reef roll-up (MarineCadastre) |
+| `fl-reefs` | Florida FWC reef deployments — fresher and richer than the roll-up |
+| `platforms` | BOEM/BSEE offshore platforms: structure, hazard and fishing mark |
+
+```
+# what fields does this feed actually publish? (no writes)
+mapsync ingest-poi --dataset ocs-wrecks --url <arcgis layer> --inspect
+
+# load it, then make it searchable
+mapsync ingest-poi --mongo … --dataset ocs-wrecks --url <arcgis layer>
+datasync --mongo … --build-places
+```
+
+`--inspect` exists because field names are the one thing about these feeds that
+can't be looked up reliably — agencies rename columns between vintages, and the
+adapters (`mapdata/poi/datasets.go`) match on a candidate list with case and
+punctuation folded rather than on an exact name. Run it against a new feed
+before trusting the mapping.
+
+The fetch is deliberately manual: these are public services with no SLA, which
+layer of a MapServer to read is a decision, and a boat should not be finding
+out at sea that a feed moved. Federal data (NOAA, BOEM/BSEE) is public domain;
+state feeds vary, so check the terms before redistributing one.
+
+Two deliberate limits. A POI draws in its own teal ink and never as an S-52
+hazard symbol: these positions are *as reported*, sometimes to the nearest
+minute, and must not read as surveyed. And POI classes are absent from the
+auto-router's hazard list, so an uncharted AWOIS wreck in 200 ft of water
+doesn't reroute the boat the way a charted one in 12 ft does.
 
 ### display API (LAN thin clients)
 

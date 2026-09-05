@@ -52,6 +52,13 @@ type ENCRenderer struct {
 	// placesColl is the gazetteer (see mapdata/places); nil falls back to the
 	// regex path.
 	placesColl *mongo.Collection
+	// poiColl holds points of interest ingested from outside the ENC — AWOIS
+	// wrecks, artificial reefs, offshore platforms (see mapdata/poi). Its
+	// documents are FeatureDoc-shaped, so they flow through the same decode
+	// and draw path as chart features. Nil (the default, and the state of any
+	// deployment that has never run `mapsync ingest-poi`) skips the extra
+	// per-tile query entirely.
+	poiColl *mongo.Collection
 	// osm is the set of per-minZoom-bucket MongoDB collections the
 	// /noaa-enc/osm-tile/ underlay queries. Nil disables the layer
 	// entirely — the handler serves a transparent fallback.
@@ -119,6 +126,11 @@ func (r *ENCRenderer) SetNavGridCollection(c *mongo.Collection) { r.navColl = c 
 // search falls back to regex over the source collections, which is correct but
 // times out on rare names.
 func (r *ENCRenderer) SetPlacesCollection(c *mongo.Collection) { r.placesColl = c }
+
+// SetPOICollection attaches the non-ENC points of interest (mapdata/poi).
+// Absent, the chart draws exactly what NOAA published — which is the correct
+// fallback: these are an addition to the chart, never a substitute for it.
+func (r *ENCRenderer) SetPOICollection(c *mongo.Collection) { r.poiColl = c }
 
 // Logger returns the renderer's logger (may be nil) so the HTTP handlers can
 // log per-request timing breakdowns through the same sublogger.
@@ -379,7 +391,47 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 			out = appendLandmarksInBBox(out, wrecks, pMinLon, pMinLat, pMaxLon, pMaxLat)
 		}
 	}
+
+	// Points of interest from outside the chart: AWOIS wrecks, artificial
+	// reefs, offshore platforms (see mapdata/poi). Their own collection and
+	// their own query — tens of thousands of points with no geometry to speak
+	// of, so the round trip is cheap next to the ENC one, and it is skipped
+	// entirely below poiQueryMinZoom where every POI class is out of zoom.
+	out = append(out, r.queryPOI(ctx, minLon, minLat, maxLon, maxLat, z)...)
 	return out, nil
+}
+
+// poiQueryMinZoom is the lowest zoom at which the POI collection is worth
+// asking. It matches the earliest POI class threshold (POI_PLATFORM, z11) —
+// below it every POI would be filtered out by minZoom anyway, so the query can
+// only come back empty.
+const poiQueryMinZoom = 11
+
+// queryPOI fetches the non-ENC points of interest intersecting the bbox.
+//
+// A failure here is logged and swallowed. These features are an addition to
+// the chart; a POI feed that is missing, corrupt or slow must degrade to a
+// chart without them, never to no chart at all.
+func (r *ENCRenderer) queryPOI(ctx context.Context, minLon, minLat, maxLon, maxLat float64, z int) []*mongoFeature {
+	if r.poiColl == nil || z < poiQueryMinZoom {
+		return nil
+	}
+	qStart := time.Now()
+	docs, err := noaa.QueryBBoxBanded(ctx, r.poiColl, minLon, minLat, maxLon, maxLat, z, 0, nil, "", false)
+	r.logSlowQuery("poi", time.Since(qStart), len(docs), z, minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warnf("poi query z=%d: %v", z, err)
+		}
+		return nil
+	}
+	out := make([]*mongoFeature, 0, len(docs))
+	for _, d := range docs {
+		if mf, ok := featureFromDoc(d); ok {
+			out = append(out, mf)
+		}
+	}
+	return out
 }
 
 // queryFeaturesClasses pulls only the given object classes from the bbox,
@@ -1218,7 +1270,13 @@ const (
 // They're long straight leading/range lines that streak across open-water
 // tiles (e.g. Cape Cod Bay) and clutter the chart without aiding our use; the
 // magenta area-limit classes (FAIRWY/ACHARE/RESARE) are unaffected.
-const ENCRenderRulesVersion = 22
+// v23: fish havens (OBSTRN with CATOBS=5 — artificial reefs, which the ENC has
+// no object class for) draw the INT1 K46 dotted-circle symbol instead of a
+// generic obstruction cross, from z12 once the stored minZoom is recomputed by
+// a re-ingest (the symbol change alone needs none); and non-chart points of interest
+// (mapdata/poi: AWOIS wrecks, state reef programs, offshore platforms) draw in
+// their own teal ink so a database position never reads as a surveyed one.
+const ENCRenderRulesVersion = 23
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
@@ -2950,7 +3008,7 @@ func drawFeature(dc *gg.Context, f encFeature, pass drawPass, project func(lon, 
 		return
 	}
 	class := f.ObjectClass()
-	if z < noaa.MinZoomForObjectClass(class) && !isNotableWreck(f) {
+	if z < noaa.MinZoomForDraw(class, f.Attributes()) && !isNotableWreck(f) {
 		// Notable (named) wrecks are surfaced below their native minZoom by a
 		// dedicated query leg (see wreckNameLegMaxZoom); let them through the
 		// guard so their symbol/name draws at overview/mid zoom.
@@ -3168,6 +3226,71 @@ func drawWreckLabel(dc *gg.Context, f encFeature, px, py, scale float64) {
 	}
 	dc.SetFontFace(basicfont.Face7x13)
 	dc.SetColor(s52CHMGD)
+	dc.Push()
+	dc.ScaleAbout(scale*0.7, scale*0.7, px, py)
+	dc.DrawStringAnchored(name, px, py, 0, 0.5)
+	dc.Pop()
+}
+
+// POI symbology. The classes are spelled out here rather than imported from
+// mapdata/poi to keep render/ off that dependency (poi imports noaa, which the
+// renderer also uses); poi.TestPOIClassesHaveMinZooms pins the strings.
+const (
+	poiClassWreck       = "POI_WRECK"
+	poiClassObstruction = "POI_OBSTRUCTION"
+	poiClassReef        = "POI_REEF"
+	poiClassPlatform    = "POI_PLATFORM"
+)
+
+// poiInk is the colour every non-chart POI draws in: a dark teal that sits
+// apart from S-52's magenta hazards and black structures without competing
+// with them. The point is that a glance tells you whether a mark came off the
+// chart or out of a database.
+var poiInk = color.RGBA{0x0E, 0x6E, 0x74, 0xE6}
+
+// poiLabelMinZoom is where POI names appear. Below it the symbol alone shows —
+// a reef field or a Gulf platform cluster stacks its labels into a solid block
+// well before the symbols themselves become crowded.
+const poiLabelMinZoom = 13
+
+// drawFishHaven paints the fish-haven symbol: a dotted circle around a small
+// cross, following INT1 K46. Same shape whether the reef came from the chart
+// or from a reef program — only the colour differs.
+func drawFishHaven(dc *gg.Context, px, py, scale float64, col color.Color) {
+	r := 3.6 * scale
+	dc.SetColor(col)
+	dc.SetLineWidth(0.9 * scale)
+	dc.SetDash(1.6*scale, 1.6*scale)
+	dc.DrawCircle(px, py, r)
+	dc.Stroke()
+	dc.SetDash() // clear, or every later stroke on this context is dashed
+	arm := 1.4 * scale
+	dc.SetLineWidth(0.9 * scale)
+	dc.DrawLine(px-arm, py, px+arm, py)
+	dc.DrawLine(px, py-arm, px, py+arm)
+	dc.Stroke()
+}
+
+// drawPOILabel paints a point of interest's name beside its symbol. Same
+// treatment as a wreck label (truncated, small, anchored left) in the caller's
+// colour.
+func drawPOILabel(dc *gg.Context, f encFeature, px, py, scale float64, col color.Color) {
+	v, ok := f.Attribute("OBJNAM")
+	if !ok {
+		return
+	}
+	name, _ := v.(string)
+	if name == "" {
+		return
+	}
+	// Truncate by runes, not bytes: these names come from external feeds and a
+	// byte slice through a multi-byte character renders as a replacement box.
+	const maxLen = 22
+	if r := []rune(name); len(r) > maxLen {
+		name = strings.TrimSpace(string(r[:maxLen-1])) + "…"
+	}
+	dc.SetFontFace(basicfont.Face7x13)
+	dc.SetColor(col)
 	dc.Push()
 	dc.ScaleAbout(scale*0.7, scale*0.7, px, py)
 	dc.DrawStringAnchored(name, px, py, 0, 0.5)
@@ -3620,6 +3743,18 @@ func drawPoint(dc *gg.Context, class string, f encFeature, project func(lon, lat
 			}
 		})
 	case "WRECKS", "OBSTRN":
+		// Fish havens are OBSTRN too (CATOBS=5) but they are a destination
+		// rather than a hazard, and drawing them as a plain obstruction cross
+		// is why nobody can find an artificial reef on this chart.
+		if class == "OBSTRN" && noaa.PseudoClass(class, f.Attributes()) == noaa.ClassFishHaven {
+			first(func(px, py float64) {
+				drawFishHaven(dc, px, py, scale, s52CHMGD)
+				if z >= poiLabelMinZoom {
+					drawPOILabel(dc, f, px+3.6*scale+2, py, scale, s52CHMGD)
+				}
+			})
+			return
+		}
 		// Wrecks / obstructions: red-magenta cross with sounding-style hash
 		// matching S-52's symbol. Bold so it pops over depth fills.
 		arm := 2.5 * scale
@@ -3633,6 +3768,50 @@ func drawPoint(dc *gg.Context, class string, f encFeature, project func(lon, lat
 			// name from wreckNameMinZoom up; the symbol alone shows at overview.
 			if z >= wreckNameMinZoom && isNotableWreck(f) {
 				drawWreckLabel(dc, f, px+arm+2, py, scale)
+			}
+		})
+	case poiClassWreck, poiClassObstruction, poiClassReef, poiClassPlatform:
+		// Points of interest that are NOT on the chart (mapdata/poi). Drawn in
+		// their own colour, deliberately: an AWOIS position is "as reported",
+		// sometimes to the nearest minute, and it must not read as a surveyed
+		// charted hazard. Same symbol language, different ink.
+		first(func(px, py float64) {
+			labelGap := 2.0
+			switch class {
+			case poiClassReef:
+				drawFishHaven(dc, px, py, scale, poiInk)
+				labelGap += 3.6 * scale
+			case poiClassPlatform:
+				// Small filled diamond — a platform is a structure, not a
+				// hazard on the seabed, and reads better as a solid mark.
+				h := 2.2 * scale
+				dc.SetColor(poiInk)
+				dc.MoveTo(px, py-h)
+				dc.LineTo(px+h, py)
+				dc.LineTo(px, py+h)
+				dc.LineTo(px-h, py)
+				dc.ClosePath()
+				dc.Fill()
+				labelGap += h
+			case poiClassObstruction:
+				arm := 1.8 * scale
+				dc.SetColor(poiInk)
+				dc.SetLineWidth(0.9 * scale)
+				dc.DrawLine(px-arm, py, px+arm, py)
+				dc.DrawLine(px, py-arm, px, py+arm)
+				dc.Stroke()
+				labelGap += arm
+			default: // poiClassWreck
+				arm := 2.2 * scale
+				dc.SetColor(poiInk)
+				dc.SetLineWidth(1.0 * scale)
+				dc.DrawLine(px-arm, py-arm, px+arm, py+arm)
+				dc.DrawLine(px-arm, py+arm, px+arm, py-arm)
+				dc.Stroke()
+				labelGap += arm
+			}
+			if z >= poiLabelMinZoom {
+				drawPOILabel(dc, f, px+labelGap, py, scale, poiInk)
 			}
 		})
 	case "UWTROC":

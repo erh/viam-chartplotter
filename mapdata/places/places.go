@@ -31,6 +31,12 @@ const Coll = "places"
 const (
 	SourceChart = "chart"
 	SourceOSM   = "osm"
+	// SourcePOI is a point of interest ingested from outside the chart — an
+	// AWOIS wreck, a state artificial reef, an offshore platform (see
+	// mapdata/poi). Kept distinct from SourceChart because it answers a
+	// different question and carries a different confidence: these positions
+	// are reported, not surveyed.
+	SourcePOI = "poi"
 )
 
 // Place is one named thing.

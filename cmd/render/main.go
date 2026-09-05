@@ -30,6 +30,7 @@ import (
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/poi"
 	"github.com/erh/viam-chartplotter/render"
 )
 
@@ -77,6 +78,7 @@ func run() error {
 	r.SetNOAACollection(noaa.OpenCollection(db))
 	r.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(ctx, db))
 	r.SetOSMCollections(osmtiler.OpenOSMCollections(db))
+	r.SetPOICollection(poi.OpenIfBuilt(ctx, db))
 
 	report, _ := r.TileFeatureReport(*zoom, x, y)
 	fmt.Printf("features=%d query=%.0fms\n  byKind=%v\n  byScale=%v\n  byClass=%v\n",

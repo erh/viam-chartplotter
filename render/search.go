@@ -29,10 +29,13 @@ type SearchResult struct {
 	// the raw acronym for classes we have no wording for.
 	Label string `json:"label"`
 	Cell  string `json:"cell"`
-	// Source is where the name came from: "chart" (the ENC) or "osm". The two
-	// answer different questions — the chart names navigation features, OSM
-	// names places and businesses — and a searcher should be able to tell
-	// which they are looking at.
+	// Source is where the name came from: "chart" (the ENC), "osm", or "poi"
+	// (a dataset ingested alongside the chart — AWOIS wrecks, artificial
+	// reefs, offshore platforms). They answer different questions and carry
+	// different confidence — the chart names surveyed navigation features, OSM
+	// names places and businesses, a POI position is as reported — and a
+	// searcher should be able to tell which they are looking at. For a POI,
+	// Cell carries the dataset it came from rather than an ENC cell.
 	Source string `json:"source"`
 
 	// Lat/Lng is the feature's centre, and BBox its full extent — a channel or
@@ -62,7 +65,7 @@ const searchOverFetch = 8
 // fewer than were typed (see searchFallbacks) — the caller should say so
 // rather than present them as an answer to the original question.
 func (r *ENCRenderer) Search(q string, class string, limit int, origin *RoutePoint) ([]SearchResult, string, error) {
-	if r.noaaColl == nil && r.osm == nil && r.placesColl == nil {
+	if r.noaaColl == nil && r.osm == nil && r.placesColl == nil && r.poiColl == nil {
 		return nil, "", errNoCharts
 	}
 	q = strings.TrimSpace(q)
@@ -103,20 +106,27 @@ func (r *ENCRenderer) Search(q string, class string, limit int, origin *RoutePoi
 	var out []SearchResult
 	matched := q
 	for _, terms := range searchFallbacks(q) {
-		// The two sources are independent, so run them together: OSM's budget
-		// then overlaps the chart query instead of adding to it.
-		var osmHits []SearchResult
+		// The three sources are independent, so run them together: the OSM and
+		// POI budgets overlap the chart query instead of adding to it.
+		var osmHits, poiHits []SearchResult
 		done := make(chan struct{})
 		go func() {
 			osmHits = r.searchOSM(ctx, terms, origin)
 			close(done)
 		}()
+		poiDone := make(chan struct{})
+		go func() {
+			poiHits = r.searchPOI(ctx, terms, fetch, origin)
+			close(poiDone)
+		}()
 		docs, err := r.searchOnce(ctx, terms, strings.ToUpper(class), fetch, origin)
 		<-done
+		<-poiDone
 		if err != nil {
 			return nil, "", err
 		}
 		found := append(r.chartResults(docs, origin), osmHits...)
+		found = append(found, poiHits...)
 		if len(found) > 0 {
 			out, matched = found, terms
 			break
@@ -146,11 +156,12 @@ func (r *ENCRenderer) chartResults(docs []noaa.FeatureDoc, origin *RoutePoint) [
 		}
 		lon := (d.BBox[0] + d.BBox[2]) / 2
 		lat := (d.BBox[1] + d.BBox[3]) / 2
+		class := noaa.PseudoClass(d.ObjectClass, d.Attributes)
 		res := SearchResult{
 			Name:           d.Name,
-			Class:          d.ObjectClass,
-			Label:          ClassLabel(d.ObjectClass),
-			Source:         "chart",
+			Class:          class,
+			Label:          ClassLabel(class),
+			Source:         places.SourceChart,
 			Cell:           d.Cell,
 			Lat:            lat,
 			Lng:            lon,
@@ -237,6 +248,49 @@ func sortSearchResults(out []SearchResult, origin *RoutePoint) {
 // matches rather than an arbitrary alphabetical slice — which is exactly what
 // the regex path could not do.
 const placesFetch = 200
+
+// searchPOI queries the non-ENC points of interest by name.
+//
+// It runs on the fallback ladder beside the chart and OSM legs, not only
+// through the gazetteer, because the gazetteer is built regionally: a
+// deployment that has ingested reefs but not yet rebuilt places would
+// otherwise answer "no results" for a reef it holds.
+func (r *ENCRenderer) searchPOI(ctx context.Context, q string, limit int, origin *RoutePoint) []SearchResult {
+	if r.poiColl == nil {
+		return nil
+	}
+	docs, err := noaa.SearchByName(ctx, r.poiColl, q, "", limit, nil)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warnf("chart search: poi lookup failed: %v", err)
+		}
+		return nil
+	}
+	out := make([]SearchResult, 0, len(docs))
+	for _, d := range docs {
+		if d.Name == "" {
+			continue
+		}
+		lon := (d.BBox[0] + d.BBox[2]) / 2
+		lat := (d.BBox[1] + d.BBox[3]) / 2
+		res := SearchResult{
+			Name:           d.Name,
+			Class:          d.ObjectClass,
+			Label:          ClassLabel(d.ObjectClass),
+			Source:         places.SourcePOI,
+			Cell:           d.Cell,
+			Lat:            lat,
+			Lng:            lon,
+			BBox:           d.BBox,
+			DistanceMeters: -1,
+		}
+		if origin != nil {
+			res.DistanceMeters = haversineMeters(origin.Lat, origin.Lng, lat, lon)
+		}
+		out = append(out, res)
+	}
+	return out
+}
 
 // searchPlaces queries the gazetteer.
 func (r *ENCRenderer) searchPlaces(ctx context.Context, q string, limit int, origin *RoutePoint) []SearchResult {
@@ -432,7 +486,8 @@ func searchFallbacks(q string) []string {
 }
 
 // dedupeSearchResults keeps one hit per (name, class), preferring the one
-// closest to the origin when distances are known.
+// closest to the origin when distances are known, then drops POI hits that
+// duplicate a charted feature of the same name in the same place.
 func dedupeSearchResults(in []SearchResult) []SearchResult {
 	type key struct{ name, class string }
 	best := make(map[key]int, len(in))
@@ -450,7 +505,54 @@ func dedupeSearchResults(in []SearchResult) []SearchResult {
 		best[k] = len(out)
 		out = append(out, r)
 	}
+	return dropPOIDuplicates(out)
+}
+
+// poiDuplicateMeters is how close a POI has to be to a charted feature of the
+// same name to count as the same thing. Generous, because that is exactly the
+// disagreement being collapsed: the OCS wrecks database and the ENC carry the
+// same wreck at positions that differ by a survey.
+const poiDuplicateMeters = 500
+
+// dropPOIDuplicates removes a POI hit when the chart already answers with the
+// same name nearby. The OCS wrecks database contains the charted wrecks as
+// well as the uncharted ones, so without this every famous wreck comes back
+// twice — once as "Wreck" and once as "Wreck", from two sources, a few hundred
+// metres apart. The chart entry wins: it is the surveyed one.
+func dropPOIDuplicates(in []SearchResult) []SearchResult {
+	var charted []SearchResult
+	for _, r := range in {
+		if r.Source == places.SourceChart {
+			charted = append(charted, r)
+		}
+	}
+	if len(charted) == 0 {
+		return in
+	}
+	out := in[:0]
+	for _, r := range in {
+		if r.Source == places.SourcePOI && hasChartedTwin(r, charted) {
+			continue
+		}
+		out = append(out, r)
+	}
 	return out
+}
+
+func hasChartedTwin(r SearchResult, charted []SearchResult) bool {
+	name := foldName(strings.ToLower(r.Name))
+	if name == "" {
+		return false
+	}
+	for _, c := range charted {
+		if foldName(strings.ToLower(c.Name)) != name {
+			continue
+		}
+		if haversineMeters(r.Lat, r.Lng, c.Lat, c.Lng) <= poiDuplicateMeters {
+			return true
+		}
+	}
+	return false
 }
 
 // classLabels are human wordings for the S-57 acronyms a search is likely to
@@ -474,6 +576,12 @@ var classLabels = map[string]string{
 	"RECTRC": "Recommended track", "NAVLNE": "Navigation line", "SBDARE": "Seabed area",
 	"TSSLPT": "Traffic-separation lane", "CTNARE": "Caution area", "MIPARE": "Military area",
 	"SPLARE": "Special area", "LOKBSN": "Lock basin",
+	// Presentation-only class: a fish haven is an OBSTRN in the ENC (see
+	// noaa.PseudoClass).
+	"FSHHAV": "Fish haven",
+	// Points of interest ingested from outside the chart (mapdata/poi).
+	"POI_WRECK": "Wreck", "POI_OBSTRUCTION": "Obstruction",
+	"POI_REEF": "Artificial reef", "POI_PLATFORM": "Platform",
 }
 
 // ClassLabel renders an S-57 object class for a human, falling back to the

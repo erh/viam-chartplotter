@@ -8,6 +8,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/erh/viam-chartplotter/mapdata/noaa"
 )
 
 // Building the gazetteer.
@@ -62,6 +64,11 @@ type SourceDoc struct {
 	Cell        string            `bson:"cell"`
 	BBox        []float64         `bson:"bbox"`
 	Tags        map[string]string `bson:"tags"`
+	// Attributes carries only the S-57 attributes a kind function needs — the
+	// projection below asks for CATOBS and nothing else. Pulling the whole
+	// attribute bag would multiply the wire volume of a build that reads every
+	// named feature in the database, to answer one question about one class.
+	Attributes map[string]any `bson:"attributes"`
 }
 
 // BuildFrom reads one source collection into the gazetteer. source is
@@ -80,7 +87,10 @@ func BuildFrom(ctx context.Context, dst, src *mongo.Collection, source string, k
 	// of the whole collection; the projection keeps geometry off the wire,
 	// which for a named coastline is the entire document.
 	find := options.Find().
-		SetProjection(bson.M{"name": 1, "objectClass": 1, "class": 1, "cell": 1, "bbox": 1, "tags": 1}).
+		SetProjection(bson.M{
+			"name": 1, "objectClass": 1, "class": 1, "cell": 1, "bbox": 1, "tags": 1,
+			"attributes.CATOBS": 1,
+		}).
 		SetHint("name_search").
 		SetBatchSize(1000).
 		SetNoCursorTimeout(true)
@@ -147,8 +157,15 @@ func BuildFrom(ctx context.Context, dst, src *mongo.Collection, source string, k
 	return stats, nil
 }
 
-// ChartKind is the class of a chart place: its S-57 object class.
-func ChartKind(d SourceDoc) string { return d.ObjectClass }
+// ChartKind is the class of a chart place: its S-57 object class, except where
+// the class alone misdescribes it. A fish haven is an OBSTRN, and calling an
+// artificial reef an "obstruction" in a search result is true and useless — see
+// noaa.PseudoClass.
+func ChartKind(d SourceDoc) string { return noaa.PseudoClass(d.ObjectClass, d.Attributes) }
+
+// POIKind is the class of a point of interest: the class the ingest assigned
+// (POI_WRECK, POI_REEF, …), which is already what it should present as.
+func POIKind(d SourceDoc) string { return d.ObjectClass }
 
 // OSMKindFunc builds a kindOf for OSM documents from a tag-priority function,
 // falling back to the ingest-time class when no interesting tag is present.

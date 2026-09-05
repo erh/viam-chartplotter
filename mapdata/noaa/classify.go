@@ -12,6 +12,15 @@ package noaa
 // (it only ever sees features the query already admitted).
 func MinZoomForFeature(class string, attrs map[string]any) int {
 	switch class {
+	case "OBSTRN":
+		// Fish havens — artificial reefs — are charted as obstructions, and
+		// obstructions are held to harbour-detail zoom because a harbour cell
+		// is full of them. A reef is the opposite case: it sits offshore, there
+		// are a handful in a bay, and it is the feature someone is looking for
+		// rather than one they are avoiding. Surface it three zooms earlier.
+		if isFishHaven(attrs) {
+			return FishHavenMinZoom
+		}
 	case "DEPCNT":
 		// Depth contours: show only "standard" depths when zoomed out; the
 		// dense intermediate contours (which make up the bulk of low-zoom
@@ -31,6 +40,58 @@ func MinZoomForFeature(class string, attrs map[string]any) int {
 	}
 	return MinZoomForObjectClass(class)
 }
+
+// CatObsFishHaven is the S-57 CATOBS (category of obstruction) value for a
+// fish haven. The ENC has no "artificial reef" object class: a reef is an
+// OBSTRN carrying this category, which is why they are invisible on the chart
+// as anything but a generic obstruction cross until you look at the attribute.
+const CatObsFishHaven = 5
+
+// FishHavenMinZoom is where fish havens start drawing. Coastal-ish rather than
+// harbour-detail: reefs are a destination, and one that only appears once you
+// are on top of it is one you never found.
+const FishHavenMinZoom = 12
+
+// isFishHaven reports whether an OBSTRN's attributes make it a fish haven.
+func isFishHaven(attrs map[string]any) bool {
+	v, ok := numAttr(attrs, "CATOBS")
+	return ok && int(v) == CatObsFishHaven
+}
+
+// MinZoomForDraw is the zoom guard the renderer applies at draw time, refined
+// for the attribute cases that should appear EARLIER than their object class
+// allows (fish havens among generic obstructions).
+//
+// It never returns more than MinZoomForObjectClass. The query surfaces some
+// classes deliberately below their stored minZoom — coarse depth contours at
+// overview zoom, named wrecks as landmarks — and a guard that could tighten
+// would silently discard exactly those.
+func MinZoomForDraw(class string, attrs map[string]any) int {
+	z := MinZoomForObjectClass(class)
+	if class == "OBSTRN" && isFishHaven(attrs) && FishHavenMinZoom < z {
+		return FishHavenMinZoom
+	}
+	return z
+}
+
+// PseudoClass is the class string a feature should be PRESENTED as, which is
+// not always its object class. A fish haven is an OBSTRN in the ENC and an
+// "Obstruction" in a search result, which is true and useless — the thing a
+// searcher typed "reef" to find is labelled as the hazard it technically is.
+//
+// Only presentation uses this. The stored objectClass stays S-57 truth, so
+// routing, the compare tests and anything else reasoning about the chart see
+// what NOAA published.
+func PseudoClass(class string, attrs map[string]any) string {
+	if class == "OBSTRN" && isFishHaven(attrs) {
+		return ClassFishHaven
+	}
+	return class
+}
+
+// ClassFishHaven is the presentation-only class for a fish haven (see
+// PseudoClass). Not an S-57 acronym — no such object class exists.
+const ClassFishHaven = "FSHHAV"
 
 // isStandardContour reports whether a depth-contour value (metres) is one of
 // the canonical contours a chart shows at coastal/overview scale.
@@ -145,6 +206,23 @@ func MinZoomForObjectClass(class string) int {
 		return 14
 	case "DOCARE", "HRBFAC", "HRBARE", "PIPARE":
 		return 13
+	// Points of interest ingested from outside the ENC (see mapdata/poi).
+	// The class strings are spelled out rather than imported because poi
+	// depends on this package; poi's TestPOIClassesHaveMinZooms guards the
+	// two lists against drifting apart.
+	//
+	// These are sparser than their charted equivalents and they are what
+	// someone went looking for, so they show earlier than an ENC obstruction:
+	// a Gulf platform is visible for miles and is a mark at coastal zoom, a
+	// reef is a destination, an AWOIS wreck is a dive site.
+	case "POI_PLATFORM":
+		return 11
+	case "POI_REEF":
+		return 12
+	case "POI_WRECK":
+		return 13
+	case "POI_OBSTRUCTION":
+		return 14
 	}
 	return 14
 }

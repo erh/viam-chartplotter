@@ -17,6 +17,7 @@ import (
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
 	"github.com/erh/viam-chartplotter/mapdata/places"
+	"github.com/erh/viam-chartplotter/mapdata/poi"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -419,6 +420,10 @@ func StartChartplotterServer(
 			// The gazetteer backing the search box. Built by
 			// `datasync --build-places`; absent, search falls back to regex.
 			encRenderer.SetPlacesCollection(places.Open(db))
+			// Points of interest from outside the chart — AWOIS wrecks, state
+			// artificial reefs, offshore platforms (`mapsync ingest-poi`).
+			// Absent, the chart draws exactly what NOAA published.
+			encRenderer.SetPOICollection(poi.OpenIfBuilt(mctx, db))
 			weatherColl = store.OpenCollection(db)
 			mongoChartsOK = true
 			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",

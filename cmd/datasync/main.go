@@ -34,6 +34,7 @@ import (
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
 	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 	"github.com/erh/viam-chartplotter/mapdata/places"
+	"github.com/erh/viam-chartplotter/mapdata/poi"
 )
 
 func main() {
@@ -93,6 +94,9 @@ func run() error {
 		}
 		if err := noaa.EnsureNavGridIndexes(ctx, noaa.OpenNavGridCollection(client.Database(*dbName))); err != nil {
 			logger.Warnf("navgrid index: %v", err)
+		}
+		if err := poi.EnsureIndexes(ctx, poi.Open(client.Database(*dbName))); err != nil {
+			logger.Warnf("poi indexes: %v", err)
 		}
 		logger.Info("indexes ensured; exiting (--indexes-only)")
 		return nil
@@ -233,6 +237,10 @@ func buildGazetteer(ctx context.Context, db *mongo.Database, bboxArg string, log
 	osmColls := osmtiler.OpenOSMCollections(db)
 	jobs := []job{
 		{"noaa", noaa.OpenCollection(db), places.SourceChart, places.ChartKind},
+		// Points of interest ingested from outside the chart (mapdata/poi).
+		// Empty on a deployment that has never run `mapsync ingest-poi`, in
+		// which case this is one cheap no-op pass.
+		{"poi", poi.Open(db), places.SourcePOI, places.POIKind},
 	}
 	for _, c := range []*mongo.Collection{osmColls.Overview, osmColls.Coastal, osmColls.Detail, osmColls.Skip} {
 		if c != nil {

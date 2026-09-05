@@ -72,6 +72,19 @@ func TestOSMKindFallsBackToIngestClass(t *testing.T) {
 	test.That(t, kindOf(SourceDoc{Class: "highway"}), test.ShouldEqual, "highway")
 }
 
+func TestChartKindRenamesFishHavens(t *testing.T) {
+	// A fish haven is an OBSTRN carrying CATOBS=5. Indexed as "Obstruction"
+	// it is unfindable by the word anyone would actually search for.
+	haven := SourceDoc{ObjectClass: "OBSTRN", Attributes: map[string]any{"CATOBS": 5}}
+	test.That(t, ChartKind(haven), test.ShouldEqual, "FSHHAV")
+	wellhead := SourceDoc{ObjectClass: "OBSTRN", Attributes: map[string]any{"CATOBS": 2}}
+	test.That(t, ChartKind(wellhead), test.ShouldEqual, "OBSTRN")
+}
+
+func TestPOIKindIsTheIngestedClass(t *testing.T) {
+	test.That(t, POIKind(SourceDoc{ObjectClass: "POI_REEF"}), test.ShouldEqual, "POI_REEF")
+}
+
 func TestChartKindIsTheObjectClass(t *testing.T) {
 	test.That(t, ChartKind(SourceDoc{ObjectClass: "LIGHTS"}), test.ShouldEqual, "LIGHTS")
 }

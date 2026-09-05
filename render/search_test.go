@@ -37,6 +37,33 @@ func TestDedupeSearchResultsKeepsTheNearest(t *testing.T) {
 	test.That(t, out[1].Class, test.ShouldEqual, "SEAARE")
 }
 
+func TestDedupeDropsPOIDuplicatesOfChartedFeatures(t *testing.T) {
+	// The OCS wrecks database carries the charted wrecks as well as the
+	// uncharted ones, at a position that differs by a survey. One answer, and
+	// it should be the surveyed one.
+	in := []SearchResult{
+		{Name: "Andrea Doria", Class: "WRECKS", Source: "chart", Lat: 40.4926, Lng: -69.8511},
+		{Name: "ANDREA DORIA", Class: "POI_WRECK", Source: "poi", Lat: 40.4930, Lng: -69.8515},
+		// Same name far away, and an unrelated POI: both are their own thing.
+		{Name: "Andrea Doria", Class: "POI_WRECK", Source: "poi", Lat: 25.0, Lng: -80.0},
+		{Name: "Miami Reef Site 4", Class: "POI_REEF", Source: "poi", Lat: 25.8, Lng: -80.1},
+	}
+	out := dedupeSearchResults(in)
+	test.That(t, len(out), test.ShouldEqual, 3)
+	test.That(t, out[0].Source, test.ShouldEqual, "chart")
+	test.That(t, out[1].Lat, test.ShouldAlmostEqual, 25.0, 0.001)
+	test.That(t, out[2].Class, test.ShouldEqual, "POI_REEF")
+}
+
+func TestPOIAndFishHavenLabels(t *testing.T) {
+	// A fish haven is an OBSTRN on the chart; presenting it as "Obstruction"
+	// is true and useless when someone typed "reef".
+	test.That(t, ClassLabel("FSHHAV"), test.ShouldEqual, "Fish haven")
+	test.That(t, ClassLabel("POI_REEF"), test.ShouldEqual, "Artificial reef")
+	test.That(t, ClassLabel("POI_WRECK"), test.ShouldEqual, "Wreck")
+	test.That(t, ClassLabel("POI_PLATFORM"), test.ShouldEqual, "Platform")
+}
+
 func TestDedupeSearchResultsWithoutDistances(t *testing.T) {
 	// No origin: distances are -1 and the first hit stands rather than being
 	// replaced by an arbitrary later duplicate.
