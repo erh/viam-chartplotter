@@ -4,9 +4,17 @@
   // capture the recorded track between two times as a new route. The nav API is
   // read lazily through a getter (the robot client is assigned asynchronously
   // and isn't a reactive prop), so the panel always sees the current value.
+  import { onDestroy } from "svelte";
   import type { PositionPoint } from "./BoatInfo";
   import { downloadGpx } from "./gpx";
   import { simplifyTrack, pathLengthMeters, type LatLng } from "./simplify";
+  import {
+    planAutoRoute,
+    optimizeRoute,
+    routeCautions,
+    metresToNm,
+    type AutoRouteResult,
+  } from "./autoRoute";
   import {
     listRoutes,
     saveRoute,
@@ -23,6 +31,9 @@
     getRoutesApi: () => RoutesApi | null;
     currentWaypoints: { id?: string; lat: number; lng: number }[];
     positionHistory: PositionPoint[];
+    // The boat's current position, when known — the usual starting point for
+    // an auto-route. Null in chart-only mode.
+    boatPosition?: LatLng | null;
     onLoadRoute: (waypoints: LatLng[]) => Promise<void>;
     // Optional: pull the recorded track for an explicit [t0,t1] window straight
     // from tabular data (beyond the in-memory positionHistory). When absent the
@@ -31,15 +42,26 @@
     // Optional: preview route geometry on the map. Pass the set of routes to
     // draw; an empty array clears the overlay.
     onPreviewRoutes?: (routes: { waypoints: LatLng[]; color?: string }[]) => void;
+    // Optional: arm a one-shot "click the map to choose a position". The
+    // handler fires once with the clicked point; the map disarms itself.
+    onRequestPick?: (handler: (p: LatLng) => void) => void;
+    // Whether a pick is currently armed (so the panel can show it and offer a
+    // way out), and how to cancel one.
+    pickArmed?: boolean;
+    onCancelPick?: () => void;
   }
 
   let {
     getRoutesApi,
     currentWaypoints,
     positionHistory,
+    boatPosition = null,
     fetchTrackWindow,
     onLoadRoute,
     onPreviewRoutes,
+    onRequestPick,
+    pickArmed = false,
+    onCancelPick,
   }: Props = $props();
 
   const NM = 1852;
@@ -66,6 +88,35 @@
   // When on, every route is drawn on the map at once (so you see the ones in
   // the region you're looking at), instead of just the expanded one.
   let showAll = $state(false);
+
+  // Auto-route form. The planner runs on the chart server (it needs the ENC
+  // depth data); this is just the ask and the review of what came back.
+  let autoFormOpen = $state(false);
+  type EndpointMode = "boat" | "first" | "last" | "manual";
+  let autoFrom = $state<EndpointMode>("boat");
+  let autoTo = $state<EndpointMode>("last");
+  let autoFromLat = $state("");
+  let autoFromLng = $state("");
+  let autoToLat = $state("");
+  let autoToLng = $state("");
+  // Blank means "use the boat's configured draft / ideal depth" — not zero.
+  let autoSafeFt = $state("");
+  let autoIdealFt = $state("");
+  let autoAvoidRestricted = $state(false);
+  // Which endpoint an armed map-pick will fill, so the panel can label it and
+  // so a second click on the same button cancels rather than re-arms.
+  let pickingFor = $state<"from" | "to" | null>(null);
+  let autoPlanning = $state(false);
+  let autoError = $state<string | null>(null);
+  let autoResult = $state<AutoRouteResult | null>(null);
+  let autoName = $state("");
+  let autoColor = $state("#00c2ff");
+  // Optimising keeps the operator's waypoints by default — one is usually
+  // there for a reason the chart doesn't record.
+  let autoKeepWaypoints = $state(true);
+  // Set when the result came from optimising rather than planning, so the
+  // summary can compare against the original route.
+  let autoWasOptimize = $state(false);
 
   // Track-capture form.
   let trackFormOpen = $state(false);
@@ -338,7 +389,9 @@
   $effect(() => {
     if (trackFormOpen && onPreviewRoutes) {
       onPreviewRoutes(
-        trackPreview.waypoints.length ? [{ waypoints: trackPreview.waypoints, color: trackColor }] : []
+        trackPreview.waypoints.length
+          ? [{ waypoints: trackPreview.waypoints, color: trackColor }]
+          : []
       );
       return () => applyMapPreview();
     }
@@ -359,6 +412,186 @@
     };
     await withStore((api) => saveRoute(api, route));
     trackFormOpen = false;
+  }
+
+  // Resolve one end of the auto-route request from the chosen mode. Returns
+  // null when the mode has no position behind it (no fix, no waypoints, or an
+  // unparseable manual entry), which is what disables the Plan button.
+  function endpoint(mode: EndpointMode, latStr: string, lngStr: string): LatLng | null {
+    switch (mode) {
+      case "boat":
+        return boatPosition ?? null;
+      case "first":
+        return currentWaypoints.length
+          ? { lat: currentWaypoints[0].lat, lng: currentWaypoints[0].lng }
+          : null;
+      case "last": {
+        const w = currentWaypoints[currentWaypoints.length - 1];
+        return w ? { lat: w.lat, lng: w.lng } : null;
+      }
+      case "manual": {
+        const lat = parseFloat(latStr);
+        const lng = parseFloat(lngStr);
+        if (!isFinite(lat) || !isFinite(lng)) return null;
+        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+        return { lat, lng };
+      }
+    }
+  }
+
+  const autoStart = $derived(endpoint(autoFrom, autoFromLat, autoFromLng));
+  const autoEnd = $derived(endpoint(autoTo, autoToLat, autoToLng));
+
+  // Arm a map click to fill one end of the route. The picked point lands in
+  // the manual lat/lon boxes and switches that end to "Lat / lon", so what the
+  // form shows is exactly what will be sent — and stays editable by hand.
+  function pickOnMap(which: "from" | "to") {
+    if (!onRequestPick) return;
+    if (pickingFor === which) {
+      pickingFor = null;
+      onCancelPick?.();
+      return;
+    }
+    pickingFor = which;
+    onRequestPick((p) => {
+      const lat = p.lat.toFixed(6);
+      const lng = p.lng.toFixed(6);
+      if (which === "from") {
+        autoFrom = "manual";
+        autoFromLat = lat;
+        autoFromLng = lng;
+      } else {
+        autoTo = "manual";
+        autoToLat = lat;
+        autoToLng = lng;
+      }
+      pickingFor = null;
+    });
+  }
+
+  // The map's Routes toggle destroys this panel outright. If a pick was armed
+  // when that happened, disarm it — otherwise the map is left in crosshair
+  // mode with a handler pointing at state that no longer exists.
+  onDestroy(() => {
+    if (pickingFor !== null) onCancelPick?.();
+  });
+
+  function openAutoForm() {
+    autoFrom = boatPosition ? "boat" : currentWaypoints.length ? "first" : "manual";
+    autoTo = currentWaypoints.length ? "last" : "manual";
+    autoResult = null;
+    autoError = null;
+    autoWasOptimize = false;
+    autoName = "";
+    autoColor = nextColor(routes);
+    autoFormOpen = true;
+  }
+
+  function closeAutoForm() {
+    autoFormOpen = false;
+    autoResult = null;
+    autoError = null;
+    // Don't leave the map armed for a pick that has nowhere to land.
+    if (pickingFor !== null) {
+      pickingFor = null;
+      onCancelPick?.();
+    }
+  }
+
+  // Re-plan the active waypoints around land, shoals and obstructions.
+  async function doOptimizeCurrent() {
+    if (currentWaypoints.length < 2) return;
+    autoFormOpen = true;
+    autoPlanning = true;
+    autoError = null;
+    autoResult = null;
+    autoWasOptimize = true;
+    if (!autoName) autoColor = nextColor(routes);
+    try {
+      autoResult = await optimizeRoute({
+        waypoints: currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
+        safeDepthFt: autoSafeFt.trim() ? parseFloat(autoSafeFt) : undefined,
+        idealDepthFt: autoIdealFt.trim() ? parseFloat(autoIdealFt) : undefined,
+        avoid: autoAvoidRestricted ? ["restricted"] : undefined,
+        keepWaypoints: autoKeepWaypoints,
+      });
+    } catch (e) {
+      autoError = e instanceof Error ? e.message : String(e);
+    } finally {
+      autoPlanning = false;
+    }
+  }
+
+  async function doPlanAuto() {
+    const start = autoStart;
+    const end = autoEnd;
+    if (!start || !end) return;
+    autoPlanning = true;
+    autoError = null;
+    autoResult = null;
+    autoWasOptimize = false;
+    try {
+      autoResult = await planAutoRoute({
+        start,
+        end,
+        safeDepthFt: autoSafeFt.trim() ? parseFloat(autoSafeFt) : undefined,
+        idealDepthFt: autoIdealFt.trim() ? parseFloat(autoIdealFt) : undefined,
+        avoid: autoAvoidRestricted ? ["restricted"] : undefined,
+      });
+    } catch (e) {
+      autoError = e instanceof Error ? e.message : String(e);
+    } finally {
+      autoPlanning = false;
+    }
+  }
+
+  // Draw the planned route on the map while the form is open, and put the
+  // route-list overlay back when it closes.
+  $effect(() => {
+    if (autoFormOpen && onPreviewRoutes) {
+      onPreviewRoutes(
+        autoResult?.waypoints.length ? [{ waypoints: autoResult.waypoints, color: autoColor }] : []
+      );
+      return () => applyMapPreview();
+    }
+  });
+
+  async function loadAutoIntoNav() {
+    if (!autoResult) return;
+    if (
+      currentWaypoints.length > 0 &&
+      !confirm(`Replace the current ${currentWaypoints.length} waypoint(s) with the planned route?`)
+    ) {
+      return;
+    }
+    busy = true;
+    error = null;
+    try {
+      await onLoadRoute(autoResult.waypoints);
+      closeAutoForm();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveAutoAsRoute() {
+    const name = autoName.trim();
+    if (!name || !autoResult || autoResult.waypoints.length < 2) return;
+    const now = new Date().toISOString();
+    await withStore((api) =>
+      saveRoute(api, {
+        id: newRouteId(),
+        name,
+        source: "auto",
+        color: autoColor,
+        createdAt: now,
+        updatedAt: now,
+        waypoints: autoResult!.waypoints,
+      })
+    );
+    autoName = "";
   }
 
   function fmtDate(iso: string): string {
@@ -436,13 +669,18 @@
               >
                 <span class:font-bold={expandedId === r.id}>{r.name}</span>
                 {#if r.scope === "parent"}
-                  <span class="text-[10px] uppercase opacity-40" title="Inherited from a parent location — read-only here">
+                  <span
+                    class="text-[10px] uppercase opacity-40"
+                    title="Inherited from a parent location — read-only here"
+                  >
                     · inherited</span
                   >
                 {/if}
               </button>
             {/if}
-            <span class="text-xs opacity-50 shrink-0 tabular-nums">{r.stats?.distanceNm.toFixed(1)} nm</span>
+            <span class="text-xs opacity-50 shrink-0 tabular-nums"
+              >{r.stats?.distanceNm.toFixed(1)} nm</span
+            >
           </div>
 
           {#if expandedId === r.id}
@@ -513,6 +751,232 @@
     {#if sizeWarning(routes)}
       <div class="text-warning-dark text-[11px]">
         Saved routes are getting large — consider deleting unused ones.
+      </div>
+    {/if}
+
+    <!-- Auto route: ask the chart server to plan a course over the ENC depth
+         data between two points, review it, then load or save it. -->
+    {#if autoFormOpen}
+      <div class="flex flex-col gap-1 border border-dark rounded px-2 py-1">
+        <div class="text-xs opacity-70">Auto route</div>
+
+        <div class="text-xs flex items-center gap-2">
+          <span>From</span>
+          <select class="bg-dark px-1 rounded text-white flex-1" bind:value={autoFrom}>
+            <option value="boat" disabled={!boatPosition}>Boat</option>
+            <option value="first" disabled={currentWaypoints.length === 0}>First waypoint</option>
+            <option value="manual">Lat / lon</option>
+          </select>
+          {#if onRequestPick}
+            <button
+              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark shrink-0"
+              class:bg-dark={pickingFor === "from"}
+              onclick={() => pickOnMap("from")}
+              title="Click a spot on the map to start from"
+            >
+              {pickingFor === "from" ? "Cancel" : "Map"}
+            </button>
+          {/if}
+        </div>
+        {#if autoFrom === "manual"}
+          <div class="flex gap-1 text-xs pl-10">
+            <input
+              class="bg-dark px-1 rounded text-white w-24"
+              placeholder="lat"
+              bind:value={autoFromLat}
+            />
+            <input
+              class="bg-dark px-1 rounded text-white w-24"
+              placeholder="lon"
+              bind:value={autoFromLng}
+            />
+          </div>
+        {/if}
+
+        <div class="text-xs flex items-center gap-2">
+          <span>To</span>
+          <select class="bg-dark px-1 rounded text-white flex-1" bind:value={autoTo}>
+            <option value="last" disabled={currentWaypoints.length === 0}>Last waypoint</option>
+            <option value="manual">Lat / lon</option>
+          </select>
+          {#if onRequestPick}
+            <button
+              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark shrink-0"
+              class:bg-dark={pickingFor === "to"}
+              onclick={() => pickOnMap("to")}
+              title="Click a spot on the map to set the destination"
+            >
+              {pickingFor === "to" ? "Cancel" : "Map"}
+            </button>
+          {/if}
+        </div>
+        {#if autoTo === "manual"}
+          <div class="flex gap-1 text-xs pl-10">
+            <input
+              class="bg-dark px-1 rounded text-white w-24"
+              placeholder="lat"
+              bind:value={autoToLat}
+            />
+            <input
+              class="bg-dark px-1 rounded text-white w-24"
+              placeholder="lon"
+              bind:value={autoToLng}
+            />
+          </div>
+        {/if}
+
+        <div class="flex gap-2 text-xs">
+          <label
+            class="flex items-center gap-1"
+            title="Hard limit — the route never crosses water charted shoaler than this. Blank uses the boat's configured draft."
+          >
+            Safe
+            <input
+              type="number"
+              min="1"
+              step="1"
+              class="bg-dark px-1 rounded text-white w-14"
+              placeholder="draft"
+              bind:value={autoSafeFt}
+            />
+            ft
+          </label>
+          <label
+            class="flex items-center gap-1"
+            title="Preference — among safe routes, prefer the one that stays this deep. Blank uses the boat's configured ideal depth."
+          >
+            Ideal
+            <input
+              type="number"
+              min="1"
+              step="1"
+              class="bg-dark px-1 rounded text-white w-14"
+              placeholder="2x draft"
+              bind:value={autoIdealFt}
+            />
+            ft
+          </label>
+        </div>
+        <label class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none">
+          <input type="checkbox" bind:checked={autoAvoidRestricted} />
+          Steer around restricted areas
+        </label>
+        <label
+          class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none"
+          title="Off, the route may be straightened through waypoints it doesn't need"
+        >
+          <input type="checkbox" bind:checked={autoKeepWaypoints} />
+          Optimize: keep every waypoint
+        </label>
+
+        {#if pickingFor && pickArmed}
+          <div class="text-xs text-accent">
+            Click the map to set the {pickingFor === "to" ? "destination" : "start"}.
+          </div>
+        {/if}
+
+        <div class="flex gap-2 text-xs">
+          <button
+            class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+            onclick={doPlanAuto}
+            disabled={autoPlanning || !autoStart || !autoEnd}
+            title={!autoStart || !autoEnd ? "Pick a start and a destination" : ""}
+          >
+            {autoPlanning ? "Planning…" : "Plan"}
+          </button>
+          <button
+            class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+            onclick={doOptimizeCurrent}
+            disabled={autoPlanning || currentWaypoints.length < 2}
+            title={currentWaypoints.length < 2
+              ? "Needs at least 2 active waypoints"
+              : "Re-plan the active waypoints around land, shoals and obstructions"}
+          >
+            Optimize current
+          </button>
+          <button
+            class="px-2 py-0.5 border border-dark rounded hover:bg-dark"
+            onclick={closeAutoForm}>Close</button
+          >
+        </div>
+
+        {#if autoError}
+          <div class="text-warning-dark text-xs border border-warning-medium rounded px-2 py-1">
+            {autoError}
+          </div>
+        {/if}
+
+        {#if autoResult}
+          <div class="text-xs opacity-70">
+            {autoResult.waypoints.length} waypoints · {metresToNm(
+              autoResult.distance_meters
+            ).toFixed(1)} nm
+            <!-- direct_meters is the straight line when planning, and the
+                 route as it stood when optimising — so the comparison is
+                 against the right thing either way. -->
+            <span class="opacity-60">
+              ({autoWasOptimize ? "was" : "direct"}
+              {metresToNm(autoResult.direct_meters).toFixed(1)} nm)
+            </span>
+          </div>
+          <!-- Everything the chart could not promise. Worth reading before
+               steering it: the planner only knows what the ENC charts. -->
+          <ul class="text-[11px] text-warning-dark list-disc pl-4">
+            {#each routeCautions(autoResult) as caution}
+              <li>{caution}</li>
+            {/each}
+          </ul>
+          <div class="text-[11px] opacity-50">
+            Planned against charted depths only — check it against your own eyes and sounder.
+          </div>
+          <div class="flex flex-wrap items-center gap-1 text-xs">
+            <button
+              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+              onclick={loadAutoIntoNav}
+              disabled={busy || autoResult.waypoints.length < 2}
+              title="Replace the active waypoints with this route">Load into nav</button
+            >
+            <label class="flex items-center gap-1 cursor-pointer" title="Route color">
+              <input
+                type="color"
+                class="w-6 h-5 bg-transparent border border-dark rounded cursor-pointer p-0"
+                bind:value={autoColor}
+              />
+            </label>
+            <input
+              class="bg-dark px-1 rounded text-white flex-1 min-w-24"
+              placeholder="Save as…"
+              bind:value={autoName}
+              onkeydown={(e) => e.key === "Enter" && saveAutoAsRoute()}
+            />
+            <button
+              class="px-1.5 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40"
+              onclick={saveAutoAsRoute}
+              disabled={busy || !autoName.trim()}>Save</button
+            >
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div class="flex gap-1">
+        <button
+          class="flex-1 px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40 text-xs"
+          onclick={openAutoForm}
+          disabled={busy}
+          title="Plan a course over the charted depths between two points"
+        >
+          Auto route…
+        </button>
+        <button
+          class="px-2 py-0.5 border border-dark rounded hover:bg-dark disabled:opacity-40 text-xs"
+          onclick={doOptimizeCurrent}
+          disabled={busy || currentWaypoints.length < 2}
+          title={currentWaypoints.length < 2
+            ? "Needs at least 2 active waypoints"
+            : `Re-plan the current ${currentWaypoints.length} waypoints around land, shoals and obstructions`}
+        >
+          Optimize current
+        </button>
       </div>
     {/if}
 

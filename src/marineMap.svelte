@@ -8,6 +8,14 @@
   import viamLogoUrl from "./assets/viam-logo.png";
   import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from "./lib/BoatInfo";
   import { getCountryFromMmsi, flagEmoji } from "./lib/mmsi";
+  import {
+    searchChart,
+    framingFor,
+    formatDistance,
+    makeSearchRunner,
+    MIN_QUERY_LENGTH,
+    type SearchHit,
+  } from "./lib/chartSearch";
   import RegularShape from "ol/style/RegularShape.js";
 
   import Collection from "ol/Collection.js";
@@ -182,7 +190,13 @@
   // The layer panel renders these (and their children) above a divider as
   // radio buttons; everything else (boat, ais, airstream + their children)
   // renders below as independent checkboxes.
-  const BASE_LAYER_NAMES = ["open street map", "satellite-imagery", "noaa", "checkmate", "noaa-ecdis"];
+  const BASE_LAYER_NAMES = [
+    "open street map",
+    "satellite-imagery",
+    "noaa",
+    "checkmate",
+    "noaa-ecdis",
+  ];
   function isBaseLayerGroup(l: { name: string; parent?: string }): boolean {
     return BASE_LAYER_NAMES.includes(l.name) || (!!l.parent && BASE_LAYER_NAMES.includes(l.parent));
   }
@@ -268,6 +282,89 @@
   let tileUrlActive = $state(false);
 
   let addWaypointActive = $state(false);
+
+  // Chart search: find anything named in the ENC store and go there. It lives
+  // on the map rather than in a side panel because the answer to "where is X"
+  // is a place, and the map is where a place means something.
+  let chartSearchOpen = $state(false);
+  let chartSearchTerm = $state("");
+  let chartSearchHits = $state<SearchHit[]>([]);
+  // Set when the server matched fewer words than were typed (see searchChart).
+  let chartSearchMatched = $state("");
+  let chartSearchBusy = $state(false);
+  let chartSearchError = $state<string | null>(null);
+  let chartSearchInput = $state<HTMLInputElement | null>(null);
+
+  // Rank by distance from the middle of what you're looking at, so "north
+  // channel" finds the one on screen rather than one in Alaska.
+  function chartSearchOrigin(): { lat: number; lng: number } | null {
+    const centre = mapGlobal.view?.getCenter();
+    if (centre) return { lng: centre[0], lat: centre[1] };
+    if (myBoat?.location) return { lat: myBoat.location[0], lng: myBoat.location[1] };
+    return null;
+  }
+
+  const chartSearchRunner = makeSearchRunner(
+    (q) => searchChart(q, { origin: chartSearchOrigin(), limit: 12 }),
+    { hits: [], matchedQuery: "" }
+  );
+
+  function runChartSearch() {
+    const q = chartSearchTerm;
+    chartSearchError = null;
+    chartSearchBusy = q.trim().length >= MIN_QUERY_LENGTH;
+    chartSearchRunner.search(
+      q,
+      (res) => {
+        chartSearchHits = res.hits;
+        // Blank unless the server had to drop words to find anything — the
+        // results then answer a narrower question than was asked, and the
+        // operator needs to know that before steering at one.
+        chartSearchMatched =
+          res.matchedQuery && res.matchedQuery !== q.trim() ? res.matchedQuery : "";
+        chartSearchBusy = false;
+      },
+      (e) => {
+        chartSearchError = e.message;
+        chartSearchHits = [];
+        chartSearchMatched = "";
+        chartSearchBusy = false;
+      }
+    );
+  }
+
+  function toggleChartSearch() {
+    chartSearchOpen = !chartSearchOpen;
+    if (chartSearchOpen) {
+      queueMicrotask(() => chartSearchInput?.focus()); // focus once it's in the DOM
+    } else {
+      closeChartSearch();
+    }
+  }
+
+  function closeChartSearch() {
+    chartSearchOpen = false;
+    chartSearchRunner.cancel();
+    chartSearchTerm = "";
+    chartSearchHits = [];
+    chartSearchMatched = "";
+    chartSearchError = null;
+    chartSearchBusy = false;
+  }
+
+  // Go to a hit: centre on a point feature, frame an area one. Either way
+  // enter pan mode, or boat-follow yanks the view straight back.
+  function goToHit(hit: SearchHit) {
+    if (!mapGlobal.view) return;
+    const framing = framingFor(hit);
+    if (framing.kind === "center") {
+      mapGlobal.view.animate({ center: [hit.lng, hit.lat], zoom: framing.zoom, duration: 500 });
+    } else {
+      mapGlobal.view.fit(hit.bbox, { padding: [80, 80, 80, 80], duration: 500, maxZoom: 15 });
+    }
+    inPanMode = true;
+    closeChartSearch();
+  }
 
   const COOKIE_HEADS_UP = "mapHeadsUp";
   const COOKIE_LAYERS = "mapLayers";
@@ -707,6 +804,8 @@
     navWaypoints,
     routePreview,
     areas,
+    pickPointActive = false,
+    onPickPoint,
     onAddWaypoint,
     onMoveWaypoint,
     onInsertWaypoint,
@@ -791,6 +890,14 @@
           folder?: string;
         }[]
       | null;
+    /** When true, the next map click reports its position to onPickPoint and
+     * does nothing else — the one-shot "pick a spot" mode the Routes panel
+     * arms to set an auto-route start or destination. Takes priority over
+     * every other click mode so an armed pick is never eaten by edit mode. */
+    pickPointActive?: boolean;
+    /** Called with the clicked position while pickPointActive. The caller is
+     * expected to disarm (set pickPointActive false) — this is one-shot. */
+    onPickPoint?: (lat: number, lng: number) => void;
     /** Called when the user clicks the map while "add waypoint" mode is active. */
     onAddWaypoint?: (lat: number, lng: number) => void;
     /** Called when the user finishes dragging an existing waypoint. */
@@ -2231,16 +2338,9 @@
     "baro_altitude_ft",
     "geom_alt_ft",
   ];
-  const AIRCRAFT_VRATE_FIELDS = [
-    "vertical_rate_fpm",
-    "vertical_rate",
-    "baro_rate",
-  ];
+  const AIRCRAFT_VRATE_FIELDS = ["vertical_rate_fpm", "vertical_rate", "baro_rate"];
 
-  function firstPresent(
-    reading: Record<string, any>,
-    fields: string[]
-  ): [string, any] | null {
+  function firstPresent(reading: Record<string, any>, fields: string[]): [string, any] | null {
     for (const f of fields) {
       const v = reading[f];
       if (v == null) continue;
@@ -2284,9 +2384,7 @@
   // "last_seen_sec" -> "last seen". Field names are snake_case with a unit
   // suffix that the value formatter re-attaches, so the label drops it.
   function aircraftFieldLabel(key: string): string {
-    return key
-      .replace(/_(sec|kt|ft|deg|nm|fpm)$/, "")
-      .replace(/_/g, " ");
+    return key.replace(/_(sec|kt|ft|deg|nm|fpm)$/, "").replace(/_/g, " ");
   }
 
   // Render one ADS-B field value for the hover tooltip. Floats come off the
@@ -2363,10 +2461,7 @@
     const dest = routeEndpoint(route, "destination");
     if (origin || dest) {
       const strip = el("ac-route");
-      const endpoint = (
-        e: { code: string; name: string } | null,
-        align: string
-      ) => {
+      const endpoint = (e: { code: string; name: string } | null, align: string) => {
         const wrap = el(`ac-route-end ${align}`);
         wrap.appendChild(el("ac-route-code", e ? e.code : "—"));
         if (e?.name) wrap.appendChild(el("ac-route-name", e.name));
@@ -2427,11 +2522,7 @@
   // right. Default is up-and-centred; each axis flips only when that side
   // has no room.
   const TOOLTIP_GAP = 18;
-  function placeTooltipInView(
-    overlay: Overlay,
-    element: HTMLElement | null,
-    coord: number[]
-  ) {
+  function placeTooltipInView(overlay: Overlay, element: HTMLElement | null, coord: number[]) {
     if (!element || !mapGlobal.map) return;
     const pixel = mapGlobal.map.getPixelFromCoordinate(coord);
     const size = mapGlobal.map.getSize();
@@ -2766,7 +2857,11 @@
 
   // One reused feature per boat, geometry updated in place — this runs
   // on every update tick.
-  function updateTrackConnector(boatId: string, lastPoint: PositionPoint, location: [number, number]): void {
+  function updateTrackConnector(
+    boatId: string,
+    lastPoint: PositionPoint,
+    location: [number, number]
+  ): void {
     const [lat, lng] = location;
     if (!isValidCoordinate(lat, lng)) return;
     const coords = [
@@ -3589,8 +3684,7 @@
           url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
           crossOrigin: "anonymous",
           maxZoom: 19,
-          attributions:
-            "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+          attributions: "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
           transition: 250,
         }),
       }),
@@ -4625,6 +4719,13 @@
     mapGlobal.map.addLayer(measureLayer);
 
     mapClickHandler = function (evt: any) {
+      if (pickPointActive && onPickPoint) {
+        // One-shot point pick: report and stop. No hit-testing — the user is
+        // choosing a position on the water, not a feature.
+        const [pickLng, pickLat] = evt.coordinate;
+        onPickPoint(pickLat, pickLng);
+        return;
+      }
       if (tileUrlActive) {
         showTileUrlForClick(evt);
         return;
@@ -4795,7 +4896,7 @@
         },
       });
       mapGlobal.map!.getTargetElement()!.style.cursor =
-        measureActive || addWaypointActive ? "crosshair" : hit ? "pointer" : "";
+        measureActive || addWaypointActive || pickPointActive ? "crosshair" : hit ? "pointer" : "";
 
       // Navaid + structure hover tooltip. Both layers share one tooltip
       // element so they don't fight for screen space; the layer the
@@ -4889,9 +4990,7 @@
           }
           const geom = (feature as Feature).getGeometry();
           const coord =
-            geom && geom.getType() === "Point"
-              ? (geom as Point).getCoordinates()
-              : evt.coordinate;
+            geom && geom.getType() === "Point" ? (geom as Point).getCoordinates() : evt.coordinate;
           aircraftTooltipOverlay.setPosition(coord);
           // The card is much taller and wider than the old text blob, so a
           // plane near an edge would push it off-screen. Anchor it to
@@ -5993,7 +6092,6 @@
         <span class="depth-color-legend-label">0–10 ft</span>
       </label>
     {/if}
-
   </div>
 
   <div class="bottom-controls">
@@ -6076,6 +6174,64 @@
   <!-- Optional left-side panel overlay (e.g. routes), toggled by the routes
        toolbar button below; sits just right of the toolbar over the left edge
        of the chart. -->
+  <!-- Chart search: a name lookup over everything in the ENC store. Sits over
+       the top-left of the chart, clear of the toolbar. -->
+  {#if chartSearchOpen}
+    <div class="chart-search">
+      <div class="chart-search-row">
+        <input
+          type="text"
+          class="boat-search-input chart-search-input"
+          placeholder="Search charts — lights, wrecks, channels…"
+          bind:this={chartSearchInput}
+          bind:value={chartSearchTerm}
+          oninput={runChartSearch}
+          onkeydown={(e) => {
+            if (e.key === "Escape") closeChartSearch();
+            if (e.key === "Enter" && chartSearchHits.length > 0) goToHit(chartSearchHits[0]);
+          }}
+        />
+        <button class="chart-search-close" onclick={closeChartSearch} aria-label="Close search"
+          >×</button
+        >
+      </div>
+
+      {#if chartSearchError}
+        <div class="chart-search-note chart-search-error">{chartSearchError}</div>
+      {:else if chartSearchBusy}
+        <div class="chart-search-note">Searching…</div>
+      {:else if chartSearchTerm.trim().length > 0 && chartSearchTerm.trim().length < MIN_QUERY_LENGTH}
+        <div class="chart-search-note">Keep typing…</div>
+      {:else if chartSearchTerm.trim().length >= MIN_QUERY_LENGTH && chartSearchHits.length === 0}
+        <div class="chart-search-note">Nothing on the chart by that name.</div>
+      {/if}
+
+      {#if chartSearchMatched}
+        <div class="chart-search-note">
+          Nothing matched all of that — showing “{chartSearchMatched}”.
+        </div>
+      {/if}
+
+      {#if chartSearchHits.length > 0}
+        <ul class="chart-search-results">
+          {#each chartSearchHits as hit (hit.cell + hit.class + hit.name + hit.lat)}
+            <li>
+              <button class="chart-search-hit" onclick={() => goToHit(hit)}>
+                <span class="chart-search-name">{hit.name}</span>
+                <span class="chart-search-meta">
+                  {hit.label}
+                  {#if formatDistance(hit.distance_meters)}
+                    · {formatDistance(hit.distance_meters)}
+                  {/if}
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
+
   {#if leftOverlay && routesExpanded}
     <div class="left-overlay">{@render leftOverlay()}</div>
   {/if}
@@ -6086,6 +6242,29 @@
        children — conditional ones (add waypoint, clear waypoints, boats)
        appear and disappear without the others jumping around. -->
   <div class="left-toolbar">
+    <button
+      class="layers-toggle"
+      class:active={chartSearchOpen}
+      onclick={toggleChartSearch}
+      data-tip="Search charts"
+      aria-label="Search charts"
+      aria-pressed={chartSearchOpen}
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <circle cx="11" cy="11" r="8" />
+        <path d="m21 21-4.3-4.3" />
+      </svg>
+    </button>
     <button
       class="layers-toggle"
       class:active={layersExpanded}
@@ -6671,11 +6850,7 @@
     align-items: flex-start;
     gap: 10px;
     padding: 8px 10px;
-    background: linear-gradient(
-      to bottom,
-      rgba(217, 119, 6, 0.22),
-      rgba(217, 119, 6, 0.06)
-    );
+    background: linear-gradient(to bottom, rgba(217, 119, 6, 0.22), rgba(217, 119, 6, 0.06));
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
   .aircraft-tooltip :global(.ac-title-wrap) {
@@ -7820,6 +7995,101 @@
 
   .boats-expanded .boats-panel {
     display: flex;
+  }
+
+  /* Chart search: floats over the top-left of the chart, right of the
+     toolbar, above the OL canvas but below any popup. */
+  .chart-search {
+    position: absolute;
+    top: 10px;
+    left: 58px;
+    z-index: 3;
+    width: min(340px, calc(100% - 76px));
+    background: rgba(255, 255, 255, 0.97);
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+  }
+
+  .chart-search-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 6px;
+  }
+
+  .chart-search-input {
+    flex: 1;
+    margin: 8px;
+    width: auto;
+  }
+
+  .chart-search-close {
+    border: none;
+    background: none;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    color: #666;
+  }
+
+  .chart-search-close:hover {
+    color: #000;
+  }
+
+  .chart-search-note {
+    padding: 0 14px 8px;
+    font-size: 12px;
+    color: #666;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+  }
+
+  .chart-search-error {
+    color: #a12;
+  }
+
+  .chart-search-results {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 4px;
+    max-height: 320px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .chart-search-hit {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    width: 100%;
+    padding: 5px 14px;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
+  }
+
+  .chart-search-hit:hover {
+    background: #eef4fb;
+  }
+
+  .chart-search-name {
+    font-size: 13px;
+    color: #111;
+  }
+
+  .chart-search-meta {
+    font-size: 11px;
+    color: #777;
   }
 
   .boat-search-input {

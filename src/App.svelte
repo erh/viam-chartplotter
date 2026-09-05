@@ -1353,14 +1353,24 @@
     }
 
     if (!host || host == "") {
-      var machineId = window.location.pathname.split("/")[2];
-      if (machineId != "") {
-        var rawCookie = getCookie(machineId);
-        if (rawCookie != "") {
-          var x = JSON.parse(rawCookie);
+      // App-embedded path form: /machine/<id>/… — the machine's credentials are
+      // in a cookie named for its id. On any shorter path (the dev server and
+      // the standalone `make run` server both serve at "/") the segment is
+      // undefined, and getCookie(undefined) hands back the whole cookie jar as
+      // an object — JSON.parse then chokes on "[object Object]" and takes
+      // startup down with it. Require an actual id, and an actual string.
+      const machineId = window.location.pathname.split("/")[2];
+      const rawCookie = machineId ? getCookie(machineId) : undefined;
+      if (typeof rawCookie === "string" && rawCookie !== "") {
+        try {
+          const x = JSON.parse(rawCookie);
           host = x.hostname;
           authEntity = x.id;
           apiKey = x.key;
+        } catch (e) {
+          // A malformed machine cookie means "no credentials here", not a dead
+          // app: fall through and let the caller treat it as chart-only.
+          globalLogger.warn(`ignoring unparseable credentials cookie for ${machineId}: ${e}`);
         }
       }
     }
@@ -2460,6 +2470,26 @@
       .map((wp) => ({ id: wp.id, lat: wp.location!.latitude, lng: wp.location!.longitude }));
   }
 
+  // One-shot "click the map to choose a position", used by the Routes panel to
+  // set an auto-route start or destination. The panel hands us a handler; the
+  // next map click calls it and disarms. Storing the handler here (rather than
+  // a mode enum) keeps the panel free to say what the point is for.
+  let mapPickHandler = $state<((p: { lat: number; lng: number }) => void) | null>(null);
+
+  function requestMapPick(handler: (p: { lat: number; lng: number }) => void) {
+    mapPickHandler = handler;
+  }
+
+  function cancelMapPick() {
+    mapPickHandler = null;
+  }
+
+  function handleMapPick(lat: number, lng: number) {
+    const handler = mapPickHandler;
+    mapPickHandler = null; // one-shot: disarm before running the handler
+    handler?.({ lat, lng });
+  }
+
   function seakeeper(name, value) {
     var cmd = {};
     cmd[name] = value;
@@ -2566,9 +2596,15 @@
           : null}
       currentWaypoints={globalData.navWaypoints}
       positionHistory={globalData.posHistory}
+      boatPosition={globalData.pos
+        ? { lat: globalData.pos.getLat(), lng: globalData.pos.getLng() }
+        : null}
       {fetchTrackWindow}
       onLoadRoute={loadNavRoute}
       onPreviewRoutes={(routes) => (routePreview = routes)}
+      onRequestPick={requestMapPick}
+      pickArmed={mapPickHandler !== null}
+      onCancelPick={cancelMapPick}
     />
   {/snippet}
 
@@ -2608,6 +2644,8 @@
       {routePreview}
       areas={areasWithFolders}
       leftOverlay={globalConfig.navServiceName ? routesOverlay : undefined}
+      pickPointActive={mapPickHandler !== null}
+      onPickPoint={handleMapPick}
       onAddWaypoint={globalConfig.navServiceName ? addNavWaypoint : undefined}
       onMoveWaypoint={globalConfig.navServiceName ? moveNavWaypoint : undefined}
       onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}

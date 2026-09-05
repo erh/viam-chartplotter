@@ -17,7 +17,8 @@ export interface Route {
   name: string;
   notes?: string;
   color?: string;
-  source: "manual" | "track";
+  // "auto" is a route the server's ENC auto-router planned (see autoRoute.ts).
+  source: "manual" | "track" | "auto";
   createdAt: string;
   updatedAt: string;
   waypoints: LatLng[];
