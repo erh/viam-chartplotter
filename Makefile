@@ -111,7 +111,9 @@ osm10024test: $(OSM_NYC_PBF)
 # Parse/sync OSM + NOAA ENC data into the shared Mongo database the renderer
 # reads (osm_* + noaa collections). Override MONGO / MONGO_DB on the CLI, e.g.
 #   make ingest-noaa MONGO=mongodb://localhost:27017
-MONGO     ?= mongodb://erh-23big.local:27017
+# The .local (mDNS) name does not resolve everywhere the Tailscale/MagicDNS
+# name does; override MONGO on the command line for a different host.
+MONGO     ?= mongodb://erh-23big:27017
 MONGO_DB  ?= osm
 
 # Base OS cache dir, matching Go's os.UserCacheDir() so these targets point at
