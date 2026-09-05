@@ -54,3 +54,4 @@ tile*.png
 
 # --- tvOS app derived data (make tvappsim) ---
 /tvos/build
+/chartdiag

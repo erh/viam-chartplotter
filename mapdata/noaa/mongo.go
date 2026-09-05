@@ -2,7 +2,10 @@ package noaa
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -157,6 +160,22 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 			Options: options.Index().SetName("cell_1"),
 		},
 		{
+			// Class-first geo index for the auto-router (QueryBBoxClasses),
+			// which asks for ~20 object classes over a corridor far bigger than
+			// any tile. Same lesson as band_geo: the discriminator has to LEAD.
+			// In geo_minZoom_class the class key sits after the 2dsphere, so it
+			// can't bound the scan — the query walks every index key the
+			// corridor intersects (soundings included) and only then filters by
+			// class, which is what blows the read deadline on a passage-sized
+			// box. With objectClass leading, an $in over the routing classes is
+			// that many small bounded geo scans instead of one huge one.
+			Keys: bson.D{
+				{Key: "objectClass", Value: 1},
+				{Key: "geometry", Value: "2dsphere"},
+			},
+			Options: options.Index().SetName("class_geo"),
+		},
+		{
 			// Partial 2dsphere holding ONLY named canyon SEAARE (~200 docs
 			// nationwide) for the overview canyon-name leg (QueryNamedCanyons).
 			// A full index over a huge z7 box still fetches every SEAARE it
@@ -168,6 +187,21 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 					"objectClass":       "SEAARE",
 					"attributes.CATSEA": SeaAreaCanyon,
 				}),
+		},
+		{
+			// Name lookup for the chart search box (SearchByName). Partial over
+			// only the named features — a small slice of the collection — so an
+			// unanchored regex is an index scan over those keys rather than a
+			// COLLSCAN of every sounding and depth area.
+			//
+			// Deliberately NO collation: $regex can only use an index under the
+			// simple binary collation, so a case-insensitive collation here
+			// would make the index unusable for the one query it exists for and
+			// silently turn every search into a full collection scan.
+			// Case-insensitivity comes from the regex's own "i" option instead.
+			Keys: bson.D{{Key: "name", Value: 1}},
+			Options: options.Index().SetName("name_search").
+				SetPartialFilterExpression(bson.M{"name": bson.M{"$exists": true}}),
 		},
 		{
 			// Partial 2dsphere holding ONLY named wrecks (~190 docs) for the
@@ -184,6 +218,180 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 		return fmt.Errorf("noaa: create indexes: %w", err)
 	}
 	return nil
+}
+
+// findHinted runs a Find pinned to a named index, falling back to an unhinted
+// query when that index isn't there yet.
+//
+// The fallback matters because indexes are created by EnsureIndexes, which a
+// long-lived database may not have run since the index was added. Without it,
+// pinning would turn "this query is slower than it should be" into "this query
+// errors outright" on every deployment that hasn't re-run datasync. The pin
+// itself matters because these queries have shapes (an unanchored regex, an
+// $in over classes with a 2dsphere) where the planner readily picks a
+// collection scan that appears to work and then times out on real data.
+func findHinted(ctx context.Context, coll *mongo.Collection, filter bson.M, opts *options.FindOptions, hint string) ([]FeatureDoc, error) {
+	cur, err := coll.Find(ctx, filter, cloneWithHint(opts, hint))
+	if err != nil {
+		if !isBadHint(err) {
+			return nil, err
+		}
+		cur, err = coll.Find(ctx, filter, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer cur.Close(ctx)
+	return decodeFeatureDocs(ctx, cur)
+}
+
+func cloneWithHint(opts *options.FindOptions, hint string) *options.FindOptions {
+	c := *opts
+	c.Hint = hint
+	return &c
+}
+
+// isBadHint reports whether an error is Mongo refusing a hint for an index
+// that doesn't exist, as opposed to a real query failure.
+func isBadHint(err error) bool {
+	var ce mongo.CommandError
+	if errors.As(err, &ce) {
+		// 2 = BadValue, which is what a missing hinted index reports.
+		return ce.Code == 2 || strings.Contains(ce.Message, "hint provided does not correspond")
+	}
+	return strings.Contains(err.Error(), "hint provided does not correspond")
+}
+
+// BBoxClassFilter is the Mongo filter for "features of these classes
+// intersecting this box" — the query the tile and routing paths are built on.
+// Exported so a diagnostic can explain() the exact filter the server runs
+// rather than a hand-copied approximation of it.
+func BBoxClassFilter(minLon, minLat, maxLon, maxLat float64, classes []string) bson.M {
+	polygon := bson.M{
+		"type": "Polygon",
+		"coordinates": [][][]float64{{
+			{minLon, minLat},
+			{maxLon, minLat},
+			{maxLon, maxLat},
+			{minLon, maxLat},
+			{minLon, minLat},
+		}},
+	}
+	f := bson.M{
+		"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
+	}
+	switch len(classes) {
+	case 0:
+	case 1:
+		f["objectClass"] = classes[0]
+	default:
+		f["objectClass"] = bson.M{"$in": classes}
+	}
+	return f
+}
+
+// NameSearchFilter builds the name-matching filter for a search query.
+//
+// The query is split on whitespace and every word must appear somewhere in the
+// name, in any order. A single contiguous match is not enough on its own: ENC
+// names don't space words the way people do — the chart says "Boothbay", a
+// searcher types "booth bay marina" — and requiring the literal phrase finds
+// nothing for either mismatch. Per-word matching handles both, since "booth",
+// "bay" and "marina" are each substrings of "Boothbay Harbor Marina".
+//
+// $exists is here so the query provably falls inside name_search's partial
+// filter; without it the planner won't consider that index at all. The "i"
+// option is what makes the match case-insensitive — a collation would
+// disqualify the index entirely (see EnsureIndexes).
+func NameSearchFilter(query string) bson.M {
+	words := strings.Fields(query)
+	if len(words) > maxSearchWords {
+		words = words[:maxSearchWords]
+	}
+	if len(words) <= 1 {
+		term := query
+		if len(words) == 1 {
+			term = words[0]
+		}
+		return bson.M{"name": bson.M{
+			"$exists":  true,
+			"$regex":   regexp.QuoteMeta(term),
+			"$options": "i",
+		}}
+	}
+	// Several words: an $and of per-word regexes. The clauses share the field,
+	// so they can't be merged into one operator document.
+	clauses := make([]bson.M, 0, len(words)+1)
+	clauses = append(clauses, bson.M{"name": bson.M{"$exists": true}})
+	for _, w := range words {
+		clauses = append(clauses, bson.M{"name": bson.M{
+			"$regex":   regexp.QuoteMeta(w),
+			"$options": "i",
+		}})
+	}
+	return bson.M{"$and": clauses}
+}
+
+// maxSearchWords bounds how many regex clauses one query can generate, so a
+// pasted paragraph can't turn into a hundred-clause scan.
+const maxSearchWords = 6
+
+// SearchLimitMax caps how many search hits a single query returns; the UI
+// shows a short list and the point is to find one thing, not to page a chart.
+const SearchLimitMax = 50
+
+// SearchByName finds named features whose name matches the query, for the
+// chart search box. Matching is case-insensitive and substring-based (so
+// "brenton" finds "Brenton Reef Light"), restricted to the name_search partial
+// index. objectClass, when non-empty, narrows to that S-57 class.
+//
+// Ordering is left to the caller: this returns whatever the index scan yields,
+// capped at limit, and the caller sorts (by distance from the boat, typically).
+// It deliberately over-fetches relative to the display limit so that sort has
+// something to choose from.
+// bbox, when non-nil, restricts the search to features intersecting that box
+// ([minLon, minLat, maxLon, maxLat]).
+func SearchByName(ctx context.Context, coll *mongo.Collection, query, objectClass string, limit int, bbox *[4]float64) ([]FeatureDoc, error) {
+	if coll == nil {
+		return nil, fmt.Errorf("noaa: nil collection")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > SearchLimitMax {
+		limit = SearchLimitMax
+	}
+	filter := NameSearchFilter(query)
+	if objectClass != "" {
+		filter["objectClass"] = objectClass
+	}
+	if bbox != nil {
+		geo := BBoxClassFilter(bbox[0], bbox[1], bbox[2], bbox[3], nil)
+		// NameSearchFilter may already own the top-level $and (a multi-word
+		// query), so merge rather than assign.
+		if existing, ok := filter["$and"].([]bson.M); ok {
+			filter["$and"] = append(existing, bson.M{"geometry": geo["geometry"]})
+		} else {
+			filter["geometry"] = geo["geometry"]
+		}
+	}
+	// geomLow/geometry are dropped: a search hit only needs its bbox.
+	opts := options.Find().
+		SetProjection(bson.M{"geomLow": 0, "geometry": 0}).
+		SetLimit(int64(limit))
+	// Always via name_search, box or no box. The name index is the selective
+	// side of this query — a full scan of it is ~300k small keys and a couple
+	// of hundred milliseconds — whereas the "near me" box is 150 nm across and
+	// selects a large fraction of the chart. Left to itself the planner reads
+	// the geo predicate as the narrow one and walks every feature in that box
+	// applying the regex, which times out on a densely charted coast. The box
+	// is a filter on the handful of name matches, not a way in.
+	docs, err := findHinted(ctx, coll, filter, opts, "name_search")
+	if err != nil {
+		return nil, fmt.Errorf("noaa: search find: %w", err)
+	}
+	return docs, nil
 }
 
 // UpsertDocs bulk-upserts feature documents keyed on _id. Writes are
@@ -372,6 +580,62 @@ func QueryNotableWrecks(ctx context.Context, coll *mongo.Collection, minLon, min
 // thinned geometry is transferred, and the result's Geometry field carries it;
 // when false the full Geometry is returned (and the geomLow duplicate excluded).
 func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom, maxUsageBand int, alwaysClasses []string, objectClass string, useLowGeom bool) ([]FeatureDoc, error) {
+	var classes []string
+	if objectClass != "" {
+		classes = []string{objectClass}
+	}
+	return queryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, maxZoom, maxUsageBand, alwaysClasses, classes, useLowGeom, nil)
+}
+
+// QueryBBoxClasses returns every feature in the bbox belonging to one of the
+// given object classes, ignoring minZoom. It exists for consumers that need a
+// narrow slice of the chart over a wide area — the auto-router wants depth
+// areas, land and obstructions across a whole passage, and nothing else.
+//
+// The class filter is what makes such a query affordable: an unfiltered
+// wide-bbox scan drags back every SOUNDG, navaid and label in the box (SOUNDG
+// alone dwarfs everything else), which is enough to blow the read deadline on
+// a passage-sized area.
+// ClassQuery is what QueryBBoxClasses fetches and how much of it.
+type ClassQuery struct {
+	// Classes restricts to these object classes; empty means all.
+	Classes []string
+	// MaxUsageBand drops features from cells finer than this navigational
+	// purpose (1=overview … 6=berthing); 0 means no ceiling. This is the
+	// single biggest lever on a wide query: harbour and berthing cells are the
+	// bulk of the features in coastal water, and their detail is invisible to
+	// a consumer working at a coarser resolution than they chart.
+	MaxUsageBand int
+	// UseLowGeom fetches the pre-simplified geometry tier instead of full
+	// resolution — geometry is most of what crosses the wire.
+	UseLowGeom bool
+	// Projection limits the fields returned; nil fetches whole documents
+	// (minus geomLow).
+	Projection bson.M
+}
+
+// QueryBBoxClasses returns the features of the requested classes intersecting
+// the bbox, ignoring minZoom.
+func QueryBBoxClasses(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, q ClassQuery) ([]FeatureDoc, error) {
+	return queryBBoxBanded(ctx, coll, minLon, minLat, maxLon, maxLat, -1, q.MaxUsageBand, nil, q.Classes, q.UseLowGeom, q.Projection)
+}
+
+func queryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat, maxLon, maxLat float64, maxZoom, maxUsageBand int, alwaysClasses, objectClasses []string, useLowGeom bool, projection bson.M) ([]FeatureDoc, error) {
+	// A multi-class query with no minZoom bound (the auto-router's) is the one
+	// shape that needs class_geo: the default geo_minZoom_class puts the class
+	// key after the 2dsphere, where it can't bound the scan. Every other caller
+	// leaves the planner alone — it picks correctly for tile-shaped queries.
+	indexHint := ""
+	if len(objectClasses) > 1 && maxZoom < 0 {
+		// With a band ceiling the leading usageBand key bounds the geo scan
+		// harder than the class list does, and band_geo already exists on
+		// every deployment; without one, class_geo is what bounds it.
+		if maxUsageBand > 0 {
+			indexHint = "band_geo"
+		} else {
+			indexHint = "class_geo"
+		}
+	}
 	if coll == nil {
 		return nil, fmt.Errorf("noaa: nil collection")
 	}
@@ -394,24 +658,9 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 	}
 
 	baseFilter := func(b [4]float64) bson.M {
-		polygon := bson.M{
-			"type": "Polygon",
-			"coordinates": [][][]float64{{
-				{b[0], b[1]},
-				{b[2], b[1]},
-				{b[2], b[3]},
-				{b[0], b[3]},
-				{b[0], b[1]},
-			}},
-		}
-		f := bson.M{
-			"geometry": bson.M{"$geoIntersects": bson.M{"$geometry": polygon}},
-		}
+		f := BBoxClassFilter(b[0], b[1], b[2], b[3], objectClasses)
 		if maxUsageBand > 0 {
 			f["usageBand"] = bson.M{"$lte": maxUsageBand}
-		}
-		if objectClass != "" {
-			f["objectClass"] = objectClass
 		}
 		return f
 	}
@@ -427,7 +676,19 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 				bson.D{{Key: "$set", Value: bson.M{"geometry": bson.M{"$ifNull": bson.A{"$geomLow", "$geometry"}}}}},
 				bson.D{{Key: "$unset", Value: "geomLow"}},
 			}
-			cur, err := coll.Aggregate(ctx, pipeline)
+			// The projection has to come after the coalesce, or it would drop
+			// geomLow before $set could read it.
+			if projection != nil {
+				pipeline = append(pipeline, bson.D{{Key: "$project", Value: projection}})
+			}
+			aggOpts := options.Aggregate()
+			if indexHint != "" {
+				aggOpts = options.Aggregate().SetHint(indexHint)
+			}
+			cur, err := coll.Aggregate(ctx, pipeline, aggOpts)
+			if err != nil && indexHint != "" && isBadHint(err) {
+				cur, err = coll.Aggregate(ctx, pipeline)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("noaa: aggregate: %w", err)
 			}
@@ -435,7 +696,19 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 			return decodeFeatureDocs(ctx, cur)
 		}
 		// Full-geometry path: exclude geomLow so its duplicate never transfers.
-		cur, err := coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"geomLow": 0}))
+		proj := bson.M{"geomLow": 0}
+		if projection != nil {
+			proj = projection
+		}
+		opts := options.Find().SetProjection(proj)
+		if indexHint != "" {
+			docs, err := findHinted(ctx, coll, filter, opts, indexHint)
+			if err != nil {
+				return nil, fmt.Errorf("noaa: find: %w", err)
+			}
+			return docs, nil
+		}
+		cur, err := coll.Find(ctx, filter, opts)
 		if err != nil {
 			return nil, fmt.Errorf("noaa: find: %w", err)
 		}
@@ -492,7 +765,7 @@ func QueryBBoxBanded(ctx context.Context, coll *mongo.Collection, minLon, minLat
 	}
 
 	withMain := func(f bson.M) { f["minZoom"] = bson.M{"$lte": maxZoom} }
-	if len(alwaysClasses) == 0 || objectClass != "" {
+	if len(alwaysClasses) == 0 || len(objectClasses) > 0 {
 		return runBoxes(withMain)
 	}
 

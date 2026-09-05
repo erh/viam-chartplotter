@@ -20,6 +20,37 @@ module: bin/viamchartplottermodule dist/index.html
 run: dist/index.html  Makefile
 	go run cmd/run/cmd-run.go
 
+# -- local dev: Go server + web app together ---------------------------------
+# Runs the Go server on :8888 (tiles, weather, /noaa-enc/autoroute) and the
+# Vite dev server on :5173 with hot reload, in one foreground process. Vite
+# already proxies /noaa-enc, /noaa-weather, /app-config and friends to :8888
+# (see vite.config.ts), so the dev app behaves like the bundled one. Ctrl+C
+# stops both.
+#
+# Point it at a Mongo with chart data, otherwise the frontend falls back to the
+# hosted tile server and /noaa-enc/autoroute has nothing to plan against:
+#   make dev MONGO_URI=mongodb://localhost:27017
+#
+# The Routes panel (and with it Auto route) needs a real navigation service, so
+# open the dev app against a machine:
+#   http://localhost:5173/?host=<machine>.viam.cloud&api-key=<key>&authEntity=<key-id>
+# Without those params there is no machine to connect to and the app comes up
+# chart-only.
+MONGO_URI ?= $(MONGO)
+
+.PHONY: dev
+dev: node_modules src/output.css dist/index.html
+	@echo "go server  http://localhost:8888   (mongo: $(MONGO_URI))"
+	@echo "web app    http://localhost:5173   (hot reload; proxies /noaa-* to :8888)"
+	@echo "ctrl+c stops both"
+	@# One shell for both, and `kill 0` on exit tears down the whole process
+	@# group -- otherwise Ctrl+C leaves the Go server or vite orphaned on its
+	@# port and the next `make dev` fails to bind.
+	@trap 'kill 0' EXIT INT TERM; \
+		MONGO_URI="$(MONGO_URI)" go run ./cmd/run & \
+		npm run dev & \
+		wait
+
 src/output.css: node_modules src/app.css
 		npm run build:css
 
@@ -110,7 +141,7 @@ EASTCOAST_STATES = maine new-hampshire massachusetts rhode-island connecticut \
 EASTCOAST_PBFS = $(wildcard $(foreach s,$(EASTCOAST_STATES),$(OSM_CACHE)/us-$(s).osm.pbf))
 ALL_OSM_PBFS   = $(wildcard $(OSM_CACHE)/*.osm.pbf)
 
-.PHONY: mapsync render-cmd ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all backfill-geomlow backfill-lowzoom
+.PHONY: mapsync render-cmd ensure-indexes build-places ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all backfill-geomlow backfill-lowzoom
 
 # Always rebuild the CLI so an ingest never runs against a stale binary.
 mapsync:
@@ -123,13 +154,36 @@ render-cmd:
 
 # Standalone service binaries (non-Viam): map+weather server, and the two
 # populate daemons that keep Mongo current.
-.PHONY: tileserver datasync weathersync
+.PHONY: tileserver datasync weathersync chartdiag
 tileserver:
 	go build -o tileserver ./cmd/tileserver
+
+# Why is a chart query slow? Reports the collection's indexes, the exact filter
+# the server runs, its explain() plan, and a timed live run with payload size.
+#   ./chartdiag --mongo $(MONGO) route --start 41.47,-71.33 --end 41.55,-71.39
+#   ./chartdiag --mongo $(MONGO) search --q brenton
+chartdiag:
+	go build -o chartdiag ./cmd/chartdiag
 datasync:
 	go build -o datasync ./cmd/datasync
 weathersync:
 	go build -o weathersync ./cmd/weathersync
+
+# Create/refresh the noaa collection's indexes without re-ingesting anything.
+# Run this after pulling a change that adds an index (name_search for the chart
+# search box, class_geo for the auto-router) — it takes seconds against data
+# that's already there, where a full ingest takes hours.
+ensure-indexes: datasync
+	./datasync --mongo $(MONGO) --db $(MONGO_DB) --indexes-only
+
+# Build the `places` gazetteer (chart + OSM names, text-indexed) that backs the
+# search box. Scope it to a region first — it is useful immediately and the
+# rest can follow. Idempotent, so re-running extends rather than duplicates.
+#   make build-places PLACES_BBOX=-71.8,40.9,-66.8,44.6
+PLACES_BBOX ?=
+build-places: datasync
+	./datasync --mongo $(MONGO) --db $(MONGO_DB) --build-places \
+		$(if $(PLACES_BBOX),--places-bbox=$(PLACES_BBOX))
 
 # Parse every downloaded ENC cell (.000) into the `noaa` collection. Upserts in
 # place, so it's safe to re-run after a parser change (find|xargs handles the

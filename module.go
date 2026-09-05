@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
+	"github.com/erh/viam-chartplotter/mapdata/places"
 
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
@@ -116,6 +117,11 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// white) is ≥ 2×draft. Fall back to legacy "safe_depth_ft" name so
 	// older configs keep working.
 	draftFt := config.Attributes.Float64("draft", config.Attributes.Float64("safe_depth_ft", 6))
+	// "ideal_depth" (feet) is the auto-router's *preferred* depth: draft is the
+	// hard floor it will never cross, ideal_depth is the water it tries to stay
+	// in when there's a choice. 0 = twice the draft, matching the chart's own
+	// safe-water (DEPDW) band.
+	idealDepthFt := config.Attributes.Float64("ideal_depth", 0)
 	myBoatIcon := config.Attributes.String("myboat_icon_path")
 	// Mongo connection for the OSM tile underlay. Config attribute
 	// wins, env var (MONGO_URI) is the dev-friendly fallback so you
@@ -136,7 +142,7 @@ func newServer(ctx context.Context, deps resource.Dependencies, config resource.
 	// chart — no boat marker, AIS, navigation, camera, or app panels. Exposed via
 	// /app-config; the frontend also auto-enters it when no host is resolvable.
 	chartOnly := config.Attributes.Bool("chart_only", false)
-	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly, api)
+	return StartChartplotterServer(config.ResourceName(), dist, logger, port, cacheDir, cacheMaxBytes, draftFt, idealDepthFt, myBoatIcon, mongoURI, mongoDB, mongoColl, tileServerBaseURL, chartOnly, api)
 }
 
 // mdnsInstanceName returns the Bonjour instance name for the display
@@ -287,6 +293,7 @@ func StartChartplotterServer(
 	cacheRoot string,
 	cacheMaxBytes int64,
 	draftFt float64,
+	idealDepthFt float64,
 	myBoatIconPath string,
 	mongoURI string,
 	mongoDB string,
@@ -362,6 +369,7 @@ func StartChartplotterServer(
 		return b, err
 	}
 	encHandlers := render.NewENCHandlers(encRenderer, encTileCache, wmsFetch, draftFt)
+	encHandlers.SetDefaultIdealDepthFt(idealDepthFt)
 	// OSM underlay layer — render by querying a MongoDB collection
 	// populated offline by `osmtools ingest`. The URI is the only
 	// required piece; if unset, the /noaa-enc/osm-tile/ endpoint
@@ -400,6 +408,17 @@ func StartChartplotterServer(
 			// geometry makes the z7..z10 query fast. Absent → renderer falls back
 			// to the full collection at every zoom.
 			encRenderer.SetNOAALowZoomCollection(noaa.OpenLowZoomCollectionIfBuilt(mctx, db))
+			// Precomputed navigability tiles for the auto-router. Built on
+			// demand and cached here; absent, routing falls back to
+			// rasterising the polygons per request.
+			navColl := noaa.OpenNavGridCollection(db)
+			if err := noaa.EnsureNavGridIndexes(mctx, navColl); err != nil {
+				logger.Warnf("navgrid index: %v", err)
+			}
+			encRenderer.SetNavGridCollection(navColl)
+			// The gazetteer backing the search box. Built by
+			// `datasync --build-places`; absent, search falls back to regex.
+			encRenderer.SetPlacesCollection(places.Open(db))
 			weatherColl = store.OpenCollection(db)
 			mongoChartsOK = true
 			logger.Infof("osm underlay: mongo db=%s buckets=%s/%s/%s; enc=%s; weather=%s",

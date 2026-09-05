@@ -31,7 +31,8 @@ public hosted map+weather server, so tiles and weather work with zero setup.
 | `mongo_uri` | string | — (env `MONGO_URI`) | MongoDB URI holding the ingested chart + weather data. Unset → frontend uses the hosted tile/weather server. |
 | `mongo_db` | string | `osm` (env `MONGO_DB`) | database name |
 | `port` | int | `8888` | HTTP listen port |
-| `draft` | float | `6` | boat draft (ft); drives depth-shading bands (legacy: `safe_depth_ft`) |
+| `draft` | float | `6` | boat draft (ft); drives depth-shading bands and is the auto-router's hard floor (legacy: `safe_depth_ft`) |
+| `ideal_depth` | float | `0` (= 2x `draft`) | preferred depth (ft) for auto-routing: among safe routes, prefer the one that stays this deep |
 | `noaa_cache_dir` | string | OS cache dir | disk cache root for rendered tiles / WMS / weather staging |
 | `noaa_cache_max_bytes` | int | `0` (unbounded) | cap on the WMS proxy cache |
 | `myboat_icon_path` | string | — | path to a custom boat icon |
@@ -56,6 +57,194 @@ public hosted map+weather server, so tiles and weather work with zero setup.
   }
 }
 ```
+
+### auto-routing
+
+`GET /noaa-enc/autoroute?startLat=&startLon=&endLat=&endLon=` plans a course
+between two points over the charted ENC data and returns a waypoint list.
+It rasterises DEPARE depths, land, and obstructions in a corridor around the
+rhumb line and A*s across it.
+
+Two depths drive it. **`sd`** (feet, defaults to `draft`) is the hard
+constraint — the route never crosses water charted shoaler than it.
+**`ideal`** (feet, defaults to `ideal_depth`, else 2x draft) is the soft one:
+among the routes that are safe, prefer the one that stays that deep, so the
+track sits in the channel rather than shaving its edge.
+
+| param | default | description |
+|-------|---------|-------------|
+| `sd` | `draft` | safe depth (ft) — hard limit |
+| `ideal` | `ideal_depth` | preferred depth (ft) |
+| `clearance` | `30` | no-go buffer off land/shoals (m); dropped automatically, with a warning, if no route exists with it |
+| `soft_clearance` | `150` | band that merely costs more, which centres the route in a channel (m) |
+| `pad` | 40% of the direct distance, min 1 nm | how far off the rhumb line the search may wander (m) |
+| `max_cell` | `120` | coarsest grid cell (m) the router will plan on; the leg length limit falls out of this |
+| `avoid` | — | comma list of area classes to steer around; currently `restricted` (RESARE). Soft — crossed only when there is no alternative |
+| `max_waypoints` | `80` | cap on the returned route |
+
+**How long a leg can be** is bounded by resolution, not distance. The grid
+covers the whole corridor in a fixed number of cells, so cell size grows with
+the leg — roughly 44 m at 10 nm, 87 m at 20 nm, 218 m at 50 nm, 872 m at
+200 nm. Past ~120 m a cell is wider than the channel it is supposed to
+represent, so the request is refused with the cell size it would have needed.
+That works out to about 28 nm at the default corridor pad; raise `max_cell`
+(or narrow `pad`) for a longer open-water passage where that precision isn't
+needed.
+
+The response carries `waypoints`, distances, `min_depth_meters` (null when
+none of the route was charted), `crossed_unknown`, whether either endpoint had
+to be snapped to navigable water, and any `warnings`. Water no DEPARE charts
+is passable but penalised, so a survey gap doesn't fail the plan — it flags it.
+Soundings are not consulted (the feature store drops their Z coordinate);
+DEPARE's DRVAL1, the shoalest depth charted for an area, is what it routes on.
+
+In the web app this is the **Auto route…** form in the Routes panel: pick a
+start and destination, plan, review the cautions, then load it into nav or
+save it as a route.
+
+### precomputed navigability tiles
+
+Routing reads "how deep is it here, can I go there" over a wide area. Answering
+that from polygons meant fetching and rasterising the same water on every
+request — measured at **31,052 documents and 58.6 MB** for one 147x80 km
+corridor, to produce a grid that is half a megabyte. The `noaa_navgrid`
+collection stores the grid instead.
+
+A tile is a 256x256 cell raster over a slippy-map tile: `int16` decimetres of
+charted depth plus a flag byte (land, obstruction, dredged, unsurveyed,
+restricted), both zlib-compressed. **~2.4 KB per tile** in practice, since a
+tile is mostly runs of the same value.
+
+Tiles are **boat-independent on purpose**. They hold charted depth and physical
+facts, never a decision that depends on draft — a wreck with a sounding folds
+into the depth rather than becoming a blanket obstruction, so a deep-draft boat
+and a dinghy read the same tile and reach different, correct conclusions. The
+router applies its own safe depth, clearances and penalties to what it reads.
+
+Tiles are built on demand and cached: the first route through a piece of water
+pays for it, everything after reads it. Measured end to end:
+
+| route | cold (builds tiles) | warm (reads them) |
+|---|---|---|
+| 11 nm coastal | 12.6 s | **0.22 s** |
+| 258 nm, 6 legs | 17.3 s | **0.11 s** |
+
+Identical routes both ways. To avoid paying the cold cost in front of a user,
+prewarm a region: `./chartdiag --mongo … prewarm --start 41.3,-71.6 --end
+41.6,-71.1` builds every zoom of the ladder (z9 ≈ 234 m cells through z13 ≈
+15 m) for that box — Narragansett Bay is 220 tiles and 0.5 MB.
+
+`NavGridVersion` is part of each document id, so changing what a tile means
+rebuilds rather than silently trusting stale data, and a rollback still finds
+its own tiles. With no tiles built (or a gap in coverage) routing falls back to
+rasterising the polygons, which is correct and slow.
+
+One thing worth knowing if you touch this: tiles are Web-Mercator, so their
+rows are **not** evenly spaced in latitude. The router's grid is
+equirectangular, so tiles are *sampled* into it per cell rather than stitched
+together — stitching and then reading row index as linear latitude misplaced
+the chart by 2.6 km (eleven cells) over a three-degree grid.
+
+### optimizing an existing route
+
+`POST /noaa-enc/optimize` re-plans a waypoint list you already have:
+
+```jsonc
+{ "waypoints": [{"lat":41.47,"lng":-71.33}, ...],
+  "safe_depth_ft": 6, "ideal_depth_ft": 20,
+  "keep_waypoints": true }        // the default
+```
+
+Every leg is re-planned around land, shoals and obstructions on **one grid over
+one chart query** — a ten-waypoint route would otherwise be nine overlapping
+fetches of the same water.
+
+`keep_waypoints` (default true) keeps every point you placed and re-plans only
+the water between them. A waypoint is usually there for a reason the chart
+doesn't record — a stop, a tide gate, something someone saw — so dropping one
+isn't a decision to make on your behalf without asking. Set it false to let the
+smoother straighten through them and remove the redundant ones.
+
+**Long routes are split into sections.** A 250 nm passage can't be planned on
+one grid — its corridor would need cells wider than the channels they
+represent. Consecutive legs are greedily grouped into the fewest runs that each
+resolve at or below `max_cell`, sharing a chart query wherever they're close
+enough to fit one, and the sections are planned concurrently (4 at a time).
+A 124 nm, 6-leg route plans in ~14 s; in series it was 40 s. The result reports
+`sections`, and `cell_size_meters` is the **coarsest** any section used — the
+route is only as well resolved as its worst-resolved part.
+
+A single leg too long to resolve can't be split further, so the error names it:
+`leg 2 of 6 is 243.9 nm, which needs 1330 m grid cells (limit 120 m): split it
+with an intermediate waypoint…`. An unroutable leg names itself the same way.
+
+The response is otherwise the same shape as `/autoroute`, except
+`direct_meters` is the **original route's** length, so you can see what the
+optimisation cost or saved.
+
+In the web app it's **Optimize current** beside the Auto route button.
+
+### chart search
+
+`GET /noaa-enc/search?q=<text>[&lat=&lon=][&class=<S-57 acronym>][&limit=<n>]`
+finds named features anywhere in the ingested ENC store — lights, wrecks,
+canyons, channels, anchorages, harbour facilities. Matching is
+case-insensitive substring over the stored `name` (OBJNAM), which is the only
+free text the ENC carries; everything else about a feature is codes, so this
+is name search, not full-text search over the chart.
+
+Search runs against the **`places` gazetteer**: one collection holding
+everything named, drawn from both the ENC and OSM, with a `$text` index over
+the names.
+
+It exists because name search over the source collections doesn't scale. An
+unanchored regex there is an index scan whose cost tracks the index size rather
+than the number of matches — measured at 0.4 s for a common word and 15 s for a
+rare one over 274M documents, with the *same query* varying 30x on cache warmth
+alone. A text index is inverted, so cost tracks the matches. Measured on the
+built region: **0.04-0.2 s**, reliably.
+
+| query | before | now |
+|---|---|---|
+| `chandler's wharf` | nothing (timed out) | Chandler's Wharf, 0.07 s |
+| `marina` near Boothbay | marinas in Boston and Detroit | Boothbay Harbor Marina, 0 nm |
+
+Building it:
+
+```
+./datasync --mongo … --build-places --places-bbox=-71.8,40.9,-66.8,44.6
+```
+
+Every write is an idempotent upsert keyed on the place's identity, so a build
+can be interrupted, resumed, or scoped to a region and extended later — build
+the water you sail in first. New England is ~564k places, 103 MB of data and
+59 MB of index, and took ~14 minutes. Omit `--places-bbox` for everything.
+
+The identity key rounds position to ~100 m, so the same light charted in the
+coastal, approach and harbour cells collapses to one row rather than three.
+
+Two details that matter for matching:
+
+- A quoted phrase in `$text` is **required**, not preferred, so the exact
+  phrase is tried as its own query first and the loose terms only if it finds
+  nothing. Combining them in one query is phrase-mandatory and returns nothing
+  when the name is spelled even slightly differently.
+- Ranking puts names carrying **every** word the operator typed above merely
+  near ones, comparing on letters only — the data says "Chandler's Wharf", a
+  searcher types "chandlers wharf", and treating that as a mismatch buries the
+  exact answer under everything sharing the word "wharf".
+
+Results are tagged `source: "chart"` or `"osm"`, because the two answer
+different questions: the ENC names lights, wrecks and channels; OSM names
+marinas, fuel docks, boatyards and towns. With `lat`/`lon` the results are
+ranked nearest-first among equally good name matches.
+
+Where the gazetteer hasn't been built, search falls back to the old regex path
+over the source collections — correct, but slow and unreliable for rare names.
+
+In the web app it's the magnifier at the top of the map toolbar: type three or
+more characters, and picking a result centres a point feature or frames an
+area one.
 
 ### display API (LAN thin clients)
 
@@ -271,9 +460,34 @@ from Mongo instead of each re-fetching GRIB.
 ## Building
 
 - `make module` — build the Viam module (`bin/viamchartplottermodule`).
-- `make run` — run the server locally (`cmd/run`).
+- `make run` — run the server locally (`cmd/run`), serving the bundled `dist`.
+- `make dev` — the local test loop: the Go server on :8888 **and** the Vite dev
+  server on :5173 with hot reload, in one foreground process (Ctrl+C stops
+  both). Vite proxies `/noaa-enc`, `/noaa-weather`, `/app-config` and friends to
+  :8888, so the dev app behaves like the bundled one. Point it at chart data
+  with `make dev MONGO_URI=mongodb://localhost:27017` — without it the frontend
+  falls back to the hosted tile server and `/noaa-enc/autoroute` returns 503.
+  The Routes panel needs a live navigation service, so open
+  `http://localhost:5173/?host=<machine>.viam.cloud&api-key=<key>&authEntity=<key-id>`
+  to exercise it; with no params the app comes up chart-only.
 - `make ingest-osm-eastcoast` / `make ingest-osm-all` / `make ingest-noaa` —
   populate MongoDB directly (alternative to the sync models for one-off loads).
+- `make chartdiag` — build the query/prewarm tool. When a chart query is slow or
+  times out, this says why: which indexes exist, the exact filter the server
+  runs, its `explain()` plan (index or COLLSCAN, keys and docs examined), and a
+  timed live run with the payload size.
+  ```
+  ./chartdiag --mongo mongodb://host:27017 route --start 41.47,-71.33 --end 41.55,-71.39
+  ./chartdiag --mongo mongodb://host:27017 search --q brenton
+  ./chartdiag --mongo mongodb://host:27017 osm --q marina
+  ./chartdiag --mongo mongodb://host:27017 prewarm --start 41.3,-71.6 --end 41.6,-71.1
+  ```
+- `make ensure-indexes` — create/refresh the `noaa` collection's indexes
+  without re-ingesting (`datasync --indexes-only`). **Run this after pulling a
+  change that adds an index** — `name_search` (chart search) and `class_geo`
+  (auto-router) are both new. Seconds, against data that's already there; a
+  missing index is the usual cause of a `context deadline exceeded` from
+  Mongo.
 - `make updaterdk` — bump the Viam RDK dependency.
 
 ### Overview-tile speed (optional backfills)

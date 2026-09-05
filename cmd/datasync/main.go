@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,8 @@ import (
 	"go.viam.com/rdk/logging"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
+	"github.com/erh/viam-chartplotter/mapdata/places"
 )
 
 func main() {
@@ -47,6 +50,9 @@ func run() error {
 	minScale := flag.Int("minscale", 0, "min cell scale (0=no bound)")
 	maxScale := flag.Int("maxscale", 0, "max cell scale (0=no bound)")
 	parallel := flag.Int("parallel", 4, "concurrent cell downloads")
+	indexesOnly := flag.Bool("indexes-only", false, "create/refresh the collection indexes and exit (no download, no ingest)")
+	buildPlaces := flag.Bool("build-places", false, "build the `places` gazetteer from the chart + OSM collections, then exit")
+	placesBBox := flag.String("places-bbox", "", "restrict --build-places to minLon,minLat,maxLon,maxLat")
 	interval := flag.Duration("interval", 24*time.Hour, "sync interval; 0 = run once and exit")
 	flag.Parse()
 
@@ -74,6 +80,26 @@ func run() error {
 	coll := noaa.OpenCollection(client.Database(*dbName))
 	if err := noaa.EnsureIndexes(ctx, coll); err != nil {
 		return err
+	}
+	// An existing database predates any index added since it was last synced,
+	// and building them is seconds of work against data that is already there.
+	// This is the way to pick those up without a re-ingest.
+	if *indexesOnly {
+		// The OSM collections live in the same database and carry the other
+		// half of the search index; a search covers both, so ensuring one
+		// without the other leaves it half-blind.
+		if err := osmtiler.EnsureSearchIndexes(ctx, osmtiler.OpenOSMCollections(client.Database(*dbName))); err != nil {
+			logger.Warnf("osm search indexes: %v", err)
+		}
+		if err := noaa.EnsureNavGridIndexes(ctx, noaa.OpenNavGridCollection(client.Database(*dbName))); err != nil {
+			logger.Warnf("navgrid index: %v", err)
+		}
+		logger.Info("indexes ensured; exiting (--indexes-only)")
+		return nil
+	}
+
+	if *buildPlaces {
+		return buildGazetteer(ctx, client.Database(*dbName), *placesBBox, logger)
 	}
 
 	// Targeted re-ingest mode: positional args are cell files / dirs to re-parse
@@ -166,6 +192,85 @@ func reingestPaths(ctx context.Context, coll *mongo.Collection, paths []string, 
 	logger.Infof("reingest done: %d cells, %d features, %d write-errors, %d geom-skipped",
 		total.Cells, total.Docs, total.WriteErrors, total.GeomSkipped)
 	return nil
+}
+
+// buildGazetteer fills the `places` collection from the chart and OSM
+// collections. Idempotent and interruptible: every write is an upsert keyed on
+// the place's identity, so a run that is cut short simply resumes, and a
+// region can be built before the rest of the world.
+func buildGazetteer(ctx context.Context, db *mongo.Database, bboxArg string, logger logging.Logger) error {
+	var bbox *[4]float64
+	if bboxArg != "" {
+		parsed, err := parseBBox(bboxArg)
+		if err != nil {
+			return err
+		}
+		bbox = &parsed
+		logger.Infof("building places within %v", parsed)
+	} else {
+		logger.Info("building places for the whole database — this reads every named feature; --places-bbox scopes it")
+	}
+
+	dst := places.Open(db)
+	if err := places.EnsureIndexes(ctx, dst); err != nil {
+		return err
+	}
+
+	opts := places.BuildOptions{
+		BBox: bbox,
+		Progress: func(coll string, read, written int) {
+			logger.Infof("places: %s read=%d written=%d", coll, read, written)
+		},
+	}
+
+	total := places.BuildStats{}
+	type job struct {
+		name   string
+		src    *mongo.Collection
+		source string
+		kindOf func(places.SourceDoc) string
+	}
+	osmColls := osmtiler.OpenOSMCollections(db)
+	jobs := []job{
+		{"noaa", noaa.OpenCollection(db), places.SourceChart, places.ChartKind},
+	}
+	for _, c := range []*mongo.Collection{osmColls.Overview, osmColls.Coastal, osmColls.Detail, osmColls.Skip} {
+		if c != nil {
+			jobs = append(jobs, job{c.Name(), c, places.SourceOSM, places.OSMKindFunc(osmtiler.KindFromTags)})
+		}
+	}
+
+	for _, j := range jobs {
+		st, err := places.BuildFrom(ctx, dst, j.src, j.source, j.kindOf, opts)
+		total.Read += st.Read
+		total.Written += st.Written
+		if err != nil {
+			logger.Warnf("places: %s stopped after read=%d written=%d: %v", j.name, st.Read, st.Written, err)
+			if ctx.Err() != nil {
+				return nil // interrupted; what was written stands
+			}
+			continue
+		}
+		logger.Infof("places: %s done read=%d written=%d in %s", j.name, st.Read, st.Written, st.Elapsed.Round(time.Second))
+	}
+	logger.Infof("places: total read=%d written=%d", total.Read, total.Written)
+	return nil
+}
+
+func parseBBox(s string) ([4]float64, error) {
+	var out [4]float64
+	parts := strings.Split(s, ",")
+	if len(parts) != 4 {
+		return out, fmt.Errorf("--places-bbox wants minLon,minLat,maxLon,maxLat")
+	}
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return out, fmt.Errorf("--places-bbox: %w", err)
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 func envOr(k, def string) string {

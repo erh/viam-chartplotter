@@ -32,6 +32,9 @@ type ENCHandlers struct {
 	tileCache        *ENCTileCache
 	wmsFetch         WMSFetch // for the /compare endpoint; may be nil
 	defaultSafeDepth float64  // feet; used when ?sd= is absent
+	// defaultIdealDepth (feet) is the auto-router's preferred depth when
+	// ?ideal= is absent. Zero means "twice the safe depth".
+	defaultIdealDepth float64
 
 	// lastRequest (unix nanos) is stamped by every registered handler; the
 	// background tile prewarmer (prewarm.go) only renders after 30s of quiet.
@@ -121,6 +124,9 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/noaa-enc/navaids", track(h.handleNavaids))
 	mux.HandleFunc("/noaa-enc/structures", track(h.handleStructures))
 	mux.HandleFunc("/noaa-enc/osm-tile/", track(h.handleOSMTile))
+	mux.HandleFunc("/noaa-enc/autoroute", track(h.handleAutoRoute))
+	mux.HandleFunc("/noaa-enc/search", track(h.handleSearch))
+	mux.HandleFunc("/noaa-enc/optimize", track(h.handleOptimize))
 }
 
 // handleOSMTile serves a 256×256 PNG containing only the OSM vector

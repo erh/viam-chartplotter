@@ -46,6 +46,12 @@ type ENCRenderer struct {
 	// noaaColl so the huge $geoIntersects walks a much smaller 2dsphere index.
 	// Nil falls back to noaaColl (full geometry) at every zoom.
 	noaaLowColl *mongo.Collection
+	// navColl holds precomputed navigability tiles (see navgrid.go); nil
+	// disables the cache and falls back to rasterising per request.
+	navColl *mongo.Collection
+	// placesColl is the gazetteer (see mapdata/places); nil falls back to the
+	// regex path.
+	placesColl *mongo.Collection
 	// osm is the set of per-minZoom-bucket MongoDB collections the
 	// /noaa-enc/osm-tile/ underlay queries. Nil disables the layer
 	// entirely — the handler serves a transparent fallback.
@@ -103,6 +109,16 @@ func (r *ENCRenderer) SetNOAACollection(c *mongo.Collection) { r.noaaColl = c }
 // it — its valid-simplified geometry makes the huge low-zoom $geoIntersects far
 // cheaper. Nil (the default) keeps every zoom on the full-geometry collection.
 func (r *ENCRenderer) SetNOAALowZoomCollection(c *mongo.Collection) { r.noaaLowColl = c }
+
+// SetNavGridCollection attaches the precomputed navigability tiles the router
+// reads. Absent, routing still works — it rasterises from the polygons every
+// time, which is correct but far slower.
+func (r *ENCRenderer) SetNavGridCollection(c *mongo.Collection) { r.navColl = c }
+
+// SetPlacesCollection attaches the gazetteer the search box reads. Absent,
+// search falls back to regex over the source collections, which is correct but
+// times out on rare names.
+func (r *ENCRenderer) SetPlacesCollection(c *mongo.Collection) { r.placesColl = c }
 
 // Logger returns the renderer's logger (may be nil) so the HTTP handlers can
 // log per-request timing breakdowns through the same sublogger.
@@ -361,6 +377,30 @@ func (r *ENCRenderer) queryTileFeatures(minLon, minLat, maxLon, maxLat float64, 
 		}
 		if z >= wreckNameMinZoom && z <= wreckNameLegMaxZoom {
 			out = appendLandmarksInBBox(out, wrecks, pMinLon, pMinLat, pMaxLon, pMaxLat)
+		}
+	}
+	return out, nil
+}
+
+// queryFeaturesClasses pulls only the given object classes from the bbox,
+// ignoring minZoom. The auto-router uses it: over a passage-sized box an
+// unfiltered scan drags back every sounding and navaid in the area and blows
+// the read deadline, while the dozen classes routing actually needs (depth
+// areas, land, obstructions) come back in a fraction of the time.
+func (r *ENCRenderer) queryFeaturesClasses(ctx context.Context, minLon, minLat, maxLon, maxLat float64, q noaa.ClassQuery) ([]*mongoFeature, error) {
+	if r.noaaColl == nil {
+		return nil, nil
+	}
+	qStart := time.Now()
+	docs, err := noaa.QueryBBoxClasses(ctx, r.noaaColl, minLon, minLat, maxLon, maxLat, q)
+	r.logSlowQuery("noaa", time.Since(qStart), len(docs), -1, minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*mongoFeature, 0, len(docs))
+	for _, d := range docs {
+		if mf, ok := featureFromDoc(d); ok {
+			out = append(out, mf)
 		}
 	}
 	return out, nil
