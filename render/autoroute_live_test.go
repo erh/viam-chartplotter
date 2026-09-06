@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -317,4 +318,38 @@ func TestLiveRoutePortlandDeparture(t *testing.T) {
 	if within < 2 {
 		t.Errorf("only %d waypoints within 6 nm of the start; expected the harbour exit to be marked", within)
 	}
+
+	// No doubling back on the spot. A section join at the Cape Cod Canal's
+	// east entrance used to put the route north-west of the Sandwich
+	// breakwater, so it ran in, back out around the jetty's tip and in again:
+	// four turns of about 100 degrees on legs of 250-300 m. Rounding a
+	// breakwater or turning into a harbour is a sharp turn too — the Montauk
+	// entrance at the far end of this route turns 92 degrees — so the leg
+	// length is what separates a manoeuvre from a stutter. Montauk's legs are
+	// ~750 m; the loop's were under 300.
+	const (
+		sharpTurnDeg = 90
+		stutterLegM  = 500
+	)
+	for i := 1; i+1 < len(res.Waypoints); i++ {
+		a, b, c := res.Waypoints[i-1], res.Waypoints[i], res.Waypoints[i+1]
+		in := haversineMeters(a.Lat, a.Lng, b.Lat, b.Lng)
+		out := haversineMeters(b.Lat, b.Lng, c.Lat, c.Lng)
+		if in >= stutterLegM || out >= stutterLegM {
+			continue
+		}
+		turn := math.Abs(math.Mod(bearingBetween(b, c)-bearingBetween(a, b)+540, 360) - 180)
+		if turn > sharpTurnDeg {
+			t.Errorf("waypoint %d at %.4f,%.4f turns %.0f deg between legs of %.0f m and %.0f m: the route is doubling back on itself",
+				i, b.Lat, b.Lng, turn, in, out)
+		}
+	}
+}
+
+func bearingBetween(a, b RoutePoint) float64 {
+	p1, p2 := a.Lat*math.Pi/180, b.Lat*math.Pi/180
+	dl := (b.Lng - a.Lng) * math.Pi / 180
+	y := math.Sin(dl) * math.Cos(p2)
+	x := math.Cos(p1)*math.Sin(p2) - math.Sin(p1)*math.Cos(p2)*math.Cos(dl)
+	return math.Mod(math.Atan2(y, x)*180/math.Pi+360, 360)
 }

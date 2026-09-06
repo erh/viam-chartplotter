@@ -272,6 +272,11 @@ type AutoRouteResult struct {
 	ElapsedMs    float64    `json:"elapsed_ms"`
 
 	Warnings []string `json:"warnings,omitempty"`
+
+	// joins are the indices in Waypoints where two independently planned
+	// sections were stitched together. Internal: they are scaffolding the
+	// straightening pass needs, not something a client should see.
+	joins []int `json:"-"`
 }
 
 // autoRouteQueryTimeout bounds the chart query. Generous compared with a tile
@@ -589,6 +594,7 @@ func (r *ENCRenderer) AutoRouteVia(points []RoutePoint, opts AutoRouteOptions) (
 	}
 
 	res := mergeRouteResults(parts, points)
+	r.straightenSectionJoins(res, opts, explicitPad)
 	r.refineTightWater(res, opts, explicitPad)
 	r.repairLegsOverLand(res, opts, explicitPad)
 	res.DistanceMeters = pathDistanceM(res.Waypoints)
@@ -641,6 +647,17 @@ func (r *ENCRenderer) refineTightWater(res *AutoRouteResult, opts AutoRouteOptio
 		if sub.CellSizeMeters >= res.CellSizeMeters {
 			continue
 		}
+		// Finer is not automatically better. At the Cape Cod Canal's east
+		// entrance this stretch runs beside the Sandwich breakwater — 84 m of
+		// stone the re-plan's grid could see but did not respect. It came back
+		// 386 m shorter with one 98 m leg straight across the jetty, and
+		// repairLegsOverLand then had to undo that by splicing a detour round
+		// the breakwater's tip, leaving the route 337 m LONGER and three
+		// waypoints messier than before the refinement. Judge the replacement
+		// the way that safety pass will, and keep what we had when it loses.
+		if r.replacementCrossesMoreLand(res.Waypoints[run[0]:run[1]+1], sub.Waypoints) {
+			continue
+		}
 		res.Waypoints = spliceWaypoints(res.Waypoints, run[0], run[1], sub.Waypoints)
 		if sub.MinDepthMeters != nil && (res.MinDepthMeters == nil || *sub.MinDepthMeters < *res.MinDepthMeters) {
 			d := *sub.MinDepthMeters
@@ -652,6 +669,75 @@ func (r *ENCRenderer) refineTightWater(res *AutoRouteResult, opts AutoRouteOptio
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
 			"%d stretch(es) through constrained water re-planned at finer resolution", refined))
 	}
+}
+
+// maxJoinStraightenings bounds the section-join pass. Each straightening is a
+// re-plan, and a route with more joins than this is long enough that the odd
+// dogleg costs less than the time to look for them all.
+const maxJoinStraightenings = 8
+
+// straightenSectionJoins re-plans the route across the waypoints where its
+// sections were joined.
+//
+// Sections are planned independently, and each must begin and end exactly on
+// the point that joins it to the next. Those points are anchors: a coarse
+// pass's guesses, placed on a grid too coarse to see what is actually there.
+// At the Cape Cod Canal's east entrance one landed north-west of the Sandwich
+// breakwater — 84 m of stone that a 408 m coarse cell cannot resolve — so the
+// route approached down the wrong side of the jetty and had to come back round
+// its tip to get in. The water either side is navigable and every leg is
+// clear, so nothing downstream calls it an error. It is simply not the way in.
+//
+// Anchors are scaffolding, so once the route exists it is allowed to
+// straighten across them: re-plan the short span from the waypoint before a
+// join to the one after, on a grid sized for that span rather than for the
+// section, and take the result when it is clear of land and no longer than
+// what it replaces. Nothing is dropped that the operator placed — those points
+// are the route, and they are never section joins.
+func (r *ENCRenderer) straightenSectionJoins(res *AutoRouteResult, opts AutoRouteOptions, explicitPad float64) {
+	straightened := 0
+	// Back to front, so a splice cannot invalidate an earlier join's index.
+	for ji := len(res.joins) - 1; ji >= 0; ji-- {
+		if straightened >= maxJoinStraightenings {
+			break
+		}
+		j := res.joins[ji]
+		if j <= 0 || j+1 >= len(res.Waypoints) {
+			continue
+		}
+		from, to := res.Waypoints[j-1], res.Waypoints[j+1]
+		sub, err := r.planSection([]RoutePoint{from, to}, []bool{true, true}, opts, explicitPad)
+		if err != nil || len(sub.Waypoints) < 2 {
+			continue // the join stands
+		}
+		span := res.Waypoints[j-1 : j+2]
+		if pathDistanceM(sub.Waypoints) > pathDistanceM(span) {
+			continue // no shorter than going through the join
+		}
+		if len(r.legsOverLand(sub.Waypoints)) > len(r.legsOverLand(span)) {
+			continue // and not at the cost of putting a leg on the beach
+		}
+		res.Waypoints = spliceWaypoints(res.Waypoints, j-1, j+1, sub.Waypoints)
+		straightened++
+	}
+}
+
+// replacementCrossesMoreLand reports whether a re-planned stretch puts more
+// legs over land than the stretch it would replace. Both are measured against
+// the finest charted grid — the one repairLegsOverLand uses — because that is
+// the only view that settles a disagreement between two coarser ones.
+//
+// A replacement that crosses nothing is always fine, which is the common case
+// and costs one check. The original is only examined when the replacement is
+// already suspect: refining a canal transit that had eight legs on the bank
+// into one that has two is exactly what this pass is for, so the test is
+// "more", not "any".
+func (r *ENCRenderer) replacementCrossesMoreLand(original, replacement []RoutePoint) bool {
+	after := len(r.legsOverLand(replacement))
+	if after == 0 {
+		return false
+	}
+	return after > len(r.legsOverLand(original))
 }
 
 // repairLegsOverLand is the last word on safety: it checks the finished route
@@ -1182,6 +1268,9 @@ func mergeRouteResults(parts []*AutoRouteResult, original []RoutePoint) *AutoRou
 		if i == 0 {
 			res.Waypoints = append(res.Waypoints, p.Waypoints...)
 		} else if len(p.Waypoints) > 1 {
+			// The waypoint the two sections share is where they were forced to
+			// meet. straightenSectionJoins needs to know which ones those are.
+			res.joins = append(res.joins, len(res.Waypoints)-1)
 			res.Waypoints = append(res.Waypoints, p.Waypoints[1:]...)
 		}
 		res.FeatureCount += p.FeatureCount
