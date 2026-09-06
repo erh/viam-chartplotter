@@ -224,19 +224,29 @@ func (g *navGrid) pullTaut(path []int) []int {
 	if len(path) < 3 {
 		return path
 	}
-	// A shortcut is allowed to be marginally worse than the sub-path it
-	// replaces; without the slack, float noise in the mean blocks legs that
-	// are visibly identical.
-	const slack = 0.05
 	out := []int{path[0]}
 	i := 0
 	for i < len(path)-1 {
 		best := i + 1
-		runMax := math.Max(float64(g.cost[path[i]]), float64(g.cost[path[i+1]]))
+		runSum := float64(g.cost[path[i]]) + float64(g.cost[path[i+1]])
 		for j := i + 2; j < len(path) && j-i <= pullWindow; j++ {
-			runMax = math.Max(runMax, float64(g.cost[path[j]]))
-			limit := runMax + slack
-			if _, _, ok := g.traverse(path[i], path[j], &limit); !ok {
+			runSum += float64(g.cost[path[j]])
+
+			// The question a waypoint answers is "can the next leg be steered
+			// as a straight line". So the test is whether that straight line
+			// stays in navigable water — not whether it matches the cost of
+			// the path it replaces. That is what makes the density follow the
+			// geography: across open water one leg reaches for miles, while
+			// through a canal the straight line leaves the channel almost
+			// immediately and the marks stay close together.
+			sum, n, ok := g.traverse(path[i], path[j], nil)
+			if !ok || n == 0 {
+				break
+			}
+			// A shortcut may not be materially worse water overall. Without
+			// this the route stops preferring depth and clearance the moment
+			// a straight line is merely passable.
+			if sum/float64(n) > (runSum/float64(j-i+1))*shortcutMeanTolerance {
 				break
 			}
 			best = j
@@ -246,6 +256,97 @@ func (g *navGrid) pullTaut(path []int) []int {
 	}
 	return out
 }
+
+// shortcutMeanTolerance is how much worse, on average, a straight leg may be
+// than the path it replaces. Generous: A* threads between cells to shave
+// fractions of a percent, and holding a steerable leg to that produces a
+// waypoint per grid artefact.
+const shortcutMeanTolerance = 1.6
+
+// shortcutCellHeadroom bounds thinToLimit's bypasses, which are driven by
+// deviation rather than steerability and so still need a cost guard.
+const shortcutCellHeadroom = 0.75
+
+// dropReversals removes waypoints whose turn the next one undoes.
+//
+// Cross-track distance cannot tell a course change from a zigzag: a mark that
+// swings you 40 degrees right and then 50 back over two miles sits a long way
+// off the line between its neighbours, so a distance test scores it as a real
+// corner. It isn't one — it is the grid's quantisation showing through, and on
+// a plotter it is a mark to read and an arrival to acknowledge for nothing.
+//
+// The test is therefore the SIGN of the turns, not their size. A waypoint
+// whose turn is reversed by its neighbour's is an artefact; one that turns and
+// keeps the course turned is a corner, however sharp, and survives. Removal is
+// still gated on the bypass being steerable through navigable water, which is
+// what keeps the marks through a canal, where the straight line leaves the
+// channel.
+func (g *navGrid) dropReversals(cells []int) []int {
+	if len(cells) < 3 {
+		return cells
+	}
+	pts := append([]int(nil), cells...)
+	for len(pts) > 2 {
+		best := -1
+		bestTurn := float64(minReversalDeg)
+		for i := 1; i < len(pts)-1; i++ {
+			turn := g.signedTurnAt(pts, i)
+			if math.Abs(turn) < minReversalDeg {
+				continue
+			}
+			// Reversed by the mark ahead, or by the one behind — and the
+			// reversal has to be a real one. A hard turn followed by a slight
+			// opposite drift is a corner easing off, not a zigzag; requiring
+			// both turns to be significant is what tells them apart.
+			ahead := g.signedTurnAt(pts, i+1)
+			behind := g.signedTurnAt(pts, i-1)
+			reversed := (turn*ahead < 0 && math.Abs(ahead) >= minReversalDeg) ||
+				(turn*behind < 0 && math.Abs(behind) >= minReversalDeg)
+			if !reversed {
+				continue
+			}
+			// A reversal is an artefact, not a deliberate dogleg, so the
+			// bypass is held to being navigable rather than to matching the
+			// cost of the wiggle it replaces.
+			limit := reversalCostCeiling
+			if _, _, ok := g.traverse(pts[i-1], pts[i+1], &limit); !ok {
+				continue
+			}
+			if math.Abs(turn) > bestTurn {
+				best, bestTurn = i, math.Abs(turn)
+			}
+		}
+		if best < 0 {
+			return pts
+		}
+		pts = append(pts[:best], pts[best+1:]...)
+	}
+	return pts
+}
+
+// signedTurnAt is the heading change at pts[i] in degrees, positive to
+// starboard. Zero at the ends, where there is no turn to speak of.
+func (g *navGrid) signedTurnAt(pts []int, i int) float64 {
+	if i <= 0 || i >= len(pts)-1 {
+		return 0
+	}
+	ax, ay := pts[i-1]%g.nx, pts[i-1]/g.nx
+	bx, by := pts[i]%g.nx, pts[i]/g.nx
+	cx, cy := pts[i+1]%g.nx, pts[i+1]/g.nx
+	in := math.Atan2(float64(by-ay)*g.my, float64(bx-ax)*g.mx)
+	out := math.Atan2(float64(cy-by)*g.my, float64(cx-bx)*g.mx)
+	d := math.Mod(out-in+3*math.Pi, 2*math.Pi) - math.Pi
+	return d * 180 / math.Pi
+}
+
+// minReversalDeg is how sharp a turn must be before its reversal is worth
+// straightening. Below it the marks are describing a curve, not zigzagging.
+const minReversalDeg = 12
+
+// reversalCostCeiling is the worst water a straightened leg may cross. Well
+// above open water and a moderate depth penalty, well below anything the cost
+// model treats as a place to avoid.
+const reversalCostCeiling = 3.0
 
 // thinToLimit drops the least significant waypoints until at most max remain,
 // removing only points whose bypass leg is still safe. Returns the kept path

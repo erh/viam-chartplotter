@@ -40,7 +40,7 @@ const NavTileSize = 256
 // NavGridVersion is bumped whenever the meaning of a stored tile changes, so
 // stale tiles are rebuilt rather than silently trusted. Part of the document
 // id, so old and new coexist and a rollback still finds its own tiles.
-const NavGridVersion = 1
+const NavGridVersion = 3
 
 // NavDepthUncharted is the depth sentinel for a cell no depth area covers.
 // Distinct from "0 m", which on a chart means a drying area.
@@ -48,11 +48,13 @@ const NavDepthUncharted = math.MinInt16
 
 // Cell flags. These are facts about the world, not judgements about a boat.
 const (
-	NavFlagLand        uint8 = 1 << iota // charted land or shoreline construction
-	NavFlagObstruction                   // wreck/rock/pile with no charted depth over it
-	NavFlagDredged                       // maintained channel
-	NavFlagUnsurveyed                    // UNSARE
-	NavFlagRestricted                    // RESARE — the router decides what to do about it
+	NavFlagLand         uint8 = 1 << iota // charted land or shoreline construction
+	NavFlagObstruction                    // wreck/rock/pile with no charted depth over it
+	NavFlagDredged                        // maintained channel
+	NavFlagUnsurveyed                     // UNSARE
+	NavFlagRestricted                     // RESARE — the router decides what to do about it
+	NavFlagChannel                        // charted navigable channel (FAIRWY/DRGARE)
+	NavFlagChannelDepth                   // the channel itself charts a depth here
 )
 
 // NavTile is one precomputed tile: a NavTileSize x NavTileSize grid over a

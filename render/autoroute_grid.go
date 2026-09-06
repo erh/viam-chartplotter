@@ -17,12 +17,14 @@ import (
 // Cell flags. A cell can carry several at once (a dredged channel inside a
 // restricted area, say).
 const (
-	cellLand        uint8 = 1 << iota // charted land / shoreline construction
-	cellObstruction                   // wreck, rock, pile — hard block
-	cellDredged                       // maintained channel: never depth-penalised
-	cellUnsurveyed                    // UNSARE: nothing was surveyed here
-	cellRestricted                    // RESARE and friends: entry is regulated
-	cellBlockedHard                   // computed in finalize(): impassable
+	cellLand         uint8 = 1 << iota // charted land / shoreline construction
+	cellObstruction                    // wreck, rock, pile — hard block
+	cellDredged                        // maintained channel: never depth-penalised
+	cellUnsurveyed                     // UNSARE: nothing was surveyed here
+	cellRestricted                     // RESARE and friends: entry is regulated
+	cellChannel                        // charted navigable channel (FAIRWY/DRGARE)
+	cellChannelDepth                   // the channel itself charts a depth here
+	cellBlockedHard                    // computed in finalize(): impassable
 )
 
 // cellAvoid is any cell there is a charted reason to stay out of. The two
@@ -49,6 +51,10 @@ type navGrid struct {
 	depth   []float64
 	scaleOf []int32
 	flags   []uint8
+	// landScale is the compilation scale of the feature that last decided
+	// whether this cell is land, so a finer cell can overrule a coarser one —
+	// exactly as scaleOf does for depth.
+	landScale []int32
 
 	// Filled by finalize().
 	cost       []float32 // cost multiplier, >= 1; +Inf where impassable
@@ -68,8 +74,25 @@ type gridCost struct {
 
 	DepthPenalty   float64 // added at safe depth, tapering to 0 at ideal depth
 	ShorePenalty   float64 // added right at the hard-clearance edge, tapering to 0
-	UnknownPenalty float64 // added on cells no DEPARE charted
-	AvoidPenalty   float64 // added on cellAvoid cells
+	UnknownPenalty float64 // added on cells no DEPARE charted, within...
+	// UnknownPenaltyRangeM of the nearest land or shoal. Beyond it uncharted
+	// water is free: it is the open sea, not an unsurveyed hazard.
+	UnknownPenaltyRangeM float64
+
+	// The two reasons to stay out of somewhere are priced separately, because
+	// they are not the same kind of reason and only one of them is the
+	// operator's choice.
+	//
+	// UnsurveyedPenalty is a fact about the chart: nobody sounded here.
+	// RestrictedPenalty is a rule, and it applies ONLY when the caller asked
+	// to avoid restricted areas. Sharing one weight between them — which this
+	// used to do, floored at the unsurveyed value — charged every charted
+	// restricted area to every route by default. New York Harbour and the East
+	// River are full of them, so the whole Long Island Sound corridor cost 3x
+	// and every passage out of New York went round the outside of Long Island,
+	// 20 nm further, for a rule nobody had asked to obey.
+	UnsurveyedPenalty float64
+	RestrictedPenalty float64
 }
 
 // newNavGrid sizes a grid over the bbox: square-ish cells, at least
@@ -93,9 +116,11 @@ func newNavGrid(minLon, minLat, maxLon, maxLat float64, maxCells int, minCellM f
 	g.depth = make([]float64, n)
 	g.scaleOf = make([]int32, n)
 	g.flags = make([]uint8, n)
+	g.landScale = make([]int32, n)
 	for i := range g.depth {
 		g.depth[i] = math.NaN()
 		g.scaleOf[i] = math.MaxInt32 // "coarser than anything real"
+		g.landScale[i] = math.MaxInt32
 	}
 	return g
 }
@@ -138,6 +163,13 @@ func (g *navGrid) cellSizeM() float64 { return g.mx }
 
 func (g *navGrid) idx(ix, iy int) int { return iy*g.nx + ix }
 
+// cellBounds returns a cell's lon/lat extent.
+func (g *navGrid) cellBounds(ix, iy int) (minLon, minLat, maxLon, maxLat float64) {
+	minLon = g.minLon + float64(ix)*g.dLon
+	minLat = g.minLat + float64(iy)*g.dLat
+	return minLon, minLat, minLon + g.dLon, minLat + g.dLat
+}
+
 // cellCentre returns the lon/lat at the centre of a cell.
 func (g *navGrid) cellCentre(ix, iy int) (lon, lat float64) {
 	return g.minLon + (float64(ix)+0.5)*g.dLon, g.minLat + (float64(iy)+0.5)*g.dLat
@@ -174,6 +206,30 @@ func (g *navGrid) setDepth(i int, depthM float64, scale int32) {
 }
 
 func (g *navGrid) mark(i int, f uint8) { g.flags[i] |= f }
+
+// markLand records land at a compilation scale, keeping the finest reading.
+//
+// Land cannot be a sticky OR the way the other flags are. Coarse cells draw a
+// peninsula as solid ground — at 1:350,000 the Cape Cod Canal is too small to
+// appear at all — so a cell painted land by a coarse cell and water by a fine
+// one has to end up water, or every narrow waterway charted in detail is
+// blocked by the overview that could not show it. This is the same
+// finest-cell-wins rule setDepth applies to depth.
+func (g *navGrid) markLand(i int, scale int32) {
+	if scale <= g.landScale[i] {
+		g.flags[i] |= cellLand
+		g.landScale[i] = scale
+	}
+}
+
+// markWater records that a feature charts navigable water here, clearing land
+// left by any coarser cell.
+func (g *navGrid) markWater(i int, scale int32) {
+	if scale < g.landScale[i] {
+		g.flags[i] &^= cellLand
+		g.landScale[i] = scale
+	}
+}
 
 // fillRings rasterises a polygon (outer ring plus any holes/parts, in the
 // concatenated-ring convention splitRings unpacks) by even-odd scanline over
@@ -269,6 +325,49 @@ func (g *navGrid) stampDisc(lon, lat, radiusM float64, fn func(i int)) {
 	}
 }
 
+// stampEdges marks every cell each edge of a ring passes through, walking the
+// line rather than sampling its ends.
+//
+// This is what keeps a narrow channel connected. Scanline fill samples cell
+// centres, so a waterway thinner than a cell survives only as a broken chain
+// of dots that A* cannot traverse — the Cape Cod Canal is ~146 m wide and
+// disappears entirely on the 136 m grid a 31 nm leg gets. Walking the channel
+// outline marks a continuous run of cells whatever the resolution.
+func (g *navGrid) stampEdges(rings [][][]float64, fn func(i int)) {
+	for _, ring := range rings {
+		for k := 0; k+1 < len(ring); k++ {
+			a, b := ring[k], ring[k+1]
+			if len(a) < 2 || len(b) < 2 {
+				continue
+			}
+			g.stampSegment(a[0], a[1], b[0], b[1], fn)
+		}
+	}
+}
+
+// stampSegment marks the cells a lon/lat segment crosses.
+func (g *navGrid) stampSegment(lon0, lat0, lon1, lat1 float64, fn func(i int)) {
+	x0 := (lon0 - g.minLon) / g.dLon
+	y0 := (lat0 - g.minLat) / g.dLat
+	x1 := (lon1 - g.minLon) / g.dLon
+	y1 := (lat1 - g.minLat) / g.dLat
+	steps := int(math.Max(math.Abs(x1-x0), math.Abs(y1-y0))) + 1
+	if steps > maxSegmentSteps {
+		steps = maxSegmentSteps // a wildly long edge must not stall the raster
+	}
+	for s := 0; s <= steps; s++ {
+		t := float64(s) / float64(steps)
+		ix := int(math.Floor(x0 + t*(x1-x0)))
+		iy := int(math.Floor(y0 + t*(y1-y0)))
+		if ix < 0 || iy < 0 || ix >= g.nx || iy >= g.ny {
+			continue
+		}
+		fn(iy*g.nx + ix)
+	}
+}
+
+const maxSegmentSteps = 4096
+
 // stampVertices marks the cell under every vertex of a polygon/line. Scanline
 // fill samples cell centres, so a pier or islet thinner than one cell would
 // otherwise vanish; walking its outline guarantees it still blocks.
@@ -295,11 +394,32 @@ func (g *navGrid) finalize(c gridCost) {
 	blocked := make([]bool, n)
 	for i := 0; i < n; i++ {
 		f := g.flags[i]
+		d := g.depth[i]
+		// A charted fairway or dredged channel is navigable by definition, so
+		// it outranks the land the same coarse cell also touches. Without this
+		// a canal narrower than a cell is impassable however it is charted:
+		// its cells all straddle a bank. Depth still governs — a channel
+		// charted shoaler than the boat's safe depth blocks like anything else.
+		if f&cellChannel != 0 {
+			// Only the CHANNEL's own charted depth can close it. A canal cell
+			// also touches the shore, so it inherits whatever the surrounding
+			// water is charted at — often 0 m, which is the drying edge beside
+			// it, not the 32 ft the Cape Cod Canal actually carries. Judging a
+			// channel by that closes every one of them.
+			// A POSITIVE charted depth below the boat's draft closes the
+			// channel. A zero does not: in a maintained channel DRVAL1=0 means
+			// the depth is unspecified far more often than it means the
+			// channel dries, and reading it literally closes every canal —
+			// the Cape Cod Canal carries 32 ft and charts 0 here.
+			if f&cellChannelDepth != 0 && !math.IsNaN(d) && d > 0 && d < c.SafeDepthM {
+				blocked[i] = true
+			}
+			continue
+		}
 		if f&(cellLand|cellObstruction) != 0 {
 			blocked[i] = true
 			continue
 		}
-		d := g.depth[i]
 		if !math.IsNaN(d) && d < c.SafeDepthM && f&cellDredged == 0 {
 			blocked[i] = true
 		}
@@ -314,7 +434,10 @@ func (g *navGrid) finalize(c gridCost) {
 			continue
 		}
 		distM := float64(g.clearCells[i]) * g.mx
-		if distM < c.HardClearanceM {
+		// The clearance buffer is measured from land, and a channel cell is by
+		// definition right against it. Applying the buffer here would close
+		// every narrow passage the previous rule just opened.
+		if distM < c.HardClearanceM && g.flags[i]&cellChannel == 0 {
 			g.cost[i] = float32(math.Inf(1))
 			continue
 		}
@@ -322,19 +445,35 @@ func (g *navGrid) finalize(c gridCost) {
 		f := g.flags[i]
 		d := g.depth[i]
 		switch {
-		case f&cellDredged != 0:
+		case f&(cellDredged|cellChannel) != 0:
 			// Maintained channel — charted or not, it is kept navigable.
 		case math.IsNaN(d):
-			mult += c.UnknownPenalty
+			// Only penalise uncharted water that is near something. Charted
+			// depth runs out offshore, so a flat penalty makes the open sea
+			// cost twice the coastal strip and the router hugs the coast to
+			// stay where the survey is — the opposite of what a passage wants.
+			// Well away from any land or shoal, uncharted means "nobody
+			// sounded the deep water", not "here be dragons".
+			if distM < c.UnknownPenaltyRangeM {
+				mult += c.UnknownPenalty
+			}
 		case span > 0 && d < c.IdealDepthM:
 			mult += c.DepthPenalty * (c.IdealDepthM - d) / span
 		}
+		// The SOFT shore cost applies in a channel too. Only the hard
+		// clearance is waived there — waiving both leaves nothing pulling the
+		// route toward mid-channel, so it clips the bank on every bend. This
+		// is a cost, not a wall: a channel narrower than the soft band is
+		// still passable, just more expensive at its edges than its middle.
 		if c.SoftClearanceM > c.HardClearanceM && distM < c.SoftClearanceM {
 			t := (c.SoftClearanceM - distM) / (c.SoftClearanceM - c.HardClearanceM)
 			mult += c.ShorePenalty * t
 		}
-		if f&cellAvoid != 0 {
-			mult += c.AvoidPenalty
+		if f&cellUnsurveyed != 0 {
+			mult += c.UnsurveyedPenalty
+		}
+		if f&cellRestricted != 0 {
+			mult += c.RestrictedPenalty
 		}
 		g.cost[i] = float32(mult)
 	}

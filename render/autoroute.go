@@ -16,6 +16,7 @@ import (
 	"github.com/beetlebugorg/s57/pkg/s57"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,9 +51,9 @@ type AvoidArea struct {
 	Name  string                  // reported back in the result
 	Class string                  // S-57 object class, e.g. "RESARE"
 	Match func(f encFeature) bool // nil matches every feature of the class
-	// Penalty is added to the cost multiplier of every cell the area covers.
-	// The grid prices all avoid-flagged cells at the heaviest penalty in play
-	// (see avoidPenalty), so this is a weight, not a per-area setting.
+	// Penalty is added to the cost multiplier of every cell the area covers,
+	// and applies only because the caller asked for this rule. A charted
+	// restricted area costs nothing on a route that did not request it.
 	Penalty float64
 }
 
@@ -82,6 +83,9 @@ type AutoRouteOptions struct {
 	DepthPenalty   float64 // cost added at SafeDepthM, tapering to 0 at IdealDepthM
 	ShorePenalty   float64 // cost added at the hard-clearance edge, tapering to 0
 	UnknownPenalty float64 // cost added where no DEPARE charts a depth
+	// UnknownPenaltyRangeM is how far from land or a shoal that penalty
+	// reaches. Uncharted water beyond it is open sea and costs nothing extra.
+	UnknownPenaltyRangeM float64
 
 	Avoid []AvoidArea
 
@@ -145,14 +149,15 @@ const maxCellCeilingM = 400
 // as a warning on the result — it is a real loss of fidelity, just a smaller
 // one than refusing to plan at all.
 func effectiveMaxCellM(points []RoutePoint, opts AutoRouteOptions) float64 {
+	// An explicitly raised MaxCellM raises the ceiling with it. Otherwise the
+	// topology pass, whose whole purpose is to accept a coarse grid, would be
+	// held to the same limit as the pass it exists to make possible.
+	ceiling := math.Max(maxCellCeilingM, opts.MaxCellM)
 	want := longestLegMeters(points) / legCellRatio
 	if want < opts.MaxCellM {
 		want = opts.MaxCellM
 	}
-	if want > maxCellCeilingM {
-		want = maxCellCeilingM
-	}
-	return want
+	return math.Min(want, ceiling)
 }
 
 // DefaultAutoRouteOptions returns sane defaults for a boat of the given safe
@@ -164,13 +169,14 @@ func DefaultAutoRouteOptions(safeDepthM float64) AutoRouteOptions {
 		safeDepthM = 6.0 / feetPerMetre
 	}
 	return AutoRouteOptions{
-		SafeDepthM:     safeDepthM,
-		IdealDepthM:    2 * safeDepthM,
-		HardClearanceM: 30,
-		SoftClearanceM: 150,
-		DepthPenalty:   1.5,
-		ShorePenalty:   2.0,
-		UnknownPenalty: 1.0,
+		SafeDepthM:           safeDepthM,
+		IdealDepthM:          2 * safeDepthM,
+		HardClearanceM:       30,
+		SoftClearanceM:       150,
+		DepthPenalty:         1.5,
+		ShorePenalty:         2.0,
+		UnknownPenalty:       1.0,
+		UnknownPenaltyRangeM: 2 * 1852,
 		// 120 m is about the narrowest a buoyed channel gets; below that
 		// resolution the router would start planning through channel edges it
 		// cannot see. With the default corridor pad this allows legs out to
@@ -208,6 +214,9 @@ func (o *AutoRouteOptions) normalize(directM float64) {
 	}
 	if o.UnknownPenalty <= 0 {
 		o.UnknownPenalty = d.UnknownPenalty
+	}
+	if o.UnknownPenaltyRangeM <= 0 {
+		o.UnknownPenaltyRangeM = d.UnknownPenaltyRangeM
 	}
 	if o.MaxCellM <= 0 {
 		o.MaxCellM = d.MaxCellM
@@ -315,24 +324,23 @@ func RoutingProjection() bson.M {
 // fetched around each endpoint, where the boat manoeuvres and where a pier or
 // a berth-scale rock is exactly what matters.
 func routingUsageBand(cellM float64) int {
-	switch {
-	case cellM >= 150:
-		return 3 // coastal and coarser: a long offshore leg
-	case cellM >= 60:
-		return 4 // approach and coarser: a normal coastal leg
-	default:
-		return 0 // fine grid, short leg, small box — take everything
+	// Only two settings, and the threshold is high. A ceiling is a promise
+	// that the detail being dropped is finer than the grid can express, and
+	// band 4 broke that promise: a query returns whole features, so a
+	// fine-scale LNDARE covering a shoreline is painted in full while the
+	// fine-scale water beside it is left out, and fine land over coarse water
+	// cannot be cleared. That mismatch walled Portland harbour in. Take
+	// everything until the grid is genuinely too coarse to hold harbour
+	// detail, then drop to coastal charting in one step.
+	if cellM >= 150 {
+		return 3
 	}
+	return 0
 }
-
-// endpointDetailRadiusM is how far around each end of a section to fetch full
-// harbour detail. Big enough to cover getting off a dock and out of a marina,
-// small enough that the extra query is trivial.
-const endpointDetailRadiusM = 2000
 
 // routingFeatures fetches the chart the router will raster: the corridor at the
 // usage band matching the grid, plus full detail around the ends.
-func (r *ENCRenderer) routingFeatures(ctx context.Context, bbox [4]float64, ends []RoutePoint, opts AutoRouteOptions) ([]*mongoFeature, error) {
+func (r *ENCRenderer) routingFeatures(ctx context.Context, bbox [4]float64, opts AutoRouteOptions) ([]*mongoFeature, error) {
 	classes := autoRouteClasses(opts)
 	cell := gridCellSize(bbox, opts)
 	band := routingUsageBand(cell)
@@ -354,28 +362,41 @@ func (r *ENCRenderer) routingFeatures(ctx context.Context, bbox [4]float64, ends
 		return features, nil // already full detail everywhere
 	}
 
+	// Charted channels are fetched at EVERY band, whatever ceiling the grid's
+	// resolution implies. A canal is drawn in the harbour cells the ceiling
+	// excludes — the Cape Cod Canal's fairway only exists at band 5 — so
+	// without this the one feature that makes a narrow passage routable is the
+	// one feature guaranteed to be missing. There are few of them, so the
+	// extra query is cheap even over a whole corridor.
+	//
+	// Note what is NOT done here: an earlier version also fetched every class
+	// at every band in a small box around each endpoint, to recover
+	// berth-level detail where the boat manoeuvres. It walled harbours in. A
+	// query returns whole features, so a fine-scale LNDARE covering a
+	// shoreline is painted far outside the box that asked for it, while the
+	// matching fine-scale water is not — and fine land over coarse water
+	// cannot be cleared, because only a finer water feature may override land.
+	// Measured on Portland: with those boxes a flood from the harbour reached
+	// 339 cells and never got to sea; without them, 186,119 and out. Detail
+	// has to arrive at a consistent scale or not at all.
 	seen := make(map[string]struct{}, len(features))
 	for _, f := range features {
 		seen[f.id] = struct{}{}
 	}
-	detail := noaa.ClassQuery{Classes: classes, Projection: RoutingProjection()}
-	for _, p := range ends {
-		b := pointBox(p, endpointDetailRadiusM)
-		extra, err := r.queryFeaturesClasses(ctx, b[0], b[1], b[2], b[3], detail)
-		if err != nil {
-			// The corridor is the safety-critical part and we have it. Losing
-			// the endpoint detail costs precision where the boat manoeuvres,
-			// which is worth a log line, not a failed route.
-			r.logger.Warnf("auto-route: endpoint detail query failed, continuing on corridor data: %v", err)
+	channels, err := r.queryFeaturesClasses(ctx, bbox[0], bbox[1], bbox[2], bbox[3], noaa.ClassQuery{
+		Classes:    autoRouteChannelClasses,
+		UseLowGeom: useLowGeomForCell(cell),
+		Projection: RoutingProjection(),
+	})
+	if err != nil {
+		r.logger.Warnf("auto-route: channel query failed, narrow passages may not route: %v", err)
+	}
+	for _, f := range channels {
+		if _, dup := seen[f.id]; dup {
 			continue
 		}
-		for _, f := range extra {
-			if _, dup := seen[f.id]; dup {
-				continue
-			}
-			seen[f.id] = struct{}{}
-			features = append(features, f)
-		}
+		seen[f.id] = struct{}{}
+		features = append(features, f)
 	}
 	return features, nil
 }
@@ -438,6 +459,7 @@ const lowGeomToleranceMeters = 360.0 / float64(256*(1<<noaa.LowGeomMaxZoom)) * m
 // bbox.
 func autoRouteClasses(opts AutoRouteOptions) []string {
 	classes := []string{"DEPARE", "DRGARE", "UNSARE"}
+	classes = append(classes, autoRouteChannelClasses...)
 	for c := range autoRouteLandClasses {
 		classes = append(classes, c)
 	}
@@ -476,6 +498,21 @@ func wrapChartQueryError(err error, what, hint string) error {
 		return fmt.Errorf("%s: %w after %s — %s", what, ErrChartQueryTimeout, autoRouteQueryTimeout, hint)
 	}
 	return fmt.Errorf("%s: %w", what, err)
+}
+
+// autoRouteChannelClasses are the charted navigable channels. A fairway is the
+// chart saying "this is the way through" — the Cape Cod Canal is a FAIRWY
+// named "Cape Cod Canal Channel" — and without them a passage narrower than a
+// grid cell cannot be routed at all, however the surrounding water is charted.
+var autoRouteChannelClasses = []string{"FAIRWY", "DRGARE"}
+
+func isChannelClassForRouting(class string) bool {
+	for _, c := range autoRouteChannelClasses {
+		if c == class {
+			return true
+		}
+	}
+	return false
 }
 
 // autoRouteLandClasses are the S-57 area classes the router treats as solid.
@@ -531,20 +568,258 @@ func (r *ENCRenderer) AutoRouteVia(points []RoutePoint, opts AutoRouteOptions) (
 	// wider than the channels they represent. Split it into sections that each
 	// resolve properly, sharing a chart query wherever consecutive legs are
 	// close enough to fit one.
+	// A leg too long to resolve is planned coarsely first, and its shape used
+	// as anchors for the real pass. Subdividing the rhumb line instead would
+	// be quicker and wrong: an evenly-spaced midpoint between New York and
+	// Provincetown lands on Long Island, and snapping it to the nearest water
+	// picks a side of the island at random.
+	points, userPlaced, err := r.anchorLongLegs(points, opts, explicitPad)
+	if err != nil {
+		return nil, err
+	}
+
 	sections, err := sectionsForResolution(points, opts, explicitPad)
 	if err != nil {
 		return nil, err
 	}
 
-	parts, err := r.planSections(sections, opts, explicitPad)
+	parts, err := r.planSections(points, userPlaced, sections, opts, explicitPad)
 	if err != nil {
 		return nil, err
 	}
 
 	res := mergeRouteResults(parts, points)
+	r.refineTightWater(res, opts, explicitPad)
+	r.repairLegsOverLand(res, opts, explicitPad)
+	res.DistanceMeters = pathDistanceM(res.Waypoints)
 	res.ElapsedMs = float64(time.Since(began).Microseconds()) / 1000.0
 	return res, nil
 }
+
+// refineTightWater re-plans the stretches of a finished route that run through
+// constrained water, each on its own grid sized for it.
+//
+// A route is only as accurate as the grid it was planned on. A canal 146 m
+// wide planned on a 136 m grid is drawn to the nearest cell centre, which is
+// the bank: a Cape Cod Canal transit had eight of its legs over land, and no
+// amount of smoothing fixes that because the smoother is checking the same
+// coarse grid that put it there. The fix is to plan that water at a resolution
+// that can see it — 20 m rather than 136 — and the only stretches that need it
+// are the ones the route already tells us about, because the smoother leaves
+// marks close together exactly where the straight line between them would
+// leave the channel.
+func (r *ENCRenderer) refineTightWater(res *AutoRouteResult, opts AutoRouteOptions, explicitPad float64) {
+	runs := tightWaterRuns(res.Waypoints)
+	if len(runs) == 0 {
+		return
+	}
+	refined := 0
+	// Back to front: a splice changes the length of the list, so working from
+	// the end leaves the earlier runs' indices valid. (Recomputing the runs
+	// inside a range loop does not help — range still walks the stale slice,
+	// which is an index out of range waiting to happen.)
+	for ri := len(runs) - 1; ri >= 0; ri-- {
+		run := runs[ri]
+		if refined >= maxTightWaterRefinements {
+			break
+		}
+		if run[0] < 0 || run[1] >= len(res.Waypoints) || run[1] <= run[0] {
+			continue
+		}
+		from, to := res.Waypoints[run[0]], res.Waypoints[run[1]]
+		// A run that spans most of the route cannot be re-planned any finer —
+		// its bbox is the route's bbox.
+		if haversineMeters(from.Lat, from.Lng, to.Lat, to.Lng) > maxTightRunFraction*res.DistanceMeters {
+			continue
+		}
+		sub, err := r.planSection([]RoutePoint{from, to}, []bool{true, true}, opts, explicitPad)
+		if err != nil || len(sub.Waypoints) < 2 {
+			continue // the original stretch stands
+		}
+		// Only take the re-plan if it is actually finer; otherwise it is the
+		// same grid and the same answer.
+		if sub.CellSizeMeters >= res.CellSizeMeters {
+			continue
+		}
+		res.Waypoints = spliceWaypoints(res.Waypoints, run[0], run[1], sub.Waypoints)
+		if sub.MinDepthMeters != nil && (res.MinDepthMeters == nil || *sub.MinDepthMeters < *res.MinDepthMeters) {
+			d := *sub.MinDepthMeters
+			res.MinDepthMeters = &d
+		}
+		refined++
+	}
+	if refined > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"%d stretch(es) through constrained water re-planned at finer resolution", refined))
+	}
+}
+
+// repairLegsOverLand is the last word on safety: it checks the finished route
+// against the finest charted grid available and re-plans any leg that crosses
+// land.
+//
+// Everything upstream reasons about the grid the route was planned on, and a
+// route is only ever as accurate as that grid. In a canal narrower than a cell
+// the two disagree — a leg the planner believes is in the channel is drawn
+// across the bank — and no amount of smoothing catches it, because the
+// smoother is consulting the same grid that put it there. This pass consults a
+// finer one, so what it reports is what a plotter would actually draw.
+func (r *ENCRenderer) repairLegsOverLand(res *AutoRouteResult, opts AutoRouteOptions, explicitPad float64) {
+	repaired, remaining := 0, 0
+	for pass := 0; pass < maxLandRepairPasses; pass++ {
+		bad := r.legsOverLand(res.Waypoints)
+		remaining = len(bad)
+		if len(bad) == 0 {
+			return
+		}
+		fixed := false
+		// Work from the end so splicing doesn't invalidate earlier indices.
+		for i := len(bad) - 1; i >= 0 && repaired < maxLandRepairs; i-- {
+			leg := bad[i]
+			sub, err := r.planSection(
+				[]RoutePoint{res.Waypoints[leg], res.Waypoints[leg+1]},
+				[]bool{true, true}, opts, explicitPad)
+			if err != nil || len(sub.Waypoints) < 2 {
+				continue
+			}
+			res.Waypoints = spliceWaypoints(res.Waypoints, leg, leg+1, sub.Waypoints)
+			repaired++
+			fixed = true
+		}
+		if !fixed {
+			break
+		}
+	}
+	res.DistanceMeters = pathDistanceM(res.Waypoints)
+	if repaired > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d leg(s) re-planned after checking against the detailed chart", repaired))
+	}
+	if remaining > 0 {
+		// Never silent. A leg the router could not get off the ground is the
+		// one thing an operator must be told about.
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"%d leg(s) still cross charted land at full detail — check them before steering this route", remaining))
+	}
+}
+
+// legsOverLand returns the indices of legs whose straight line crosses charted
+// land, checked against the finest tiles the ladder offers.
+func (r *ENCRenderer) legsOverLand(pts []RoutePoint) []int {
+	if r.navColl == nil || len(pts) < 2 {
+		return nil
+	}
+	var bad []int
+	for i := 0; i+1 < len(pts); i++ {
+		if r.legCrossesLand(pts[i], pts[i+1]) {
+			bad = append(bad, i)
+		}
+	}
+	return bad
+}
+
+// legCrossesLand samples one leg against a fine local grid.
+func (r *ENCRenderer) legCrossesLand(a, b RoutePoint) bool {
+	pad := landCheckPadM / metresPerDegreeLat
+	bbox := [4]float64{
+		math.Min(a.Lng, b.Lng) - pad/clampCosLat(a.Lat), math.Min(a.Lat, b.Lat) - pad,
+		math.Max(a.Lng, b.Lng) + pad/clampCosLat(a.Lat), math.Max(a.Lat, b.Lat) + pad,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), landCheckTimeout)
+	defer cancel()
+	tiles, err := r.NavTiles(ctx, navMaxZoom, bbox[0], bbox[1], bbox[2], bbox[3])
+	if err != nil || len(tiles) == 0 {
+		return false // cannot check; do not invent a problem
+	}
+	scale := float64(int(1) << navMaxZoom)
+	n := noaa.NavTileSize
+	steps := int(haversineMeters(a.Lat, a.Lng, b.Lat, b.Lng)/landCheckStepM) + 1
+	for s := 0; s <= steps; s++ {
+		f := float64(s) / float64(steps)
+		lat := a.Lat + f*(b.Lat-a.Lat)
+		lon := a.Lng + f*(b.Lng-a.Lng)
+		fx, fy := lonLatToTileFrac(lon, lat, scale)
+		tile := tiles[[3]int{navMaxZoom, int(math.Floor(fx)), int(math.Floor(fy))}]
+		if tile == nil {
+			continue
+		}
+		px := clampIndex(int((fx-math.Floor(fx))*float64(n)), n)
+		py := clampIndex(int((fy-math.Floor(fy))*float64(n)), n)
+		fl := tile.Flags[py*n+px]
+		if fl&noaa.NavFlagLand != 0 && fl&noaa.NavFlagChannel == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	// landCheckStepM is how finely a leg is sampled. Below the finest tile's
+	// cell size, so nothing is stepped over.
+	landCheckStepM = 10
+	// landCheckPadM is the margin around a leg when fetching tiles to check it.
+	landCheckPadM = 200
+	// maxLandRepairs and maxLandRepairPasses bound the extra planning. A route
+	// needing more than this has something wrong with it that re-planning
+	// individual legs will not fix, and the operator is told instead.
+	maxLandRepairs      = 12
+	maxLandRepairPasses = 3
+	landCheckTimeout    = 60 * time.Second
+)
+
+// tightWaterRuns finds maximal runs of waypoints joined by short legs, with
+// one waypoint of context on each side. A short leg is the smoother saying the
+// straight line between these marks would leave the water.
+func tightWaterRuns(pts []RoutePoint) [][2]int {
+	var runs [][2]int
+	i := 1
+	for i < len(pts) {
+		if haversineMeters(pts[i-1].Lat, pts[i-1].Lng, pts[i].Lat, pts[i].Lng) >= tightWaterLegM {
+			i++
+			continue
+		}
+		start := i - 1
+		for i < len(pts) && haversineMeters(pts[i-1].Lat, pts[i-1].Lng, pts[i].Lat, pts[i].Lng) < tightWaterLegM {
+			i++
+		}
+		end := i - 1
+		// Deliberately no context expansion. Reaching out a mark on each side
+		// pulls in the long approach legs either end of a canal, and the
+		// refinement bbox then covers the whole passage again — which is the
+		// grid we are trying to get away from. The run's own ends are already
+		// real waypoints, so the splice joins cleanly without them.
+		if end > start {
+			runs = append(runs, [2]int{start, end})
+		}
+	}
+	return runs
+}
+
+// spliceWaypoints replaces pts[from..to] with the replacement, INCLUDING the
+// replacement's own end positions.
+//
+// Keeping the original ends instead looks harmless — they are the same
+// positions the re-plan was asked for — but a re-plan may have had to move one
+// off land to find navigable water, and dropping it reconnects the route to
+// the very waypoint that was over the bank. That is why re-planning a bad leg
+// left it just as bad.
+func spliceWaypoints(pts []RoutePoint, from, to int, replacement []RoutePoint) []RoutePoint {
+	out := make([]RoutePoint, 0, len(pts)+len(replacement))
+	out = append(out, pts[:from]...)
+	out = append(out, replacement...)
+	return append(out, pts[to+1:]...)
+}
+
+// tightWaterLegM is the leg length below which a stretch is treated as
+// constrained enough to be worth re-planning finely.
+const tightWaterLegM = 2 * 1852
+
+// maxTightWaterRefinements bounds the extra planning one route can trigger.
+const maxTightWaterRefinements = 6
+
+// maxTightRunFraction is how much of a route a single tight run may span
+// before re-planning it is pointless: past this its bbox is the route's bbox
+// and the "finer" grid is the same grid.
+const maxTightRunFraction = 0.5
 
 // sectionConcurrency bounds how many sections are planned at once. Each holds
 // its own grid and its own slice of the chart, so this is a memory and
@@ -557,32 +832,216 @@ const sectionConcurrency = 3
 // planSections plans every section, several at a time. They are independent —
 // separate queries, separate grids — and planning them in series is the
 // difference between a route arriving in seven seconds and in forty.
-func (r *ENCRenderer) planSections(sections [][]RoutePoint, opts AutoRouteOptions, explicitPad float64) ([]*AutoRouteResult, error) {
+func (r *ENCRenderer) planSections(points []RoutePoint, userPlaced []bool, sections [][2]int, opts AutoRouteOptions, explicitPad float64) ([]*AutoRouteResult, error) {
 	parts := make([]*AutoRouteResult, len(sections))
 	errs := make([]error, len(sections))
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, sectionConcurrency)
-	for i, sec := range sections {
+	for i, rng := range sections {
 		wg.Add(1)
-		go func(i int, sec []RoutePoint) {
+		go func(i int, rng [2]int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			parts[i], errs[i] = r.planSection(sec, opts, explicitPad)
-		}(i, sec)
+			parts[i], errs[i] = r.planSection(points[rng[0]:rng[1]+1], userPlaced[rng[0]:rng[1]+1], opts, explicitPad)
+		}(i, rng)
 	}
 	wg.Wait()
 
-	// Report the earliest failing section, so "leg 3 of 7" means the same
-	// thing however the work happened to be scheduled.
+	// A section that failed gets one more try, leg by leg.
+	//
+	// A section's grid resolution is set by its LONGEST leg, so a section that
+	// runs twenty miles across open water and then two hundred yards into a
+	// harbour plans both on the open-water grid — and the harbour entrance is
+	// narrower than a cell. Each leg on its own gets a grid sized for itself.
+	// Verified: the leg into Provincetown fails inside its section and routes
+	// in seven waypoints alone.
+	out := make([]*AutoRouteResult, 0, len(parts))
 	for i, err := range errs {
-		if err != nil {
+		if err == nil {
+			out = append(out, parts[i])
+			continue
+		}
+		rng := sections[i]
+		if rng[1]-rng[0] < 2 {
 			return nil, fmt.Errorf("section %d of %d: %w", i+1, len(sections), err)
 		}
+		secPts := points[rng[0] : rng[1]+1]
+		secUser := userPlaced[rng[0] : rng[1]+1]
+		split, serr := r.planLegByLeg(secPts, secUser, opts, explicitPad)
+		if serr == nil {
+			out = append(out, split...)
+			continue
+		}
+		// Last resort: drop the section's anchors and plan straight through.
+		//
+		// Anchors are a coarse pass's guesses at a corridor, and a pair of them
+		// can be unroutable at fine resolution even though the water between
+		// their neighbours is fine. Holding the route to them then fails the
+		// whole passage for the sake of scaffolding. Points the operator placed
+		// are kept — those are the route.
+		if bare, bareUser := keepUserPlaced(secPts, secUser); len(bare) >= 2 && len(bare) < len(secPts) {
+			if direct, derr := r.planLegByLeg(bare, bareUser, opts, explicitPad); derr == nil {
+				out = append(out, direct...)
+				continue
+			}
+		}
+		return nil, fmt.Errorf("section %d of %d: %w", i+1, len(sections), serr)
 	}
-	return parts, nil
+	return out, nil
 }
+
+// keepUserPlaced strips the anchors from a run, keeping its ends and anything
+// the operator placed.
+func keepUserPlaced(points []RoutePoint, userPlaced []bool) ([]RoutePoint, []bool) {
+	pts := make([]RoutePoint, 0, len(points))
+	user := make([]bool, 0, len(points))
+	for i := range points {
+		if i == 0 || i == len(points)-1 || userPlaced[i] {
+			pts = append(pts, points[i])
+			user = append(user, userPlaced[i])
+		}
+	}
+	return pts, user
+}
+
+// planLegByLeg plans each leg of a section on its own grid.
+func (r *ENCRenderer) planLegByLeg(points []RoutePoint, userPlaced []bool, opts AutoRouteOptions, explicitPad float64) ([]*AutoRouteResult, error) {
+	out := make([]*AutoRouteResult, 0, len(points)-1)
+	i := 0
+	for i+1 < len(points) {
+		// A leg that will not plan is retried with its far end dropped, as
+		// long as that end is an anchor rather than a waypoint the operator
+		// placed. Anchors come from a coarse pass and can land somewhere that
+		// is navigable at 600 m and a shoal at 30 m; they are scaffolding, so
+		// the right answer is to remove one, not to fail the route. A point
+		// the operator placed is never dropped — if that cannot be reached,
+		// the route genuinely cannot be planned and they need to know.
+		end := i + 1
+		var res *AutoRouteResult
+		var err error
+		for end < len(points) {
+			res, err = r.planSection(points[i:end+1], userPlaced[i:end+1], opts, explicitPad)
+			if err == nil {
+				break
+			}
+			if end+1 >= len(points) || userPlaced[end] {
+				return nil, fmt.Errorf("leg %d of %d: %w", i+1, len(points)-1, err)
+			}
+			end++
+		}
+		if err != nil {
+			return nil, fmt.Errorf("leg %d of %d: %w", i+1, len(points)-1, err)
+		}
+		out = append(out, res)
+		i = end
+	}
+	return out, nil
+}
+
+// coarsePassCellM is the resolution the topology pass may fall back to. Far
+// coarser than anything worth steering — a kilometre cell cannot see a
+// channel — but it is deciding which side of Long Island to pass, not where
+// to put the boat, and the fine pass that follows fixes the detail.
+const coarsePassCellM = 2500
+
+// coarsePassPenalty is what the soft costs are damped to during the topology
+// pass. Not zero: a tiebreak between two equal-length corridors should still
+// prefer the deeper, more open one.
+const coarsePassPenalty = 0.05
+
+// coarseAnchorMinSpacingM only drops anchors that are nearly coincident. The
+// coarse pass's own spacing carries the information about where the water is
+// tight, so it is kept.
+const coarseAnchorMinSpacingM = 0.4 * 1852
+
+// legResolutionRatio is how many grid cells must span a section's SHORTEST
+// leg. A short leg means tight water — the smoother only puts marks close
+// together where the straight line between them leaves the channel — so a
+// section holding one may not be planned on a grid too coarse to see it. This
+// is what stops a canal being planned on the open-water grid it shares a
+// section with, and what kept eight legs of a canal transit off the banks.
+const legResolutionRatio = 20
+
+// anchorLongLegs replaces any leg too long to plan at a useful resolution with
+// a coarse route through the same water, so the rest of the pipeline sees legs
+// it can actually handle. Legs that already fit are passed through untouched.
+// The returned mask marks which points the caller actually placed. Anchors
+// are scaffolding — they exist so the planner can work at a useful resolution,
+// and preserving them as waypoints litters a long route with marks nobody
+// asked for and no reason to steer to.
+func (r *ENCRenderer) anchorLongLegs(points []RoutePoint, opts AutoRouteOptions, explicitPad float64) ([]RoutePoint, []bool, error) {
+	out := []RoutePoint{points[0]}
+	mine := []bool{true}
+	for i := 0; i+1 < len(points); i++ {
+		leg := points[i : i+2]
+		if !sectionFits(leg, opts, explicitPad) {
+			anchors, err := r.coarseAnchors(leg, opts, explicitPad)
+			if err != nil {
+				return nil, nil, fmt.Errorf("leg %d of %d: %w", i+1, len(points)-1, err)
+			}
+			for _, a := range anchors {
+				out = append(out, a)
+				mine = append(mine, false)
+			}
+		}
+		out = append(out, points[i+1])
+		mine = append(mine, true)
+	}
+	return out, mine, nil
+}
+
+// coarseAnchors plans one over-long leg at whatever resolution it takes, and
+// returns intermediate points from that route.
+func (r *ENCRenderer) coarseAnchors(leg []RoutePoint, opts AutoRouteOptions, explicitPad float64) ([]RoutePoint, error) {
+	coarse := opts
+	coarse.MaxCellM = coarsePassCellM
+	coarse.KeepWaypoints = false
+	// The topology pass answers one question — which way round — so it is
+	// scored on distance, not on comfort. Its preferences are damped almost to
+	// nothing: what BLOCKS a cell (land, an obstruction, water shoaler than the
+	// boat's draft, the clearance buffer) is untouched, but the soft costs are
+	// not allowed to decide the corridor. Measured: with them in force the
+	// corridor comes out 307.8 nm, with them damped 293.5 nm.
+	coarse.DepthPenalty = coarsePassPenalty
+	coarse.ShorePenalty = coarsePassPenalty
+	coarse.UnknownPenalty = coarsePassPenalty
+	// The corridor pad is what makes a long leg's box enormous; the topology
+	// pass does not need room to wander, only to get round the land.
+	coarse.CorridorPadM = math.Min(sectionPadM(leg, explicitPad), 20*1852)
+	if !sectionFits(leg, coarse, coarse.CorridorPadM) {
+		cell := gridCellSize(pointsBBox(leg, coarse.CorridorPadM), coarse)
+		return nil, fmt.Errorf("%.0f nm needs %.0f m grid cells, past even the coarse limit of %.0f m: split it with an intermediate waypoint",
+			haversineMeters(leg[0].Lat, leg[0].Lng, leg[1].Lat, leg[1].Lng)/1852, cell, coarse.MaxCellM)
+	}
+
+	res, err := r.planSection(leg, []bool{true, true}, coarse, coarse.CorridorPadM)
+	if err != nil {
+		return nil, err
+	}
+	// Keep the coarse route's own spacing rather than thinning to a fixed
+	// interval. Its marks are already density-adapted — close together where
+	// the water is tight, far apart offshore — and that density is exactly the
+	// signal the detail pass needs to know where it must plan finely. Thinning
+	// to 15 nm threw that signal away and handed the canal to a grid sized for
+	// open water.
+	var out []RoutePoint
+	last := leg[0]
+	for _, w := range res.Waypoints[1 : len(res.Waypoints)-1] {
+		if haversineMeters(last.Lat, last.Lng, w.Lat, w.Lng) < coarseAnchorMinSpacingM {
+			continue
+		}
+		out = append(out, w)
+		last = w
+	}
+	return out, nil
+}
+
+// navTilesBudget bounds building the tiles one section needs. Generous
+// because it is paid once; `chartdiag prewarm` is how you avoid paying it in
+// front of a user.
+const navTilesBudget = 20 * time.Minute
 
 // planSection plans one contiguous run of waypoints on its own grid.
 //
@@ -591,7 +1050,7 @@ func (r *ENCRenderer) planSections(sections [][]RoutePoint, opts AutoRouteOption
 // between fetching 58 MB of coastline to rasterise and fetching a few hundred
 // kilobytes of grid that is already rasterised; the fallback exists so a
 // deployment with no tiles built (or a gap in coverage) still routes.
-func (r *ENCRenderer) planSection(points []RoutePoint, opts AutoRouteOptions, explicitPad float64) (*AutoRouteResult, error) {
+func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts AutoRouteOptions, explicitPad float64) (*AutoRouteResult, error) {
 	bbox := pointsBBox(points, sectionPadM(points, explicitPad))
 	ctx, cancel := context.WithTimeout(context.Background(), autoRouteQueryTimeout)
 	defer cancel()
@@ -600,7 +1059,13 @@ func (r *ENCRenderer) planSection(points []RoutePoint, opts AutoRouteOptions, ex
 		wanted := gridCellSize(bbox, opts)
 		midLat := (bbox[1] + bbox[3]) / 2
 		z := navTileZoomFor(wanted, midLat)
-		tiles, err := r.NavTiles(ctx, z, bbox[0], bbox[1], bbox[2], bbox[3])
+		// Tile building gets its own, far longer budget than a chart query.
+		// It is a one-time cost paid once per piece of water and read forever
+		// after — a continental-scale route can be hundreds of tiles on its
+		// first run — whereas autoRouteQueryTimeout bounds a single query.
+		tileCtx, tileCancel := context.WithTimeout(context.Background(), navTilesBudget)
+		tiles, err := r.NavTiles(tileCtx, z, bbox[0], bbox[1], bbox[2], bbox[3])
+		tileCancel()
 		if err != nil {
 			return nil, err
 		}
@@ -608,15 +1073,23 @@ func (r *ENCRenderer) planSection(points []RoutePoint, opts AutoRouteOptions, ex
 		o.normalize(longestLegMeters(points))
 		g := newNavGrid(bbox[0], bbox[1], bbox[2], bbox[3], o.MaxCells, o.MinCellM, o.MaxGridDim)
 		if sampleTilesIntoGrid(g, tiles, z) > 0 {
-			return planRouteOnGrid(g, bbox, points, opts)
+			return planRouteOnGrid(g, bbox, points, userPlaced, opts)
 		}
 	}
 
-	features, err := r.routingFeatures(ctx, bbox, []RoutePoint{points[0], points[len(points)-1]}, opts)
+	features, err := r.routingFeatures(ctx, bbox, opts)
 	if err != nil {
 		return nil, err
 	}
-	return planRouteVia(features, bbox, points, opts)
+	var ways []osmtiler.Feature
+	if r.osm != nil {
+		if w, werr := osmtiler.NavigableWaterways(ctx, r.osm, bbox[0], bbox[1], bbox[2], bbox[3]); werr != nil {
+			r.logger.Warnf("auto-route: waterway query failed, narrow passages may not route: %v", werr)
+		} else {
+			ways = w
+		}
+	}
+	return planRouteViaWithWays(features, ways, bbox, points, userPlaced, opts)
 }
 
 // sectionPadM is the corridor width for one run of waypoints: a fraction of
@@ -636,8 +1109,8 @@ func sectionPadM(points []RoutePoint, explicitPad float64) float64 {
 // A single leg that cannot meet the limit on its own is unplannable, and the
 // error names it: nothing can be split further, and the operator needs to know
 // which leg to shorten rather than being told the whole route is too long.
-func sectionsForResolution(points []RoutePoint, opts AutoRouteOptions, explicitPad float64) ([][]RoutePoint, error) {
-	var out [][]RoutePoint
+func sectionsForResolution(points []RoutePoint, opts AutoRouteOptions, explicitPad float64) ([][2]int, error) {
+	var out [][2]int
 	start := 0
 	for start < len(points)-1 {
 		end := start + 1
@@ -653,7 +1126,7 @@ func sectionsForResolution(points []RoutePoint, opts AutoRouteOptions, explicitP
 		for end+1 < len(points) && sectionFits(points[start:end+2], opts, explicitPad) {
 			end++
 		}
-		out = append(out, points[start:end+1])
+		out = append(out, [2]int{start, end})
 		start = end
 	}
 	return out, nil
@@ -661,7 +1134,30 @@ func sectionsForResolution(points []RoutePoint, opts AutoRouteOptions, explicitP
 
 func sectionFits(points []RoutePoint, opts AutoRouteOptions, explicitPad float64) bool {
 	cell := gridCellSize(pointsBBox(points, sectionPadM(points, explicitPad)), opts)
-	return cell <= effectiveMaxCellM(points, opts)
+	if cell > effectiveMaxCellM(points, opts) {
+		return false
+	}
+	// And the grid has to resolve the tightest water in the section.
+	if shortest := shortestLegMeters(points); shortest > 0 {
+		if want := shortest / legResolutionRatio; want > opts.MinCellM && cell > want {
+			return false
+		}
+	}
+	return true
+}
+
+// shortestLegMeters is the length of the shortest leg in a run of waypoints.
+func shortestLegMeters(points []RoutePoint) float64 {
+	shortest := math.Inf(1)
+	for i := 1; i < len(points); i++ {
+		if d := haversineMeters(points[i-1].Lat, points[i-1].Lng, points[i].Lat, points[i].Lng); d < shortest {
+			shortest = d
+		}
+	}
+	if math.IsInf(shortest, 1) {
+		return 0
+	}
+	return shortest
 }
 
 // mergeRouteResults stitches the sections back into one route. Each section
@@ -714,8 +1210,103 @@ func mergeRouteResults(parts []*AutoRouteResult, original []RoutePoint) *AutoRou
 		}
 	}
 	res.BBox = bbox
+	// Drop marks that sit within the plan's own precision of the line between
+	// their neighbours. Each section is smoothed against its own grid and then
+	// concatenated, so nothing ever looks at the route as a whole — and a long
+	// passage arrives carrying a mark every few miles that bends it by a
+	// boat-length. The tolerance is one grid cell: removing such a point moves
+	// the track less than the resolution the route was planned at, so it
+	// cannot claim precision the plan never had.
 	res.DistanceMeters = pathDistanceM(res.Waypoints)
 	return res
+}
+
+// dropWithinTolerance removes waypoints whose cross-track offset from the line
+// between their neighbours is under toleranceM. Purely geometric: it never
+// moves the track further than the tolerance, so it cannot steer the route
+// into water the planner didn't already accept.
+func (g *navGrid) dropWithinTolerance(pts []RoutePoint, toleranceM float64) []RoutePoint {
+	if len(pts) < 3 || toleranceM <= 0 {
+		return pts
+	}
+	// Repeat until nothing more can go. One pass is not enough: a cluster of
+	// marks protects itself, because the proportional test measures against
+	// legs that are short only because the cluster is there. Dropping one
+	// lengthens its neighbours' legs and lets the next go.
+	for {
+		next := g.dropWithinTolerancePass(pts, toleranceM)
+		if len(next) == len(pts) {
+			return next
+		}
+		pts = next
+	}
+}
+
+func (g *navGrid) dropWithinTolerancePass(pts []RoutePoint, toleranceM float64) []RoutePoint {
+	if len(pts) < 3 {
+		return pts
+	}
+	out := make([]RoutePoint, 0, len(pts))
+	out = append(out, pts[0])
+	for i := 1; i < len(pts)-1; i++ {
+		prev := out[len(out)-1]
+		// The tolerance is relative as well as absolute. One grid cell is the
+		// right scale in open water, and far too coarse in a canal: the Cape
+		// Cod Canal is 146 m wide, so a mark bending the track by "only" a
+		// 136 m cell is most of the channel. Tying it to the shorter adjacent
+		// leg keeps the test proportionate — tens of metres where the marks
+		// are a cable apart, a full cell where they are miles apart.
+		legM := math.Min(
+			haversineMeters(prev.Lat, prev.Lng, pts[i].Lat, pts[i].Lng),
+			haversineMeters(pts[i].Lat, pts[i].Lng, pts[i+1].Lat, pts[i+1].Lng))
+		limit := math.Min(toleranceM, legM*dropRelativeFraction)
+		// Measure against the last KEPT point, so a run of small bends can't
+		// accumulate into a large one.
+		if crossTrackMeters(prev, pts[i], pts[i+1]) > limit || !g.legIsClear(prev, pts[i+1]) {
+			out = append(out, pts[i])
+		}
+	}
+	return append(out, pts[len(pts)-1])
+}
+
+// dropRelativeFraction is how far, as a fraction of the shorter adjacent leg,
+// a waypoint may sit off the line before it is worth keeping.
+const dropRelativeFraction = 0.1
+
+// legIsClear reports whether the straight line between two positions stays in
+// navigable water.
+//
+// This simplifier used to be purely geometric, on the reasoning that moving
+// the track by less than a grid cell could not steer it anywhere the planner
+// had not already accepted. That reasoning is wrong wherever the water is
+// narrower than a cell: in the Cape Cod Canal, 146 m wide and planned on a
+// 136 m grid, a "within tolerance" shift is the bank. It put eight legs of one
+// canal transit over land.
+func (g *navGrid) legIsClear(a, b RoutePoint) bool {
+	ai, ok1 := g.cellAt(a.Lng, a.Lat)
+	bi, ok2 := g.cellAt(b.Lng, b.Lat)
+	if !ok1 || !ok2 {
+		return false
+	}
+	_, _, ok := g.traverse(ai, bi, nil)
+	return ok
+}
+
+// crossTrackMeters is the perpendicular distance from m to the line a-b, on a
+// local flat-earth approximation — accurate well past the leg lengths here.
+func crossTrackMeters(a, m, b RoutePoint) float64 {
+	cos := clampCosLat(a.Lat)
+	ax, ay := 0.0, 0.0
+	mx := (m.Lng - a.Lng) * metresPerDegreeLat * cos
+	my := (m.Lat - a.Lat) * metresPerDegreeLat
+	bx := (b.Lng - a.Lng) * metresPerDegreeLat * cos
+	by := (b.Lat - a.Lat) * metresPerDegreeLat
+	dx, dy := bx-ax, by-ay
+	den := math.Hypot(dx, dy)
+	if den == 0 {
+		return math.Hypot(mx, my)
+	}
+	return math.Abs(dy*(mx-ax)-dx*(my-ay)) / den
 }
 
 // AutoRoute plans a route from start to end over the charted ENC data.
@@ -735,11 +1326,26 @@ func planRoute(features []*mongoFeature, bbox [4]float64, start, end RoutePoint,
 // Split out so the router can be exercised against hand-built features with no
 // Mongo behind it.
 func planRouteVia(features []*mongoFeature, bbox [4]float64, points []RoutePoint, opts AutoRouteOptions) (*AutoRouteResult, error) {
+	return planRouteViaWithWays(features, nil, bbox, points, allUserPlaced(len(points)), opts)
+}
+
+// allUserPlaced treats every point as the caller's, which is what the tests
+// and the two-point case want.
+func allUserPlaced(n int) []bool {
+	m := make([]bool, n)
+	for i := range m {
+		m[i] = true
+	}
+	return m
+}
+
+func planRouteViaWithWays(features []*mongoFeature, ways []osmtiler.Feature, bbox [4]float64, points []RoutePoint, userPlaced []bool, opts AutoRouteOptions) (*AutoRouteResult, error) {
 	o := opts
 	o.normalize(longestLegMeters(points))
 	g := newNavGrid(bbox[0], bbox[1], bbox[2], bbox[3], o.MaxCells, o.MinCellM, o.MaxGridDim)
 	rasterizeForRouting(g, features, o)
-	res, err := planRouteOnGrid(g, bbox, points, opts)
+	stampWaterways(g, ways)
+	res, err := planRouteOnGrid(g, bbox, points, userPlaced, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -750,19 +1356,21 @@ func planRouteVia(features []*mongoFeature, bbox [4]float64, points []RoutePoint
 // planRouteOnGrid searches an already-rasterised grid. Split out so a grid
 // read from precomputed tiles and one built from polygons take exactly the
 // same path from here on.
-func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, opts AutoRouteOptions) (*AutoRouteResult, error) {
+func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, userPlaced []bool, opts AutoRouteOptions) (*AutoRouteResult, error) {
 	directM := legTotalMeters(points)
 	opts.normalize(longestLegMeters(points))
 
 	g.finalize(gridCost{
-		SafeDepthM:     opts.SafeDepthM,
-		IdealDepthM:    opts.IdealDepthM,
-		HardClearanceM: opts.HardClearanceM,
-		SoftClearanceM: opts.SoftClearanceM,
-		DepthPenalty:   opts.DepthPenalty,
-		ShorePenalty:   opts.ShorePenalty,
-		UnknownPenalty: opts.UnknownPenalty,
-		AvoidPenalty:   avoidPenalty(opts.Avoid),
+		SafeDepthM:           opts.SafeDepthM,
+		IdealDepthM:          opts.IdealDepthM,
+		HardClearanceM:       opts.HardClearanceM,
+		SoftClearanceM:       opts.SoftClearanceM,
+		DepthPenalty:         opts.DepthPenalty,
+		ShorePenalty:         opts.ShorePenalty,
+		UnknownPenalty:       opts.UnknownPenalty,
+		UnknownPenaltyRangeM: opts.UnknownPenaltyRangeM,
+		UnsurveyedPenalty:    unsurveyedPenalty,
+		RestrictedPenalty:    restrictedPenalty(opts.Avoid),
 	})
 
 	res := &AutoRouteResult{
@@ -801,7 +1409,13 @@ func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, opts Auto
 			g.cellSizeM(), opts.MaxCellM))
 	}
 
-	res.Waypoints = g.pathToWaypoints(full, legBounds, points, opts, res)
+	res.Waypoints = g.pathToWaypoints(full, legBounds, points, userPlaced, opts, res)
+	// Simplify here, against THIS section's cell size. Doing it after the
+	// sections are merged judges every one of them by the coarsest — so a
+	// canal planned on 136 m cells gets thinned as though it were the 348 m
+	// open-water leg it shares a route with, and the channel loses the marks
+	// that keep it in the water.
+	res.Waypoints = g.dropWithinTolerance(res.Waypoints, g.cellSizeM())
 	res.DistanceMeters = pathDistanceM(res.Waypoints)
 	minDepth, unknown := g.pathDepthStats(full)
 	if !math.IsNaN(minDepth) {
@@ -857,7 +1471,8 @@ func (g *navGrid) route(start, end RoutePoint, opts AutoRouteOptions, res *AutoR
 				SafeDepthM: opts.SafeDepthM, IdealDepthM: opts.IdealDepthM,
 				HardClearanceM: 0, SoftClearanceM: opts.SoftClearanceM,
 				DepthPenalty: opts.DepthPenalty, ShorePenalty: opts.ShorePenalty,
-				UnknownPenalty: opts.UnknownPenalty, AvoidPenalty: avoidPenalty(opts.Avoid),
+				UnknownPenalty: opts.UnknownPenalty, UnknownPenaltyRangeM: opts.UnknownPenaltyRangeM,
+				UnsurveyedPenalty: unsurveyedPenalty, RestrictedPenalty: restrictedPenalty(opts.Avoid),
 			}
 			g.finalize(relaxed)
 			res.Warnings = append(res.Warnings,
@@ -873,7 +1488,13 @@ func (g *navGrid) route(start, end RoutePoint, opts AutoRouteOptions, res *AutoR
 // taut, thin it to the cap, then convert cell centres to lon/lat. The exact
 // requested endpoints replace the first/last cell centre unless they had to be
 // snapped, in which case the snapped water is what the caller gets.
-func (g *navGrid) pathToWaypoints(path []int, legBounds []int, points []RoutePoint, opts AutoRouteOptions, res *AutoRouteResult) []RoutePoint {
+func (g *navGrid) pathToWaypoints(path []int, legBounds []int, points []RoutePoint, userPlaced []bool, opts AutoRouteOptions, res *AutoRouteResult) []RoutePoint {
+	// Only the caller's own waypoints anchor the smoothing. Coarse-pass
+	// anchors are scaffolding for the planner, and holding the route to them
+	// scatters a long passage with marks nobody placed and nothing to steer
+	// to. Smoothing runs straight through them.
+	legBounds = userLegBounds(legBounds, userPlaced)
+
 	var pulled []int
 	if opts.KeepWaypoints && len(legBounds) > 2 {
 		// Smooth inside each leg only, so every point the operator placed
@@ -897,6 +1518,7 @@ func (g *navGrid) pathToWaypoints(path []int, legBounds []int, points []RoutePoi
 		pulled = g.pullTaut(path)
 	}
 
+	pulled = g.dropReversals(pulled)
 	pulled, thinned := g.thinToLimit(pulled, opts.MaxWaypoints)
 	if thinned {
 		res.Warnings = append(res.Warnings, "route thinned to fit the waypoint limit")
@@ -914,6 +1536,21 @@ func (g *navGrid) pathToWaypoints(path []int, legBounds []int, points []RoutePoi
 	}
 	if len(out) > 1 && !res.SnappedEnd {
 		out[len(out)-1] = points[len(points)-1]
+	}
+	return out
+}
+
+// userLegBounds keeps only the boundaries that fall on a waypoint the caller
+// placed. The first and last always survive: they are the route's ends.
+func userLegBounds(legBounds []int, userPlaced []bool) []int {
+	if len(userPlaced) != len(legBounds) {
+		return legBounds // shapes disagree; keep every boundary rather than guess
+	}
+	out := make([]int, 0, len(legBounds))
+	for i, b := range legBounds {
+		if i == 0 || i == len(legBounds)-1 || userPlaced[i] {
+			out = append(out, b)
+		}
 	}
 	return out
 }
@@ -961,7 +1598,7 @@ func rasterizeForNavTile(g *tileGrid, features []*mongoFeature) {
 
 		switch {
 		case autoRouteLandClasses[class]:
-			markGeometry(g.navGrid, geom, hazardRadius, func(i int) { g.mark(i, cellLand) })
+			markGeometry(g.navGrid, geom, hazardRadius, func(i int) { g.markLand(i, scale) })
 
 		case autoRouteObstructionClasses[class]:
 			// A charted depth over an obstruction is a depth, not a wall: fold
@@ -981,20 +1618,31 @@ func rasterizeForNavTile(g *tileGrid, features []*mongoFeature) {
 				continue
 			}
 			if key, ok := depareKeyDepth(f); ok {
-				g.fillRings(splitRings(geom.Coordinates), func(i int) { g.setDepth(i, key, scale) })
+				g.fillRings(splitRings(geom.Coordinates), func(i int) {
+					g.setDepth(i, key, scale)
+					g.markWater(i, scale)
+				})
 			}
 
-		case class == "DRGARE":
+		case isChannelClassForRouting(class):
 			if geom.Type != s57.GeometryTypePolygon {
 				continue
 			}
 			key, ok := depareKeyDepth(f)
-			g.fillRings(splitRings(geom.Coordinates), func(i int) {
+			rings := splitRings(geom.Coordinates)
+			markChannel := func(i int) {
 				if ok {
 					g.setDepth(i, key, scale)
+					g.mark(i, cellChannelDepth)
 				}
-				g.mark(i, cellDredged)
-			})
+				g.mark(i, cellChannel)
+				g.markWater(i, scale)
+				if class == "DRGARE" {
+					g.mark(i, cellDredged)
+				}
+			}
+			g.fillRings(rings, markChannel)
+			g.stampEdges(rings, markChannel)
 
 		case class == "UNSARE":
 			if geom.Type == s57.GeometryTypePolygon {
@@ -1041,7 +1689,7 @@ func rasterizeForRouting(g *navGrid, features []*mongoFeature, opts AutoRouteOpt
 
 		switch {
 		case autoRouteLandClasses[class]:
-			markGeometry(g, geom, hazardRadius, func(i int) { g.mark(i, cellLand) })
+			markGeometry(g, geom, hazardRadius, func(i int) { g.markLand(i, scale) })
 
 		case autoRouteObstructionClasses[class]:
 			if obstructionIsClear(f, opts.SafeDepthM) {
@@ -1060,23 +1708,34 @@ func rasterizeForRouting(g *navGrid, features []*mongoFeature, opts AutoRouteOpt
 			if !ok {
 				continue
 			}
-			g.fillRings(splitRings(geom.Coordinates), func(i int) { g.setDepth(i, key, scale) })
+			g.fillRings(splitRings(geom.Coordinates), func(i int) {
+				g.setDepth(i, key, scale)
+				g.markWater(i, scale)
+			})
 
-		case class == "DRGARE":
+		case isChannelClassForRouting(class):
 			if geom.Type != s57.GeometryTypePolygon {
 				continue
 			}
-			// A dredged area is a maintained channel: the chart guarantees it
-			// even where the surrounding DEPARE is shoal. Record its depth
-			// when it carries one, and flag it either way so the depth
-			// penalties leave it alone.
+			// A charted channel is the way through, so it is rasterised to
+			// stay connected: filled AND walked along its outline, because a
+			// channel narrower than a cell survives only as a broken chain of
+			// dots under centre-sampling alone.
 			key, ok := depareKeyDepth(f)
-			g.fillRings(splitRings(geom.Coordinates), func(i int) {
+			rings := splitRings(geom.Coordinates)
+			markChannel := func(i int) {
 				if ok {
 					g.setDepth(i, key, scale)
+					g.mark(i, cellChannelDepth)
 				}
-				g.mark(i, cellDredged)
-			})
+				g.mark(i, cellChannel)
+				g.markWater(i, scale)
+				if class == "DRGARE" {
+					g.mark(i, cellDredged)
+				}
+			}
+			g.fillRings(rings, markChannel)
+			g.stampEdges(rings, markChannel)
 
 		case class == "UNSARE":
 			// Unsurveyed: no depth to record, and worth steering around.
@@ -1094,6 +1753,24 @@ func rasterizeForRouting(g *navGrid, features []*mongoFeature, opts AutoRouteOpt
 			}
 		}
 	}
+}
+
+// stampWaterways marks the cells along navigable waterway centrelines as
+// channel, guaranteeing a connected path through a passage the raster cannot
+// resolve. Depth still governs: a channel cell charted shoaler than the boat's
+// safe depth blocks like anything else (see navGrid.finalize).
+func stampWaterways(g *navGrid, ways []osmtiler.Feature) int {
+	marked := 0
+	for _, w := range ways {
+		for i := 0; i+1 < len(w.Coords); i++ {
+			a, b := w.Coords[i], w.Coords[i+1]
+			g.stampSegment(a.Lon, a.Lat, b.Lon, b.Lat, func(idx int) {
+				g.mark(idx, cellChannel)
+				marked++
+			})
+		}
+	}
+	return marked
 }
 
 // markGeometry applies fn to every cell a feature covers, whatever its
@@ -1158,23 +1835,22 @@ func obstructionIsClear(f encFeature, safeDepthM float64) bool {
 	return ok && d >= safeDepthM
 }
 
-// unsurveyedPenalty is the cost added on unsurveyed (UNSARE) water, which is
-// always marked cellAvoid whether or not the caller asked to avoid anything.
+// unsurveyedPenalty is the cost added on unsurveyed (UNSARE) water. It always
+// applies: an absence of survey is a fact about the chart, not a preference.
 const unsurveyedPenalty = 2.0
 
-// avoidPenalty is the single weight the grid prices every cellAvoid cell at.
-// One weight, not one per rule: the grid carries a flag, not a rule id, so a
-// configured area with a heavier penalty raises the cost of all of them. That
-// is deliberate — the flag exists to say "there is a reason to stay out of
-// here", and the heaviest reason in play is the honest one to charge.
-func avoidPenalty(areas []AvoidArea) float64 {
-	best := unsurveyedPenalty
+// restrictedPenalty is what a charted restricted area costs — and it is zero
+// unless the caller asked to avoid them. Entry to most of these is regulated,
+// not forbidden, and charging for them by default routes a boat the long way
+// round its own harbour.
+func restrictedPenalty(areas []AvoidArea) float64 {
+	worst := 0.0
 	for _, a := range areas {
-		if a.Penalty > best {
-			best = a.Penalty
+		if a.Class == "RESARE" && a.Penalty > worst {
+			worst = a.Penalty
 		}
 	}
-	return best
+	return worst
 }
 
 // routeBBox is the search corridor: the endpoints' bounding box grown by padM

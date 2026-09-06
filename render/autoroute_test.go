@@ -594,25 +594,24 @@ func TestSectionsGroupWhatFitsAndSplitWhatDoesnt(t *testing.T) {
 	// Grouped: at least one section carries more than a single leg, so nearby
 	// legs share a chart query instead of getting one each.
 	grouped := false
-	for _, sec := range secs {
-		if len(sec) > 2 {
+	for _, rng := range secs {
+		if rng[1]-rng[0] > 1 {
 			grouped = true
 		}
 	}
 	test.That(t, grouped, test.ShouldBeTrue)
 
 	// Every section resolves at or below the limit — that is the whole point.
-	for _, sec := range secs {
-		test.That(t, len(sec), test.ShouldBeGreaterThanOrEqualTo, 2)
-		test.That(t, sectionFits(sec, opts, 0), test.ShouldBeTrue)
+	for _, rng := range secs {
+		test.That(t, rng[1]-rng[0], test.ShouldBeGreaterThanOrEqualTo, 1)
+		test.That(t, sectionFits(points[rng[0]:rng[1]+1], opts, 0), test.ShouldBeTrue)
 	}
 	// Sections are contiguous and share their join waypoint, so the route
 	// stays continuous with no gap and no duplicated leg.
-	test.That(t, secs[0][0], test.ShouldResemble, points[0])
-	test.That(t, secs[len(secs)-1][len(secs[len(secs)-1])-1], test.ShouldResemble, points[len(points)-1])
+	test.That(t, secs[0][0], test.ShouldEqual, 0)
+	test.That(t, secs[len(secs)-1][1], test.ShouldEqual, len(points)-1)
 	for i := 1; i < len(secs); i++ {
-		prev := secs[i-1]
-		test.That(t, secs[i][0], test.ShouldResemble, prev[len(prev)-1])
+		test.That(t, secs[i][0], test.ShouldEqual, secs[i-1][1])
 	}
 }
 
@@ -621,7 +620,7 @@ func TestShortRouteStaysOneSection(t *testing.T) {
 	secs, err := sectionsForResolution([]RoutePoint{westPoint, eastPoint}, opts, 0)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(secs), test.ShouldEqual, 1)
-	test.That(t, len(secs[0]), test.ShouldEqual, 2)
+	test.That(t, secs[0], test.ShouldResemble, [2]int{0, 1})
 }
 
 func TestSingleOversizedLegNamesItself(t *testing.T) {
@@ -709,11 +708,242 @@ func TestWideDepthRangeIsUnchartedNotShoal(t *testing.T) {
 }
 
 func TestRoutingUsageBandMatchesTheGrid(t *testing.T) {
-	// Fine grid, short leg: take every band, including berth-level detail.
+	// Any grid fine enough to express harbour detail takes every band. There
+	// is no middle setting on purpose: a partial ceiling returns fine-scale
+	// land without the fine-scale water beside it, and fine land over coarse
+	// water cannot be cleared — which walled Portland harbour in.
 	test.That(t, routingUsageBand(20), test.ShouldEqual, 0)
-	// Normal coastal leg: approach scale and coarser.
-	test.That(t, routingUsageBand(80), test.ShouldEqual, 4)
-	// Long offshore leg: coastal scale and coarser, where the measured payload
-	// difference is the whole reason the leg is plannable.
+	test.That(t, routingUsageBand(80), test.ShouldEqual, 0)
+	test.That(t, routingUsageBand(149), test.ShouldEqual, 0)
+	// Past that the grid cannot hold harbour detail at all, and the payload
+	// saving is what makes a long leg plannable.
 	test.That(t, routingUsageBand(200), test.ShouldEqual, 3)
+}
+
+func TestUserLegBoundsKeepsOnlyPlacedWaypoints(t *testing.T) {
+	// The coarse pass inserts anchors so a long leg can be planned at a useful
+	// resolution. They are scaffolding: holding the route to them scatters a
+	// passage with marks nobody placed, which is what "lots of stops that
+	// aren't needed" looks like on the chart.
+	bounds := []int{0, 10, 20, 30, 40}
+	user := []bool{true, false, false, true, true}
+	test.That(t, userLegBounds(bounds, user), test.ShouldResemble, []int{0, 30, 40})
+
+	// The route's own ends always survive, even if the mask disagrees.
+	test.That(t, userLegBounds([]int{0, 5, 9}, []bool{false, false, false}),
+		test.ShouldResemble, []int{0, 9})
+
+	// A mismatched mask keeps every boundary rather than guessing.
+	test.That(t, userLegBounds(bounds, []bool{true}), test.ShouldResemble, bounds)
+}
+
+func TestDropWithinToleranceRemovesOnlyClutter(t *testing.T) {
+	// Open-water spacing (~2 km legs) with the middle mark ~30 m off the line.
+	// At that spacing 30 m is inside the plan's own precision.
+	offLon := 30.0 / (metresPerDegreeLat * clampCosLat(41))
+	straight := []RoutePoint{
+		{Lat: 41.000, Lng: -71.0},
+		{Lat: 41.018, Lng: -71.0 + offLon},
+		{Lat: 41.036, Lng: -71.0},
+	}
+	test.That(t, crossTrackMeters(straight[0], straight[1], straight[2]), test.ShouldAlmostEqual, 30.0, 3)
+	test.That(t, len(zigzagGrid(t).dropWithinTolerance(straight, 100)), test.ShouldEqual, 2)
+
+	// A real corner survives: this one bends the track by kilometres.
+	corner := []RoutePoint{
+		{Lat: 41.0, Lng: -71.0},
+		{Lat: 41.1, Lng: -70.8},
+		{Lat: 41.0, Lng: -70.6},
+	}
+	test.That(t, zigzagGrid(t).dropWithinTolerance(corner, 100), test.ShouldResemble, corner)
+
+	// Ends are never dropped, and a two-point route is left alone.
+	pair := []RoutePoint{{Lat: 41, Lng: -71}, {Lat: 42, Lng: -70}}
+	test.That(t, zigzagGrid(t).dropWithinTolerance(pair, 1e9), test.ShouldResemble, pair)
+}
+
+func TestDropWithinToleranceDoesNotAccumulate(t *testing.T) {
+	// Ten points each 60 m off the previous would drift 600 m from the
+	// original track if every one were judged against its immediate
+	// neighbours. Measuring against the last KEPT point bounds the error.
+	pts := []RoutePoint{{Lat: 41.0, Lng: -71.0}}
+	for i := 1; i <= 10; i++ {
+		pts = append(pts, RoutePoint{Lat: 41.0 + float64(i)*0.001, Lng: -71.0 + float64(i)*0.0007})
+	}
+	got := zigzagGrid(t).dropWithinTolerance(pts, 100)
+	for _, w := range got {
+		off := crossTrackMeters(pts[0], w, pts[len(pts)-1])
+		test.That(t, off, test.ShouldBeLessThan, 400)
+	}
+}
+
+func TestDropWithinToleranceIsProportionateInTightWater(t *testing.T) {
+	// The same 30 m offset, but with marks a cable apart instead of a mile.
+	// In open water that is noise; between the banks of a 146 m canal it is a
+	// fifth of the channel, so it has to survive the same tolerance.
+	offLon := 30.0 / (metresPerDegreeLat * clampCosLat(41.74))
+	tight := []RoutePoint{
+		{Lat: 41.7400, Lng: -70.6100},
+		{Lat: 41.7417, Lng: -70.6100 + offLon},
+		{Lat: 41.7434, Lng: -70.6100},
+	}
+	test.That(t, crossTrackMeters(tight[0], tight[1], tight[2]), test.ShouldAlmostEqual, 30.0, 3)
+	// A one-cell tolerance alone would drop it; proportionality keeps it.
+	test.That(t, len(zigzagGrid(t).dropWithinTolerance(tight, 136)), test.ShouldEqual, 3)
+}
+
+// zigzagGrid is open water with no obstacles, so any bypass is steerable and
+// the only thing deciding what survives is the turn test.
+func zigzagGrid(t *testing.T) *navGrid {
+	t.Helper()
+	g := newNavGrid(-71.6, 40.9, -71.0, 41.5, 40000, 5, 1400)
+	g.finalize(gridCost{SafeDepthM: 2, IdealDepthM: 2, UnknownPenalty: 0})
+	return g
+}
+
+func TestDropReversalsCollapsesAZigzag(t *testing.T) {
+	g := zigzagGrid(t)
+	at := func(lon, lat float64) int {
+		i, ok := g.cellAt(lon, lat)
+		test.That(t, ok, test.ShouldBeTrue)
+		return i
+	}
+	// A straight run north with two marks kicked alternately east and west —
+	// each sits well off the line between its neighbours, so a cross-track
+	// test scores both as real corners. They are not: the second undoes the
+	// first.
+	zig := []int{
+		at(-71.30, 41.00),
+		at(-71.26, 41.05),
+		at(-71.34, 41.10),
+		at(-71.30, 41.15),
+	}
+	got := g.dropReversals(zig)
+	// At least one kick goes; whatever is left no longer reverses, and the
+	// near-collinear remainder is picked up by the tolerance pass downstream.
+	test.That(t, len(got), test.ShouldBeLessThan, len(zig))
+	test.That(t, got[0], test.ShouldEqual, zig[0])
+	test.That(t, got[len(got)-1], test.ShouldEqual, zig[len(zig)-1])
+	for i := 1; i < len(got)-1; i++ {
+		test.That(t, math.Abs(g.signedTurnAt(got, i)), test.ShouldBeLessThan, 83.0)
+	}
+}
+
+func TestDropReversalsKeepsARealCorner(t *testing.T) {
+	g := zigzagGrid(t)
+	at := func(lon, lat float64) int {
+		i, ok := g.cellAt(lon, lat)
+		test.That(t, ok, test.ShouldBeTrue)
+		return i
+	}
+	// North, then hard east and stays east. One turn, never undone — a corner
+	// changes the course and keeps it changed, so it survives even though the
+	// bypass across it is perfectly clear water.
+	corner := []int{
+		at(-71.30, 41.00), at(-71.30, 41.15), at(-71.10, 41.20), at(-71.05, 41.22),
+	}
+	test.That(t, g.dropReversals(corner), test.ShouldResemble, corner)
+}
+
+func TestDropReversalsWillNotCutThroughLand(t *testing.T) {
+	// A dodge around an island reads as a reversal — turn one way to get past
+	// it, turn back after. Straightening it would steer over the island, so
+	// the safety check has to keep the mark. This is the same guard that keeps
+	// the marks through a canal.
+	g := newNavGrid(-71.6, 40.9, -71.0, 41.5, 40000, 5, 1400)
+	for iy := 0; iy < g.ny; iy++ {
+		for ix := 0; ix < g.nx; ix++ {
+			lon, lat := g.cellCentre(ix, iy)
+			if lat > 41.04 && lat < 41.06 && lon > -71.32 && lon < -71.28 {
+				g.mark(g.idx(ix, iy), cellLand)
+			}
+		}
+	}
+	g.finalize(gridCost{SafeDepthM: 2, IdealDepthM: 2, UnknownPenalty: 0})
+	at := func(lon, lat float64) int {
+		i, ok := g.cellAt(lon, lat)
+		test.That(t, ok, test.ShouldBeTrue)
+		return i
+	}
+	// West of the island, south around it, east of it, then north.
+	dodge := []int{
+		at(-71.36, 41.05), at(-71.30, 41.01), at(-71.24, 41.05), at(-71.24, 41.10),
+	}
+	// The straight line the smoother would like to draw runs through it.
+	_, _, clear := g.traverse(dodge[0], dodge[2], nil)
+	test.That(t, clear, test.ShouldBeFalse)
+
+	test.That(t, g.dropReversals(dodge), test.ShouldResemble, dodge)
+}
+
+func TestUnknownPenaltyOnlyReachesNearHazards(t *testing.T) {
+	// Charted depth runs out offshore, so a flat penalty on uncharted water
+	// makes the open sea cost twice the surveyed coastal strip — and the
+	// router hugs the coast to stay where the survey is. Beyond the range,
+	// uncharted has to be free.
+	g := newNavGrid(-71.0, 41.0, -70.0, 41.6, 40000, 5, 1400)
+	// A patch of land in the west; everything else uncharted.
+	for iy := 0; iy < g.ny; iy++ {
+		for ix := 0; ix < g.nx; ix++ {
+			if lon, _ := g.cellCentre(ix, iy); lon < -70.95 {
+				g.mark(g.idx(ix, iy), cellLand)
+			}
+		}
+	}
+	g.finalize(gridCost{
+		SafeDepthM: 2, IdealDepthM: 2,
+		UnknownPenalty: 1.0, UnknownPenaltyRangeM: 2 * 1852,
+	})
+
+	near, ok := g.cellAt(-70.93, 41.3) // ~1 nm off the land
+	test.That(t, ok, test.ShouldBeTrue)
+	far, ok := g.cellAt(-70.30, 41.3) // ~30 nm off
+	test.That(t, ok, test.ShouldBeTrue)
+
+	test.That(t, float64(g.cost[near]), test.ShouldBeGreaterThan, float64(g.cost[far]))
+	test.That(t, float64(g.cost[far]), test.ShouldAlmostEqual, 1.0, 0.001)
+}
+
+func TestRestrictedAreasCostNothingUnlessAsked(t *testing.T) {
+	// A charted restricted area is a rule, not a hazard, and entry to most of
+	// them is regulated rather than forbidden. Charging for one by default
+	// sent every passage out of New York round the outside of Long Island —
+	// 20 nm further — because the harbour and the East River are full of them.
+	g := newNavGrid(-71.5, 41.0, -71.0, 41.4, 40000, 5, 1400)
+	restricted, ok := g.cellAt(-71.25, 41.2)
+	test.That(t, ok, test.ShouldBeTrue)
+	g.mark(restricted, cellRestricted)
+	plain, ok := g.cellAt(-71.20, 41.2)
+	test.That(t, ok, test.ShouldBeTrue)
+
+	base := gridCost{SafeDepthM: 2, IdealDepthM: 2, UnsurveyedPenalty: unsurveyedPenalty}
+	g.finalize(base)
+	test.That(t, float64(g.cost[restricted]), test.ShouldAlmostEqual, float64(g.cost[plain]), 0.001)
+
+	// Ask to avoid them and they cost what was asked.
+	withAvoid := base
+	withAvoid.RestrictedPenalty = restrictedPenalty([]AvoidArea{RestrictedAreaAvoid(3)})
+	g.finalize(withAvoid)
+	test.That(t, float64(g.cost[restricted]), test.ShouldAlmostEqual, float64(g.cost[plain])+3, 0.001)
+}
+
+func TestUnsurveyedAlwaysCosts(t *testing.T) {
+	// Unlike a restricted area, an absence of survey is a fact about the
+	// chart, so it is priced whether or not anything was asked for.
+	g := newNavGrid(-71.5, 41.0, -71.0, 41.4, 40000, 5, 1400)
+	uns, ok := g.cellAt(-71.25, 41.2)
+	test.That(t, ok, test.ShouldBeTrue)
+	g.mark(uns, cellUnsurveyed)
+	plain, _ := g.cellAt(-71.20, 41.2)
+
+	g.finalize(gridCost{SafeDepthM: 2, IdealDepthM: 2, UnsurveyedPenalty: unsurveyedPenalty})
+	test.That(t, float64(g.cost[uns]), test.ShouldAlmostEqual, float64(g.cost[plain])+unsurveyedPenalty, 0.001)
+}
+
+func TestRestrictedPenaltyOnlyCountsRestrictedRules(t *testing.T) {
+	test.That(t, restrictedPenalty(nil), test.ShouldAlmostEqual, 0.0, 0.001)
+	test.That(t, restrictedPenalty([]AvoidArea{RestrictedAreaAvoid(3)}), test.ShouldAlmostEqual, 3.0, 0.001)
+	// A rule about some other class must not price restricted areas.
+	test.That(t, restrictedPenalty([]AvoidArea{{Name: "spoil", Class: "DMPGRD", Penalty: 5}}),
+		test.ShouldAlmostEqual, 0.0, 0.001)
 }

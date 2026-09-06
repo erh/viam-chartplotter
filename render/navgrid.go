@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/erh/viam-chartplotter/mapdata/noaa"
+	"github.com/erh/viam-chartplotter/mapdata/osmtiler"
 )
 
 // Building and reading the precomputed navigability tiles.
@@ -107,7 +108,15 @@ const navTileBuildConcurrency = 4
 
 // navTileQueryTimeout bounds one tile's chart query. A tile is a small area,
 // so this is generous; it exists so a stuck query can't hold a route.
-const navTileQueryTimeout = 30 * time.Second
+// A coarse tile spans a lot of ground — a z9 tile is ~78 km across — so this
+// is generous. It exists so a stuck query cannot hold a route, not to keep
+// tiles fast; a tile is built once and read forever.
+const navTileQueryTimeout = 90 * time.Second
+
+// navTileWaterwayBudget bounds the waterway lookup separately. It is an
+// enrichment: losing it costs narrow passages in this tile, while letting it
+// consume the tile's whole budget costs the tile.
+const navTileWaterwayBudget = 15 * time.Second
 
 // NavTiles returns the tiles covering a bbox at the given zoom, building and
 // storing any that are missing. Tiles already built are read straight back.
@@ -204,8 +213,39 @@ func (r *ENCRenderer) buildNavTile(ctx context.Context, z, x, y int) (*noaa.NavT
 			"run `chartdiag route` to check the chart indexes")
 	}
 
+	// Channels at every band, for the same reason the live path does it: the
+	// fairway that makes a canal routable is charted in a harbour cell the
+	// tile's band ceiling would drop.
+	if routingUsageBand(cellM) > 0 {
+		channels, cerr := r.queryFeaturesClasses(qctx,
+			minLon-pad, minLat-pad, maxLon+pad, maxLat+pad,
+			noaa.ClassQuery{
+				Classes:    autoRouteChannelClasses,
+				UseLowGeom: useLowGeomForCell(cellM),
+				Projection: RoutingProjection(),
+			})
+		if cerr != nil {
+			r.logger.Warnf("navgrid: channel query failed for %d/%d/%d: %v", z, x, y, cerr)
+		}
+		feats = append(feats, channels...)
+	}
+
 	g := newTileGrid(z, x, y)
 	rasterizeForNavTile(g, feats)
+
+	// Navigable waterway centrelines, stamped last so they win. A canal is
+	// connected by construction as a line and disconnected as a polygon on any
+	// grid coarser than it is wide; this is what carries a route through one.
+	if r.osm != nil {
+		wctx, wcancel := context.WithTimeout(ctx, navTileWaterwayBudget)
+		ways, werr := osmtiler.NavigableWaterways(wctx, r.osm, minLon-pad, minLat-pad, maxLon+pad, maxLat+pad)
+		wcancel()
+		if werr != nil {
+			r.logger.Warnf("navgrid: waterway query failed for %d/%d/%d: %v", z, x, y, werr)
+		} else {
+			stampWaterways(g.navGrid, ways)
+		}
+	}
 	return g.tile(), nil
 }
 
@@ -241,9 +281,11 @@ func newTileGrid(z, x, y int) *tileGrid {
 	g.depth = make([]float64, size)
 	g.scaleOf = make([]int32, size)
 	g.flags = make([]uint8, size)
+	g.landScale = make([]int32, size)
 	for i := range g.depth {
 		g.depth[i] = math.NaN()
 		g.scaleOf[i] = math.MaxInt32
+		g.landScale[i] = math.MaxInt32
 	}
 	return &tileGrid{navGrid: g, z: z, x: x, y: y}
 }
@@ -304,6 +346,12 @@ func storedFlags(f uint8) uint8 {
 	if f&cellRestricted != 0 {
 		out |= noaa.NavFlagRestricted
 	}
+	if f&cellChannel != 0 {
+		out |= noaa.NavFlagChannel
+	}
+	if f&cellChannelDepth != 0 {
+		out |= noaa.NavFlagChannelDepth
+	}
 	return out
 }
 
@@ -327,22 +375,72 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 
 	for iy := 0; iy < g.ny; iy++ {
 		for ix := 0; ix < g.nx; ix++ {
-			lon, lat := g.cellCentre(ix, iy)
-			fx, fy := lonLatToTileFrac(lon, lat, scale)
-			tx, ty := int(math.Floor(fx)), int(math.Floor(fy))
-			tile := tiles[[3]int{z, tx, ty}]
-			if tile == nil {
+			// Aggregate over every tile pixel the grid cell covers, rather than
+			// point-sampling its centre. A channel one pixel wide is exactly
+			// what point-sampling drops: the Cape Cod Canal survives in the
+			// tile and then vanishes on the way into a slightly coarser grid.
+			// Flags are OR'd so a channel anywhere in the cell is a channel,
+			// and depth takes the shoalest reading, which is the conservative
+			// one.
+			minLon, minLat, maxLon, maxLat := g.cellBounds(ix, iy)
+			fx0, fy0 := lonLatToTileFrac(minLon, maxLat, scale) // north-west
+			fx1, fy1 := lonLatToTileFrac(maxLon, minLat, scale) // south-east
+
+			dst := iy*g.nx + ix
+			depth := math.NaN()
+			// A channel's own depth is tracked apart from the surrounding
+			// water's. Taking the shoalest of everything a cell covers is the
+			// right conservative reading in open water, but where a cell holds
+			// a dredged channel between two flats it reports the flats and
+			// closes the channel — which is how Portland's harbour entrance
+			// came to be a wall. If any pixel is a channel, the channel is
+			// what this cell represents.
+			chDepth := math.NaN()
+			var flags uint8
+			hit := false
+
+			for fy := fy0; ; fy += 1.0 / float64(n) {
+				if fy > fy1 {
+					fy = fy1
+				}
+				for fx := fx0; ; fx += 1.0 / float64(n) {
+					if fx > fx1 {
+						fx = fx1
+					}
+					tile := tiles[[3]int{z, int(math.Floor(fx)), int(math.Floor(fy))}]
+					if tile != nil {
+						px := clampIndex(int((fx-math.Floor(fx))*float64(n)), n)
+						py := clampIndex(int((fy-math.Floor(fy))*float64(n)), n)
+						src := py*n + px
+						pf := liveFlags(tile.Flags[src])
+						if d := tile.Depth[src]; d != noaa.NavDepthUncharted {
+							v := float64(d) / 10.0
+							if math.IsNaN(depth) || v < depth {
+								depth = v
+							}
+							if pf&cellChannel != 0 && (math.IsNaN(chDepth) || v < chDepth) {
+								chDepth = v
+							}
+						}
+						flags |= pf
+						hit = true
+					}
+					if fx >= fx1 {
+						break
+					}
+				}
+				if fy >= fy1 {
+					break
+				}
+			}
+			if !hit {
 				continue // no tile here: stays uncharted, which is passable-but-costly
 			}
-			px := clampIndex(int((fx-math.Floor(fx))*float64(n)), n)
-			// Tile rows already run north-to-south, matching slippy y.
-			py := clampIndex(int((fy-math.Floor(fy))*float64(n)), n)
-			src := py*n + px
-			dst := iy*g.nx + ix
-			if d := tile.Depth[src]; d != noaa.NavDepthUncharted {
-				g.depth[dst] = float64(d) / 10.0
+			if flags&cellChannel != 0 {
+				depth = chDepth
 			}
-			g.flags[dst] = liveFlags(tile.Flags[src])
+			g.depth[dst] = depth
+			g.flags[dst] = flags
 			covered++
 		}
 	}
@@ -385,6 +483,12 @@ func liveFlags(f uint8) uint8 {
 	}
 	if f&noaa.NavFlagRestricted != 0 {
 		out |= cellRestricted
+	}
+	if f&noaa.NavFlagChannel != 0 {
+		out |= cellChannel
+	}
+	if f&noaa.NavFlagChannelDepth != 0 {
+		out |= cellChannelDepth
 	}
 	return out
 }
