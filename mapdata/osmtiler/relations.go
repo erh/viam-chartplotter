@@ -14,20 +14,28 @@ import "github.com/paulmach/osm"
 // time. The runtime renderer queries those pre-built polygons from
 // MongoDB and never sees the constituent member ways.
 func AssembleOuterRings(wayIDs []osm.WayID, coords map[osm.WayID][]LonLat) [][]LonLat {
+	// Both loops below walk `ordered` — the caller's own member order — rather
+	// than ranging over `available`. Go randomises map iteration, so seeding a
+	// ring from the map would emit the same loop starting at a different vertex
+	// from run to run: geometrically identical, but a different document every
+	// time the ingest re-reads the relation. `available` is now only the
+	// membership test.
+	ordered := make([]osm.WayID, 0, len(wayIDs))
 	available := make(map[osm.WayID]bool, len(wayIDs))
 	for _, id := range wayIDs {
+		if available[id] {
+			continue // a way listed twice is still one way
+		}
 		if c, ok := coords[id]; ok && len(c) >= 2 {
 			available[id] = true
+			ordered = append(ordered, id)
 		}
 	}
 
 	var rings [][]LonLat
-	for len(available) > 0 {
-		// Seed a new ring with any remaining way.
-		var startID osm.WayID
-		for id := range available {
-			startID = id
-			break
+	for _, startID := range ordered {
+		if !available[startID] {
+			continue // already consumed by an earlier ring
 		}
 		delete(available, startID)
 		ring := append([]LonLat(nil), coords[startID]...)
@@ -46,7 +54,10 @@ func AssembleOuterRings(wayIDs []osm.WayID, coords map[osm.WayID][]LonLat) [][]L
 				reversed bool
 				found    bool
 			)
-			for id := range available {
+			for _, id := range ordered {
+				if !available[id] {
+					continue
+				}
 				c := coords[id]
 				if c[0] == tail {
 					pickID, reversed, found = id, false, true

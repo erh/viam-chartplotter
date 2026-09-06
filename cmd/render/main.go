@@ -48,12 +48,20 @@ func run() error {
 	lat := flag.Float64("lat", 32.79, "latitude (degrees)")
 	lon := flag.Float64("lon", -79.86, "longitude (degrees)")
 	zoom := flag.Int("zoom", 13, "tile zoom level")
-	mongoURI := flag.String("mongo", "mongodb://erh-23big.local:27017", "MongoDB URI")
+	// No default: this is machine-specific, and the old one ("…erh-23big.local")
+	// was both someone's personal host and an mDNS name that doesn't resolve
+	// off that network — so the tool's out-of-the-box behaviour was a confusing
+	// connect failure. Match the other tools and read MONGO_URI.
+	mongoURI := flag.String("mongo", os.Getenv("MONGO_URI"), "MongoDB URI (required; defaults to $MONGO_URI)")
 	dbName := flag.String("db", "osm", "MongoDB database")
 	outDir := flag.String("out", "/tmp/render", "output directory")
 	sd := flag.Float64("sd", 6, "safe depth (feet)")
 	fetchWMS := flag.Bool("wms", true, "also fetch NOAA WMS and build a compare panel")
 	flag.Parse()
+
+	if *mongoURI == "" {
+		return fmt.Errorf("--mongo is required (or set MONGO_URI): it names the chart database to render from")
+	}
 
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return err

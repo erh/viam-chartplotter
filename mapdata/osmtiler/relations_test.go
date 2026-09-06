@@ -101,3 +101,32 @@ func TestAssembleRings_MissingMemberWay(t *testing.T) {
 		t.Fatalf("rings=%d, want 1 (missing member tolerated)", len(got))
 	}
 }
+
+// The same relation must assemble to the same ring every time. Ingest upserts
+// what this returns, so a ring that starts at a random vertex would rewrite
+// unchanged geometry on every run. The start vertex is the first member way's
+// first point.
+func TestAssembleRings_IsDeterministic(t *testing.T) {
+	coords := map[osm.WayID][]LonLat{
+		1: pts(0, 0, 1, 0, 1, 1),
+		2: pts(1, 1, 0, 1, 0, 0),
+	}
+
+	want := pts(0, 0, 1, 0, 1, 1, 0, 1, 0, 0)
+	for i := 0; i < 50; i++ {
+		got := AssembleOuterRings([]osm.WayID{1, 2}, coords)
+		if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+			t.Fatalf("run %d: got=%v, want=%v", i, got, want)
+		}
+	}
+
+	// Listed the other way round, the ring starts at way 2 instead — still the
+	// caller's order, not the map's.
+	wantFrom2 := pts(1, 1, 0, 1, 0, 0, 1, 0, 1, 1)
+	for i := 0; i < 50; i++ {
+		got := AssembleOuterRings([]osm.WayID{2, 1}, coords)
+		if len(got) != 1 || !reflect.DeepEqual(got[0], wantFrom2) {
+			t.Fatalf("run %d (2,1): got=%v, want=%v", i, got, wantFrom2)
+		}
+	}
+}

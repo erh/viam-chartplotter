@@ -27,20 +27,25 @@ run: dist/index.html  Makefile
 # (see vite.config.ts), so the dev app behaves like the bundled one. Ctrl+C
 # stops both.
 #
-# Point it at a Mongo with chart data, otherwise the frontend falls back to the
-# hosted tile server and /noaa-enc/autoroute has nothing to plan against:
+# By default the dev server has NO Mongo, so it forwards the chart endpoints
+# (tiles, routing, search) to the hosted server -- the configuration a boat
+# actually runs. Nothing here defaults to a chart database: pointing dev at one
+# silently is how you end up debugging against data the boat will never have.
+#
+# To serve everything locally instead, name the database:
 #   make dev MONGO_URI=mongodb://localhost:27017
+#   MONGO_URI=$(MONGO) make dev          # the data-tools database
 #
 # The Routes panel (and with it Auto route) needs a real navigation service, so
 # open the dev app against a machine:
 #   http://localhost:5173/?host=<machine>.viam.cloud&api-key=<key>&authEntity=<key-id>
 # Without those params there is no machine to connect to and the app comes up
 # chart-only.
-MONGO_URI ?= $(MONGO)
+MONGO_URI ?=
 
 .PHONY: dev
 dev: node_modules src/output.css dist/index.html
-	@echo "go server  http://localhost:8888   (mongo: $(MONGO_URI))"
+	@echo "go server  http://localhost:8888   $(if $(MONGO_URI),(mongo: $(MONGO_URI)),(no mongo: chart endpoints proxied to the hosted server))"
 	@echo "web app    http://localhost:5173   (hot reload; proxies /noaa-* to :8888)"
 	@echo "ctrl+c stops both"
 	@# One shell for both, and `kill 0` on exit tears down the whole process
@@ -109,12 +114,26 @@ osm10024test: $(OSM_NYC_PBF)
 
 # -- ingest map data into MongoDB -------------------------------------------
 # Parse/sync OSM + NOAA ENC data into the shared Mongo database the renderer
-# reads (osm_* + noaa collections). Override MONGO / MONGO_DB on the CLI, e.g.
+# reads (osm_* + noaa collections). MONGO has no default -- these targets write
+# to a database for hours, and a default host is one that is wrong for everyone
+# but its author. Pass it per command or export it once:
 #   make ingest-noaa MONGO=mongodb://localhost:27017
-# The .local (mDNS) name does not resolve everywhere the Tailscale/MagicDNS
-# name does; override MONGO on the command line for a different host.
-MONGO     ?= mongodb://erh-23big:27017
+#   export MONGO=mongodb://erh-23big:27017
+# Note the .local (mDNS) form of a host does not resolve everywhere the
+# Tailscale/MagicDNS form does.
+MONGO     ?=
 MONGO_DB  ?= osm
+
+# require-mongo stops a data target with the fix in hand, rather than letting
+# the tool fail obscurely against an empty URI.
+define require-mongo
+@if [ -z "$(MONGO)" ]; then \
+	echo "$@: MONGO is not set -- it names the chart database to work on."; \
+	echo "  make $@ MONGO=mongodb://<host>:27017"; \
+	echo "  export MONGO=mongodb://<host>:27017   # once per shell"; \
+	exit 1; \
+fi
+endef
 
 # Base OS cache dir, matching Go's os.UserCacheDir() so these targets point at
 # the same place the running module/services read & write:
@@ -176,6 +195,7 @@ weathersync:
 # search box, class_geo for the auto-router) — it takes seconds against data
 # that's already there, where a full ingest takes hours.
 ensure-indexes: datasync
+	$(require-mongo)
 	./datasync --mongo $(MONGO) --db $(MONGO_DB) --indexes-only
 
 # Build the `places` gazetteer (chart + OSM names, text-indexed) that backs the
@@ -184,6 +204,7 @@ ensure-indexes: datasync
 #   make build-places PLACES_BBOX=-71.8,40.9,-66.8,44.6
 PLACES_BBOX ?=
 build-places: datasync
+	$(require-mongo)
 	./datasync --mongo $(MONGO) --db $(MONGO_DB) --build-places \
 		$(if $(PLACES_BBOX),--places-bbox=$(PLACES_BBOX))
 
@@ -191,14 +212,17 @@ build-places: datasync
 # place, so it's safe to re-run after a parser change (find|xargs handles the
 # thousands-of-cells arg list).
 ingest-noaa: datasync
+	$(require-mongo)
 	find $(ENC_CACHE) -name '*.000' -print0 | xargs -0 ./datasync --mongo $(MONGO) --db $(MONGO_DB)
 
 # Ingest the downloaded Atlantic-coast state extracts into the osm_* collections.
 ingest-osm-eastcoast: mapsync
+	$(require-mongo)
 	./mapsync ingest $(INGEST_FLAGS) --mongo $(MONGO) --db $(MONGO_DB) $(EASTCOAST_PBFS)
 
 # Ingest every downloaded OSM extract (all states + countries in the cache).
 ingest-osm-all: mapsync
+	$(require-mongo)
 	./mapsync ingest $(INGEST_FLAGS) --mongo $(MONGO) --db $(MONGO_DB) $(ALL_OSM_PBFS)
 
 # Everything: all OSM extracts then all ENC cells.
@@ -208,6 +232,7 @@ ingest-all: ingest-osm-all ingest-noaa
 # docs so the z7..z11 land-cover band renders fast (no PBF re-ingest needed).
 # New ingests write geomLow automatically; this backfills what's already there.
 backfill-geomlow: mapsync
+	$(require-mongo)
 	./mapsync backfill-geomlow --mongo $(MONGO) --db $(MONGO_DB)
 
 # One-time migration: build the curated osm_lowzoom collection (the z7/z8 band's
@@ -215,6 +240,7 @@ backfill-geomlow: mapsync
 # New ingests populate it automatically; this backfills what's already there.
 # Run AFTER backfill-geomlow so it copies the simplified geometry.
 backfill-lowzoom: mapsync
+	$(require-mongo)
 	./mapsync backfill-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
 
 # Build the curated noaa_lowzoom collection (the z7..z10 overview band, stored
@@ -223,6 +249,7 @@ backfill-lowzoom: mapsync
 # NOAA sync to refresh it; the renderer falls back to the full noaa collection
 # when it's absent.
 backfill-noaa-lowzoom: mapsync
+	$(require-mongo)
 	./mapsync backfill-noaa-lowzoom --mongo $(MONGO) --db $(MONGO_DB)
 
 
