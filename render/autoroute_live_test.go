@@ -253,3 +253,68 @@ func TestLiveRouteNewYorkToPortland(t *testing.T) {
 		test.That(t, *res.MinDepthMeters, test.ShouldBeGreaterThanOrEqualTo, 0.0)
 	}
 }
+
+// TestLiveRoutePortlandDeparture pins the way out of a harbour in an
+// archipelago.
+//
+// Portland sits behind the Casco Bay islands, and the way to sea is the ship
+// channel south-east past Portland Head. The router used to take a boat
+// leaving DiMillo's north-east up Casco Bay, eight miles the wrong way, and
+// hairpin back down through Hussey Sound — including two waypoints 18 m apart.
+//
+// The cause was in the downsample, not the search: sampleTilesIntoGrid OR'd
+// cellLand across every tile pixel a coarse cell covered, so a cell 11% land
+// and 89% navigable water came out solid. The channel between House and
+// Cushing Islands is exactly that, and carries no charted fairway to exempt
+// it, so the coarse topology pass saw Portland walled in and went round the
+// only way it could find. Anchors from that pass then forced the fine pass
+// through the detour.
+//
+// The invariant is simple enough to state without pinning a distance: a route
+// from Portland to somewhere south never goes north.
+func TestLiveRoutePortlandDeparture(t *testing.T) {
+	r, done := liveRenderer(t)
+	defer done()
+
+	// DiMillo's, on the Fore River, to Montauk.
+	start := RoutePoint{Lat: 43.6553, Lng: -70.2497}
+	res := liveRoute(t, r, start, RoutePoint{Lat: 41.0722, Lng: -71.9367})
+	t.Logf("Portland -> Montauk: %.1f nm, %d waypoints", routeNM(res), len(res.Waypoints))
+
+	// Montauk is due south, so any northing at all is the detour. The bound is
+	// tight on purpose: the coarse pass wandered to 43.70, but its ANCHORS are
+	// scaffolding and only some of them survive into the route, which reached
+	// 1112 m north of the berth. The fixed route reaches 333 m — the turn out
+	// of the Fore River — so 700 m separates them with the margin on the side
+	// that matters. Widen it only for a route that genuinely starts northbound.
+	const maxNorthingM = 700
+	for i, w := range res.Waypoints {
+		northM := (w.Lat - res.Waypoints[0].Lat) * metresPerDegreeLat
+		if northM > maxNorthingM {
+			t.Errorf("waypoint %d at %.4f,%.4f is %.0f m north of the berth (limit %d m): the way out of Portland is south-east, not up Casco Bay",
+				i, w.Lat, w.Lng, northM, maxNorthingM)
+		}
+	}
+
+	// A hairpin leaves waypoints on top of each other. Anything this short is
+	// not a mark a skipper would steer to.
+	for i := 1; i < len(res.Waypoints); i++ {
+		a, b := res.Waypoints[i-1], res.Waypoints[i]
+		if d := haversineMeters(a.Lat, a.Lng, b.Lat, b.Lng); d < 50 {
+			t.Errorf("waypoints %d and %d are %.0f m apart (%.4f,%.4f -> %.4f,%.4f)",
+				i-1, i, d, a.Lat, a.Lng, b.Lat, b.Lng)
+		}
+	}
+
+	// And the exit should actually be marked: a harbour this constrained needs
+	// waypoints in it, not one leg from the berth to the open sea.
+	within := 0
+	for _, w := range res.Waypoints {
+		if haversineMeters(start.Lat, start.Lng, w.Lat, w.Lng) < 6*1852 {
+			within++
+		}
+	}
+	if within < 2 {
+		t.Errorf("only %d waypoints within 6 nm of the start; expected the harbour exit to be marked", within)
+	}
+}

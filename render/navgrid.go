@@ -379,9 +379,23 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 			// point-sampling its centre. A channel one pixel wide is exactly
 			// what point-sampling drops: the Cape Cod Canal survives in the
 			// tile and then vanishes on the way into a slightly coarser grid.
-			// Flags are OR'd so a channel anywhere in the cell is a channel,
-			// and depth takes the shoalest reading, which is the conservative
-			// one.
+			//
+			// Flags that say "something navigable is here" are OR'd, so a
+			// channel anywhere in the cell is a channel -- that is what carries
+			// a route through a canal narrower than a cell. cellLand cannot be
+			// merged that way. OR-ing it means one land pixel in nine closes a
+			// cell that is 89% navigable water, so an archipelago downsamples
+			// into a solid wall: measured over Portland's approaches, the ship
+			// channel between House and Cushing Islands (11-22% land, and no
+			// charted fairway to exempt it) came out closed, leaving no way to
+			// sea except eight miles north around Casco Bay and back down.
+			// Land is therefore decided by coverage -- the cell is land when
+			// land covers at least half of it.
+			//
+			// Obstructions keep OR-ing. They are point hazards rather than
+			// area, one is enough to matter, and they were not what closed
+			// anything here (measured: zero obstruction pixels across the whole
+			// Portland approach).
 			minLon, minLat, maxLon, maxLat := g.cellBounds(ix, iy)
 			fx0, fy0 := lonLatToTileFrac(minLon, maxLat, scale) // north-west
 			fx1, fy1 := lonLatToTileFrac(maxLon, minLat, scale) // south-east
@@ -398,6 +412,7 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 			chDepth := math.NaN()
 			var flags uint8
 			hit := false
+			totalPx, landPx := 0, 0
 
 			for fy := fy0; ; fy += 1.0 / float64(n) {
 				if fy > fy1 {
@@ -413,7 +428,15 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 						py := clampIndex(int((fy-math.Floor(fy))*float64(n)), n)
 						src := py*n + px
 						pf := liveFlags(tile.Flags[src])
-						if d := tile.Depth[src]; d != noaa.NavDepthUncharted {
+						totalPx++
+						if pf&cellLand != 0 {
+							landPx++
+						} else if d := tile.Depth[src]; d != noaa.NavDepthUncharted {
+							// Only water contributes a depth. A land pixel's
+							// reading is not a depth the boat can use, and
+							// letting it into the shoalest-wins rule would
+							// re-close by depth exactly the cells the coverage
+							// rule just opened.
 							v := float64(d) / 10.0
 							if math.IsNaN(depth) || v < depth {
 								depth = v
@@ -422,7 +445,7 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 								chDepth = v
 							}
 						}
-						flags |= pf
+						flags |= pf &^ cellLand
 						hit = true
 					}
 					if fx >= fx1 {
@@ -435,6 +458,9 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 			}
 			if !hit {
 				continue // no tile here: stays uncharted, which is passable-but-costly
+			}
+			if 2*landPx >= totalPx {
+				flags |= cellLand
 			}
 			if flags&cellChannel != 0 {
 				depth = chDepth
