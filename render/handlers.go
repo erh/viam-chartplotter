@@ -36,6 +36,11 @@ type ENCHandlers struct {
 	// ?ideal= is absent. Zero means "twice the safe depth".
 	defaultIdealDepth float64
 
+	// upstream, when set, is another chartplotter server that DOES have the
+	// chart collections. Endpoints this deployment cannot answer locally are
+	// forwarded to it rather than failing (see proxy.go). Nil = no fallback.
+	upstream *UpstreamProxy
+
 	// lastRequest (unix nanos) is stamped by every registered handler; the
 	// background tile prewarmer (prewarm.go) only renders after 30s of quiet.
 	lastRequest   atomic.Int64
@@ -106,6 +111,24 @@ func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
 	return true
 }
 
+// orUpstream serves fn when the data it needs is attached locally, and
+// otherwise forwards the request to the upstream chart server. With no
+// upstream configured it still calls fn, which reports the missing data in the
+// endpoint's own vocabulary ("mongo_uri is not configured").
+func (h *ENCHandlers) orUpstream(available func() bool, fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.upstream != nil && !available() && r.Header.Get(proxyHopHeader) == "" {
+			h.upstream.Forward(w, r)
+			return
+		}
+		fn(w, r)
+	}
+}
+
+// SetUpstream points chart endpoints this deployment cannot serve at another
+// chartplotter server. Call it before Register.
+func (h *ENCHandlers) SetUpstream(p *UpstreamProxy) { h.upstream = p }
+
 func (h *ENCHandlers) Register(mux *http.ServeMux) {
 	// Every route is wrapped with the last-request stamp so the background
 	// prewarmer (prewarm.go) yields whenever a user is actively browsing.
@@ -115,18 +138,28 @@ func (h *ENCHandlers) Register(mux *http.ServeMux) {
 			fn(w, r)
 		}
 	}
-	mux.HandleFunc("/noaa-enc/tile/", track(h.handleTile))
-	mux.HandleFunc("/noaa-enc/debug", track(h.handleDebug))
-	mux.HandleFunc("/noaa-enc/debug-tile/", track(h.handleDebugTile))
-	mux.HandleFunc("/noaa-enc/debug-mongo/", track(h.handleDebugMongo))
+	// charts / osm wrap a handler with the upstream fallback: when the data it
+	// needs isn't attached here, the request is forwarded instead of failing.
+	charts := func(fn http.HandlerFunc) http.HandlerFunc {
+		return track(h.orUpstream(h.renderer.HasCharts, fn))
+	}
+	osm := func(fn http.HandlerFunc) http.HandlerFunc {
+		return track(h.orUpstream(h.renderer.HasOSM, fn))
+	}
+	mux.HandleFunc("/noaa-enc/tile/", charts(h.handleTile))
+	mux.HandleFunc("/noaa-enc/debug", charts(h.handleDebug))
+	mux.HandleFunc("/noaa-enc/debug-tile/", charts(h.handleDebugTile))
+	mux.HandleFunc("/noaa-enc/debug-mongo/", charts(h.handleDebugMongo))
+	// /compare is served by the WMS cache, not the feature store, so it works
+	// locally with no Mongo at all — never proxy it.
 	mux.HandleFunc("/noaa-enc/compare/test", track(h.handleCompareTest))
 	mux.HandleFunc("/noaa-enc/compare/", track(h.handleCompare))
-	mux.HandleFunc("/noaa-enc/navaids", track(h.handleNavaids))
-	mux.HandleFunc("/noaa-enc/structures", track(h.handleStructures))
-	mux.HandleFunc("/noaa-enc/osm-tile/", track(h.handleOSMTile))
-	mux.HandleFunc("/noaa-enc/autoroute", track(h.handleAutoRoute))
-	mux.HandleFunc("/noaa-enc/search", track(h.handleSearch))
-	mux.HandleFunc("/noaa-enc/optimize", track(h.handleOptimize))
+	mux.HandleFunc("/noaa-enc/navaids", charts(h.handleNavaids))
+	mux.HandleFunc("/noaa-enc/structures", charts(h.handleStructures))
+	mux.HandleFunc("/noaa-enc/osm-tile/", osm(h.handleOSMTile))
+	mux.HandleFunc("/noaa-enc/autoroute", charts(h.handleAutoRoute))
+	mux.HandleFunc("/noaa-enc/search", charts(h.handleSearch))
+	mux.HandleFunc("/noaa-enc/optimize", charts(h.handleOptimize))
 }
 
 // handleOSMTile serves a 256×256 PNG containing only the OSM vector

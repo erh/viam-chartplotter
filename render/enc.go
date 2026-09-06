@@ -120,6 +120,14 @@ func (r *ENCRenderer) SetNavGridCollection(c *mongo.Collection) { r.navColl = c 
 // times out on rare names.
 func (r *ENCRenderer) SetPlacesCollection(c *mongo.Collection) { r.placesColl = c }
 
+// HasCharts reports whether the ENC feature store is attached. False means
+// every chart-backed endpoint (tiles, navaids, search, routing) would answer
+// errNoCharts, and the handlers forward the request upstream instead.
+func (r *ENCRenderer) HasCharts() bool { return r.noaaColl != nil }
+
+// HasOSM reports whether the OSM underlay collections are attached.
+func (r *ENCRenderer) HasOSM() bool { return r.osm != nil }
+
 // Logger returns the renderer's logger (may be nil) so the HTTP handlers can
 // log per-request timing breakdowns through the same sublogger.
 func (r *ENCRenderer) Logger() logging.Logger { return r.logger }

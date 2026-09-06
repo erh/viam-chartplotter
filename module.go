@@ -427,6 +427,18 @@ func StartChartplotterServer(
 	} else {
 		logger.Info("osm underlay disabled (set mongo_uri config or MONGO_URI env to enable)")
 	}
+	// No local chart store: forward the chart endpoints to the one server that
+	// has Mongo attached (see render/proxy.go). The app then only ever talks to
+	// its own origin, which is what makes the JSON endpoints work from a
+	// browser without CORS on the far end.
+	if !mongoChartsOK && tileServerBaseURL != "" {
+		if p, err := render.NewUpstreamProxy(tileServerBaseURL, logger); err != nil {
+			logger.Warnf("chart proxy disabled: %v", err)
+		} else {
+			encHandlers.SetUpstream(p)
+			logger.Infof("chart proxy: no local mongo, forwarding /noaa-enc/* to %s", p.Host())
+		}
+	}
 	encHandlers.Register(mux)
 	logger.Infof("noaa enc renderer ready (mongo-backed; tile cache %s, default draft=%.1f ft)", filepath.Join(encDir, "tiles"), draftFt)
 	if mongoChartsOK {

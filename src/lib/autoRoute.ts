@@ -74,29 +74,21 @@ export function autoRouteUrl(base: string, req: AutoRouteRequest): string {
   return `${base}/noaa-enc/autoroute?${p.toString()}`;
 }
 
-// The chart server may be a different origin from the app (a split
-// deployment); /app-config says which. Resolved once and cached — it can't
-// change without a page reload.
-let tileBasePromise: Promise<string> | null = null;
-const HOSTED_TILE_FALLBACK = "https://nycmaps.checkmatemaps.com";
-
-export function resolveTileBase(): Promise<string> {
-  if (!tileBasePromise) {
-    tileBasePromise = (async () => {
-      try {
-        const resp = await fetch("/app-config");
-        if (!resp.ok) return HOSTED_TILE_FALLBACK;
-        const cfg = await resp.json();
-        if (cfg && typeof cfg.tileServerBaseURL === "string") {
-          return cfg.tileServerBaseURL.replace(/\/$/, "");
-        }
-      } catch {
-        return HOSTED_TILE_FALLBACK;
-      }
-      return "";
-    })();
-  }
-  return tileBasePromise;
+/**
+ * Where the JSON chart APIs live: our own origin, always.
+ *
+ * The server that served this app either has the chart database attached or
+ * forwards these endpoints to the one that does (Go: render/proxy.go), so the
+ * client needs to know neither which is which nor how to reach the chart
+ * server — a browser on a boat whose uplink only reaches the module still
+ * routes and searches. It also keeps these fetch()es same-origin, so they
+ * don't depend on the far end sending CORS headers.
+ *
+ * Map tiles still go straight to the tile server (marineMap.svelte reads
+ * /app-config for that), so we don't relay megabytes of PNG through the boat.
+ */
+export function apiBase(): string {
+  return "";
 }
 
 export interface OptimizeRequest {
@@ -120,7 +112,7 @@ export interface OptimizeRequest {
  * can show what the optimisation cost or saved.
  */
 export async function optimizeRoute(req: OptimizeRequest): Promise<AutoRouteResult> {
-  const base = await resolveTileBase();
+  const base = apiBase();
   const resp = await fetch(`${base}/noaa-enc/optimize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -159,7 +151,7 @@ export async function optimizeRoute(req: OptimizeRequest): Promise<AutoRouteResu
  * verbatim, since it names the depth that made it impossible.
  */
 export async function planAutoRoute(req: AutoRouteRequest): Promise<AutoRouteResult> {
-  const base = await resolveTileBase();
+  const base = apiBase();
   const resp = await fetch(autoRouteUrl(base, req));
   if (!resp.ok) {
     let msg = `auto-route failed (${resp.status})`;

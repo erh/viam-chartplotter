@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"go.viam.com/rdk/components/generic"
@@ -29,7 +31,17 @@ func realMain() error {
 	}
 
 	mongoURI := os.Getenv("MONGO_URI")
-	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, 8888, "", 0, 6, 0, "",
+	// PORT lets a second instance run alongside one already on 8888 — handy for
+	// comparing a Mongo-backed server with a proxying one.
+	port := 8888
+	if p := os.Getenv("PORT"); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return fmt.Errorf("bad PORT %q: %w", p, err)
+		}
+		port = n
+	}
+	ws, err := vc.StartChartplotterServer(generic.Named("foo"), fs, logger, port, "", 0, 6, 0, "",
 		mongoURI, "osm", "features", vc.ResolveTileServerBaseURL("", mongoURI), false, nil)
 	if err != nil {
 		return err

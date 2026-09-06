@@ -26,6 +26,15 @@ weather tiles from MongoDB. With `mongo_uri` set, the server reads `osm_*`,
 **Without `mongo_uri`** it still serves the UI but points the frontend at the
 public hosted map+weather server, so tiles and weather work with zero setup.
 
+The chart *data* endpoints — auto-routing, route optimisation and search — need
+the feature store, so without `mongo_uri` this server proxies them to
+`tile_server_base_url` (the hosted server by default) instead of failing;
+see `render/proxy.go`. The app therefore always calls its own origin for
+`/noaa-enc/*` JSON: it needs no knowledge of where the data lives, and a client
+that can only reach the module still routes and searches. Only map tiles are
+fetched from the hosted server directly, so they aren't relayed through the
+boat's uplink.
+
 | attribute | type | default | description |
 |-----------|------|---------|-------------|
 | `mongo_uri` | string | — (env `MONGO_URI`) | MongoDB URI holding the ingested chart + weather data. Unset → frontend uses the hosted tile/weather server. |
@@ -36,7 +45,7 @@ public hosted map+weather server, so tiles and weather work with zero setup.
 | `noaa_cache_dir` | string | OS cache dir | disk cache root for rendered tiles / WMS / weather staging |
 | `noaa_cache_max_bytes` | int | `0` (unbounded) | cap on the WMS proxy cache |
 | `myboat_icon_path` | string | — | path to a custom boat icon |
-| `tile_server_base_url` | string | "" (same-origin; hosted server if `mongo_uri` unset) | base URL of a separate map+weather server the frontend fetches tiles+weather from. Empty = this instance serves its own. |
+| `tile_server_base_url` | string | "" (same-origin; hosted server if `mongo_uri` unset) | base URL of a separate map+weather server the frontend fetches tiles+weather from, and that chart-data endpoints are proxied to when `mongo_uri` is unset. Empty = this instance serves its own. |
 | `chart_only` | bool | `false` | chart-extended (kiosk) mode: no boat/robot to connect to — the frontend skips the Viam connection and shows only the chart (no boat marker, AIS, nav, camera, or panels). Also auto-enabled when no host is resolvable. |
 | `movement_sensor` | string | — | movement sensor for `/api/state` (position/heading/SOG) |
 | `depth_sensor` | string | — | depth sensor; adds `depth_ft` to `/api/state` |

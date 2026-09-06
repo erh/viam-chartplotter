@@ -4,9 +4,9 @@
 //
 // Search runs on the chart server (it owns the feature store); this module
 // shapes the request, debounces the type-ahead, and works out how the map
-// should frame a hit.
+// should frame a hit. The request goes to our own origin — see apiBase().
 
-import { resolveTileBase } from "./autoRoute";
+import { apiBase } from "./autoRoute";
 
 export interface SearchHit {
   name: string;
@@ -57,7 +57,7 @@ export async function searchChart(
 ): Promise<SearchResponse> {
   const trimmed = q.trim();
   if (!trimmed) return { hits: [], matchedQuery: trimmed };
-  const base = await resolveTileBase();
+  const base = apiBase();
   const resp = await fetch(searchUrl(base, trimmed, opts));
   if (!resp.ok) {
     let msg = `search failed (${resp.status})`;
