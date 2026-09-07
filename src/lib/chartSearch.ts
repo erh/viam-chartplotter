@@ -14,6 +14,9 @@ export interface SearchHit {
   class: string;
   /** That class in words ("Light"), or the acronym when we have no wording. */
   label: string;
+  /** Where the hit is for a human — "Newport, RI" — or absent/empty when the
+   *  server could not place it. */
+  area?: string;
   cell: string;
   lat: number;
   lng: number;

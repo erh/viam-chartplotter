@@ -34,6 +34,10 @@ type SearchResult struct {
 	// names places and businesses — and a searcher should be able to tell
 	// which they are looking at.
 	Source string `json:"source"`
+	// Area places the hit for a human — "Newport, RI" — from the nearest
+	// settlement and its state (see search_area.go). Empty when nothing
+	// nearby could name it.
+	Area string `json:"area,omitempty"`
 
 	// Lat/Lng is the feature's centre, and BBox its full extent — a channel or
 	// canyon is a big thing and the caller usually wants to frame it, not
@@ -97,6 +101,7 @@ func (r *ENCRenderer) Search(q string, class string, limit int, origin *RoutePoi
 			hits = hits[:limit]
 		}
 		r.logSlowQuery("places-search", time.Since(qStart), len(hits), -1, 0, 0, 0, 0)
+		r.annotateAreas(ctx, hits)
 		return hits, q, nil
 	}
 
@@ -134,6 +139,7 @@ func (r *ENCRenderer) Search(q string, class string, limit int, origin *RoutePoi
 	if len(out) > limit {
 		out = out[:limit]
 	}
+	r.annotateAreas(ctx, out)
 	return out, matched, nil
 }
 

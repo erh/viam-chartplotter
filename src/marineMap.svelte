@@ -6220,6 +6220,9 @@
                 <span class="chart-search-name">{hit.name}</span>
                 <span class="chart-search-meta">
                   {hit.label}
+                  {#if hit.area}
+                    · {hit.area}
+                  {/if}
                   {#if formatDistance(hit.distance_meters)}
                     · {formatDistance(hit.distance_meters)}
                   {/if}

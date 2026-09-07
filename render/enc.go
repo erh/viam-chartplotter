@@ -74,6 +74,10 @@ type ENCRenderer struct {
 	landmarksLoaded  bool
 	canonicalCanyons []*mongoFeature
 	canonicalWrecks  []*mongoFeature
+
+	// areas holds the settlement index behind search-result "Newport, RI"
+	// annotations (see search_area.go). Lazily loaded; owns its own lock.
+	areas areaIndex
 }
 
 // drawPass orders the rendering of features so fills are below lines are below
