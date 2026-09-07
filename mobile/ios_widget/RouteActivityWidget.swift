@@ -34,12 +34,14 @@ struct RouteActivityWidget: Widget {
         Image(systemName: "location.north.line.fill")
           .foregroundStyle(.cyan)
       } compactTrailing: {
-        if let eta = futureDate(context.state.nextEtaEpoch) {
+        // Time remaining to the FINAL destination — the one number worth the
+        // island's few points; next-leg detail lives in the expanded view.
+        if let eta = futureDate(context.state.finalEtaEpoch) {
           Text(timerInterval: Date.now...eta, countsDown: true)
             .monospacedDigit()
             .frame(maxWidth: 60)
         } else {
-          Text(nm(context.state.nextDistNm)).monospacedDigit()
+          Text(nm(context.state.finalDistNm)).monospacedDigit()
         }
       } minimal: {
         Image(systemName: "location.north.line.fill")
