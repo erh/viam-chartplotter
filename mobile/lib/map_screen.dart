@@ -21,6 +21,7 @@ import 'data_drawer.dart';
 import 'debug_screen.dart';
 import 'forecast.dart';
 import 'fuel_screen.dart';
+import 'chart/chart_search.dart';
 import 'chart/navaid_icon.dart';
 import 'chart/navaids.dart';
 import 'chart/structure_icon.dart';
@@ -30,8 +31,10 @@ import 'chart/bbox_source.dart';
 import 'map/ais_sheet.dart';
 import 'map/map_controls.dart';
 import 'map/map_layers.dart';
+import 'map/search_sheet.dart';
 import 'map/tile_cache.dart';
 import 'map/wind_overlay.dart';
+import 'routes/auto_route_sheet.dart';
 import 'routes/route_store.dart' show NavWaypoint;
 import 'routes/routes_sheet.dart';
 import 'settings.dart';
@@ -111,6 +114,12 @@ class _MapScreenState extends State<MapScreen> {
       setState(() => _weatherSample = null);
       return;
     }
+    // Armed auto-route: the tap is the destination.
+    if (_autoRouteArmed) {
+      setState(() => _autoRouteArmed = false);
+      unawaited(_planAutoRouteTo(point));
+      return;
+    }
     // Armed waypoint edits (E1) take the tap first: move, then insert. Both
     // commit exactly one RPC per gesture (tap-to-place, not drag-per-frame).
     final movingId = _movingWaypointId;
@@ -166,7 +175,9 @@ class _MapScreenState extends State<MapScreen> {
   /// no other way to read a point value on touch. With weather off,
   /// long-press adds a waypoint. Never both.
   void _onMapLongPress(LatLng point) {
-    if (_measureMode || _waypointModeArmed) return; // don't fight other modes
+    if (_measureMode || _waypointModeArmed || _autoRouteArmed) {
+      return; // don't fight other modes
+    }
     final weatherShowing = (_wind.on || _wind.wavesOn) &&
         WindOverlayController.weatherVisibleAtZoom(() {
           try {
@@ -415,6 +426,114 @@ class _MapScreenState extends State<MapScreen> {
         },
       ),
     );
+  }
+
+  // ---- chart search + auto route ---------------------------------------
+  // Search finds anything named in the ENC store and frames it on the map
+  // (web: marineMap.svelte chart search). Auto route asks the chart server
+  // for a waypoint list that stays off land and shoals (web: RoutesPanel's
+  // auto form); on touch the destination is a tap or a search hit, so there
+  // is no form — arm, tap, review, load.
+  bool _autoRouteArmed = false;
+  List<LatLng>? _autoRouteCandidate; // planned waypoints being previewed
+
+  Future<void> _openSearch() async {
+    // Rank by distance from the middle of what you're looking at, so "north
+    // channel" finds the one on screen rather than one in Alaska.
+    LatLng? origin;
+    try {
+      origin = _map.camera.center;
+    } catch (_) {
+      origin = widget.state.displayPosition;
+    }
+    final boat = widget.state.displayPosition;
+    final choice = await showModalBottomSheet<SearchChoice>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => ChartSearchSheet(
+        origin: origin,
+        canRoute: widget.connection.navApi != null &&
+            boat != null &&
+            _validPos(boat),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    if (choice.route) {
+      await _planAutoRouteTo(choice.hit.pos);
+    } else {
+      _goToHit(choice.hit);
+    }
+  }
+
+  /// Go to a hit: centre on a point feature, frame an area one. Either way
+  /// suspend follow, or the boat anchor yanks the view straight back.
+  void _goToHit(SearchHit hit) {
+    setState(() => _followBoat = false);
+    final framing = framingFor(hit);
+    if (framing.fit) {
+      _map.fitCamera(CameraFit.bounds(
+        bounds: LatLngBounds(
+          LatLng(hit.bbox[1], hit.bbox[0]),
+          LatLng(hit.bbox[3], hit.bbox[2]),
+        ),
+        padding: const EdgeInsets.all(80),
+        maxZoom: 15,
+      ));
+    } else {
+      _map.move(hit.pos, framing.zoom);
+    }
+  }
+
+  /// Plan boat → [dest] on the chart server, preview it behind the sheet,
+  /// and load it into the nav service if the skipper accepts.
+  Future<void> _planAutoRouteTo(LatLng dest) async {
+    final start = widget.state.displayPosition;
+    if (start == null || !_validPos(start)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No boat position to route from')));
+      return;
+    }
+    final waypoints = await showModalBottomSheet<List<LatLng>>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => AutoRouteSheet(
+        base: AppConfig.tileBase.value,
+        start: start,
+        end: dest,
+        // The operator's safe depth (A2) is the hard constraint; unset, the
+        // server falls back to the boat's configured draft.
+        safeDepthFt: _settings.safeDepthFt?.toDouble(),
+        onPreview: (pts) {
+          if (mounted) setState(() => _autoRouteCandidate = pts);
+        },
+      ),
+    );
+    if (!mounted) return;
+    setState(() => _autoRouteCandidate = null);
+    if (waypoints == null) return;
+    // Deliberate confirm before replacing a route in use (web confirms too).
+    final current = widget.state.navWaypoints.length;
+    if (current > 0) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          title: const Text('Replace route?'),
+          content: Text(
+              'Replace the current $current waypoint(s) with the planned route?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(dctx, true),
+                child: const Text('Replace')),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+    }
+    await _navEdit(() => widget.connection.loadRouteWaypoints(waypoints));
   }
 
   // Per-area visibility (B3), seeded from the season window on every load
@@ -1320,6 +1439,8 @@ class _MapScreenState extends State<MapScreen> {
                 ..._routePreviews.values,
                 if (_trackCandidate case final tc? when tc.length >= 2)
                   (points: tc, color: Colors.tealAccent),
+                if (_autoRouteCandidate case final ac? when ac.length >= 2)
+                  (points: ac, color: Colors.lightGreenAccent),
               ],
               // Active nav route (E1): boat (fresh fix only) + the chain.
               activeRoutePoints: s.navWaypoints.isEmpty
@@ -1517,6 +1638,34 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                     ],
+                    // Auto route armed: the next tap picks the destination.
+                    if (_autoRouteArmed) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.only(left: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.lightGreenAccent),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Auto route: tap the destination',
+                              style: TextStyle(
+                                  color: Colors.lightGreenAccent,
+                                  fontWeight: FontWeight.bold),
+                            ),
+                            TextButton(
+                              onPressed: () =>
+                                  setState(() => _autoRouteArmed = false),
+                              child: const Text('Cancel'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     // Waypoint move/insert armed (E1): what the next tap does.
                     if (_waypointModeArmed) ...[
                       const SizedBox(height: 6),
@@ -1569,6 +1718,12 @@ class _MapScreenState extends State<MapScreen> {
                         setState(() => _base = t);
                         _settings.baseLayerId = t.id;
                       },
+                    ),
+                    const SizedBox(height: 8),
+                    MapRoundButton(
+                      icon: Icons.search,
+                      tooltip: 'Search charts',
+                      onTap: _openSearch,
                     ),
                     // Phone only: on tablets the data panel is persistent
                     // (L6), so there's no drawer to open.
@@ -1626,6 +1781,14 @@ class _MapScreenState extends State<MapScreen> {
                         icon: Icons.route,
                         tooltip: 'Routes',
                         onTap: _openRoutesSheet,
+                      ),
+                      const SizedBox(height: 8),
+                      MapRoundButton(
+                        icon: Icons.alt_route,
+                        tooltip: 'Auto route',
+                        active: _autoRouteArmed,
+                        onTap: () => setState(
+                            () => _autoRouteArmed = !_autoRouteArmed),
                       ),
                     ],
                     // Everything used less than once an hour lives in the
