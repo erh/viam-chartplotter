@@ -80,6 +80,12 @@ func EnsureIndexes(ctx context.Context, coll *mongo.Collection) error {
 			Keys:    bson.D{{Key: "source", Value: 1}},
 			Options: options.Index().SetName("source_1"),
 		},
+		{
+			// The search-area settlement load (render/search_area.go) selects
+			// by source + class; without this it scans every OSM row.
+			Keys:    bson.D{{Key: "source", Value: 1}, {Key: "class", Value: 1}},
+			Options: options.Index().SetName("source_class"),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("places: create indexes: %w", err)

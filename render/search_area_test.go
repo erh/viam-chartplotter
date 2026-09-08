@@ -40,7 +40,29 @@ func TestFormatArea(t *testing.T) {
 
 func TestStateAbbrev(t *testing.T) {
 	test.That(t, stateAbbrev("Rhode Island"), test.ShouldEqual, "RI")
-	test.That(t, stateAbbrev("District of Columbia"), test.ShouldEqual, "DC")
+	test.That(t, stateAbbrev("District Of Columbia"), test.ShouldEqual, "DC")
 	// Unknown names pass through whole rather than get dropped or guessed.
 	test.That(t, stateAbbrev("Nova Scotia"), test.ShouldEqual, "Nova Scotia")
+}
+
+func TestRegionArea(t *testing.T) {
+	test.That(t, regionArea("us-rhode-island"), test.ShouldEqual, "RI")
+	test.That(t, regionArea("us-new-york"), test.ShouldEqual, "NY")
+	test.That(t, regionArea("us-district-of-columbia"), test.ShouldEqual, "DC")
+	test.That(t, regionArea("us-us-virgin-islands"), test.ShouldEqual, "VI")
+	// Provinces and countries show in full.
+	test.That(t, regionArea("canada-nova-scotia"), test.ShouldEqual, "Nova Scotia")
+	test.That(t, regionArea("bahamas"), test.ShouldEqual, "Bahamas")
+	test.That(t, regionArea(""), test.ShouldEqual, "")
+}
+
+func TestWikipediaState(t *testing.T) {
+	test.That(t, wikipediaState("en:Newport, Rhode Island"), test.ShouldEqual, "RI")
+	test.That(t, wikipediaState("en:Newport (city), Vermont"), test.ShouldEqual, "VT")
+	// No state suffix, a non-English tag, or a suffix we don't recognise all
+	// defer to the ingest region instead of guessing.
+	test.That(t, wikipediaState("en:Boston"), test.ShouldEqual, "")
+	test.That(t, wikipediaState("de:Newport, Rhode Island"), test.ShouldEqual, "")
+	test.That(t, wikipediaState("en:Springfield, Ontario County"), test.ShouldEqual, "")
+	test.That(t, wikipediaState(""), test.ShouldEqual, "")
 }
