@@ -63,11 +63,14 @@ void main() {
         'bbox': [-71.4, 41.4, -71.4, 41.4],
         'distance_meters': 1852,
         'area': 'Newport, RI',
+        'address': '4524 Dunning Rd',
       });
       expect(withArea?.area, 'Newport, RI');
+      expect(withArea?.address, '4524 Dunning Rd');
       final without =
           SearchHit.fromJson({'name': 'x', 'lat': 41.0, 'lng': -71.0});
       expect(without?.area, '');
+      expect(without?.address, '');
     });
   });
 

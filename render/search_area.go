@@ -269,6 +269,9 @@ func (r *ENCRenderer) annotateAreas(ctx context.Context, hits []SearchResult) {
 	ctx, cancel := context.WithTimeout(ctx, areaLookupBudget)
 	defer cancel()
 	for i := range hits {
+		if hits[i].Area != "" {
+			continue // the source knew its own address (Overture)
+		}
 		idx := nearestSettlement(settlements, hits[i].Lat, hits[i].Lng)
 		if idx < 0 {
 			continue

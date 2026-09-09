@@ -53,6 +53,7 @@ func run() error {
 	indexesOnly := flag.Bool("indexes-only", false, "create/refresh the collection indexes and exit (no download, no ingest)")
 	buildPlaces := flag.Bool("build-places", false, "build the `places` gazetteer from the chart + OSM collections, then exit")
 	placesBBox := flag.String("places-bbox", "", "restrict --build-places to minLon,minLat,maxLon,maxLat")
+	overtureFile := flag.String("overture", "", "load an Overture places NDJSON export (see `make ingest-overture`) into the gazetteer, then exit")
 	interval := flag.Duration("interval", 24*time.Hour, "sync interval; 0 = run once and exit")
 	flag.Parse()
 
@@ -94,8 +95,17 @@ func run() error {
 		if err := noaa.EnsureNavGridIndexes(ctx, noaa.OpenNavGridCollection(client.Database(*dbName))); err != nil {
 			logger.Warnf("navgrid index: %v", err)
 		}
+		// The gazetteer's indexes too — the settlement load behind search
+		// areas needs source+class, and an existing database predates it.
+		if err := places.EnsureIndexes(ctx, places.Open(client.Database(*dbName))); err != nil {
+			logger.Warnf("places indexes: %v", err)
+		}
 		logger.Info("indexes ensured; exiting (--indexes-only)")
 		return nil
+	}
+
+	if *overtureFile != "" {
+		return loadOverture(ctx, client.Database(*dbName), *overtureFile, logger)
 	}
 
 	if *buildPlaces {
@@ -191,6 +201,27 @@ func reingestPaths(ctx context.Context, coll *mongo.Collection, paths []string, 
 	}
 	logger.Infof("reingest done: %d cells, %d features, %d write-errors, %d geom-skipped",
 		total.Cells, total.Docs, total.WriteErrors, total.GeomSkipped)
+	return nil
+}
+
+// loadOverture upserts a DuckDB-exported Overture places file (see the
+// ingest-overture Makefile target) into the gazetteer. Idempotent, so the
+// monthly refresh is just running it again.
+func loadOverture(ctx context.Context, db *mongo.Database, path string, logger logging.Logger) error {
+	dst := places.Open(db)
+	if err := places.EnsureIndexes(ctx, dst); err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := places.BuildFromOverture(ctx, dst, f, places.BuildOptions{})
+	if err != nil {
+		return fmt.Errorf("overture load: read=%d written=%d: %w", st.Read, st.Written, err)
+	}
+	logger.Infof("overture: read=%d written=%d", st.Read, st.Written)
 	return nil
 }
 

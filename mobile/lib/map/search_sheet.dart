@@ -146,6 +146,7 @@ class _ChartSearchSheetState extends State<ChartSearchSheet> {
                         subtitle: Text(
                           [
                             h.label,
+                            if (h.address.isNotEmpty) h.address,
                             if (h.area.isNotEmpty) h.area,
                             if (formatSearchDistance(h.distanceMeters)
                                 case final d when d.isNotEmpty)

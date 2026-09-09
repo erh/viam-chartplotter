@@ -17,6 +17,8 @@ export interface SearchHit {
   /** Where the hit is for a human — "Newport, RI" — or absent/empty when the
    *  server could not place it. */
   area?: string;
+  /** Street address — "4524 Dunning Rd" — for sources that carry one. */
+  address?: string;
   cell: string;
   lat: number;
   lng: number;

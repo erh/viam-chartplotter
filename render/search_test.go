@@ -37,6 +37,33 @@ func TestDedupeSearchResultsKeepsTheNearest(t *testing.T) {
 	test.That(t, out[1].Class, test.ShouldEqual, "SEAARE")
 }
 
+func TestDedupeSearchResultsMergesAcrossSources(t *testing.T) {
+	// The same marina known to OSM and Overture under different class
+	// vocabularies shares a label, so it collapses to one row — the nearer
+	// (Overture) copy, which carries the address.
+	in := []SearchResult{
+		{Name: "Cobb's Marina", Class: "leisure=marina", Label: "Marina", Source: "osm", DistanceMeters: 900},
+		{Name: "Cobb's Marina", Class: "marina", Label: "Marina", Source: "overture", Address: "4524 Dunning Rd", DistanceMeters: 850},
+	}
+	out := dedupeSearchResults(in)
+	test.That(t, len(out), test.ShouldEqual, 1)
+	test.That(t, out[0].Address, test.ShouldEqual, "4524 Dunning Rd")
+}
+
+func TestCategoryLabel(t *testing.T) {
+	test.That(t, categoryLabel("marina"), test.ShouldEqual, "Marina")
+	test.That(t, categoryLabel("boat_service_and_repair"), test.ShouldEqual, "Boat service and repair")
+	test.That(t, categoryLabel(""), test.ShouldEqual, "")
+}
+
+func TestPlaceArea(t *testing.T) {
+	// A postal code passes through; a full state name abbreviates.
+	test.That(t, placeArea("Norfolk", "VA"), test.ShouldEqual, "Norfolk, VA")
+	test.That(t, placeArea("Norfolk", "Virginia"), test.ShouldEqual, "Norfolk, VA")
+	test.That(t, placeArea("Norfolk", ""), test.ShouldEqual, "Norfolk")
+	test.That(t, placeArea("", ""), test.ShouldEqual, "")
+}
+
 func TestDedupeSearchResultsWithoutDistances(t *testing.T) {
 	// No origin: distances are -1 and the first hit stands rather than being
 	// replaced by an arbitrary later duplicate.

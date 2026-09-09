@@ -22,6 +22,7 @@ class SearchHit {
     required this.bbox,
     required this.distanceMeters,
     this.area = '',
+    this.address = '',
   });
 
   final String name;
@@ -44,6 +45,9 @@ class SearchHit {
   /// Where the hit is for a human — "Newport, RI" — or empty when the
   /// server could not place it.
   final String area;
+
+  /// Street address — "4524 Dunning Rd" — for sources that carry one.
+  final String address;
 
   LatLng get pos => LatLng(lat, lng);
 
@@ -70,6 +74,7 @@ class SearchHit {
           : [lng.toDouble(), lat.toDouble(), lng.toDouble(), lat.toDouble()],
       distanceMeters: (j['distance_meters'] as num?)?.toDouble() ?? -1,
       area: (j['area'] ?? '').toString(),
+      address: (j['address'] ?? '').toString(),
     );
   }
 }

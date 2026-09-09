@@ -31,6 +31,10 @@ const Coll = "places"
 const (
 	SourceChart = "chart"
 	SourceOSM   = "osm"
+	// SourceOverture is the Overture Maps places layer (CDLA-Permissive 2.0)
+	// — commercial marine POIs (marinas, boatyards, fuel docks) with street
+	// addresses, covering what OSM volunteers never mapped. See overture.go.
+	SourceOverture = "overture"
 )
 
 // Place is one named thing.
@@ -45,6 +49,13 @@ type Place struct {
 	Lng   float64    `bson:"lng"`
 	BBox  [4]float64 `bson:"bbox"`
 	Cell  string     `bson:"cell,omitempty"`
+
+	// Street/City/State are carried by sources that know addresses (Overture);
+	// blank for chart and OSM places, whose hits are placed by the search-area
+	// annotation instead.
+	Street string `bson:"street,omitempty"`
+	City   string `bson:"city,omitempty"`
+	State  string `bson:"state,omitempty"`
 }
 
 // ID builds a stable document id from a place's identity, so rebuilding is an
@@ -137,7 +148,7 @@ func textSearch(ctx context.Context, coll *mongo.Collection, search string, limi
 	cur, err := coll.Find(ctx,
 		bson.M{"$text": bson.M{"$search": search}},
 		options.Find().
-			SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}, "name": 1, "source": 1, "class": 1, "lat": 1, "lng": 1, "bbox": 1, "cell": 1}).
+			SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}, "name": 1, "source": 1, "class": 1, "lat": 1, "lng": 1, "bbox": 1, "cell": 1, "street": 1, "city": 1, "state": 1}).
 			SetSort(bson.M{"score": bson.M{"$meta": "textScore"}}).
 			SetLimit(int64(limit)))
 	if err != nil {

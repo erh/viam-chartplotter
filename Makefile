@@ -162,7 +162,7 @@ EASTCOAST_STATES = maine new-hampshire massachusetts rhode-island connecticut \
 EASTCOAST_PBFS = $(wildcard $(foreach s,$(EASTCOAST_STATES),$(OSM_CACHE)/us-$(s).osm.pbf))
 ALL_OSM_PBFS   = $(wildcard $(OSM_CACHE)/*.osm.pbf)
 
-.PHONY: mapsync render-cmd ensure-indexes build-places ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all backfill-geomlow backfill-lowzoom
+.PHONY: mapsync render-cmd ensure-indexes build-places ingest-overture ingest-noaa ingest-osm-eastcoast ingest-osm-all ingest-all backfill-geomlow backfill-lowzoom
 
 # Always rebuild the CLI so an ingest never runs against a stale binary.
 mapsync:
@@ -207,6 +207,30 @@ build-places: datasync
 	$(require-mongo)
 	./datasync --mongo $(MONGO) --db $(MONGO_DB) --build-places \
 		$(if $(PLACES_BBOX),--places-bbox=$(PLACES_BBOX))
+
+# Load Overture Maps marine POIs (marinas, boatyards, fuel docks — with street
+# addresses) into the `places` gazetteer. DuckDB filters the parquet-on-S3
+# release down to an NDJSON file; datasync upserts it, so a monthly refresh is
+# just re-running this with a newer OVERTURE_RELEASE. Data is CDLA-Permissive
+# 2.0 (attribution: Overture Maps Foundation). Needs `brew install duckdb`.
+# North-America bbox to match the chart/OSM coverage.
+OVERTURE_RELEASE ?= 2026-08-19.0
+OVERTURE_FILE ?= /tmp/overture-marine.ndjson
+OVERTURE_CATEGORIES = 'marina','yacht_club','sailing_club','sailing_area','boating_places','pier','fuel_dock','boat_dealer','boat_service_and_repair','boat_parts_and_supply_store','boat_rental_and_training','boat_charter','boat_tours','boat_storage_facility','boat_builder','ferry_boat_company'
+ingest-overture: datasync
+	$(require-mongo)
+	duckdb -c "INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2'; \
+		COPY (SELECT names.primary AS name, categories.primary AS category, \
+			addresses[1].freeform AS street, addresses[1].locality AS city, \
+			addresses[1].region AS state, \
+			(bbox.xmin+bbox.xmax)/2 AS lng, (bbox.ymin+bbox.ymax)/2 AS lat, \
+			confidence \
+		FROM read_parquet('s3://overturemaps-us-west-2/release/$(OVERTURE_RELEASE)/theme=places/type=place/*', hive_partitioning=1) \
+		WHERE bbox.xmin BETWEEN -180 AND -50 AND bbox.ymin BETWEEN 15 AND 75 \
+			AND categories.primary IN ($(OVERTURE_CATEGORIES)) \
+			AND confidence >= 0.5 AND names.primary IS NOT NULL \
+		) TO '$(OVERTURE_FILE)' (FORMAT JSON);"
+	./datasync --mongo $(MONGO) --db $(MONGO_DB) --overture $(OVERTURE_FILE)
 
 # Parse every downloaded ENC cell (.000) into the `noaa` collection. Upserts in
 # place, so it's safe to re-run after a parser change (find|xargs handles the

@@ -34,10 +34,14 @@ type SearchResult struct {
 	// names places and businesses — and a searcher should be able to tell
 	// which they are looking at.
 	Source string `json:"source"`
-	// Area places the hit for a human — "Newport, RI" — from the nearest
+	// Area places the hit for a human — "Newport, RI" — from the hit's own
+	// address when its source knows one (Overture), else the nearest
 	// settlement and its state (see search_area.go). Empty when nothing
-	// nearby could name it.
+	// could place it.
 	Area string `json:"area,omitempty"`
+	// Address is the street address for sources that carry one (Overture) —
+	// "4524 Dunning Rd". Empty for chart and OSM hits.
+	Address string `json:"address,omitempty"`
 
 	// Lat/Lng is the feature's centre, and BBox its full extent — a channel or
 	// canyon is a big thing and the caller usually wants to frame it, not
@@ -257,8 +261,11 @@ func (r *ENCRenderer) searchPlaces(ctx context.Context, q string, limit int, ori
 	out := make([]SearchResult, 0, len(hits))
 	for _, h := range hits {
 		label := ClassLabel(h.Class)
-		if h.Source == places.SourceOSM {
+		switch h.Source {
+		case places.SourceOSM:
 			label = osmKindLabel(h.Class)
+		case places.SourceOverture:
+			label = categoryLabel(h.Class)
 		}
 		res := SearchResult{
 			Name:           h.Name,
@@ -269,6 +276,8 @@ func (r *ENCRenderer) searchPlaces(ctx context.Context, q string, limit int, ori
 			Lat:            h.Lat,
 			Lng:            h.Lng,
 			BBox:           h.BBox,
+			Address:        h.Street,
+			Area:           placeArea(h.City, h.State),
 			DistanceMeters: -1,
 		}
 		if origin != nil {
@@ -277,6 +286,29 @@ func (r *ENCRenderer) searchPlaces(ctx context.Context, q string, limit int, ori
 		out = append(out, res)
 	}
 	return out
+}
+
+// placeArea renders a source-supplied address into the Area form — the same
+// "Norfolk, VA" the settlement annotation produces, so the row reads the same
+// whichever way it was placed.
+func placeArea(city, state string) string {
+	if city == "" {
+		return stateAbbrev(state)
+	}
+	if state == "" {
+		return city
+	}
+	return city + ", " + stateAbbrev(state)
+}
+
+// categoryLabel renders an Overture category ("boat_service_and_repair") for
+// a human. The taxonomy is already words, just snake_cased.
+func categoryLabel(cat string) string {
+	if cat == "" {
+		return cat
+	}
+	words := strings.ReplaceAll(cat, "_", " ")
+	return strings.ToUpper(words[:1]) + words[1:]
 }
 
 // searchOSM looks the query up in the ingested OSM data, under its own short
@@ -437,14 +469,21 @@ func searchFallbacks(q string) []string {
 	return out
 }
 
-// dedupeSearchResults keeps one hit per (name, class), preferring the one
-// closest to the origin when distances are known.
+// dedupeSearchResults keeps one hit per (name, kind), preferring the one
+// closest to the origin when distances are known. Kind is the human label so
+// the same marina known to both OSM ("leisure=marina") and Overture
+// ("marina") collapses to one row; class is the fallback when no label was
+// assigned.
 func dedupeSearchResults(in []SearchResult) []SearchResult {
-	type key struct{ name, class string }
+	type key struct{ name, kind string }
 	best := make(map[key]int, len(in))
 	out := make([]SearchResult, 0, len(in))
 	for _, r := range in {
-		k := key{strings.ToLower(r.Name), r.Class}
+		kind := r.Label
+		if kind == "" {
+			kind = r.Class
+		}
+		k := key{strings.ToLower(r.Name), kind}
 		if at, seen := best[k]; seen {
 			// Distances are -1 when no origin was given, in which case the
 			// first hit stands.
