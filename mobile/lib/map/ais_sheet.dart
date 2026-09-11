@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../ais.dart';
 import '../boat_state.dart';
@@ -36,7 +37,26 @@ void showAisDetails(BuildContext context, AisBoat b, {BoatState? own}) {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(b.displayName, style: Theme.of(ctx).textTheme.titleLarge),
+            InkWell(
+              onTap: () => _searchVessel(b),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(b.displayName,
+                        style: Theme.of(ctx)
+                            .textTheme
+                            .titleLarge
+                            ?.copyWith(
+                                color: Theme.of(ctx).colorScheme.primary,
+                                decoration: TextDecoration.underline)),
+                  ),
+                  const SizedBox(width: 6),
+                  Icon(Icons.open_in_new,
+                      size: 16, color: Theme.of(ctx).colorScheme.primary),
+                ],
+              ),
+            ),
             const SizedBox(height: 2),
             Text('MMSI ${b.mmsi}',
                 style: const TextStyle(color: Colors.white54, fontSize: 12)),
@@ -68,6 +88,14 @@ void showAisDetails(BuildContext context, AisBoat b, {BoatState? own}) {
       ),
     ),
   );
+}
+
+/// Open a Google search for the vessel — its name plus MMSI, which usually
+/// surfaces MarineTraffic/VesselFinder pages for the boat.
+Future<void> _searchVessel(AisBoat b) async {
+  final query = '${b.displayName} ${b.mmsi}';
+  final url = Uri.https('www.google.com', '/search', {'q': query});
+  await launchUrl(url, mode: LaunchMode.externalApplication);
 }
 
 Widget _row(String k, String v) => Padding(
