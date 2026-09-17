@@ -103,6 +103,7 @@
   let autoSafeFt = $state("");
   let autoIdealFt = $state("");
   let autoAvoidRestricted = $state(false);
+  let autoFollowMarkers = $state(false);
   // Which endpoint an armed map-pick will fill, so the panel can label it and
   // so a second click on the same button cancels rather than re-arms.
   let pickingFor = $state<"from" | "to" | null>(null);
@@ -513,6 +514,7 @@
         safeDepthFt: autoSafeFt.trim() ? parseFloat(autoSafeFt) : undefined,
         idealDepthFt: autoIdealFt.trim() ? parseFloat(autoIdealFt) : undefined,
         avoid: autoAvoidRestricted ? ["restricted"] : undefined,
+        followChannelMarkers: autoFollowMarkers,
         keepWaypoints: autoKeepWaypoints,
       });
     } catch (e) {
@@ -537,6 +539,7 @@
         safeDepthFt: autoSafeFt.trim() ? parseFloat(autoSafeFt) : undefined,
         idealDepthFt: autoIdealFt.trim() ? parseFloat(autoIdealFt) : undefined,
         avoid: autoAvoidRestricted ? ["restricted"] : undefined,
+        followChannelMarkers: autoFollowMarkers,
       });
     } catch (e) {
       autoError = e instanceof Error ? e.message : String(e);
@@ -860,6 +863,13 @@
         <label class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none">
           <input type="checkbox" bind:checked={autoAvoidRestricted} />
           Steer around restricted areas
+        </label>
+        <label
+          class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none"
+          title="Prefer the water between the charted lateral and safe-water marks over merely the deepest safe water. A preference, not a rule — and it changes nothing where nothing is marked."
+        >
+          <input type="checkbox" bind:checked={autoFollowMarkers} />
+          Follow the channel markers
         </label>
         <label
           class="flex items-center gap-1.5 text-xs opacity-80 cursor-pointer select-none"

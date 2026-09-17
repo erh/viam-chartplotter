@@ -110,7 +110,7 @@ func TestSampleTilesReportsNoCoverage(t *testing.T) {
 }
 
 func TestStoredAndLiveFlagsRoundTrip(t *testing.T) {
-	for _, live := range []uint8{
+	for _, live := range []uint16{
 		cellLand, cellObstruction, cellDredged, cellUnsurveyed, cellRestricted,
 		cellLand | cellRestricted, cellDredged | cellUnsurveyed,
 	} {

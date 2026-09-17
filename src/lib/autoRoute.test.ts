@@ -41,6 +41,13 @@ describe("autoRouteUrl", () => {
     expect(url.searchParams.get("clearance")).toBe("0");
   });
 
+  it("asks to follow the channel markers only when the operator chose it", () => {
+    const off = new URL(autoRouteUrl("", { start, end }), "http://x");
+    expect(off.searchParams.has("channel_markers")).toBe(false);
+    const on = new URL(autoRouteUrl("", { start, end, followChannelMarkers: true }), "http://x");
+    expect(on.searchParams.get("channel_markers")).toBe("1");
+  });
+
   it("uses a same-origin path when there is no separate chart server", () => {
     expect(autoRouteUrl("", { start, end })).toMatch(/^\/noaa-enc\/autoroute\?/);
   });

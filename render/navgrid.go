@@ -280,7 +280,7 @@ func newTileGrid(z, x, y int) *tileGrid {
 	size := n * n
 	g.depth = make([]float64, size)
 	g.scaleOf = make([]int32, size)
-	g.flags = make([]uint8, size)
+	g.flags = make([]uint16, size)
 	g.landScale = make([]int32, size)
 	for i := range g.depth {
 		g.depth[i] = math.NaN()
@@ -329,7 +329,7 @@ func clampDecimetres(m float64) int16 {
 // storedFlags maps the in-memory cell flags to the stored bits. cellAvoid is
 // split: unsurveyed and restricted are different facts, and a router may want
 // to treat them differently.
-func storedFlags(f uint8) uint8 {
+func storedFlags(f uint16) uint8 {
 	var out uint8
 	if f&cellLand != 0 {
 		out |= noaa.NavFlagLand
@@ -410,7 +410,7 @@ func sampleTilesIntoGrid(g *navGrid, tiles map[[3]int]*noaa.NavTile, z int) int 
 			// came to be a wall. If any pixel is a channel, the channel is
 			// what this cell represents.
 			chDepth := math.NaN()
-			var flags uint8
+			var flags uint16
 			hit := false
 			totalPx, landPx := 0, 0
 
@@ -493,8 +493,8 @@ func clampIndex(v, n int) int {
 }
 
 // liveFlags maps stored tile bits back to the in-memory cell flags.
-func liveFlags(f uint8) uint8 {
-	var out uint8
+func liveFlags(f uint8) uint16 {
+	var out uint16
 	if f&noaa.NavFlagLand != 0 {
 		out |= cellLand
 	}

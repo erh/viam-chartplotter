@@ -17,14 +17,16 @@ import (
 // Cell flags. A cell can carry several at once (a dredged channel inside a
 // restricted area, say).
 const (
-	cellLand         uint8 = 1 << iota // charted land / shoreline construction
-	cellObstruction                    // wreck, rock, pile — hard block
-	cellDredged                        // maintained channel: never depth-penalised
-	cellUnsurveyed                     // UNSARE: nothing was surveyed here
-	cellRestricted                     // RESARE and friends: entry is regulated
-	cellChannel                        // charted navigable channel (FAIRWY/DRGARE)
-	cellChannelDepth                   // the channel itself charts a depth here
-	cellBlockedHard                    // computed in finalize(): impassable
+	cellLand          uint16 = 1 << iota // charted land / shoreline construction
+	cellObstruction                      // wreck, rock, pile — hard block
+	cellDredged                          // maintained channel: never depth-penalised
+	cellUnsurveyed                       // UNSARE: nothing was surveyed here
+	cellRestricted                       // RESARE and friends: entry is regulated
+	cellChannel                          // charted navigable channel (FAIRWY/DRGARE)
+	cellChannelDepth                     // the channel itself charts a depth here
+	cellBlockedHard                      // computed in finalize(): impassable
+	cellMarkedChannel                    // inside the channel the charted marks gate
+	cellMarkerZone                       // within reach of a marked channel, in or out
 )
 
 // cellAvoid is any cell there is a charted reason to stay out of. The two
@@ -50,11 +52,16 @@ type navGrid struct {
 	// one and equal-scale overlaps keep the shoalest value.
 	depth   []float64
 	scaleOf []int32
-	flags   []uint8
+	flags   []uint16
 	// landScale is the compilation scale of the feature that last decided
 	// whether this cell is land, so a finer cell can overrule a coarser one —
 	// exactly as scaleOf does for depth.
 	landScale []int32
+
+	// markerGates is how many channel-marker gates were stamped onto this
+	// grid (see stampChannelMarkers). Zero with the option on means there was
+	// nothing charted here to follow, which is worth telling the operator.
+	markerGates int
 
 	// Filled by finalize().
 	cost       []float32 // cost multiplier, >= 1; +Inf where impassable
@@ -93,6 +100,12 @@ type gridCost struct {
 	// 20 nm further, for a rule nobody had asked to obey.
 	UnsurveyedPenalty float64
 	RestrictedPenalty float64
+
+	// ChannelMarkerPenalty is what it costs to be beside a buoyed channel
+	// rather than in it — cellMarkerZone without cellMarkedChannel. It applies
+	// only when the caller asked to follow the channel markers, and only near
+	// a channel the marks actually gate, so open water is untouched.
+	ChannelMarkerPenalty float64
 }
 
 // newNavGrid sizes a grid over the bbox: square-ish cells, at least
@@ -115,7 +128,7 @@ func newNavGrid(minLon, minLat, maxLon, maxLat float64, maxCells int, minCellM f
 	n := nx * ny
 	g.depth = make([]float64, n)
 	g.scaleOf = make([]int32, n)
-	g.flags = make([]uint8, n)
+	g.flags = make([]uint16, n)
 	g.landScale = make([]int32, n)
 	for i := range g.depth {
 		g.depth[i] = math.NaN()
@@ -205,7 +218,7 @@ func (g *navGrid) setDepth(i int, depthM float64, scale int32) {
 	}
 }
 
-func (g *navGrid) mark(i int, f uint8) { g.flags[i] |= f }
+func (g *navGrid) mark(i int, f uint16) { g.flags[i] |= f }
 
 // markLand records land at a compilation scale, keeping the finest reading.
 //
@@ -368,6 +381,47 @@ func (g *navGrid) stampSegment(lon0, lat0, lon1, lat1 float64, fn func(i int)) {
 
 const maxSegmentSteps = 4096
 
+// stampCorridor marks every cell within radiusM of the segment between two
+// lon/lat points, by walking the segment and stamping a disc at each step. A
+// band rather than a line: it is how a channel centreline becomes the water
+// either side of it that a boat actually uses.
+//
+// The step is half the radius, or half a cell when the radius is smaller than
+// that. Discs a half-radius apart overlap enough to leave the band's own edge
+// within 4% of the radius — and stepping by the cell instead would stamp the
+// same wide disc dozens of times over on a fine grid, where a 300 m band is
+// twenty cells across.
+func (g *navGrid) stampCorridor(lon0, lat0, lon1, lat1, radiusM float64, fn func(i int)) {
+	step := math.Max(radiusM/2, math.Max(math.Min(g.mx, g.my)/2, 1))
+	length := haversineMeters(lat0, lon0, lat1, lon1)
+	steps := int(math.Ceil(length / step))
+	if steps < 1 {
+		steps = 1
+	}
+	if steps > maxSegmentSteps {
+		steps = maxSegmentSteps
+	}
+	for k := 0; k <= steps; k++ {
+		t := float64(k) / float64(steps)
+		g.stampDisc(lon0+t*(lon1-lon0), lat0+t*(lat1-lat0), radiusM, fn)
+	}
+}
+
+// segmentCrossesLand reports whether the straight line between two lon/lat
+// points passes over a cell already rasterised as land. Used to reject a pair
+// of marks, or a link between two pairs, that only looks like a channel
+// because the two ends happen to be close — across a spit, or between two
+// sides of a harbour that do not connect.
+func (g *navGrid) segmentCrossesLand(lon0, lat0, lon1, lat1 float64) bool {
+	hit := false
+	g.stampSegment(lon0, lat0, lon1, lat1, func(i int) {
+		if g.flags[i]&cellLand != 0 {
+			hit = true
+		}
+	})
+	return hit
+}
+
 // stampVertices marks the cell under every vertex of a polygon/line. Scanline
 // fill samples cell centres, so a pier or islet thinner than one cell would
 // otherwise vanish; walking its outline guarantees it still blocks.
@@ -468,6 +522,12 @@ func (g *navGrid) finalize(c gridCost) {
 		if c.SoftClearanceM > c.HardClearanceM && distM < c.SoftClearanceM {
 			t := (c.SoftClearanceM - distM) / (c.SoftClearanceM - c.HardClearanceM)
 			mult += c.ShorePenalty * t
+		}
+		// Outside the buoys, beside a channel they gate. This is a cost, not
+		// a wall — leaving a channel to pass a tow or to reach a mooring stays
+		// possible, it just stops being the cheapest way through.
+		if f&cellMarkerZone != 0 && f&cellMarkedChannel == 0 {
+			mult += c.ChannelMarkerPenalty
 		}
 		if f&cellUnsurveyed != 0 {
 			mult += c.UnsurveyedPenalty
