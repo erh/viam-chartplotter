@@ -111,6 +111,18 @@ type AutoRouteOptions struct {
 	// MaxWaypoints caps the returned route.
 	MaxWaypoints int
 
+	// FollowChannelMarkers makes the route prefer the water the charted
+	// lateral and safe-water marks gate — between the red and the green —
+	// rather than merely the deepest safe water. It costs nothing where there
+	// are no marks, so an offshore passage is unaffected; see
+	// autoroute_marks.go for how the channel is reconstructed from them.
+	FollowChannelMarkers bool
+	// ChannelMarkerPenalty is what being beside a buoyed channel costs instead
+	// of being in it, and MarkerCorridorM is how far outside the channel that
+	// cost reaches. Both apply only with FollowChannelMarkers.
+	ChannelMarkerPenalty float64
+	MarkerCorridorM      float64
+
 	// KeepWaypoints applies when optimising an existing route: every point the
 	// operator placed stays in the result, and only the water between them is
 	// re-planned. A waypoint is usually there for a reason the chart doesn't
@@ -187,6 +199,12 @@ func DefaultAutoRouteOptions(safeDepthM float64) AutoRouteOptions {
 		MaxGridDim:   1400,
 		MinCellM:     15,
 		MaxWaypoints: 80,
+		// Comparable to the depth and shore penalties, so outside the buoys is
+		// clearly the dearer way through without ever being a wall. The reach
+		// is about an eighth of a mile: far enough to price the water either
+		// side of a channel, near enough that open water beyond it is free.
+		ChannelMarkerPenalty: 1.5,
+		MarkerCorridorM:      250,
 	}
 }
 
@@ -232,6 +250,12 @@ func (o *AutoRouteOptions) normalize(directM float64) {
 	}
 	if o.MaxWaypoints <= 1 {
 		o.MaxWaypoints = d.MaxWaypoints
+	}
+	if o.ChannelMarkerPenalty <= 0 {
+		o.ChannelMarkerPenalty = d.ChannelMarkerPenalty
+	}
+	if o.MarkerCorridorM <= 0 {
+		o.MarkerCorridorM = d.MarkerCorridorM
 	}
 	if o.CorridorPadM <= 0 {
 		o.CorridorPadM = corridorPadFor(directM)
@@ -308,6 +332,9 @@ func RoutingProjection() bson.M {
 		"attributes.VALSOU": 1,
 		"attributes.CATREA": 1,
 		"attributes.RESTRN": 1,
+		// Which hand of the channel a lateral mark stands on, read only when
+		// the caller asked to follow the channel markers.
+		"attributes.CATLAM": 1,
 	}
 }
 
@@ -388,8 +415,16 @@ func (r *ENCRenderer) routingFeatures(ctx context.Context, bbox [4]float64, opts
 	for _, f := range features {
 		seen[f.id] = struct{}{}
 	}
+	// Channel markers ride along on that same query when the caller asked to
+	// follow them, for the same reason: a buoy is charted in the harbour
+	// cells, so the ceiling would drop exactly the marks the route is meant to
+	// follow. They are points, so they cost almost nothing to carry.
+	extra := autoRouteChannelClasses
+	if opts.FollowChannelMarkers {
+		extra = append(append([]string(nil), extra...), channelMarkClasses...)
+	}
 	channels, err := r.queryFeaturesClasses(ctx, bbox[0], bbox[1], bbox[2], bbox[3], noaa.ClassQuery{
-		Classes:    autoRouteChannelClasses,
+		Classes:    extra,
 		UseLowGeom: useLowGeomForCell(cell),
 		Projection: RoutingProjection(),
 	})
@@ -465,6 +500,9 @@ const lowGeomToleranceMeters = 360.0 / float64(256*(1<<noaa.LowGeomMaxZoom)) * m
 func autoRouteClasses(opts AutoRouteOptions) []string {
 	classes := []string{"DEPARE", "DRGARE", "UNSARE"}
 	classes = append(classes, autoRouteChannelClasses...)
+	if opts.FollowChannelMarkers {
+		classes = append(classes, channelMarkClasses...)
+	}
 	for c := range autoRouteLandClasses {
 		classes = append(classes, c)
 	}
@@ -1159,6 +1197,7 @@ func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts A
 		o.normalize(longestLegMeters(points))
 		g := newNavGrid(bbox[0], bbox[1], bbox[2], bbox[3], o.MaxCells, o.MinCellM, o.MaxGridDim)
 		if sampleTilesIntoGrid(g, tiles, z) > 0 {
+			r.stampMarksFromCharts(ctx, g, bbox, o)
 			return planRouteOnGrid(g, bbox, points, userPlaced, opts)
 		}
 	}
@@ -1176,6 +1215,33 @@ func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts A
 		}
 	}
 	return planRouteViaWithWays(features, ways, bbox, points, userPlaced, opts)
+}
+
+// stampMarksFromCharts paints the channel markers over a bbox onto a grid that
+// came from precomputed nav tiles.
+//
+// The tiles cannot carry them: their per-cell flag byte is a stored format
+// (noaa.NavFlag*) that is already full, and the marks are a preference only
+// some routes ask for — baking them into every tile would change a format
+// every deployment has on disk for a feature most requests do not use. So they
+// are fetched from the feature store instead, which is cheap: marks are points
+// with two attributes, not coastline polygons.
+//
+// A failure here is logged, not returned. The route is still a safe route —
+// it just follows the depths rather than the buoys.
+func (r *ENCRenderer) stampMarksFromCharts(ctx context.Context, g *navGrid, bbox [4]float64, opts AutoRouteOptions) {
+	if !opts.FollowChannelMarkers {
+		return
+	}
+	feats, err := r.queryFeaturesClasses(ctx, bbox[0], bbox[1], bbox[2], bbox[3], noaa.ClassQuery{
+		Classes:    channelMarkClasses,
+		Projection: RoutingProjection(),
+	})
+	if err != nil {
+		r.logger.Warnf("auto-route: channel-marker query failed, the route will not follow the buoys: %v", err)
+		return
+	}
+	stampChannelMarkers(g, channelMarksFrom(feats), opts.MarkerCorridorM)
 }
 
 // sectionPadM is the corridor width for one run of waypoints: a fraction of
@@ -1460,6 +1526,7 @@ func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, userPlace
 		UnknownPenaltyRangeM: opts.UnknownPenaltyRangeM,
 		UnsurveyedPenalty:    unsurveyedPenalty,
 		RestrictedPenalty:    restrictedPenalty(opts.Avoid),
+		ChannelMarkerPenalty: channelMarkerPenalty(opts),
 	})
 
 	res := &AutoRouteResult{
@@ -1489,6 +1556,13 @@ func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, userPlace
 		legBounds = append(legBounds, len(full))
 	}
 
+	// Asked to follow the marks and there were none to follow. Not a failure —
+	// most water is unmarked — but the operator chose this expecting the buoys
+	// to shape the route, and silence would let them believe they did.
+	if opts.FollowChannelMarkers && g.markerGates == 0 {
+		res.Warnings = append(res.Warnings,
+			"no charted channel markers to follow on this stretch — it was planned on the charted depths alone")
+	}
 	// Coarser than the configured floor means this leg was long enough to need
 	// a relaxed grid. That is a real loss of fidelity — just a smaller one than
 	// refusing to plan — so say so rather than let it pass silently.
@@ -1842,6 +1916,12 @@ func rasterizeForRouting(g *navGrid, features []*mongoFeature, opts AutoRouteOpt
 			}
 		}
 	}
+
+	// Last, because pairing marks into gates reads the land this loop painted:
+	// two marks with a spit between them are not the two sides of a channel.
+	if opts.FollowChannelMarkers {
+		stampChannelMarkers(g, channelMarksFrom(features), opts.MarkerCorridorM)
+	}
 }
 
 // stampWaterways marks the cells along navigable waterway centrelines as
@@ -1940,6 +2020,17 @@ func restrictedPenalty(areas []AvoidArea) float64 {
 		}
 	}
 	return worst
+}
+
+// channelMarkerPenalty is what staying outside a buoyed channel costs — and it
+// is zero unless the caller asked to follow the marks. Charging for it by
+// default would put an opinion about where the channel is ahead of the depth
+// data on every route, including the open-water ones that have no channel.
+func channelMarkerPenalty(opts AutoRouteOptions) float64 {
+	if !opts.FollowChannelMarkers {
+		return 0
+	}
+	return opts.ChannelMarkerPenalty
 }
 
 // routeBBox is the search corridor: the endpoints' bounding box grown by padM

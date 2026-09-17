@@ -20,6 +20,12 @@ export interface AutoRouteRequest {
   clearanceM?: number;
   /** Charted area classes to steer around. Extensible server-side. */
   avoid?: "restricted"[];
+  /**
+   * Prefer the water the charted lateral and safe-water marks gate — between
+   * the red and the green — over merely the deepest safe water. A preference,
+   * not a constraint: it costs nothing where nothing is marked.
+   */
+  followChannelMarkers?: boolean;
   maxWaypoints?: number;
 }
 
@@ -71,6 +77,7 @@ export function autoRouteUrl(base: string, req: AutoRouteRequest): string {
   if (req.maxWaypoints != null && req.maxWaypoints > 1)
     p.set("max_waypoints", String(req.maxWaypoints));
   if (req.avoid?.length) p.set("avoid", req.avoid.join(","));
+  if (req.followChannelMarkers) p.set("channel_markers", "1");
   return `${base}/noaa-enc/autoroute?${p.toString()}`;
 }
 
@@ -97,6 +104,8 @@ export interface OptimizeRequest {
   idealDepthFt?: number;
   clearanceM?: number;
   avoid?: "restricted"[];
+  /** See AutoRouteRequest.followChannelMarkers. */
+  followChannelMarkers?: boolean;
   maxWaypoints?: number;
   /**
    * Keep every waypoint the operator placed, re-planning only the water
@@ -130,6 +139,7 @@ export async function optimizeRoute(req: OptimizeRequest): Promise<AutoRouteResu
         : {}),
       ...(req.keepWaypoints != null ? { keep_waypoints: req.keepWaypoints } : {}),
       ...(req.avoid?.length ? { avoid: req.avoid } : {}),
+      ...(req.followChannelMarkers ? { follow_channel_markers: true } : {}),
     }),
   });
   if (!resp.ok) {

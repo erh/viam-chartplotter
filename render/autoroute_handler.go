@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -19,7 +20,8 @@ func (h *ENCHandlers) SetDefaultIdealDepthFt(ft float64) { h.defaultIdealDepth =
 //	POST /noaa-enc/optimize
 //	{"waypoints":[{"lat":..,"lng":..}, ...],
 //	 "safe_depth_ft":6, "ideal_depth_ft":20, "keep_waypoints":true,
-//	 "clearance_m":30, "avoid":["restricted"]}
+//	 "clearance_m":30, "avoid":["restricted"],
+//	 "follow_channel_markers":true}
 //
 // Every leg is re-planned around land, shoals and obstructions, on one grid
 // over one chart query. With keep_waypoints (the default) each point the
@@ -48,6 +50,9 @@ func (h *ENCHandlers) handleOptimize(w http.ResponseWriter, r *http.Request) {
 		MaxWaypoints  int      `json:"max_waypoints"`
 		KeepWaypoints *bool    `json:"keep_waypoints"`
 		Avoid         []string `json:"avoid"`
+		// FollowChannelMarkers prefers the water the charted lateral and
+		// safe-water marks gate over merely the deepest safe water.
+		FollowChannelMarkers bool `json:"follow_channel_markers"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, optimizeMaxBody)).Decode(&req); err != nil {
 		http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
@@ -94,6 +99,7 @@ func (h *ENCHandlers) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	if req.KeepWaypoints != nil {
 		opts.KeepWaypoints = *req.KeepWaypoints
 	}
+	opts.FollowChannelMarkers = req.FollowChannelMarkers
 	for _, name := range req.Avoid {
 		if strings.EqualFold(strings.TrimSpace(name), "restricted") {
 			opts.Avoid = append(opts.Avoid, RestrictedAreaAvoid(3.0))
@@ -102,6 +108,20 @@ func (h *ENCHandlers) handleOptimize(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.renderer.AutoRouteVia(points, opts)
 	writeRouteResult(w, res, err)
+}
+
+// boolQuery reads a query flag. Present-but-empty counts as true, so
+// `?channel_markers` works as well as `?channel_markers=1` — and a value that
+// plainly says no is honoured rather than read as "present, so on".
+func boolQuery(q url.Values, name string) bool {
+	if !q.Has(name) {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(q.Get(name))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 // optimizeMaxBody and optimizeMaxWaypoints bound what one request can ask for.
@@ -139,6 +159,12 @@ func writeRouteResult(w http.ResponseWriter, res *AutoRouteResult, err error) {
 //	     [&clearance=<m>] [&soft_clearance=<m>] [&pad=<corridor pad, m>]
 //	     [&max_cell=<coarsest grid cell, m>]
 //	     [&avoid=restricted] [&max_waypoints=<n>]
+//	     [&channel_markers=1]
+//
+// `channel_markers` makes the route prefer the water the charted lateral and
+// safe-water marks gate — between the red and the green — over merely the
+// deepest safe water. It is a preference, not a constraint, and it costs
+// nothing where nothing is marked.
 //
 // `sd` is the hard constraint — the route never crosses water charted shoaler
 // than this — and defaults to the module's configured draft. `ideal` is the
@@ -195,6 +221,7 @@ func (h *ENCHandlers) handleAutoRoute(w http.ResponseWriter, r *http.Request) {
 	if v, ok := num("max_waypoints"); ok && v > 1 {
 		opts.MaxWaypoints = int(v)
 	}
+	opts.FollowChannelMarkers = boolQuery(q, "channel_markers")
 	for _, name := range strings.Split(q.Get("avoid"), ",") {
 		switch strings.TrimSpace(strings.ToLower(name)) {
 		case "restricted":

@@ -82,6 +82,11 @@ class AutoRouteResult {
 /// Builds the /noaa-enc/autoroute query. Exposed for testing. Only sends
 /// what the operator actually chose — an omitted parameter means "use the
 /// boat's configured value", which is not the same as sending 0.
+///
+/// [followChannelMarkers] asks the server to prefer the water the charted
+/// lateral and safe-water marks gate — between the red and the green — over
+/// merely the deepest safe water. A preference, not a constraint: it costs
+/// nothing where nothing is marked.
 String autoRouteUrl(
   String base, {
   required LatLng start,
@@ -90,6 +95,7 @@ String autoRouteUrl(
   double? idealDepthFt,
   double? clearanceM,
   List<String> avoid = const [],
+  bool followChannelMarkers = false,
   int? maxWaypoints,
 }) {
   final p = <String, String>{
@@ -105,6 +111,7 @@ String autoRouteUrl(
     p['max_waypoints'] = '$maxWaypoints';
   }
   if (avoid.isNotEmpty) p['avoid'] = avoid.join(',');
+  if (followChannelMarkers) p['channel_markers'] = '1';
   return '$base/noaa-enc/autoroute?${Uri(queryParameters: p).query}';
 }
 
@@ -119,6 +126,7 @@ Future<AutoRouteResult> planAutoRoute(
   double? idealDepthFt,
   double? clearanceM,
   List<String> avoid = const [],
+  bool followChannelMarkers = false,
   int? maxWaypoints,
   http.Client? client,
 }) async {
@@ -130,6 +138,7 @@ Future<AutoRouteResult> planAutoRoute(
     idealDepthFt: idealDepthFt,
     clearanceM: clearanceM,
     avoid: avoid,
+    followChannelMarkers: followChannelMarkers,
     maxWaypoints: maxWaypoints,
   ));
   final resp = await (client?.get(url) ?? http.get(url));

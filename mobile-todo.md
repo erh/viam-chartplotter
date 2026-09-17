@@ -258,6 +258,9 @@ logic) and leave the rest for you.
 
 All P0s are done at the end of M3 (~5.5 wk).
 
+E6 (follow-the-channel-markers toggle) was raised after M3 closed and sits in
+its section; it is a P2 and does not reopen the milestone.
+
 ---
 
 # M0 — Correctness quick-wins
@@ -1192,6 +1195,34 @@ raise it as a new card (the web app has no importer either).
 **Accept.**
 - [x] Exported file opens in a GPX reader with the right waypoints.
 - [x] `gpx.test.ts`'s cases pass in Dart.
+
+---
+
+### E6 · Follow-the-channel-markers toggle `S` `P2`
+
+**Files:** `mobile/lib/routes/auto_route_sheet.dart`
+**Web ref:** `src/lib/RoutesPanel.svelte` (the "Follow the channel markers"
+checkbox), `src/lib/autoRoute.ts` (`followChannelMarkers`)
+**Depends on:** nothing — the transport is already there
+
+**Problem.** The server takes `?channel_markers=1`, which makes the route
+prefer the water the charted lateral and safe-water marks gate rather than
+merely the deepest safe water (README, *auto-routing*). `autoRouteUrl` and
+`planAutoRoute` in `mobile/lib/routes/auto_route.dart` already carry
+`followChannelMarkers`, but nothing on the phone can turn it on.
+
+**Do.** Put a single switch in the auto-route sheet and re-plan when it
+changes. The sheet's design is "the destination was just tapped, so plan
+immediately and show the result" — keep that: plan with the switch off first,
+and let flipping it re-plan in place rather than gating the first plan behind a
+form. Remember the last choice with the other sheet-level settings.
+
+**Accept.**
+- [x] The switch adds `channel_markers=1` to the request and nothing else.
+- [x] Flipping it re-plans and redraws the preview without closing the sheet.
+- [x] The server's "no charted channel markers to follow" warning shows in the
+      cautions list like any other (it already will — `routeCautions` passes
+      server warnings through).
 
 ---
 

@@ -65,6 +65,16 @@ void main() {
       expect(double.parse(url.queryParameters['clearance']!), 0);
     });
 
+    test('asks to follow the channel markers only when the operator chose it',
+        () {
+      final plain =
+          Uri.parse('http://x${autoRouteUrl('', start: start, end: end)}');
+      expect(plain.queryParameters.containsKey('channel_markers'), isFalse);
+      final marked = Uri.parse('http://x${autoRouteUrl('', start: start,
+          end: end, followChannelMarkers: true)}');
+      expect(marked.queryParameters['channel_markers'], '1');
+    });
+
     test('uses a same-origin path when there is no separate chart server', () {
       expect(autoRouteUrl('', start: start, end: end),
           startsWith('/noaa-enc/autoroute?'));

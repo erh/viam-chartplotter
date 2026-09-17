@@ -89,7 +89,25 @@ track sits in the channel rather than shaving its edge.
 | `pad` | 40% of the direct distance, min 1 nm | how far off the rhumb line the search may wander (m) |
 | `max_cell` | `120` | coarsest grid cell (m) the router will plan on; the leg length limit falls out of this |
 | `avoid` | — | comma list of area classes to steer around; currently `restricted` (RESARE). Soft — crossed only when there is no alternative |
+| `channel_markers` | off | follow the charted channel markers — prefer the water they gate over merely the deepest safe water |
 | `max_waypoints` | `80` | cap on the returned route |
+
+**`channel_markers`** routes between the buoys. The depth model knows where the
+water is deep; it does not know where the channel is. The marks do — they carry
+the dredging, the tide, the shifting bar and the traffic that a DEPARE polygon
+compiled years ago does not. With the option on, a port-hand and a starboard-hand
+mark that are each other's nearest opposite-handed neighbour (BOYLAT/BCNLAT via
+CATLAM, within 800 m, with no charted land between) are read as a *gate*: the
+water you pass between. A safe-water mark (BOYSAW/BCNSAW) is a mid-channel gate
+on its own. Gate midpoints are linked to their nearest neighbours to recover the
+channel's centreline, and being beside that channel rather than in it costs more.
+
+It is a preference, not a constraint, and a local one: it prices only the water
+within ~250 m of a channel the marks actually gate, so an offshore passage is
+unaffected. A mark with no partner is ignored — on its own a lateral mark says
+which side to pass it, which without a heading is not a channel. It can never
+open water the depth model closed or close water it left open. If there was
+nothing charted to follow, the result says so in `warnings`.
 
 **How long a leg can be** is bounded by resolution, not distance. The grid
 covers the whole corridor in a fixed number of cells, so cell size grows with
@@ -161,6 +179,7 @@ the chart by 2.6 km (eleven cells) over a three-degree grid.
 ```jsonc
 { "waypoints": [{"lat":41.47,"lng":-71.33}, ...],
   "safe_depth_ft": 6, "ideal_depth_ft": 20,
+  "follow_channel_markers": false, // the /autoroute `channel_markers` option
   "keep_waypoints": true }        // the default
 ```
 
