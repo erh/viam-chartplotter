@@ -109,6 +109,14 @@ type gridCost struct {
 	// only when the caller asked to follow the channel markers, and only near
 	// a channel the marks actually gate, so open water is untouched.
 	ChannelMarkerPenalty float64
+	// OffChannelPenalty is what any water NOT in a channel costs when the caller
+	// asked to follow the channels. Unlike ChannelMarkerPenalty it is charged
+	// everywhere, not just in the band beside a channel, so the route stays on
+	// the charted channel network — it will run out the ship channel and back
+	// rather than cut straight across open water between two channel segments.
+	// Large enough to buy a real detour onto the channel, since that is the
+	// whole point of the option; zero unless following.
+	OffChannelPenalty float64
 }
 
 // newNavGrid sizes a grid over the bbox: square-ish cells, at least
@@ -526,11 +534,21 @@ func (g *navGrid) finalize(c gridCost) {
 			t := (c.SoftClearanceM - distM) / (c.SoftClearanceM - c.HardClearanceM)
 			mult += c.ShorePenalty * t
 		}
-		// Outside the buoys, beside a channel they gate. This is a cost, not
-		// a wall — leaving a channel to pass a tow or to reach a mooring stays
-		// possible, it just stops being the cheapest way through.
-		if f&cellMarkerZone != 0 && f&cellMarkedChannel == 0 {
+		// Following the channels. A cell in any channel is free; a cell in the
+		// band the marks gate but not in the channel pays the close-in centring
+		// cost; any other water pays a gentler everywhere cost, so the route
+		// stays on the charted network — out the ship channel and back — rather
+		// than cutting across open water between two channel segments. All three
+		// are costs, not walls: leaving a channel to pass a tow or reach a
+		// mooring, or crossing open water where no channel goes, stays possible;
+		// it just stops being the cheapest way through.
+		switch {
+		case f&(cellMarkedChannel|cellChannel|cellDredged) != 0:
+			// in a channel — free
+		case f&cellMarkerZone != 0:
 			mult += c.ChannelMarkerPenalty
+		default:
+			mult += c.OffChannelPenalty
 		}
 		if f&cellUnsurveyed != 0 {
 			mult += c.UnsurveyedPenalty

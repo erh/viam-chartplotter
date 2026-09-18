@@ -119,9 +119,13 @@ type AutoRouteOptions struct {
 	FollowChannelMarkers bool
 	// ChannelMarkerPenalty is what being beside a buoyed channel costs instead
 	// of being in it, and MarkerCorridorM is how far outside the channel that
-	// cost reaches. Both apply only with FollowChannelMarkers.
+	// cost reaches. OffChannelPenalty is the cost carried by any water not in a
+	// channel at all, which is what makes a route stay on the charted channel
+	// network — out the ship channel and back — instead of cutting the corner
+	// across open water. All three apply only with FollowChannelMarkers.
 	ChannelMarkerPenalty float64
 	MarkerCorridorM      float64
+	OffChannelPenalty    float64
 
 	// KeepWaypoints applies when optimising an existing route: every point the
 	// operator placed stays in the result, and only the water between them is
@@ -215,6 +219,14 @@ func DefaultAutoRouteOptions(safeDepthM float64) AutoRouteOptions {
 		// cheaper way through; a quarter mile covers the approaches that matter
 		// while still leaving open water beyond it free.
 		MarkerCorridorM: 500,
+		// The cost on water that is not in a channel, charged everywhere the
+		// option is on. This is what makes "follow the channels" run a departure
+		// out the main ship channel and back rather than straight across the
+		// bay: a route stays on the charted network until the extra distance of
+		// doing so outweighs it. At 1.0 a channel route may be up to twice the
+		// open-water shortcut before the shortcut wins — deliberately generous,
+		// because a skipper who asked to follow the channels wants the channels.
+		OffChannelPenalty: 1.0,
 	}
 }
 
@@ -266,6 +278,9 @@ func (o *AutoRouteOptions) normalize(directM float64) {
 	}
 	if o.MarkerCorridorM <= 0 {
 		o.MarkerCorridorM = d.MarkerCorridorM
+	}
+	if o.OffChannelPenalty <= 0 {
+		o.OffChannelPenalty = d.OffChannelPenalty
 	}
 	if o.CorridorPadM <= 0 {
 		o.CorridorPadM = corridorPadFor(directM)
@@ -1562,6 +1577,7 @@ func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, userPlace
 		UnsurveyedPenalty:    unsurveyedPenalty,
 		RestrictedPenalty:    restrictedPenalty(opts.Avoid),
 		ChannelMarkerPenalty: channelMarkerPenalty(opts),
+		OffChannelPenalty:    offChannelPenalty(opts),
 	})
 
 	res := &AutoRouteResult{
@@ -2112,6 +2128,16 @@ func channelMarkerPenalty(opts AutoRouteOptions) float64 {
 		return 0
 	}
 	return opts.ChannelMarkerPenalty
+}
+
+// offChannelPenalty is the cost on any water not in a channel, and like
+// channelMarkerPenalty it is zero unless the caller asked to follow the
+// channels — so an ordinary route is never nudged toward one.
+func offChannelPenalty(opts AutoRouteOptions) float64 {
+	if !opts.FollowChannelMarkers {
+		return 0
+	}
+	return opts.OffChannelPenalty
 }
 
 // routeBBox is the search corridor: the endpoints' bounding box grown by padM

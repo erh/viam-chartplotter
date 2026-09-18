@@ -53,3 +53,43 @@ func TestFollowChannelFollowsAWaterway(t *testing.T) {
 		test.That(t, w, test.ShouldNotContainSubstring, "no charted channel markers")
 	}
 }
+
+// TestFollowChannelTakesADetourOntoTheChannel pins the point of the option: a
+// channel that is a real detour is still taken. Following the buoys out of New
+// York means running the ship channel southeast and back, not cutting straight
+// across the bay, so the off-channel cost has to buy a genuine deviation, not
+// just centre a route already passing nearby.
+func TestFollowChannelTakesADetourOntoTheChannel(t *testing.T) {
+	// A waterway that doglegs well north of the straight line — 3.3 km off it at
+	// the peak, so joining it is ~25% further than the rhumb line. Deep and
+	// featureless everywhere else.
+	scene := []*mongoFeature{deepEverywhere(10)}
+	ways := []osmtiler.Feature{{
+		Kind: osmtiler.GeomLine,
+		Coords: []osmtiler.LonLat{
+			{Lon: -71.50, Lat: 41.000},
+			{Lon: -71.45, Lat: 41.030},
+			{Lon: -71.40, Lat: 41.000},
+		},
+	}}
+
+	plan := func(opts AutoRouteOptions) *AutoRouteResult {
+		opts.normalize(haversineMeters(westPoint.Lat, westPoint.Lng, eastPoint.Lat, eastPoint.Lng))
+		bbox := routeBBox(westPoint, eastPoint, opts.CorridorPadM)
+		res, err := planRouteViaWithWays(scene, ways, bbox,
+			[]RoutePoint{westPoint, eastPoint}, allUserPlaced(2), opts)
+		test.That(t, err, test.ShouldBeNil)
+		return res
+	}
+
+	// Off, the shortest path is the rhumb line — the dogleg is ignored.
+	plain := plan(testOptions(2))
+	test.That(t, maxWaypointLat(plain), test.ShouldBeLessThan, 41.005)
+
+	// On, the route detours north onto the channel even though it is longer.
+	opts := testOptions(2)
+	opts.FollowChannelMarkers = true
+	steered := plan(opts)
+	test.That(t, maxWaypointLat(steered), test.ShouldBeGreaterThan, 41.02)
+	test.That(t, steered.DistanceMeters, test.ShouldBeGreaterThan, plain.DistanceMeters*1.1)
+}
