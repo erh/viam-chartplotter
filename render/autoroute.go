@@ -200,11 +200,21 @@ func DefaultAutoRouteOptions(safeDepthM float64) AutoRouteOptions {
 		MinCellM:     15,
 		MaxWaypoints: 80,
 		// Comparable to the depth and shore penalties, so outside the buoys is
-		// clearly the dearer way through without ever being a wall. The reach
-		// is about an eighth of a mile: far enough to price the water either
-		// side of a channel, near enough that open water beyond it is free.
+		// clearly the dearer way through without ever being a wall.
 		ChannelMarkerPenalty: 1.5,
-		MarkerCorridorM:      250,
+		// How far outside the channel the cost reaches — about a quarter of a
+		// mile. It has to be wider than it looks it should be. The penalty is a
+		// cost OUTSIDE the channel (a discount inside would make the A* heuristic
+		// inadmissible), so a route in the zone escapes it just as cheaply by
+		// leaving the zone on the near side as by joining the channel on the
+		// far side. With a channel a couple of hundred metres off the rhumb line
+		// — an ordinary harbour approach — an eighth-of-a-mile reach put the near
+		// edge closer than the channel, and the route ducked out of the zone
+		// instead of following the buoys. The reach has to exceed roughly twice
+		// the distance a route runs off the channel for the channel to be the
+		// cheaper way through; a quarter mile covers the approaches that matter
+		// while still leaving open water beyond it free.
+		MarkerCorridorM: 500,
 	}
 }
 
@@ -1179,6 +1189,17 @@ func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts A
 	ctx, cancel := context.WithTimeout(context.Background(), autoRouteQueryTimeout)
 	defer cancel()
 
+	// Navigable waterway centrelines guarantee a connected path through a
+	// passage the raster cannot resolve. They are baked into the nav tiles too,
+	// but a tile is Web-Mercator and the routing grid is not: re-sampling a
+	// one-pixel-wide stamped channel into the grid drops cells, leaving gaps a
+	// boat cannot cross. Measured at Manasquan Inlet, three cells of the river
+	// centreline lost the channel flag on re-sampling and reverted to the 0.9 m
+	// charted shoal, cutting the destination off from the sea. Stamping the ways
+	// straight onto the routing grid re-lays a continuous chain at the grid's
+	// own resolution, whichever path built it.
+	ways := r.navigableWaysForRouting(ctx, bbox)
+
 	if r.navColl != nil {
 		wanted := gridCellSize(bbox, opts)
 		midLat := (bbox[1] + bbox[3]) / 2
@@ -1197,6 +1218,10 @@ func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts A
 		o.normalize(longestLegMeters(points))
 		g := newNavGrid(bbox[0], bbox[1], bbox[2], bbox[3], o.MaxCells, o.MinCellM, o.MaxGridDim)
 		if sampleTilesIntoGrid(g, tiles, z) > 0 {
+			stampWaterways(g, ways)
+			if o.FollowChannelMarkers {
+				stampWaterwayChannel(g, ways, o.MarkerCorridorM)
+			}
 			r.stampMarksFromCharts(ctx, g, bbox, o)
 			return planRouteOnGrid(g, bbox, points, userPlaced, opts)
 		}
@@ -1205,14 +1230,6 @@ func (r *ENCRenderer) planSection(points []RoutePoint, userPlaced []bool, opts A
 	features, err := r.routingFeatures(ctx, bbox, opts)
 	if err != nil {
 		return nil, err
-	}
-	var ways []osmtiler.Feature
-	if r.osm != nil {
-		if w, werr := osmtiler.NavigableWaterways(ctx, r.osm, bbox[0], bbox[1], bbox[2], bbox[3]); werr != nil {
-			r.logger.Warnf("auto-route: waterway query failed, narrow passages may not route: %v", werr)
-		} else {
-			ways = w
-		}
 	}
 	return planRouteViaWithWays(features, ways, bbox, points, userPlaced, opts)
 }
@@ -1242,6 +1259,21 @@ func (r *ENCRenderer) stampMarksFromCharts(ctx context.Context, g *navGrid, bbox
 		return
 	}
 	stampChannelMarkers(g, channelMarksFrom(feats), opts.MarkerCorridorM)
+}
+
+// navigableWaysForRouting fetches the navigable waterway centrelines in the
+// bbox, or nil if there is no OSM store or the query fails — a missing
+// waterway only means a narrow passage may not route, never a hard error.
+func (r *ENCRenderer) navigableWaysForRouting(ctx context.Context, bbox [4]float64) []osmtiler.Feature {
+	if r.osm == nil {
+		return nil
+	}
+	ways, err := osmtiler.NavigableWaterways(ctx, r.osm, bbox[0], bbox[1], bbox[2], bbox[3])
+	if err != nil {
+		r.logger.Warnf("auto-route: waterway query failed, narrow passages may not route: %v", err)
+		return nil
+	}
+	return ways
 }
 
 // sectionPadM is the corridor width for one run of waypoints: a fraction of
@@ -1500,6 +1532,9 @@ func planRouteViaWithWays(features []*mongoFeature, ways []osmtiler.Feature, bbo
 	g := newNavGrid(bbox[0], bbox[1], bbox[2], bbox[3], o.MaxCells, o.MinCellM, o.MaxGridDim)
 	rasterizeForRouting(g, features, o)
 	stampWaterways(g, ways)
+	if o.FollowChannelMarkers {
+		stampWaterwayChannel(g, ways, o.MarkerCorridorM)
+	}
 	res, err := planRouteOnGrid(g, bbox, points, userPlaced, opts)
 	if err != nil {
 		return nil, err
@@ -1556,10 +1591,11 @@ func planRouteOnGrid(g *navGrid, bbox [4]float64, points []RoutePoint, userPlace
 		legBounds = append(legBounds, len(full))
 	}
 
-	// Asked to follow the marks and there were none to follow. Not a failure —
-	// most water is unmarked — but the operator chose this expecting the buoys
-	// to shape the route, and silence would let them believe they did.
-	if opts.FollowChannelMarkers && g.markerGates == 0 {
+	// Asked to follow the marks and there was nothing to follow — neither buoy
+	// gates nor a charted navigable waterway. Not a failure — most water is
+	// unmarked — but the operator chose this expecting the channel to shape the
+	// route, and silence would let them believe it did.
+	if opts.FollowChannelMarkers && g.markerGates == 0 && g.markerWays == 0 {
 		res.Warnings = append(res.Warnings,
 			"no charted channel markers to follow on this stretch — it was planned on the charted depths alone")
 	}
@@ -1926,8 +1962,18 @@ func rasterizeForRouting(g *navGrid, features []*mongoFeature, opts AutoRouteOpt
 
 // stampWaterways marks the cells along navigable waterway centrelines as
 // channel, guaranteeing a connected path through a passage the raster cannot
-// resolve. Depth still governs: a channel cell charted shoaler than the boat's
-// safe depth blocks like anything else (see navGrid.finalize).
+// resolve.
+//
+// It also clears cellChannelDepth on the cells it stamps. A charted channel
+// depth coinciding with an OSM-asserted navigable centreline is treated as
+// unspecified rather than as a wall — the same reading finalize() already gives
+// a charted zero in a maintained channel, extended to a shoal DRVAL1 under a
+// waterway OSM tags navigable by construction (canal, tidal_channel, boat=yes).
+// Without this the guarantee is hollow wherever it is most needed: at Manasquan
+// Inlet the river's dredged channel charts 0.9 m, so every stamped cell over it
+// blocked at a 6 ft safe depth and the route could not reach the sea. The
+// charted depth is left in place, so pathDepthStats still reports the shoal as
+// the route's min depth and the operator is warned.
 func stampWaterways(g *navGrid, ways []osmtiler.Feature) int {
 	marked := 0
 	for _, w := range ways {
@@ -1935,11 +1981,46 @@ func stampWaterways(g *navGrid, ways []osmtiler.Feature) int {
 			a, b := w.Coords[i], w.Coords[i+1]
 			g.stampSegment(a.Lon, a.Lat, b.Lon, b.Lat, func(idx int) {
 				g.mark(idx, cellChannel)
+				g.flags[idx] &^= cellChannelDepth
 				marked++
 			})
 		}
 	}
 	return marked
+}
+
+// stampWaterwayChannel makes a navigable waterway a channel to follow when the
+// operator asked to: cellMarkedChannel on the centreline, cellMarkerZone out to
+// influenceM, exactly as stampChannelMarkers does for a buoyed channel, so
+// finalize() prices being beside it the same way.
+//
+// The buoy gates reconstruct a channel only where lateral marks are charted in
+// opposite-handed pairs, close enough to gate and close enough to each other to
+// chain. A river or an inlet is often beaconed too sparsely for that — Manasquan
+// Inlet charts three gates over two miles, past the spacing that links them —
+// and the gates collapse to a few isolated dots the route steps around. But the
+// same water is charted as a continuous OSM waterway line, which is the channel
+// the operator means. Following that line is what turns "follow the channel"
+// into a route that actually does, rather than one indistinguishable from the
+// plain depth route. It is stamped only with the option on, so an ordinary
+// route is unchanged.
+func stampWaterwayChannel(g *navGrid, ways []osmtiler.Feature, influenceM float64) {
+	inside := func(i int) { g.mark(i, cellMarkedChannel) }
+	zone := func(i int) { g.mark(i, cellMarkerZone) }
+	// No gate width to work with — a waterway line has none — so the channel
+	// itself is a cell wide, and the zone is what does the pulling.
+	h := 0.75 * g.cellSizeM()
+	for _, w := range ways {
+		if len(w.Coords) < 2 {
+			continue
+		}
+		for i := 0; i+1 < len(w.Coords); i++ {
+			a, b := w.Coords[i], w.Coords[i+1]
+			g.stampCorridor(a.Lon, a.Lat, b.Lon, b.Lat, h+influenceM, zone)
+			g.stampCorridor(a.Lon, a.Lat, b.Lon, b.Lat, h, inside)
+		}
+		g.markerWays++
+	}
 }
 
 // markGeometry applies fn to every cell a feature covers, whatever its

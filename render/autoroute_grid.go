@@ -59,9 +59,12 @@ type navGrid struct {
 	landScale []int32
 
 	// markerGates is how many channel-marker gates were stamped onto this
-	// grid (see stampChannelMarkers). Zero with the option on means there was
-	// nothing charted here to follow, which is worth telling the operator.
+	// grid (see stampChannelMarkers). markerWays is how many navigable-waterway
+	// channels were stamped to follow (see stampWaterwayChannel). Both zero with
+	// the option on means there was nothing charted here to follow, which is
+	// worth telling the operator.
 	markerGates int
+	markerWays  int
 
 	// Filled by finalize().
 	cost       []float32 // cost multiplier, >= 1; +Inf where impassable
