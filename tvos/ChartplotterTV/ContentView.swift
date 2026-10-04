@@ -420,18 +420,25 @@ struct ChartScreen: View {
         let seconds: Double?
     }
 
-    /// Next-waypoint leg: the nav system's DTW + closing velocity when
-    /// it has an active route, else straight-line from the boat to the
-    /// first nav-service waypoint at current SOG.
+    /// Next-waypoint leg of the chartplotter route: straight-line from
+    /// the boat to the first nav-service waypoint at current SOG — the
+    /// web app's routeStats.next (marineMap.svelte). The N2K sensor's
+    /// DTW is deliberately NOT used here: it describes the boat nav
+    /// system's own active waypoint, which may be a different route
+    /// altogether (see n2kLeg).
     private var nextLeg: RouteLeg? {
-        let sogKn = client.state?.sogKn ?? 0
-        if let nm = client.route?.distanceToWaypointNM {
-            return RouteLeg(nm: nm, seconds: client.route?.etaSeconds
-                ?? (sogKn > 0.5 ? nm / sogKn * 3600 : nil))
-        }
         guard let s = client.state, let wp = client.route?.waypoints?.first else { return nil }
+        let sogKn = s.sogKn ?? 0
         let nm = haversineNM(s.lat, s.lng, wp.lat, wp.lng)
         return RouteLeg(nm: nm, seconds: sogKn > 0.5 ? nm / sogKn * 3600 : nil)
+    }
+
+    /// The boat nav system's (N2K) active waypoint: its own DTW, timed
+    /// at its own closing velocity. Independent of the nav-service
+    /// route and shown as a separate block.
+    private var n2kLeg: RouteLeg? {
+        guard let nm = client.route?.distanceToWaypointNM, nm > 0 else { return nil }
+        return RouteLeg(nm: nm, seconds: client.route?.etaSeconds)
     }
 
     /// Whole-route leg: the next leg plus every remaining
@@ -457,12 +464,11 @@ struct ChartScreen: View {
             // Wall-clock now — the panel re-renders on every 1s state
             // poll, which keeps a minutes-resolution clock current.
             row("Now", Date().formatted(date: .omitted, time: .shortened))
+            // Chartplotter route (magenta dashed line on the chart).
             if let next = nextLeg {
                 panelDivider
+                sectionHeader("Route", color: Color(red: 1, green: 0, blue: 1))
                 row("Next", String(format: "%.2f nm", next.nm))
-                if let v = client.route?.closingVelocityMS, v > 0.1 {
-                    row("Closing", String(format: "%.1f kn", v * 1.94384))
-                }
                 if let s = next.seconds {
                     row("Time", Self.formatDuration(s))
                     row("ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
@@ -480,8 +486,37 @@ struct ChartScreen: View {
                     row("WPTS", "\(wpCount)")
                 }
             }
+            // Boat nav system's own active waypoint (green line). A
+            // different route from the one above, so its own block.
+            if let n2k = n2kLeg {
+                panelDivider
+                sectionHeader("N2K WPT", color: .green)
+                row("Dist", String(format: "%.2f nm", n2k.nm))
+                if let v = client.route?.closingVelocityMS, v > 0.1 {
+                    row("Closing", String(format: "%.1f kn", v * 1.94384))
+                }
+                if let s = n2k.seconds {
+                    row("Time", Self.formatDuration(s))
+                    row("ETA", Date(timeIntervalSinceNow: s).formatted(date: .omitted, time: .shortened))
+                }
+            }
         }
         .panelStyle()
+    }
+
+    /// Block title with a swatch matching that route's line on the chart.
+    private func sectionHeader(_ title: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 22, height: 4)
+            Text(title)
+                .font(.caption.bold())
+                .textCase(.uppercase)
+                .foregroundStyle(color)
+            Spacer(minLength: 0)
+        }
+        .frame(width: 250)
     }
 
     private var panelDivider: some View {

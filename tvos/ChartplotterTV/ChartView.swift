@@ -35,6 +35,11 @@ final class BoatAnnotation: MKPointAnnotation {}
 /// differently from the magenta route line.
 final class TrackPolyline: MKPolyline {}
 
+/// Marker class for the boat nav system's (N2K route sensor) active
+/// waypoint line — a separate route from the chartplotter's, drawn in
+/// the web app's solid green so the two never read as one.
+final class N2KPolyline: MKPolyline {}
+
 /// The TV hangs on a wall across the room, so sit two zoom levels
 /// further out than the web app does at every speed.
 let tvZoomOffset: Double = 2
@@ -153,6 +158,7 @@ struct ChartMapView: UIViewRepresentable {
         }
 
         updateRouteOverlay(map, co: co, boat: center)
+        updateN2KOverlay(map, co: co, boat: center)
         updateTrackOverlay(map, co: co)
     }
 
@@ -191,47 +197,65 @@ struct ChartMapView: UIViewRepresentable {
             span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lngDelta))
     }
 
-    /// Magenta route line: boat → active-route waypoints (nav service),
-    /// or boat → the nav system's destination when that's all we have.
+    /// Magenta route line: boat → the chartplotter nav service's
+    /// waypoints, in order. Same geometry the web app's nav-route layer
+    /// draws, and the one the route panel's Next/Final are measured on.
     ///
     /// Replacing an overlay makes MapKit redraw its whole overlay
     /// canvas, which reads as a flash — so rebuild only when the route
     /// itself changed or the boat has moved enough (~200 m, a few px at
     /// these zooms) to visibly kink the first leg, not per poll tick.
     private func updateRouteOverlay(_ map: MKMapView, co: Coordinator, boat: CLLocationCoordinate2D) {
+        let targets = (route?.waypoints ?? []).map {
+            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng)
+        }
+        co.routeLine = replaceLine(
+            map, old: co.routeLine, boat: boat, targets: targets,
+            lastKey: &co.lastRouteKey, lastBoat: &co.lastRouteBoat,
+            make: { MKPolyline(coordinates: $0, count: $0.count) })
+    }
+
+    /// Green line: boat → the boat nav system's own active waypoint (the
+    /// N2K route sensor's destination). Independent of the nav-service
+    /// route above — the MFD may be steering to something else entirely,
+    /// so it gets its own line, own colour, own panel block.
+    private func updateN2KOverlay(_ map: MKMapView, co: Coordinator, boat: CLLocationCoordinate2D) {
         var targets: [CLLocationCoordinate2D] = []
-        if let wps = route?.waypoints, !wps.isEmpty {
-            targets = wps.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng) }
-        } else if let dLat = route?.destinationLat, let dLng = route?.destinationLng {
+        if let dLat = route?.destinationLat, let dLng = route?.destinationLng {
             targets = [CLLocationCoordinate2D(latitude: dLat, longitude: dLng)]
         }
+        co.n2kLine = replaceLine(
+            map, old: co.n2kLine, boat: boat, targets: targets,
+            lastKey: &co.lastN2KKey, lastBoat: &co.lastN2KBoat,
+            make: { N2KPolyline(coordinates: $0, count: $0.count) })
+    }
 
+    /// Shared rebuild rule for the boat-anchored lines: returns the
+    /// overlay now on the map (the old one when nothing changed enough,
+    /// nil when there are no targets).
+    private func replaceLine<L: MKPolyline>(
+        _ map: MKMapView, old: L?, boat: CLLocationCoordinate2D,
+        targets: [CLLocationCoordinate2D],
+        lastKey: inout String, lastBoat: inout CLLocationCoordinate2D,
+        make: ([CLLocationCoordinate2D]) -> L
+    ) -> L? {
         if targets.isEmpty {
-            if let old = co.routeLine {
-                map.removeOverlay(old)
-                co.routeLine = nil
-            }
-            co.lastRouteKey = ""
-            return
+            if let old { map.removeOverlay(old) }
+            lastKey = ""
+            return nil
         }
-
         let key = targets.map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) }
             .joined(separator: ";")
-        let boatMoved = MKMapPoint(boat).distance(to: MKMapPoint(co.lastRouteBoat)) > 200
-        if key == co.lastRouteKey, !boatMoved, co.routeLine != nil {
-            return
+        let boatMoved = MKMapPoint(boat).distance(to: MKMapPoint(lastBoat)) > 200
+        if key == lastKey, !boatMoved, let old {
+            return old
         }
-        co.lastRouteKey = key
-        co.lastRouteBoat = boat
-
-        let coords = [boat] + targets
-        let line = MKPolyline(coordinates: coords, count: coords.count)
-        let old = co.routeLine
-        co.routeLine = line
+        lastKey = key
+        lastBoat = boat
+        let line = make([boat] + targets)
         map.addOverlay(line, level: .aboveLabels)
-        if let old {
-            map.removeOverlay(old)
-        }
+        if let old { map.removeOverlay(old) }
+        return line
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
@@ -244,6 +268,9 @@ struct ChartMapView: UIViewRepresentable {
         var pendingZoomTicks = 0
         var lastRouteKey = ""
         var lastRouteBoat = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+        var n2kLine: N2KPolyline?
+        var lastN2KKey = ""
+        var lastN2KBoat = CLLocationCoordinate2D(latitude: 0, longitude: 0)
         var trackLine: TrackPolyline?
         var lastTrackCount = 0
         var lastTrackTs: Double = 0
@@ -284,6 +311,13 @@ struct ChartMapView: UIViewRepresentable {
             if let line = overlay as? TrackPolyline {
                 let r = MKPolylineRenderer(polyline: line)
                 r.strokeColor = UIColor.systemBlue.withAlphaComponent(0.7)
+                r.lineWidth = 3
+                return r
+            }
+            if let line = overlay as? N2KPolyline {
+                // Web app's style for the same line: solid green, 3px.
+                let r = MKPolylineRenderer(polyline: line)
+                r.strokeColor = UIColor.systemGreen.withAlphaComponent(0.9)
                 r.lineWidth = 3
                 return r
             }
