@@ -3,7 +3,6 @@ package noaa
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -15,6 +14,7 @@ type IngestStats struct {
 	Docs         int // feature documents applied
 	WriteErrors  int // per-document write errors tolerated (bad geometry etc.)
 	GeomSkipped  int // features dropped for empty/degenerate geometry
+	Pruned       int // stale docs removed: features the new parse no longer has
 }
 
 // IngestCellFile parses a single .000 file and upserts its features into the
@@ -30,6 +30,10 @@ func IngestCellFile(ctx context.Context, coll *mongo.Collection, cellName, path 
 	if err != nil {
 		return IngestStats{}, err
 	}
+	pruned, err := PruneCellDocs(ctx, coll, res.Meta.Cell, res.Docs)
+	if err != nil {
+		return IngestStats{}, err
+	}
 	if err := WriteMeta(ctx, coll, res.Meta); err != nil {
 		return IngestStats{}, fmt.Errorf("write meta %s: %w", res.Meta.Cell, err)
 	}
@@ -38,6 +42,7 @@ func IngestCellFile(ctx context.Context, coll *mongo.Collection, cellName, path 
 		Docs:        applied,
 		WriteErrors: writeErrs,
 		GeomSkipped: res.Skipped,
+		Pruned:      int(pruned),
 	}, nil
 }
 
@@ -90,9 +95,9 @@ func IngestBBox(
 	cells := store.catalog.CellsForBBox(minLon, minLat, maxLon, maxLat, minScale, maxScale)
 	var stats IngestStats
 	for _, c := range cells {
-		// Dedup: skip if the collection already holds this exact edition+update.
-		if meta, ok, err := LookupMeta(ctx, coll, c.Name); err == nil && ok &&
-			meta.Edition == strconv.Itoa(c.Edition) && meta.UpdateNumber == strconv.Itoa(c.Update) {
+		// Dedup: skip if the collection already holds this exact edition+update,
+		// parsed by the current ParserVersion.
+		if meta, ok, err := LookupMeta(ctx, coll, c.Name); err == nil && ok && meta.IsCurrent(c.Edition, c.Update) {
 			stats.CellsSkipped++
 			continue
 		}
@@ -112,8 +117,9 @@ func IngestBBox(
 		stats.Docs += cs.Docs
 		stats.WriteErrors += cs.WriteErrors
 		stats.GeomSkipped += cs.GeomSkipped
-		logf("noaa cell %s: %d features (%d geom-skipped, %d write-errs)",
-			c.Name, cs.Docs, cs.GeomSkipped, cs.WriteErrors)
+		stats.Pruned += cs.Pruned
+		logf("noaa cell %s: %d features (%d geom-skipped, %d write-errs, %d pruned)",
+			c.Name, cs.Docs, cs.GeomSkipped, cs.WriteErrors, cs.Pruned)
 	}
 	return stats, nil
 }

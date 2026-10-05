@@ -1,0 +1,36 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.out
+
+# Go workspace file
+go.work
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation example binaries
+docs/examples/*/quick-start
+docs/examples/*/viewport-queries
+docs/examples/*/*
+!docs/examples/*/*.go
+!docs/examples/*/go.mod
+!docs/examples/*/go.sum
+!docs/examples/*/README.md

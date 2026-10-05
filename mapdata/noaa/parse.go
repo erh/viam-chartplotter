@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/beetlebugorg/s57/pkg/s57"
@@ -40,15 +41,39 @@ type FeatureDoc struct {
 	Attributes map[string]any `bson:"attributes,omitempty"`
 }
 
+// ParserVersion is recorded in each cell's CellMeta. Bump it when a parser fix
+// changes the features produced for an unchanged cell file, so IngestBBox
+// re-parses cells it would otherwise skip as current.
+//
+// v1: S-57 update merging fixed in third_party/s57 — positional SGCC/VRPC/FSPC
+// control, feature updates keyed by FRID RCID (NOAA DELETE records carry no
+// FOID), and RCNM-exact spatial lookup. Before it, cells with .001+ updates
+// produced shoreline whose vertices jump kilometres across the chart (black
+// lines through the Chelsea piers in US5NYCEG). Base-only cells (update 0)
+// parsed the same and are not re-ingested.
+const ParserVersion = 1
+
 // CellMeta is the metadata stored in the noaa collection under
 // "_meta:<cell>" so a re-ingest can skip a cell whose edition+update are
 // already loaded.
 type CellMeta struct {
-	ID           string `bson:"_id"`
-	Cell         string `bson:"cell"`
-	Edition      string `bson:"edition"`
-	UpdateNumber string `bson:"updateNumber"`
-	FeatureCount int    `bson:"featureCount"`
+	ID            string `bson:"_id"`
+	Cell          string `bson:"cell"`
+	Edition       string `bson:"edition"`
+	UpdateNumber  string `bson:"updateNumber"`
+	FeatureCount  int    `bson:"featureCount"`
+	ParserVersion int    `bson:"parserVersion,omitempty"`
+}
+
+// IsCurrent reports whether a cell ingested with this metadata is up to date
+// for the given published edition and update. A cell with updates applied is
+// also stale when it was parsed by an older ParserVersion; ParserVersion 1 only
+// changed update merging, so update-0 cells stay current regardless.
+func (m CellMeta) IsCurrent(edition, update int) bool {
+	if m.Edition != strconv.Itoa(edition) || m.UpdateNumber != strconv.Itoa(update) {
+		return false
+	}
+	return update == 0 || m.ParserVersion >= ParserVersion
 }
 
 // maxPolygonVertices caps a single polygon ring so one pathological
@@ -95,7 +120,8 @@ func ParseCell(cellName, path string) (ParseResult, error) {
 			ID:           "_meta:" + cellName,
 			Cell:         cellName,
 			Edition:      chart.Edition(),
-			UpdateNumber: chart.UpdateNumber(),
+			UpdateNumber:  chart.UpdateNumber(),
+			ParserVersion: ParserVersion,
 		},
 	}
 

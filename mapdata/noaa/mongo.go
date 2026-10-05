@@ -436,6 +436,23 @@ func UpsertDocs(ctx context.Context, coll *mongo.Collection, docs []FeatureDoc, 
 	return applied, writeErrs, nil
 }
 
+// PruneCellDocs deletes a cell's feature docs whose _id is not in keep — the
+// features a fresh parse no longer produces (deleted by an update file or a new
+// edition). UpsertDocs alone never removes them, so they would keep rendering.
+// The cell's "_meta:" doc is left alone.
+func PruneCellDocs(ctx context.Context, coll *mongo.Collection, cell string, keep []FeatureDoc) (int64, error) {
+	ids := make([]string, 0, len(keep)+1)
+	for _, d := range keep {
+		ids = append(ids, d.ID)
+	}
+	ids = append(ids, "_meta:"+cell)
+	res, err := coll.DeleteMany(ctx, bson.M{"cell": cell, "_id": bson.M{"$nin": ids}})
+	if err != nil {
+		return 0, fmt.Errorf("noaa: prune %s: %w", cell, err)
+	}
+	return res.DeletedCount, nil
+}
+
 // asBulkWriteException unwraps a BulkWriteException so callers can tolerate
 // per-document write errors while still failing on transport/auth errors.
 func asBulkWriteException(err error, out *mongo.BulkWriteException) bool {

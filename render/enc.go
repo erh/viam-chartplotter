@@ -1230,7 +1230,12 @@ const (
 // They're long straight leading/range lines that streak across open-water
 // tiles (e.g. Cape Cod Bay) and clutter the chart without aiding our use; the
 // magenta area-limit classes (FAIRWY/ACHARE/RESARE) are unaffected.
-const ENCRenderRulesVersion = 22
+// v23: no rule change — the S-57 update-merge fix (noaa.ParserVersion 1)
+// re-ingests every cell with .001+ updates, whose shoreline/contours had
+// vertices jumping kilometres across the chart. Bump so tiles cached from the
+// corrupt geometry re-render. Re-ingest BEFORE deploying this, or tiles drawn
+// from the old data get cached again under v23.
+const ENCRenderRulesVersion = 23
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that

@@ -196,11 +196,12 @@ func reingestPaths(ctx context.Context, coll *mongo.Collection, paths []string, 
 		total.Docs += st.Docs
 		total.WriteErrors += st.WriteErrors
 		total.GeomSkipped += st.GeomSkipped
-		logger.Infof("reingest %d/%d %s: %d features (%d geom-skipped, %d write-errs)",
-			i+1, len(files), noaa.CellNameFromPath(f), st.Docs, st.GeomSkipped, st.WriteErrors)
+		total.Pruned += st.Pruned
+		logger.Infof("reingest %d/%d %s: %d features (%d geom-skipped, %d write-errs, %d pruned)",
+			i+1, len(files), noaa.CellNameFromPath(f), st.Docs, st.GeomSkipped, st.WriteErrors, st.Pruned)
 	}
-	logger.Infof("reingest done: %d cells, %d features, %d write-errors, %d geom-skipped",
-		total.Cells, total.Docs, total.WriteErrors, total.GeomSkipped)
+	logger.Infof("reingest done: %d cells, %d features, %d write-errors, %d geom-skipped, %d pruned",
+		total.Cells, total.Docs, total.WriteErrors, total.GeomSkipped, total.Pruned)
 	return nil
 }
 
