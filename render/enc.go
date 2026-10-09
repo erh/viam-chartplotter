@@ -1235,7 +1235,9 @@ const (
 // vertices jumping kilometres across the chart. Bump so tiles cached from the
 // corrupt geometry re-render. Re-ingest BEFORE deploying this, or tiles drawn
 // from the old data get cached again under v23.
-const ENCRenderRulesVersion = 23
+// v24: no rule change — 0.4.7 (v23) was deployed before the re-ingest finished,
+// so tiles cached under v23 may still hold the corrupt geometry.
+const ENCRenderRulesVersion = 24
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
