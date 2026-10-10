@@ -1237,7 +1237,9 @@ const (
 // from the old data get cached again under v23.
 // v24: no rule change — 0.4.7 (v23) was deployed before the re-ingest finished,
 // so tiles cached under v23 may still hold the corrupt geometry.
-const ENCRenderRulesVersion = 24
+// v25: no rule change — belt-and-braces flush after the module serving the
+// chart was found still running a pre-fix build.
+const ENCRenderRulesVersion = 25
 
 // OSMRenderRulesVersion is the same idea, scoped to the OSM raster pipeline
 // (RenderOSMTile via osmtiler). Bump on any change to the rasteriser that
