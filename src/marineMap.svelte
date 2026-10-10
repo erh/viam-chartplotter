@@ -5742,6 +5742,246 @@
   });
 </script>
 
+{#snippet dataPanel(placement: string)}
+  {#if hasDataPanel}
+    <div class="data-panel {placement}" class:edit={addWaypointActive}>
+      {#if hasSensorData}
+        <div class="data-panel-section">
+          <div class="data-panel-row">
+            <span class="data-panel-label">Time</span>
+            <span class="data-panel-value">
+              <!-- Zero-padded + tabular figures: locale hour formatting and
+                   proportional digits made the panel width bounce every
+                   second. -->
+              <span class="data-panel-bold data-panel-clock"
+                >{String(clockNow.getHours()).padStart(2, "0")}:{String(
+                  clockNow.getMinutes()
+                ).padStart(2, "0")}:{String(clockNow.getSeconds()).padStart(2, "0")}</span
+              >
+            </span>
+          </div>
+          {#if sog != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">SOG</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{sog.toFixed(2)}</span><sup>kn</sup>
+              </span>
+            </div>
+          {/if}
+          {#if hdg != null || cog != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">HDG/COG</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{compassFmt(hdg)}</span> /
+                <span class="data-panel-bold">{compassFmt(cog)}</span>
+              </span>
+            </div>
+          {/if}
+          {#if depth != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Depth</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{depth.toFixed(1)}</span><sup>ft</sup>
+              </span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+      {#if routeStats}
+        <div class="data-panel-section data-panel-nav">
+          <div class="data-panel-row">
+            <span class="data-panel-label">Next</span>
+            <span class="data-panel-value">
+              <span class="data-panel-bold">{routeStats.next.distNm.toFixed(2)}</span><sup>nm</sup>
+              · {routeStats.next.headingDeg.toFixed(0)}° · {formatDurationMin(
+                routeStats.next.minutes
+              )}
+              · ETA {formatEta(routeStats.next.minutes)}
+            </span>
+          </div>
+          {#if routeStats.final.waypointCount > 1}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Final</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup
+                  >nm</sup
+                >
+                · {formatDurationMin(routeStats.final.minutes)}
+                · ETA {formatEta(routeStats.final.minutes)}
+              </span>
+            </div>
+          {/if}
+          {#if addWaypointActive}
+            <div class="data-panel-hint">click to add · drag waypoints to move</div>
+          {/if}
+        </div>
+      {/if}
+      {#if tideInfo}
+        <a
+          class="data-panel-section data-panel-tide data-panel-link"
+          href={`https://tidesandcurrents.noaa.gov/stationhome.html?id=${tideInfo.station.id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open NOAA tide station page"
+        >
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Tide</span>
+            <span class="data-panel-station">{tideInfo.station.name}</span>
+            <span class="data-panel-station">{tideInfo.station.distNm.toFixed(1)} nm away</span>
+          </div>
+          {#if tideSpark}
+            <svg class="tide-spark" viewBox="0 0 {sparkW} {sparkH}" preserveAspectRatio="none">
+              <polyline points={tideSpark.points} fill="none" stroke="#4ade80" stroke-width="1.5" />
+              {#if tideSpark.nowX !== null}
+                <line
+                  x1={tideSpark.nowX}
+                  y1="0"
+                  x2={tideSpark.nowX}
+                  y2={sparkH}
+                  stroke="#fff"
+                  stroke-width="1"
+                  stroke-dasharray="2,2"
+                  opacity="0.7"
+                />
+                {#if tideSpark.nowY !== null}
+                  <circle cx={tideSpark.nowX} cy={tideSpark.nowY} r="2.5" fill="#fff" />
+                {/if}
+              {/if}
+            </svg>
+          {/if}
+          {#if tideView && tideView.currentLevel !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Now</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{tideView.currentLevel.toFixed(2)}</span><sup>ft</sup>
+              </span>
+            </div>
+          {/if}
+          {#if tideView?.nextHigh}
+            <div class="data-panel-row">
+              <span class="data-panel-label">High</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{tideView.nextHigh.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideView.nextHigh)}
+              </span>
+            </div>
+          {/if}
+          {#if tideView?.nextLow}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Low</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{tideView.nextLow.v.toFixed(2)}</span><sup>ft</sup>
+                · {tideTimeFmt(tideView.nextLow)}
+              </span>
+            </div>
+          {/if}
+        </a>
+      {/if}
+      {#if weatherInfo && myBoat?.location}
+        <a
+          class="data-panel-section data-panel-weather data-panel-link"
+          href={`https://www.windy.com/?${myBoat.location[0].toFixed(4)},${myBoat.location[1].toFixed(4)},10`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open Windy.com forecast"
+        >
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Wx · next 4h</span>
+          </div>
+          {#if weatherInfo.tempNowF !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Temp</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{weatherInfo.tempNowF.toFixed(0)}</span><sup>°F</sup>
+                · {weatherInfo.tempMinF.toFixed(0)}–{weatherInfo.tempMaxF.toFixed(0)}°
+              </span>
+            </div>
+          {/if}
+          {#if weatherInfo.windNowKn !== null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Wind</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{weatherInfo.windNowKn.toFixed(0)}</span><sup>kn</sup>
+                {#if weatherInfo.windNowDirDeg !== null}
+                  · {compassFmt(weatherInfo.windNowDirDeg)}
+                {/if}
+                · max {weatherInfo.windMaxKn.toFixed(0)}
+              </span>
+            </div>
+          {/if}
+          <div class="data-panel-row">
+            <span class="data-panel-label">Rain</span>
+            <span class="data-panel-value">
+              {#if weatherInfo.rainTotalIn > 0}
+                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup
+                  >in</sup
+                >
+                · {weatherInfo.rainHoursAny}h
+              {:else}
+                <span class="data-panel-bold">none</span>
+              {/if}
+            </span>
+          </div>
+          {#if weatherInfo.sunriseLocal && weatherInfo.sunsetLocal}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Sun</span>
+              <span class="data-panel-value">
+                ↑ {weatherInfo.sunriseLocal} · ↓ {weatherInfo.sunsetLocal}
+              </span>
+            </div>
+          {/if}
+          {#if weatherInfo.moonriseLocal || weatherInfo.moonsetLocal}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Moon</span>
+              <span class="data-panel-value">
+                ↑ {weatherInfo.moonriseLocal ?? "—"} · ↓ {weatherInfo.moonsetLocal ?? "—"}
+              </span>
+            </div>
+          {/if}
+        </a>
+      {/if}
+      {#if cursorInfo}
+        <div class="data-panel-section data-panel-cursor">
+          <div class="data-panel-stack">
+            <span class="data-panel-label">Cursor</span>
+            <span class="data-panel-value">{formatCoord(cursorInfo.lat, true)}</span>
+            <span class="data-panel-value">{formatCoord(cursorInfo.lng, false)}</span>
+            {#if cursorInfo.nm !== null && cursorInfo.brg !== null}
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
+                @ {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+            {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
+              {@const windColor = colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}
+              <span class="data-panel-value" style="color: {windColor}">
+                <span class="weather-swatch" style="background: {windColor}"></span>
+                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup
+                >
+                from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+            {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
+              {@const waveColor = colorForValue(
+                WAVE_COLOR_SCALE,
+                cursorInfo.waveM,
+                WAVE_RANGE_MAX_M
+              )}
+              <span class="data-panel-value" style="color: {waveColor}">
+                <span class="weather-swatch" style="background: {waveColor}"></span>
+                wave
+                <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span
+                ><sup>ft</sup>
+                from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
+              </span>
+            {/if}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
 <div
   id="map-container"
   class="relative {fullWidth
@@ -6541,244 +6781,16 @@
        and cursor (lat/lng + bearing/distance from boat). Pinned to top-right
        of the map below the toolbar. Sections are separated by dividers and
        only render when their data is present. -->
-  {#if hasDataPanel}
-    <div class="data-panel" class:edit={addWaypointActive}>
-      {#if hasSensorData}
-        <div class="data-panel-section">
-          <div class="data-panel-row">
-            <span class="data-panel-label">Time</span>
-            <span class="data-panel-value">
-              <!-- Zero-padded + tabular figures: locale hour formatting and
-                   proportional digits made the panel width bounce every
-                   second. -->
-              <span class="data-panel-bold data-panel-clock"
-                >{String(clockNow.getHours()).padStart(2, "0")}:{String(
-                  clockNow.getMinutes()
-                ).padStart(2, "0")}:{String(clockNow.getSeconds()).padStart(2, "0")}</span
-              >
-            </span>
-          </div>
-          {#if sog != null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">SOG</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{sog.toFixed(2)}</span><sup>kn</sup>
-              </span>
-            </div>
-          {/if}
-          {#if hdg != null || cog != null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">HDG/COG</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{compassFmt(hdg)}</span> /
-                <span class="data-panel-bold">{compassFmt(cog)}</span>
-              </span>
-            </div>
-          {/if}
-          {#if depth != null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Depth</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{depth.toFixed(1)}</span><sup>ft</sup>
-              </span>
-            </div>
-          {/if}
-        </div>
-      {/if}
-      {#if routeStats}
-        <div class="data-panel-section data-panel-nav">
-          <div class="data-panel-row">
-            <span class="data-panel-label">Next</span>
-            <span class="data-panel-value">
-              <span class="data-panel-bold">{routeStats.next.distNm.toFixed(2)}</span><sup>nm</sup>
-              · {routeStats.next.headingDeg.toFixed(0)}° · {formatDurationMin(
-                routeStats.next.minutes
-              )}
-              · ETA {formatEta(routeStats.next.minutes)}
-            </span>
-          </div>
-          {#if routeStats.final.waypointCount > 1}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Final</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{routeStats.final.distNm.toFixed(2)}</span><sup
-                  >nm</sup
-                >
-                · {formatDurationMin(routeStats.final.minutes)}
-                · ETA {formatEta(routeStats.final.minutes)}
-              </span>
-            </div>
-          {/if}
-          {#if addWaypointActive}
-            <div class="data-panel-hint">click to add · drag waypoints to move</div>
-          {/if}
-        </div>
-      {/if}
-      {#if tideInfo}
-        <a
-          class="data-panel-section data-panel-tide data-panel-link"
-          href={`https://tidesandcurrents.noaa.gov/stationhome.html?id=${tideInfo.station.id}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open NOAA tide station page"
-        >
-          <div class="data-panel-stack">
-            <span class="data-panel-label">Tide</span>
-            <span class="data-panel-station">{tideInfo.station.name}</span>
-            <span class="data-panel-station">{tideInfo.station.distNm.toFixed(1)} nm away</span>
-          </div>
-          {#if tideSpark}
-            <svg class="tide-spark" viewBox="0 0 {sparkW} {sparkH}" preserveAspectRatio="none">
-              <polyline points={tideSpark.points} fill="none" stroke="#4ade80" stroke-width="1.5" />
-              {#if tideSpark.nowX !== null}
-                <line
-                  x1={tideSpark.nowX}
-                  y1="0"
-                  x2={tideSpark.nowX}
-                  y2={sparkH}
-                  stroke="#fff"
-                  stroke-width="1"
-                  stroke-dasharray="2,2"
-                  opacity="0.7"
-                />
-                {#if tideSpark.nowY !== null}
-                  <circle cx={tideSpark.nowX} cy={tideSpark.nowY} r="2.5" fill="#fff" />
-                {/if}
-              {/if}
-            </svg>
-          {/if}
-          {#if tideView && tideView.currentLevel !== null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Now</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{tideView.currentLevel.toFixed(2)}</span><sup>ft</sup>
-              </span>
-            </div>
-          {/if}
-          {#if tideView?.nextHigh}
-            <div class="data-panel-row">
-              <span class="data-panel-label">High</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{tideView.nextHigh.v.toFixed(2)}</span><sup>ft</sup>
-                · {tideTimeFmt(tideView.nextHigh)}
-              </span>
-            </div>
-          {/if}
-          {#if tideView?.nextLow}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Low</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{tideView.nextLow.v.toFixed(2)}</span><sup>ft</sup>
-                · {tideTimeFmt(tideView.nextLow)}
-              </span>
-            </div>
-          {/if}
-        </a>
-      {/if}
-      {#if weatherInfo && myBoat?.location}
-        <a
-          class="data-panel-section data-panel-weather data-panel-link"
-          href={`https://www.windy.com/?${myBoat.location[0].toFixed(4)},${myBoat.location[1].toFixed(4)},10`}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open Windy.com forecast"
-        >
-          <div class="data-panel-stack">
-            <span class="data-panel-label">Wx · next 4h</span>
-          </div>
-          {#if weatherInfo.tempNowF !== null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Temp</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{weatherInfo.tempNowF.toFixed(0)}</span><sup>°F</sup>
-                · {weatherInfo.tempMinF.toFixed(0)}–{weatherInfo.tempMaxF.toFixed(0)}°
-              </span>
-            </div>
-          {/if}
-          {#if weatherInfo.windNowKn !== null}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Wind</span>
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{weatherInfo.windNowKn.toFixed(0)}</span><sup>kn</sup>
-                {#if weatherInfo.windNowDirDeg !== null}
-                  · {compassFmt(weatherInfo.windNowDirDeg)}
-                {/if}
-                · max {weatherInfo.windMaxKn.toFixed(0)}
-              </span>
-            </div>
-          {/if}
-          <div class="data-panel-row">
-            <span class="data-panel-label">Rain</span>
-            <span class="data-panel-value">
-              {#if weatherInfo.rainTotalIn > 0}
-                <span class="data-panel-bold">{weatherInfo.rainTotalIn.toFixed(2)}</span><sup
-                  >in</sup
-                >
-                · {weatherInfo.rainHoursAny}h
-              {:else}
-                <span class="data-panel-bold">none</span>
-              {/if}
-            </span>
-          </div>
-          {#if weatherInfo.sunriseLocal && weatherInfo.sunsetLocal}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Sun</span>
-              <span class="data-panel-value">
-                ↑ {weatherInfo.sunriseLocal} · ↓ {weatherInfo.sunsetLocal}
-              </span>
-            </div>
-          {/if}
-          {#if weatherInfo.moonriseLocal || weatherInfo.moonsetLocal}
-            <div class="data-panel-row">
-              <span class="data-panel-label">Moon</span>
-              <span class="data-panel-value">
-                ↑ {weatherInfo.moonriseLocal ?? "—"} · ↓ {weatherInfo.moonsetLocal ?? "—"}
-              </span>
-            </div>
-          {/if}
-        </a>
-      {/if}
-      {#if cursorInfo}
-        <div class="data-panel-section data-panel-cursor">
-          <div class="data-panel-stack">
-            <span class="data-panel-label">Cursor</span>
-            <span class="data-panel-value">{formatCoord(cursorInfo.lat, true)}</span>
-            <span class="data-panel-value">{formatCoord(cursorInfo.lng, false)}</span>
-            {#if cursorInfo.nm !== null && cursorInfo.brg !== null}
-              <span class="data-panel-value">
-                <span class="data-panel-bold">{cursorInfo.nm.toFixed(2)}</span><sup>nm</sup>
-                @ {cursorInfo.brg.toFixed(0).padStart(3, "0")}°
-              </span>
-            {/if}
-            {#if cursorInfo.windKt !== null && cursorInfo.windFromDeg !== null}
-              {@const windColor = colorForValue(WIND_COLOR_SCALE, cursorInfo.windKt / MS_TO_KT, 15)}
-              <span class="data-panel-value" style="color: {windColor}">
-                <span class="weather-swatch" style="background: {windColor}"></span>
-                wind <span class="data-panel-bold">{cursorInfo.windKt.toFixed(0)}</span><sup>kt</sup
-                >
-                from {cursorInfo.windFromDeg.toFixed(0).padStart(3, "0")}°
-              </span>
-            {/if}
-            {#if cursorInfo.waveM !== null && cursorInfo.waveFromDeg !== null}
-              {@const waveColor = colorForValue(
-                WAVE_COLOR_SCALE,
-                cursorInfo.waveM,
-                WAVE_RANGE_MAX_M
-              )}
-              <span class="data-panel-value" style="color: {waveColor}">
-                <span class="weather-swatch" style="background: {waveColor}"></span>
-                wave
-                <span class="data-panel-bold">{(cursorInfo.waveM * METERS_TO_FEET).toFixed(1)}</span
-                ><sup>ft</sup>
-                from {cursorInfo.waveFromDeg.toFixed(0).padStart(3, "0")}°
-              </span>
-            {/if}
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
+  {@render dataPanel("data-panel-overlay")}
 </div>
+
+<!-- Portrait phone: the same panel rendered as a sibling of the map
+     container, so it stacks as its own block under the 16:9 map instead
+     of covering it. Must be a sibling, not a child: the toolbar, scale
+     bar, legend and Stop Panning are bottom-anchored to #map-container
+     and would slide onto the panel if the container grew. Only one of the
+     two renders is displayed at a time (see the media queries). -->
+{@render dataPanel("data-panel-flow")}
 
 <style>
   .track-time-tooltip {
@@ -8252,6 +8264,91 @@
        map instead and cap it against the viewport. */
     .layer-controls {
       max-height: 60vh;
+    }
+  }
+
+  /* Two renders of the panel exist (see the dataPanel snippet): the
+     overlay inside #map-container, and a flow copy after it. Exactly one
+     is displayed. At lg and up the page is the fixed helm layout and the
+     overlay is right. Below lg the page stacks and the map is a 16:9 box —
+     on a portrait phone only ~220px tall, shorter than the 16px overlay
+     panel with five sections, which then hid the chart. There the flow
+     copy shows instead, as a compact strip under the map. Landscape
+     phones keep the overlay (the map already overflows the short
+     viewport, so a strip under it would be below the fold) but shrink
+     it. */
+  .data-panel-flow {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 1px;
+    background: #4b5563;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    font-size: 12px;
+    max-width: none;
+    pointer-events: auto;
+  }
+  .data-panel-flow.edit {
+    box-shadow: inset 0 2px 0 #f59e0b;
+  }
+  .data-panel-flow .data-panel-section {
+    flex: 1 1 auto;
+    padding: 4px 10px;
+    background: #000;
+  }
+  .data-panel-flow .data-panel-section + .data-panel-section {
+    border-top: 0;
+  }
+  .data-panel-flow .data-panel-row {
+    gap: 8px;
+  }
+  .data-panel-flow .data-panel-station {
+    display: none;
+  }
+  .data-panel-flow .tide-spark {
+    width: 120px;
+    height: 26px;
+    margin-top: 2px;
+  }
+  /* Cursor info only updates while a finger is on the glass, so it is never
+     readable on a phone. */
+  .data-panel-flow .data-panel-cursor {
+    display: none;
+  }
+  @media (min-width: 1024px), (orientation: landscape) {
+    .data-panel-flow {
+      display: none;
+    }
+  }
+  @media (max-width: 1023px) and (orientation: portrait) {
+    .data-panel-overlay {
+      display: none;
+    }
+    /* The eight-button toolbar column is taller than the 16:9 map on a
+       portrait phone and ran off the bottom onto whatever stacks under the
+       map. Wrap it into columns that stop above the map's bottom edge. */
+    .left-toolbar {
+      flex-wrap: wrap;
+      align-content: flex-start;
+      max-height: calc(100% - 98px);
+    }
+  }
+  @media (max-width: 1023px) and (orientation: landscape) {
+    .data-panel-overlay {
+      font-size: 12px;
+      max-height: calc(100% - 60px);
+      overflow: hidden;
+    }
+    .data-panel-overlay .data-panel-section {
+      padding: 4px 10px;
+    }
+    .data-panel-overlay .tide-spark,
+    .data-panel-overlay .data-panel-station,
+    .data-panel-overlay .data-panel-hint {
+      display: none;
     }
   }
 </style>
