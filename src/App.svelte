@@ -18,6 +18,12 @@
   import * as VIAM from "@viamrobotics/sdk";
 
   import { tankSort } from "./helpers.ts";
+  import {
+    formatRateDuration,
+    pushLevelSample,
+    tankRateReport,
+    type LevelSample,
+  } from "./lib/fuelRate";
   import MarineMap from "./marineMap.svelte";
   import RoutesPanel from "./lib/RoutesPanel.svelte";
   import type { RoutesApi } from "./lib/routeStore";
@@ -479,6 +485,15 @@
           .getReadings()
           .then((raw) => {
             globalData.gauges[name] = raw;
+            // Only successful reads enter the rate series — same rule as
+            // mobile's levelIsFresh: a carried-forward level would read as
+            // "burning nothing" and blank the rate.
+            if (typeof raw?.Level === "number") {
+              tankSeries[name] = pushLevelSample(tankSeries[name] ?? [], {
+                t: Date.now(),
+                v: raw.Level,
+              });
+            }
           })
           .catch(errorHandlerMaker(r.name));
       });
@@ -2336,6 +2351,15 @@
   // needs to live somewhere reactive.
   let tankHover = $state<Record<string, { value: number; ts: Date } | null>>({});
 
+  // Live level samples per tank (last ~10 min) for the fill/burn rate line.
+  // Separate from gaugesToHistorical, whose 1-min/15-min min-buckets are too
+  // coarse for a 5-minute trend. Rules: src/lib/fuelRate.ts (mobile port).
+  let tankSeries = $state<Record<string, LevelSample[]>>({});
+
+  function clockTime(ms: number): string {
+    return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
   // Map a tank's historical _id (formatted bucket label like "26-5-11
   // 14:30") back to the bucket's start timestamp, so the hover handler
   // can show how long ago the reading was without round-tripping the
@@ -2838,6 +2862,7 @@
                  since the visual treatment (border accent below + bold
                  name) already signals it's the rollup. -->
               {@const displayName = isAggregate ? key.replace(/-all$/i, "") : key}
+              {@const rate = tankRateReport(tankSeries[key] ?? [], value.Level, value.Capacity)}
               <!-- Tank row: header line (name on the left, % + volume on the
                  right) above a full-width sparkline. Header columns are
                  fixed-width and right-aligned so the percent and volume
@@ -2872,6 +2897,26 @@
                   >
                     {displayName}
                   </h2>
+                  <!-- Fill/burn rate: only shown past the 1 gal/min deadband,
+                     so it's absent while the boat sits idle. -->
+                  {#if rate}
+                    <span
+                      class="text-xs tabular-nums whitespace-nowrap"
+                      class:text-sky-400={rate.filling}
+                      class:text-orange-400={!rate.filling}
+                      title={rate.filling
+                        ? rate.to95Ms != null
+                          ? `Filling ${rate.gpm.toFixed(1)} gal/min — 95% ≈ ${clockTime(Date.now() + rate.to95Ms)}`
+                          : `Filling ${rate.gpm.toFixed(1)} gal/min`
+                        : `Using ${rate.gpm.toFixed(1)} gal/min`}
+                    >
+                      {rate.filling ? "+" : "−"}{rate.gpm.toFixed(1)}<span class="text-gray-500"
+                        >/min</span
+                      >{#if rate.filling && rate.to95Ms != null}<span class="text-gray-400">
+                          · 95% {formatRateDuration(rate.to95Ms)}</span
+                        >{/if}
+                    </span>
+                  {/if}
                   <span
                     class={`font-bold tabular-nums w-12 text-right ${levelClass}`}
                     class:text-base={!isCompact}
