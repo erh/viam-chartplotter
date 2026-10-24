@@ -1278,7 +1278,10 @@ const ENCRenderRulesVersion = 25
 // quarter-bbox scans, merged + deduped by _id) — ~2x faster wall. The feature
 // SET is unchanged but merge order differs, so label-collision arbitration
 // can pick a different (equally valid) winner; cached tiles regenerate.
-const OSMRenderRulesVersion = 24
+// v25: overview band (z7..z11) draws only motorway/trunk/primary roads, and
+// only motorways keep their route shield — suburban tiles were buried in
+// CR/NJ/US shield boxes and a secondary-road mesh.
+const OSMRenderRulesVersion = 25
 
 func (s RenderStyle) String() string {
 	if s == StyleECDIS {
@@ -2209,11 +2212,21 @@ func (r *ENCRenderer) renderOverviewOSM(z, x, y int) ([]byte, bool) {
 // filterOverviewBand keeps land-cover/network features as-is and applies the
 // overview gating to admin (by level) and place (by type), so a z9..z11 tile
 // isn't swamped by county lines and marsh-island labels. Same admin/place rules
-// as filterOverviewMarkers, but pass-through for every other class.
+// as filterOverviewMarkers, but pass-through for every other class except
+// roads: only motorway/trunk/primary are drawn, and only motorways keep their
+// route shield — secondary roads and the CR/NJ/US shields on every primary
+// buried a suburban overview tile (e.g. Paramus NJ at z11) in boxes.
 func filterOverviewBand(feats []osmtiler.Feature, z int) []osmtiler.Feature {
 	out := feats[:0]
 	for _, f := range feats {
 		switch f.Class {
+		case osmtiler.ClassRoad:
+			if f.RoadKind > osmtiler.RoadPrimary {
+				continue
+			}
+			if f.RoadKind != osmtiler.RoadMotorway {
+				f.Ref = ""
+			}
 		case osmtiler.ClassAdmin:
 			lvl, err := strconv.Atoi(strings.TrimSpace(f.Tags["admin_level"]))
 			if err != nil {
