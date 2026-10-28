@@ -1,11 +1,10 @@
 package vc
 
 import (
-	"context"
+	"os"
 	"path/filepath"
 	"testing"
-
-	geo "github.com/kellydunn/golang-geo"
+	"time"
 )
 
 func tempStore(t *testing.T) *diskNavStore {
@@ -18,181 +17,137 @@ func tempStore(t *testing.T) *diskNavStore {
 	return st
 }
 
-func TestReplaceWaypointsBasics(t *testing.T) {
-	ctx := context.Background()
+func TestNavStorePersistsAcrossReload(t *testing.T) {
 	st := tempStore(t)
-
-	// Seed with a couple of waypoints, mark one visited, so we can prove
-	// ReplaceWaypoints discards everything (including visited).
-	if _, err := st.AddWaypoint(ctx, geo.NewPoint(1, 1)); err != nil {
-		t.Fatal(err)
-	}
-	seed, err := st.AddWaypoint(ctx, geo.NewPoint(2, 2))
+	err := st.mutate(true, func(s *navState) error {
+		s.Locations = append(s.Locations, savedLocation{Name: "home", navPoint: navPoint{Lat: 41, Lng: -71}})
+		s.Goal = &navGoal{
+			Mode:      goalModeRoute,
+			RouteName: "Run",
+			Waypoints: []navPoint{{Lat: 1, Lng: 2}, {Lat: 3, Lng: 4}},
+			Index:     1,
+			State:     goalActive,
+			StartedAt: time.Now(),
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.WaypointVisited(ctx, seed.ID); err != nil {
-		t.Fatal(err)
-	}
 
-	points := []*geo.Point{geo.NewPoint(41.1, -71.5), geo.NewPoint(41.2, -71.4), geo.NewPoint(41.3, -71.3)}
-	count, err := st.ReplaceWaypoints(ctx, points)
-	if err != nil {
-		t.Fatalf("ReplaceWaypoints: %v", err)
-	}
-	if count != 3 {
-		t.Fatalf("count = %d, want 3", count)
-	}
-
-	wps, err := st.Waypoints(ctx)
+	again, err := newDiskNavStore(st.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(wps) != 3 {
-		t.Fatalf("Waypoints len = %d, want 3", len(wps))
+	if loc, ok := again.LocationByName("home"); !ok || loc.Lat != 41 {
+		t.Fatalf("location not persisted: %+v %v", loc, ok)
 	}
-	seen := map[string]bool{}
-	for i, wp := range wps {
-		if wp.Order != i {
-			t.Errorf("waypoint %d Order = %d, want %d", i, wp.Order, i)
-		}
-		if wp.ID.IsZero() {
-			t.Errorf("waypoint %d has zero ID", i)
-		}
-		if seen[wp.ID.Hex()] {
-			t.Errorf("duplicate ID %s", wp.ID.Hex())
-		}
-		seen[wp.ID.Hex()] = true
-		if wp.Visited {
-			t.Errorf("waypoint %d should not be visited", i)
-		}
-	}
-	if wps[0].Lat != 41.1 || wps[0].Long != -71.5 {
-		t.Errorf("first waypoint = (%v,%v), want (41.1,-71.5)", wps[0].Lat, wps[0].Long)
+	g := again.Goal()
+	if g == nil || g.RouteName != "Run" || g.Index != 1 || len(g.Waypoints) != 2 || g.State != goalActive {
+		t.Fatalf("goal not persisted: %+v", g)
 	}
 }
 
-func TestReplaceWaypointsEmptyClears(t *testing.T) {
-	ctx := context.Background()
+func TestNavStoreMutateRollsBackOnError(t *testing.T) {
 	st := tempStore(t)
-	if _, err := st.AddWaypoint(ctx, geo.NewPoint(1, 1)); err != nil {
-		t.Fatal(err)
+	_ = st.mutate(true, func(s *navState) error {
+		s.Locations = []savedLocation{{Name: "a"}}
+		return nil
+	})
+	err := st.mutate(true, func(s *navState) error {
+		s.Locations = append(s.Locations, savedLocation{Name: "b"})
+		return os.ErrInvalid
+	})
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	count, err := st.ReplaceWaypoints(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("count = %d, want 0", count)
-	}
-	wps, err := st.Waypoints(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(wps) != 0 {
-		t.Fatalf("Waypoints len = %d, want 0", len(wps))
+	if n := len(st.Locations()); n != 1 {
+		t.Fatalf("rollback failed: %d locations", n)
 	}
 }
 
-func TestReplaceWaypointsRejectsNil(t *testing.T) {
-	ctx := context.Background()
+func TestNavStoreGoalIsACopy(t *testing.T) {
 	st := tempStore(t)
-	if _, err := st.AddWaypoint(ctx, geo.NewPoint(5, 5)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.ReplaceWaypoints(ctx, []*geo.Point{geo.NewPoint(1, 1), nil}); err == nil {
-		t.Fatal("expected error on nil point")
-	}
-	// The existing waypoint must survive a rejected replace.
-	wps, err := st.Waypoints(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(wps) != 1 {
-		t.Fatalf("Waypoints len = %d, want 1 (replace must not partially apply)", len(wps))
+	_ = st.mutate(true, func(s *navState) error {
+		s.Goal = &navGoal{Waypoints: []navPoint{{Lat: 1, Lng: 1}}, State: goalActive}
+		return nil
+	})
+	g := st.Goal()
+	g.Waypoints[0].Lat = 99
+	g.Index = 5
+	if again := st.Goal(); again.Waypoints[0].Lat != 1 || again.Index != 0 {
+		t.Fatalf("Goal() leaked internal state: %+v", again)
 	}
 }
 
-func TestReplaceWaypointsPersistsAcrossReload(t *testing.T) {
-	ctx := context.Background()
+func TestNavStoreMigratesLegacyWaypointList(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nav.json")
+	legacy := `[
+	  {"id": "aaaaaaaaaaaaaaaaaaaaaaaa", "lat": 1, "long": 1, "visited": true},
+	  {"id": "bbbbbbbbbbbbbbbbbbbbbbbb", "lat": 2, "long": 2},
+	  {"id": "cccccccccccccccccccccccc", "lat": 3, "long": 3, "visited": true},
+	  {"id": "dddddddddddddddddddddddd", "lat": 4, "long": 4}
+	]`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	st, err := newDiskNavStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	points := []*geo.Point{geo.NewPoint(10, 20), geo.NewPoint(11, 21)}
-	if _, err := st.ReplaceWaypoints(ctx, points); err != nil {
-		t.Fatal(err)
+	g := st.Goal()
+	if g == nil || g.State != goalActive || g.Mode != goalModeRoute {
+		t.Fatalf("expected an active route goal, got %+v", g)
 	}
-
-	reloaded, err := newDiskNavStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wps, err := reloaded.Waypoints(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(wps) != 2 {
-		t.Fatalf("reloaded Waypoints len = %d, want 2", len(wps))
-	}
-	if wps[0].Lat != 10 || wps[1].Lat != 11 {
-		t.Errorf("reloaded order/values wrong: %+v", wps)
+	// The leading visited waypoint is the reached prefix; the visited one
+	// after the cursor (hidden by the old store) is dropped.
+	if g.Index != 1 || len(g.Waypoints) != 3 || g.Waypoints[1].Lat != 2 || g.Waypoints[2].Lat != 4 {
+		t.Fatalf("bad migration: %+v", g)
 	}
 }
 
-func TestDoSetWaypointsCommand(t *testing.T) {
-	ctx := context.Background()
-	st := tempStore(t)
-	svc := &navService{store: st}
-
-	out, err := svc.doSetWaypoints(ctx, map[string]interface{}{
-		"waypoints": []interface{}{
-			map[string]interface{}{"lat": 41.1, "lng": -71.5},
-			map[string]interface{}{"lat": 41.2, "lng": -71.4},
-		},
-	})
-	if err != nil {
-		t.Fatalf("doSetWaypoints: %v", err)
-	}
-	if out["count"] != 2 {
-		t.Fatalf("count = %v, want 2", out["count"])
-	}
-	wps, err := st.Waypoints(ctx)
+func TestNavStoreLegacyAllVisitedIsNoGoal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nav.json")
+	_ = os.WriteFile(path, []byte(`[{"id":"x","lat":1,"long":1,"visited":true}]`), 0o644)
+	st, err := newDiskNavStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(wps) != 2 {
-		t.Fatalf("Waypoints len = %d, want 2", len(wps))
+	if g := st.Goal(); g != nil {
+		t.Fatalf("expected no goal, got %+v", g)
 	}
 }
 
-func TestDoSetWaypointsValidation(t *testing.T) {
-	ctx := context.Background()
+func TestNavGoalAdvance(t *testing.T) {
+	now := time.Now()
+	g := &navGoal{Waypoints: []navPoint{{}, {}, {}}, State: goalActive}
+	g.advance(1, now)
+	if g.Index != 1 || g.State != goalActive {
+		t.Fatalf("after 1: %+v", g)
+	}
+	g.advance(2, now)
+	if g.Index != 3 || g.State != goalSucceeded || g.FinishedAt == nil {
+		t.Fatalf("after end: %+v", g)
+	}
+	if len(g.remaining()) != 0 {
+		t.Fatal("finished goal has remaining waypoints")
+	}
+
+	loop := &navGoal{Waypoints: []navPoint{{}, {}}, State: goalActive, Loop: true}
+	loop.advance(2, now)
+	if loop.Index != 0 || loop.Lap != 1 || loop.State != goalActive {
+		t.Fatalf("loop should wrap: %+v", loop)
+	}
+}
+
+func TestNavStoreSnapshotOnUserMutation(t *testing.T) {
 	st := tempStore(t)
-	svc := &navService{store: st}
-
-	cases := []struct {
-		name string
-		raw  interface{}
-	}{
-		{"not an object", []interface{}{}},
-		{"waypoints not array", map[string]interface{}{"waypoints": 5}},
-		{"element not object", map[string]interface{}{"waypoints": []interface{}{5}}},
-		{"missing lng", map[string]interface{}{"waypoints": []interface{}{map[string]interface{}{"lat": 1.0}}}},
-		{"lat out of range", map[string]interface{}{"waypoints": []interface{}{map[string]interface{}{"lat": 91.0, "lng": 0.0}}}},
-		{"lng out of range", map[string]interface{}{"waypoints": []interface{}{map[string]interface{}{"lat": 0.0, "lng": 181.0}}}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := svc.doSetWaypoints(ctx, tc.raw); err == nil {
-				t.Fatalf("expected error for %s", tc.name)
-			}
-		})
-	}
-
-	// An empty/missing waypoints array is valid and clears the route.
-	if _, err := svc.doSetWaypoints(ctx, map[string]interface{}{}); err != nil {
-		t.Fatalf("empty payload should be valid: %v", err)
+	_ = st.mutate(true, func(s *navState) error { s.Locations = []savedLocation{{Name: "a"}}; return nil })
+	// The first write has nothing to back up; the second snapshots it.
+	_ = st.mutate(true, func(s *navState) error { s.Locations = nil; return nil })
+	_ = st.mutate(false, func(s *navState) error { s.Locations = []savedLocation{{Name: "c"}}; return nil })
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(st.path), "nav.*.json"))
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 snapshot, got %v", matches)
 	}
 }

@@ -69,8 +69,9 @@ Key spellings vary by boat module. Tolerate the same variants the web app does:
 `viam_sdk` is beta. Confirmed working: `RobotClient` over WebRTC,
 `MovementSensor`, `Sensor.readings()`, `Camera.getImages()`,
 `robot.resourceNames`, `getCloudMetadata()`, `dataClient.tabularDataByMql`.
-Unverified and blocking specific cards: `NavigationClient` waypoint methods and
-its `doCommand` Struct requirement (E1, E2), `getRobotPart().configJson`
+`NavigationClient` (0.23+, the new navigation API: `getNavigationStatus`,
+`navigateRoute`, `cancel`, `doCommand`) is wired in `mobile/lib/routes/nav_api.dart`
+but not yet exercised against a boat. Unverified and blocking specific cards: `getRobotPart().configJson`
 (H5, H6). If a symbol is missing, report it — don't work around it.
 
 ## Notes

@@ -1,19 +1,30 @@
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
 
 /// Saved-routes data layer (E2), ported from src/lib/routeStore.ts (tests
 /// translated alongside). Storage lives in the Viam location metadata, but
-/// the client never talks to the cloud directly — everything goes through
-/// the nav service's routes_* DoCommand verbs (nav_routes.go), which
-/// authenticate with the machine's own credentials. Read-modify-write,
-/// schema/size guards and stats live on the Go side; this module just
-/// shapes the calls plus the id/color/size helpers the UI needs.
+/// the client never talks to the cloud directly: it goes through the nav
+/// service, which authenticates with the machine's own credentials. Names
+/// and waypoints use the navigation API's Route RPCs; the library fields the
+/// API's Route has no slot for (id, notes, color, source, dates, stats,
+/// scope) are written via request extras and read back with the one
+/// routes_meta DoCommand (nav_routes.go).
 
-/// Minimal nav-service surface: a DoCommand passthrough. Backed by the real
-/// nav service in the app; a fake in tests.
+/// A route as ListRoutes reports it: name and coordinates only.
+typedef ApiRoute = ({String name, List<LatLng> waypoints});
+
+/// The nav service's route calls. Backed by NavApi in the app; a fake in
+/// tests. Routes are addressed by id (the service accepts id or name).
 abstract class RoutesApi {
+  Future<List<ApiRoute>> listApiRoutes();
+  Future<void> addRoute(
+      String name, List<LatLng> waypoints, Map<String, dynamic> extra);
+  Future<void> updateRoute(String id,
+      {String? newName,
+      List<LatLng>? waypoints,
+      Map<String, dynamic>? extra});
+  Future<void> deleteRoute(String id);
   Future<Map<String, dynamic>> doCommand(Map<String, dynamic> cmd);
 }
 
@@ -24,8 +35,8 @@ class NavWaypoint {
   final String id;
   final LatLng pos;
 
-  /// Optimistic entries created locally before the backend assigns a real
-  /// ObjectID. Never send a pending id back to the service (web parity).
+  /// Optimistic entries created locally before the service reports the
+  /// waypoint back with its index id.
   bool get isPending => id.startsWith('pending-');
 }
 
@@ -129,7 +140,7 @@ class Route {
 
 // ---- optimistic waypoint edits (E1) ---------------------------------------
 // Pure list transforms applied the moment the user acts; the next
-// getWaypoints poll replaces them with the backend's truth (and real ids).
+// nav-status poll replaces them with the service's truth (and index ids).
 
 /// Local id for a waypoint the backend hasn't acknowledged yet.
 String pendingWaypointId(DateTime now) =>
@@ -155,16 +166,6 @@ List<NavWaypoint> waypointsWithInsertedBefore(
 List<NavWaypoint> waypointsWithRemoved(List<NavWaypoint> wps, String id) =>
     [for (final w in wps) if (w.id != id) w];
 
-/// Stable, unique-ish route id: `rte_<time36>_<4 hex>` (web newRouteId).
-String newRouteId({DateTime? now, math.Random? rng}) {
-  final time = (now ?? DateTime.now())
-      .millisecondsSinceEpoch
-      .toRadixString(36);
-  final r = rng ?? math.Random.secure();
-  final rand = r.nextInt(0xffff).toRadixString(16).padLeft(4, '0');
-  return 'rte_${time}_$rand';
-}
-
 /// An unused palette color, cycling once the palette is exhausted.
 String nextColor(List<Route> existing) {
   final used = {for (final r in existing) r.color}..remove(null);
@@ -179,43 +180,94 @@ bool sizeWarning(List<Route> routes) =>
     utf8.encode(jsonEncode([for (final r in routes) r.toJson()])).length >
     sizeWarnBytes;
 
+/// Pair ListRoutes results with routes_meta entries (web pairRoutes). Both
+/// come from the same server-side list, so they normally line up by index;
+/// if they don't (a route changed between the two calls), fall back to the
+/// first unused entry with the same name. A route with no metadata is
+/// dropped: it has no id to edit by.
+List<Route> pairRoutes(List<ApiRoute> apiRoutes, List<dynamic> metas) {
+  String? metaName(int k) {
+    final m = metas[k];
+    return m is Map ? m['name']?.toString() : null;
+  }
+
+  final used = <int>{};
+  final out = <Route>[];
+  for (var i = 0; i < apiRoutes.length; i++) {
+    final r = apiRoutes[i];
+    var j = i < metas.length && metaName(i) == r.name && !used.contains(i)
+        ? i
+        : -1;
+    if (j < 0) {
+      for (var k = 0; k < metas.length; k++) {
+        if (!used.contains(k) && metaName(k) == r.name) {
+          j = k;
+          break;
+        }
+      }
+    }
+    if (j < 0) continue;
+    final meta = Route.fromJson(metas[j]);
+    if (meta == null) continue;
+    used.add(j);
+    out.add(Route(
+      id: meta.id,
+      name: meta.name,
+      notes: meta.notes,
+      color: meta.color,
+      source: meta.source,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt,
+      waypoints: r.waypoints,
+      distanceNm: meta.distanceNm,
+      count: meta.count,
+      scope: meta.scope,
+    ));
+  }
+  return out;
+}
+
 Future<List<Route>> listRoutes(RoutesApi api) async {
-  final resp = await api.doCommand({'routes_list': true});
-  final routes = resp['routes'];
-  if (routes is! List) return const [];
-  return [
-    for (final r in routes)
-      if (Route.fromJson(r) case final route?) route
-  ];
+  final results = await Future.wait<Object>([
+    api.listApiRoutes(),
+    api.doCommand({'routes_meta': true}),
+  ]);
+  final apiRoutes = results[0] as List<ApiRoute>;
+  final metas = (results[1] as Map<String, dynamic>)['routes'];
+  return pairRoutes(apiRoutes, metas is List ? metas : const []);
 }
 
-Future<void> saveRoute(RoutesApi api, Route route) async {
-  await api.doCommand({
-    'routes_save': {'route': route.toJson()}
-  });
-}
+/// Save a new route; the service assigns its id and timestamps.
+Future<void> createRoute(
+  RoutesApi api, {
+  required String name,
+  required String source,
+  String? color,
+  String? notes,
+  required List<LatLng> waypoints,
+}) =>
+    api.addRoute(name, waypoints, {
+      'source': source,
+      if (color != null) 'color': color,
+      if (notes != null) 'notes': notes,
+    });
 
-Future<void> deleteRoute(RoutesApi api, String id) async {
-  await api.doCommand({
-    'routes_delete': {'id': id}
-  });
-}
+/// Overwrite a route's geometry, keeping everything else.
+Future<void> replaceRouteWaypoints(
+        RoutesApi api, String id, List<LatLng> waypoints) =>
+    api.updateRoute(id, waypoints: waypoints);
 
-Future<void> renameRoute(
+/// Change a route's name, notes and/or color.
+Future<void> updateRouteFields(
   RoutesApi api,
   String id, {
   String? name,
   String? notes,
   String? color,
-  required String nowIso,
-}) async {
-  await api.doCommand({
-    'routes_rename': {
-      'id': id,
-      if (name != null) 'name': name,
+}) =>
+    api.updateRoute(id, newName: name, extra: {
       if (notes != null) 'notes': notes,
       if (color != null) 'color': color,
-      'updatedAt': nowIso,
-    }
-  });
-}
+    });
+
+Future<void> deleteRoute(RoutesApi api, String id) => api.deleteRoute(id);

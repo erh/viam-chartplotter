@@ -441,17 +441,22 @@ struct ChartScreen: View {
         return RouteLeg(nm: nm, seconds: client.route?.etaSeconds)
     }
 
-    /// Whole-route leg: the next leg plus every remaining
-    /// waypoint-to-waypoint hop, timed at current SOG. Only meaningful
+    /// Whole-route leg: the nav service's distance remaining when it
+    /// reports one, else the next leg plus every remaining
+    /// waypoint-to-waypoint hop; timed at current SOG. Only meaningful
     /// with 2+ waypoints — with one, it's identical to nextLeg.
     private var finalLeg: RouteLeg? {
         guard let wps = client.route?.waypoints, wps.count >= 2,
             var prev = wps.first, let first = nextLeg
         else { return nil }
         var total = first.nm
-        for wp in wps.dropFirst() {
-            total += haversineNM(prev.lat, prev.lng, wp.lat, wp.lng)
-            prev = wp
+        if let served = client.route?.navDistanceRemainingNM {
+            total = served
+        } else {
+            for wp in wps.dropFirst() {
+                total += haversineNM(prev.lat, prev.lng, wp.lat, wp.lng)
+                prev = wp
+            }
         }
         let sogKn = client.state?.sogKn ?? 0
         return RouteLeg(nm: total, seconds: sogKn > 0.5 ? total / sogKn * 3600 : nil)
@@ -467,7 +472,10 @@ struct ChartScreen: View {
             // Chartplotter route (magenta dashed line on the chart).
             if let next = nextLeg {
                 panelDivider
-                sectionHeader("Route", color: Color(red: 1, green: 0, blue: 1))
+                sectionHeader(client.route?.navRouteName ?? "Route", color: Color(red: 1, green: 0, blue: 1))
+                if client.route?.navSuspended == true {
+                    row("Status", "Paused")
+                }
                 row("Next", String(format: "%.2f nm", next.nm))
                 if let s = next.seconds {
                     row("Time", Self.formatDuration(s))

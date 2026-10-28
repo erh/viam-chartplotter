@@ -1,30 +1,56 @@
 import { describe, it, expect } from "vitest";
+import type { JsonValue, Route as ApiRoute, Waypoint } from "@viamrobotics/sdk";
 import {
   listRoutes,
-  saveRoute,
+  pairRoutes,
+  createRoute,
+  replaceRouteWaypoints,
+  updateRoute,
   deleteRoute,
-  renameRoute,
   sizeWarning,
-  newRouteId,
   nextColor,
   type Route,
   type RoutesApi,
 } from "./routeStore";
+import { latLngWaypoint } from "./navRoute";
 
-// Records every DoCommand the wrapper issues and returns a canned response. The
-// heavy read-modify-write / guard logic now lives + is tested in Go
-// (nav_routes_test.go); here we only verify the browser shapes the commands
-// right and maps responses back.
+// Records every call the wrapper issues and returns canned responses. The heavy
+// read-modify-write / guard logic lives + is tested in Go (nav_routes_test.go);
+// here we only verify the browser shapes the calls right and maps responses
+// back.
 class FakeApi implements RoutesApi {
-  calls: Record<string, unknown>[] = [];
-  response: Record<string, unknown> = {};
-  async doCommand(cmd: Record<string, unknown>): Promise<Record<string, unknown>> {
-    this.calls.push(cmd);
-    return this.response;
+  calls: [string, ...unknown[]][] = [];
+  apiRoutes: ApiRoute[] = [];
+  meta: JsonValue = {};
+  async listRoutes(): Promise<ApiRoute[]> {
+    this.calls.push(["listRoutes"]);
+    return this.apiRoutes;
   }
-  last(): Record<string, unknown> {
+  async addRoute(name: string, waypoints: Waypoint[], extra?: Record<string, JsonValue>) {
+    this.calls.push(["addRoute", name, waypoints, extra]);
+  }
+  async updateRoute(
+    name: string,
+    newName?: string,
+    waypoints?: Waypoint[],
+    extra?: Record<string, JsonValue>
+  ) {
+    this.calls.push(["updateRoute", name, newName, waypoints, extra]);
+  }
+  async deleteRoute(name: string) {
+    this.calls.push(["deleteRoute", name]);
+  }
+  async doCommand(cmd: Record<string, JsonValue>): Promise<JsonValue> {
+    this.calls.push(["doCommand", cmd]);
+    return this.meta;
+  }
+  last(): [string, ...unknown[]] {
     return this.calls[this.calls.length - 1];
   }
+}
+
+function apiRoute(name: string, ...pts: [number, number][]): ApiRoute {
+  return { name, waypoints: pts.map(([lat, lng]) => latLngWaypoint({ lat, lng })) };
 }
 
 function mkRoute(overrides: Partial<Route> = {}): Route {
@@ -43,15 +69,6 @@ function mkRoute(overrides: Partial<Route> = {}): Route {
     ...overrides,
   };
 }
-
-describe("newRouteId", () => {
-  it("has the rte_ prefix and is unique across calls", () => {
-    const a = newRouteId();
-    const b = newRouteId();
-    expect(a).toMatch(/^rte_[a-z0-9]+_[0-9a-f]{4}$/);
-    expect(a).not.toBe(b);
-  });
-});
 
 describe("nextColor", () => {
   it("returns an unused palette color", () => {
@@ -76,52 +93,98 @@ describe("sizeWarning", () => {
   });
 });
 
+function meta(r: Route): Omit<Route, "waypoints"> {
+  const { waypoints: _w, ...rest } = r;
+  return rest;
+}
+
 describe("listRoutes", () => {
-  it("issues routes_list and returns the routes", async () => {
+  it("joins ListRoutes waypoints with routes_meta", async () => {
     const api = new FakeApi();
-    api.response = { routes: [mkRoute({ id: "x" })] };
+    api.apiRoutes = [apiRoute("Test", [41.1, -71.5], [41.2, -71.4])];
+    api.meta = { routes: [meta(mkRoute({ id: "x", scope: "parent" }))] };
     const routes = await listRoutes(api);
-    expect(api.last()).toEqual({ routes_list: true });
-    expect(routes).toHaveLength(1);
-    expect(routes[0].id).toBe("x");
+    expect(api.calls).toContainEqual(["doCommand", { routes_meta: true }]);
+    expect(routes).toEqual([mkRoute({ id: "x", scope: "parent" })]);
   });
 
-  it("defaults to empty when the routes field is missing", async () => {
+  it("defaults to empty when the meta routes field is missing", async () => {
     const api = new FakeApi();
-    api.response = {};
+    api.apiRoutes = [apiRoute("Test", [1, 1], [2, 2])];
     expect(await listRoutes(api)).toEqual([]);
   });
 });
 
-describe("saveRoute", () => {
-  it("issues routes_save with the route", async () => {
+describe("pairRoutes", () => {
+  it("pairs by index, keeping duplicate names apart", () => {
+    const routes = pairRoutes(
+      [apiRoute("Dup", [1, 1], [2, 2]), apiRoute("Dup", [3, 3], [4, 4])],
+      [meta(mkRoute({ id: "a", name: "Dup" })), meta(mkRoute({ id: "b", name: "Dup" }))]
+    );
+    expect(routes.map((r) => [r.id, r.waypoints[0].lat])).toEqual([
+      ["a", 1],
+      ["b", 3],
+    ]);
+  });
+
+  it("falls back to name when the lists don't line up, dropping unmatched routes", () => {
+    const routes = pairRoutes(
+      [apiRoute("New", [9, 9], [8, 8]), apiRoute("Old", [1, 1], [2, 2])],
+      [meta(mkRoute({ id: "o", name: "Old" }))]
+    );
+    expect(routes).toHaveLength(1);
+    expect(routes[0].id).toBe("o");
+    expect(routes[0].waypoints[0]).toEqual({ lat: 1, lng: 1 });
+  });
+});
+
+describe("createRoute", () => {
+  it("calls AddRoute with library fields in extra", async () => {
     const api = new FakeApi();
-    api.response = { ok: true, scope: "location" };
-    const r = mkRoute();
-    await saveRoute(api, r);
-    expect(api.last()).toEqual({ routes_save: { route: r } });
+    await createRoute(api, {
+      name: "N",
+      source: "track",
+      color: "#123456",
+      waypoints: [
+        { lat: 1, lng: 2 },
+        { lat: 3, lng: 4 },
+      ],
+    });
+    expect(api.last()).toEqual([
+      "addRoute",
+      "N",
+      [latLngWaypoint({ lat: 1, lng: 2 }), latLngWaypoint({ lat: 3, lng: 4 })],
+      { source: "track", color: "#123456" },
+    ]);
+  });
+});
+
+describe("replaceRouteWaypoints", () => {
+  it("calls UpdateRoute by id with only waypoints", async () => {
+    const api = new FakeApi();
+    await replaceRouteWaypoints(api, "rte_a", [{ lat: 1, lng: 2 }]);
+    expect(api.last()).toEqual([
+      "updateRoute",
+      "rte_a",
+      undefined,
+      [latLngWaypoint({ lat: 1, lng: 2 })],
+      undefined,
+    ]);
+  });
+});
+
+describe("updateRoute", () => {
+  it("sends the new name and puts color/notes in extra", async () => {
+    const api = new FakeApi();
+    await updateRoute(api, "rte_a", { name: "New", color: "#123456" });
+    expect(api.last()).toEqual(["updateRoute", "rte_a", "New", undefined, { color: "#123456" }]);
   });
 });
 
 describe("deleteRoute", () => {
-  it("issues routes_delete with the id", async () => {
+  it("calls DeleteRoute with the id", async () => {
     const api = new FakeApi();
     await deleteRoute(api, "rte_a");
-    expect(api.last()).toEqual({ routes_delete: { id: "rte_a" } });
-  });
-});
-
-describe("renameRoute", () => {
-  it("issues routes_rename with fields + updatedAt", async () => {
-    const api = new FakeApi();
-    await renameRoute(api, "rte_a", { name: "New", color: "#123456" }, "2026-07-01T00:00:00Z");
-    expect(api.last()).toEqual({
-      routes_rename: {
-        id: "rte_a",
-        name: "New",
-        color: "#123456",
-        updatedAt: "2026-07-01T00:00:00Z",
-      },
-    });
+    expect(api.last()).toEqual(["deleteRoute", "rte_a"]);
   });
 });

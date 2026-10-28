@@ -3,21 +3,28 @@ package vc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"os"
+	"strconv"
+	"time"
 
 	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
 
 	"go.viam.com/rdk/app"
+	"go.viam.com/rdk/services/navigation"
 	rutils "go.viam.com/rdk/utils"
 )
 
 // Saved routes live in the Viam location metadata under a single key, shared
 // across every machine/user in the location. We own only this key and preserve
-// every other key on each read-modify-write. The browser reaches this through
-// the nav service's routes_* DoCommand verbs (see nav.go) so it never needs its
-// own cloud credentials — the nav service authenticates with the machine's own
-// VIAM_API_KEY/VIAM_LOCATION_ID env vars instead.
+// every other key on each read-modify-write. Clients reach them through the
+// navigation API's Route RPCs (AddRoute/ListRoutes/UpdateRoute/DeleteRoute),
+// with the fields the API has no slot for (notes, color, source) carried in
+// extra, plus the routes_meta DoCommand to read those fields back. The nav
+// service authenticates with the machine's own VIAM_API_KEY/VIAM_LOCATION_ID
+// env vars, so clients never need their own cloud credentials.
 const (
 	routesKey           = "chartplotter_routes"
 	routesSchemaVersion = 1
@@ -235,21 +242,6 @@ func validateRoute(r routeRec) error {
 	return nil
 }
 
-func applyRouteFields(r *routeRec, fields map[string]interface{}) {
-	if v, ok := fields["name"].(string); ok {
-		r.Name = v
-	}
-	if v, ok := fields["notes"].(string); ok {
-		r.Notes = v
-	}
-	if v, ok := fields["color"].(string); ok {
-		r.Color = v
-	}
-	if v, ok := fields["updatedAt"].(string); ok {
-		r.UpdatedAt = v
-	}
-}
-
 // locationUpsert writes a (already-validated) route into the location metadata.
 func locationUpsert(ctx context.Context, store metadataStore, r routeRec) error {
 	r.Scope = ""
@@ -305,59 +297,15 @@ func routesDelete(ctx context.Context, store metadataStore, id string) error {
 	return commitRoutes(ctx, store, meta, blob)
 }
 
-func routesRename(ctx context.Context, store metadataStore, id string, fields map[string]interface{}) error {
-	if id == "" {
-		return errors.New("route id is required")
-	}
-	meta, err := store.Get(ctx)
-	if err != nil {
-		return err
-	}
-	blob, err := parseRoutesBlob(meta)
-	if err != nil {
-		return err
-	}
-	found := false
-	for i := range blob.Routes {
-		if blob.Routes[i].ID != id {
-			continue
-		}
-		found = true
-		applyRouteFields(&blob.Routes[i], fields)
-		break
-	}
-	if !found {
-		return errors.Errorf("route %s not found", id)
-	}
-	return commitRoutes(ctx, store, meta, blob)
-}
-
 // --- DoCommand handlers -----------------------------------------------------
 
-func routesToInterface(routes []routeRec) ([]interface{}, error) {
-	b, err := json.Marshal(routes)
-	if err != nil {
-		return nil, err
-	}
-	var out []interface{}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
-	}
-	if out == nil {
-		out = []interface{}{}
-	}
-	return out, nil
-}
-
-// doRoutesList aggregates routes from this machine's own location and every
+// allRoutes aggregates routes from this machine's own location and every
 // ancestor (parent) location, each tagged with its scope. Routes are deduped by
 // id keeping the most-local copy (location > parent), then ordered shared →
-// inherited.
-func (s *navService) doRoutesList(ctx context.Context) (map[string]interface{}, error) {
-	s.routesMu.Lock()
-	defer s.routesMu.Unlock()
-
+// inherited. Caller must hold s.routesMu.
+func (s *navService) allRoutes(ctx context.Context) ([]routeRec, error) {
 	byID := map[string]routeRec{}
+	var order []string
 	add := func(routes []routeRec, scope string) {
 		for _, r := range routes {
 			if _, exists := byID[r.ID]; exists {
@@ -366,6 +314,7 @@ func (s *navService) doRoutesList(ctx context.Context) (map[string]interface{}, 
 			r.Scope = scope
 			r.Stats = computeRouteStats(r.Waypoints)
 			byID[r.ID] = r
+			order = append(order, r.ID)
 		}
 	}
 
@@ -389,103 +338,264 @@ func (s *navService) doRoutesList(ctx context.Context) (map[string]interface{}, 
 		}
 	}
 
-	// Order for display: shared (this location), then inherited.
-	var loc, par []routeRec
-	for _, r := range byID {
-		if r.Scope == scopeParent {
-			par = append(par, r)
-		} else {
-			loc = append(loc, r)
-		}
+	// Insertion order is already shared (this location) then inherited.
+	all := make([]routeRec, 0, len(order))
+	for _, id := range order {
+		all = append(all, byID[id])
 	}
-	all := append(loc, par...)
+	return all, nil
+}
 
-	iface, err := routesToInterface(all)
+// routeMeta is a saved route's record minus its waypoints: what routes_meta
+// returns for the fields the API's Route message can't carry.
+type routeMeta struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Notes     string         `json:"notes,omitempty"`
+	Color     string         `json:"color,omitempty"`
+	Source    string         `json:"source"`
+	CreatedAt string         `json:"createdAt"`
+	UpdatedAt string         `json:"updatedAt"`
+	Stats     *routeStatsRec `json:"stats,omitempty"`
+	Scope     string         `json:"scope,omitempty"`
+}
+
+// doRoutesMeta handles {"routes_meta": true}: the metadata of every saved
+// route, in the same order as ListRoutes, so a client can pair the two lists
+// up (by index, falling back to name).
+func (s *navService) doRoutesMeta(ctx context.Context) (map[string]interface{}, error) {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	all, err := s.allRoutes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"routes": iface}, nil
+	metas := make([]routeMeta, len(all))
+	for i, r := range all {
+		metas[i] = routeMeta{
+			ID: r.ID, Name: r.Name, Notes: r.Notes, Color: r.Color, Source: r.Source,
+			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Stats: r.Stats, Scope: r.Scope,
+		}
+	}
+	b, err := json.Marshal(metas)
+	if err != nil {
+		return nil, err
+	}
+	out := []interface{}{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"routes": out}, nil
 }
 
-func parseRoutePayload(raw interface{}) (routeRec, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return routeRec{}, errors.New("routes_save payload must be an object")
+// --- navigation API Route RPCs ---------------------------------------------------
+//
+// The API identifies a route by name and carries only its waypoints; the
+// rest of each record (id, notes, color, source, dates, scope) goes in extra on
+// writes and comes back through the routes_meta DoCommand. Names aren't guaranteed unique in that store, so every lookup also
+// accepts a route's id, and a name resolves to the most-local match (this
+// location before inherited ones). Inherited routes are read-only.
+
+// matchRoute returns the first route whose id, then whose name, is key.
+func matchRoute(routes []routeRec, key string) (routeRec, bool) {
+	for _, r := range routes {
+		if r.ID == key {
+			return r, true
+		}
 	}
-	routeRaw, ok := m["route"]
-	if !ok {
-		return routeRec{}, errors.New("routes_save.route is required")
+	for _, r := range routes {
+		if r.Name == key {
+			return r, true
+		}
 	}
-	b, err := json.Marshal(routeRaw)
+	return routeRec{}, false
+}
+
+func apiRoute(r routeRec) navigation.Route {
+	pts := make([]navPoint, len(r.Waypoints))
+	for i, w := range r.Waypoints {
+		pts[i] = navPoint{Lat: w.Lat, Lng: w.Lng}
+	}
+	return navigation.Route{Name: r.Name, Waypoints: positionWaypoints(pts)}
+}
+
+// findRoute looks a saved route up by id or name across this location and
+// its ancestors.
+func (s *navService) findRoute(ctx context.Context, key string) (routeRec, error) {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	all, err := s.allRoutes(ctx)
 	if err != nil {
 		return routeRec{}, err
 	}
-	var r routeRec
-	if err := json.Unmarshal(b, &r); err != nil {
-		return routeRec{}, errors.Wrap(err, "parsing routes_save.route")
+	r, ok := matchRoute(all, key)
+	if !ok {
+		return routeRec{}, errors.Errorf("route %q not found", key)
 	}
 	return r, nil
 }
 
-// doRoutesSave saves (or replaces) a route in the shared location store.
-func (s *navService) doRoutesSave(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	r, err := parseRoutePayload(raw)
+func (s *navService) routeWaypoints(wps []navigation.Waypoint) ([]routeWaypoint, error) {
+	pts, err := s.resolveWaypoints(wps)
 	if err != nil {
 		return nil, err
+	}
+	out := make([]routeWaypoint, len(pts))
+	for i, p := range pts {
+		out[i] = routeWaypoint{Lat: p.Lat, Lng: p.Lng}
+	}
+	return out, nil
+}
+
+// newRouteID matches the web app's id format (routeStore.ts newRouteId):
+// "rte_" + base36 epoch millis + 4 hex chars.
+func newRouteID(now time.Time) string {
+	return fmt.Sprintf("rte_%s_%04x", strconv.FormatInt(now.UnixMilli(), 36), rand.Intn(0x10000))
+}
+
+func nowISO(now time.Time) string {
+	return now.UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+// AddRoute saves a new route in this location. Extra may carry the fields the
+// API has no slot for: "notes", "color" and "source" ("manual" by default).
+func (s *navService) AddRoute(ctx context.Context, req navigation.AddRouteReq) (navigation.Route, error) {
+	wps, err := s.routeWaypoints(req.Waypoints)
+	if err != nil {
+		return navigation.Route{}, err
+	}
+	now := time.Now()
+	r := routeRec{
+		ID:        newRouteID(now),
+		Name:      req.Name,
+		Source:    "manual",
+		CreatedAt: nowISO(now),
+		UpdatedAt: nowISO(now),
+		Waypoints: wps,
+	}
+	str := func(key string) string { v, _ := req.Extra[key].(string); return v }
+	r.Notes, r.Color = str("notes"), str("color")
+	if src := str("source"); src != "" {
+		r.Source = src
 	}
 	if err := validateRoute(r); err != nil {
-		return nil, err
+		return navigation.Route{}, err
 	}
 
 	s.routesMu.Lock()
 	defer s.routesMu.Unlock()
-
 	store, err := s.routesStore(ctx)
 	if err != nil {
-		return nil, err
+		return navigation.Route{}, err
+	}
+	existing, err := routesList(ctx, store)
+	if err != nil {
+		return navigation.Route{}, err
+	}
+	for _, e := range existing {
+		if e.Name == r.Name {
+			return navigation.Route{}, errors.Errorf("route %q already exists", r.Name)
+		}
 	}
 	if err := locationUpsert(ctx, store, r); err != nil {
-		return nil, err
+		return navigation.Route{}, err
 	}
-	return map[string]interface{}{"ok": true, "id": r.ID, "scope": scopeLocation}, nil
+	return apiRoute(r), nil
 }
 
-// doRoutesDelete removes a route from the location store.
-func (s *navService) doRoutesDelete(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("routes_delete payload must be an object")
+func (s *navService) GetRoute(ctx context.Context, name string, extra map[string]interface{}) (navigation.Route, error) {
+	r, err := s.findRoute(ctx, name)
+	if err != nil {
+		return navigation.Route{}, err
 	}
-	id, _ := m["id"].(string)
+	return apiRoute(r), nil
+}
+
+func (s *navService) ListRoutes(ctx context.Context, extra map[string]interface{}) ([]navigation.Route, error) {
 	s.routesMu.Lock()
 	defer s.routesMu.Unlock()
-
-	store, err := s.routesStore(ctx)
+	all, err := s.allRoutes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := routesDelete(ctx, store, id); err != nil {
-		return nil, err
+	out := make([]navigation.Route, len(all))
+	for i, r := range all {
+		out[i] = apiRoute(r)
 	}
-	return map[string]interface{}{"ok": true, "scope": scopeLocation}, nil
+	return out, nil
 }
 
-// doRoutesRename updates mutable fields on a route in the location store.
-func (s *navService) doRoutesRename(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("routes_rename payload must be an object")
+// locationRoute finds a route in this location's own store for a mutation;
+// a route that only exists in an ancestor location is read-only.
+func (s *navService) locationRoute(ctx context.Context, store metadataStore, key string) (routeRec, error) {
+	own, err := routesList(ctx, store)
+	if err != nil {
+		return routeRec{}, err
 	}
-	id, _ := m["id"].(string)
+	if r, ok := matchRoute(own, key); ok {
+		return r, nil
+	}
+	if all, err := s.allRoutes(ctx); err == nil {
+		if _, ok := matchRoute(all, key); ok {
+			return routeRec{}, errors.Errorf("route %q is inherited from a parent location and is read-only here", key)
+		}
+	}
+	return routeRec{}, errors.Errorf("route %q not found", key)
+}
+
+// UpdateRoute renames a route and/or replaces its waypoints. Extra may carry
+// "notes" and "color", so a notes- or color-only update needs neither.
+func (s *navService) UpdateRoute(ctx context.Context, req navigation.UpdateRouteReq) (navigation.Route, error) {
+	var wps []routeWaypoint
+	if req.Waypoints != nil {
+		var err error
+		if wps, err = s.routeWaypoints(req.Waypoints); err != nil {
+			return navigation.Route{}, err
+		}
+	}
 	s.routesMu.Lock()
 	defer s.routesMu.Unlock()
-
 	store, err := s.routesStore(ctx)
 	if err != nil {
-		return nil, err
+		return navigation.Route{}, err
 	}
-	if err := routesRename(ctx, store, id, m); err != nil {
-		return nil, err
+	r, err := s.locationRoute(ctx, store, req.Name)
+	if err != nil {
+		return navigation.Route{}, err
 	}
-	return map[string]interface{}{"ok": true, "scope": scopeLocation}, nil
+	if req.NewName != nil {
+		r.Name = *req.NewName
+	}
+	if req.Waypoints != nil {
+		r.Waypoints = wps
+	}
+	// The API's Route has no slot for these; they ride in extra.
+	if v, ok := req.Extra["notes"].(string); ok {
+		r.Notes = v
+	}
+	if v, ok := req.Extra["color"].(string); ok {
+		r.Color = v
+	}
+	r.UpdatedAt = nowISO(time.Now())
+	if err := validateRoute(r); err != nil {
+		return navigation.Route{}, err
+	}
+	if err := locationUpsert(ctx, store, r); err != nil {
+		return navigation.Route{}, err
+	}
+	return apiRoute(r), nil
+}
+
+func (s *navService) DeleteRoute(ctx context.Context, name string, extra map[string]interface{}) error {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	store, err := s.routesStore(ctx)
+	if err != nil {
+		return err
+	}
+	r, err := s.locationRoute(ctx, store, name)
+	if err != nil {
+		return err
+	}
+	return routesDelete(ctx, store, r.ID)
 }

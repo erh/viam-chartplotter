@@ -27,6 +27,9 @@ class RouteStats {
 
 const Distance _dist = Distance();
 
+/// Meters to nautical miles. The nav service reports SI on the wire.
+double metersToNm(double meters) => meters / 1852;
+
 bool _validCoord(LatLng p) =>
     !(p.latitude == 0 && p.longitude == 0) &&
     p.latitude.abs() <= 90 &&
@@ -39,7 +42,7 @@ RouteStats? computeRouteStats(
 
   final next = waypoints.first.pos;
   final nextMeters = _dist.distance(boat, next);
-  final nextNm = nextMeters / 1852;
+  final nextNm = metersToNm(nextMeters);
   // hours = nm / kn; → minutes. Below steerage way SOG is GPS noise, so the
   // estimate would be garbage — blank it instead (web returns Infinity and
   // formats it as "—").
@@ -51,7 +54,7 @@ RouteStats? computeRouteStats(
     totalMeters += _dist.distance(prev, waypoints[i].pos);
     prev = waypoints[i].pos;
   }
-  final totalNm = totalMeters / 1852;
+  final totalNm = metersToNm(totalMeters);
   final double? totalMin = spd > 0.1 ? (totalNm / spd) * 60 : null;
 
   return RouteStats(

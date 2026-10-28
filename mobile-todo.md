@@ -149,7 +149,6 @@ working in the app today: `RobotClient` over WebRTC, `MovementSensor`,
 
 **Unverified, and cards depend on them** — check before estimating:
 
-- `NavigationClient` waypoint methods + `doCommand` **Struct** requirement → E1, E2
 - `appClient.getRobotPart(...).configJson` → H6, H5
 
 If one is missing, say so in the PR and park the card rather than working
@@ -1054,18 +1053,20 @@ UI depends on the same nav-service plumbing.
 **Files:** new `mobile/lib/routes/route_store.dart` (+ tests), routes UI
 **Web ref:** `src/lib/routeStore.ts` (+ `routeStore.test.ts` — **port the
 tests**), `src/lib/RoutesPanel.svelte`
-**Backend (read-only reference):** `nav.go:441-490`, `nav_routes.go`,
+**Backend (read-only reference):** `nav.go` (DoCommand), `nav_routes.go`,
 `ROUTES_SPEC.md`
 
-**Contract.** All storage goes through the nav service's DoCommand verbs — the
-client never touches the cloud directly, so this works without app credentials:
+**Contract.** All storage goes through the nav service — the client never
+touches the cloud directly, so this works without app credentials. Routes use
+the navigation API's Route RPCs (addressed by id or name); the fields the API
+has no slot for ride in `extra` and come back via one DoCommand:
 
 ```dart
-nav.doCommand({'routes_list': true})          // → {routes: [Route, …]}
-nav.doCommand({'routes_save': {'route': {…}}})
-nav.doCommand({'routes_delete': {'id': id}})
-nav.doCommand({'routes_rename': {'id': id, 'name'?: …, 'notes'?: …,
-                                 'color'?: …, 'updatedAt'?: …}})
+nav.listRoutes()                                   // → [Route(name, waypoints)]
+nav.doCommand({'routes_meta': true})               // → {routes: [meta, …]} in listRoutes order
+nav.addRoute(name, waypoints, extra: {'notes'?: …, 'color'?: …, 'source'?: …})
+nav.updateRoute(id, newName?: …, waypoints?: …, extra: {'notes'?: …, 'color'?: …})
+nav.deleteRoute(id)
 ```
 
 `Route` = `{id, name, notes?, color?, source: "manual"|"track", createdAt,
@@ -1082,7 +1083,7 @@ before the backend rejects.
 2. Build the routes sheet: list, load, load-reversed, rename, delete, colour
    pick, and preview-on-map (including "show all"). Preview polylines are
    display-only and must be visually distinct from the active route.
-3. Loading a route uses `set_waypoints` (see E1) — one atomic replace.
+3. Loading a route is one `navigateRoute(routeName: <route id>)` (see E1) — one atomic replace.
 
 **Accept.**
 - [x] A route saved on the phone appears in the web app's routes panel and
@@ -1102,17 +1103,19 @@ drag-modify), `3263-3311` (insert/delete popups)
 **Problem.** Mobile can only *view* the active destination. You can't plan or
 adjust a route from the phone at all.
 
-**Nav service API** (`VIAM.NavigationClient` → Dart `NavigationClient`):
+**Nav service API** (new navigation API; Dart `NavigationClient`, viam_sdk 0.23+).
+The active route is the service's goal: an ordered waypoint list with a cursor
+(see `nav_service.go`). There are no per-waypoint verbs; every edit re-sends
+the whole list. Pure logic + tests: `mobile/lib/routes/nav_route.dart`.
 
 | Operation | Call |
 |-----------|------|
-| list | `getWayPoints()` → `[{id, location{latitude,longitude}}]` |
-| add | `addWayPoint(latitude:, longitude:)` |
-| remove | `removeWayPoint(id)` |
-| insert | `doCommand({'insert_waypoint': {'before_id': id, 'lat': , 'lng': }})` |
-| move | `doCommand({'move_waypoint': {'id': , 'lat': , 'lng': }})` |
-| replace all | `doCommand({'set_waypoints': {'waypoints': [{'lat','lng'}, …]}})` |
-| clear | loop `removeWayPoint` over existing ids |
+| list | `getNavigationStatus()` → `goal.route.waypoints[goal.route.index:]` (ACTIVE/SUSPENDED goals only); ids = absolute index |
+| add / move / insert / remove | edit locally, then `navigateRoute(waypoints: reached + remaining, startIndex: reached.length)` |
+| load saved route | `navigateRoute(routeName: route.id)` |
+| clear | `cancel()` (also when an edit leaves nothing to sail) |
+
+Every `GeoPose` sent needs `heading: 0` — the service rejects one without.
 
 **Do.**
 1. Poll `getWayPoints()` and render the waypoint chain + active route line.
@@ -1121,23 +1124,20 @@ adjust a route from the phone at all.
    **tap a waypoint** for a sheet with delete / insert-before; a **clear route**
    action with a confirm step (web arms a two-tap confirm — `clearConfirmArmed`).
 3. Apply optimistically with `pending-<ts>` ids, exactly as web does, and
-   reconcile from the next poll — the backend ids are what subsequent
-   move/insert/remove need, so never send a pending id.
-4. After a `set_waypoints`, refetch so local ids are real backend ObjectIDs.
+   reconcile from the next poll.
+4. After every edit, refetch the status so local ids are the service's.
 
 **Accept.**
 - [x] Add / move / insert / delete / clear all round-trip and survive a poll.
 - [x] A route edited on the phone shows the same waypoints in the web app.
-- [x] Dragging a waypoint issues one `move_waypoint`, not one per frame.
+- [x] Dragging a waypoint issues one route edit, not one per frame.
       (Touch design: move is armed from the waypoint sheet and committed by
       one tap-to-place — one RPC per gesture, no per-frame drag events.)
 - [x] Clearing requires deliberate confirmation.
 
-**Watch out.** `NavigationClient.doCommand` needs a protobuf `Struct`, not a
-plain map — the web app has a scar here (`App.svelte:2329`: a plain object
-serialises to an *empty* command and the backend reports "DoCommand
-unimplemented"). Check the Dart SDK's equivalent requirement before assuming a
-`Map` works.
+**Watch out.** The web app has a scar where a plain object passed to
+`doCommand` serialised to an *empty* command; the Dart `NavigationClient.doCommand`
+takes a `Map` and converts it with `toStruct()` itself.
 
 ---
 
@@ -1745,8 +1745,8 @@ file and `MOBILE_PARITY_GAPS.md` — don't renumber them.
 - **E1 touch design.** Drag-to-move and click-to-insert are mouse idioms. The
   touch equivalents (long-press, drag handles, undo) are design work, not a
   port. Budget for a design pass, and expect to iterate on the water.
-- **`viam_sdk` beta drift.** E1/E2 need `NavigationClient` DoCommand;
-  H5/H6 need `getRobotPart().configJson`. Both are flagged unknowns. **Verify
+- **`viam_sdk` beta drift.** H5/H6 need `getRobotPart().configJson`, a
+  flagged unknown. **Verify
   before committing to an estimate** — if a symbol is missing, say so in the PR
   and park the card rather than working around it.
 - **Battery and data (L3).** Measure a real hour under way before offshore

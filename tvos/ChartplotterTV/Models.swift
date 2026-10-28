@@ -42,7 +42,24 @@ struct RouteInfo: Decodable, Equatable {
     let destinationLng: Double?
     let distanceToWaypointM: Double?
     let closingVelocityMS: Double?
+    /// Remaining waypoints of the nav service's open goal, in order.
     let waypoints: [Waypoint]?
+    /// The nav service's latest goal: "active", "suspended",
+    /// "succeeded", "canceled", "failed" (absent with no goal).
+    let navState: String?
+    /// Saved route the goal was started from; absent for an edited or
+    /// ad-hoc route.
+    let navRouteName: String?
+    /// Distance left along the route (boat to the last waypoint), as
+    /// the nav service computes it; present only while the goal is active.
+    let navDistanceRemainingM: Double?
+
+    /// The goal is paused: waypoints stay, but nothing advances.
+    var navSuspended: Bool { navState == "suspended" }
+
+    var navDistanceRemainingNM: Double? {
+        navDistanceRemainingM.map { $0 / 1852.0 }
+    }
 
     var distanceToWaypointNM: Double? {
         distanceToWaypointM.map { $0 / 1852.0 }

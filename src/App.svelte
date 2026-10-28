@@ -20,7 +20,17 @@
   import { tankSort } from "./helpers.ts";
   import MarineMap from "./marineMap.svelte";
   import RoutesPanel from "./lib/RoutesPanel.svelte";
-  import type { RoutesApi } from "./lib/routeStore";
+  import {
+    activeRouteFromGoal,
+    latLngWaypoint,
+    routeUpdate,
+    withAppended,
+    withInserted,
+    withMoved,
+    withRemoved,
+    type ActiveRoute,
+    type LatLng,
+  } from "./lib/navRoute";
   import YachtDetails from "./YachtDetails.svelte";
 
   const globalLogger = new Logger({ name: "global" });
@@ -120,6 +130,10 @@
     lastCameraTimes: [],
 
     navWaypoints: [] as { id: string; lat: number; lng: number }[],
+    // The open goal's state ("active"/"suspended", null when none) and the
+    // service's distance to go along it, in metres (active goals only).
+    navState: null as "active" | "suspended" | null,
+    navDistanceRemainingM: null as number | null,
 
     // Regions loaded from `area` components on the machine (see
     // discoverAreas). Each carries a normalized GeoJSON FeatureCollection and
@@ -447,18 +461,10 @@
 
     if (globalConfig.navServiceName != "") {
       new VIAM.NavigationClient(client, globalConfig.navServiceName)
-        .getWayPoints()
-        .then((wps) => {
-          globalData.navWaypoints = (wps ?? [])
-            .filter((wp) => wp.location != null)
-            .map((wp) => ({
-              id: wp.id,
-              lat: wp.location!.latitude,
-              lng: wp.location!.longitude,
-            }));
-        })
+        .getNavigationStatus()
+        .then(applyNavStatus)
         .catch((e) => {
-          globalData.navWaypoints = [];
+          applyNavStatus(undefined);
           errorHandler(e, "navigation");
         });
     }
@@ -2362,112 +2368,116 @@
     return `${days}d ago`;
   }
 
+  // The nav service's open goal as a route (see lib/navRoute.ts): the reached
+  // prefix is kept so edits can re-send it. globalData.navWaypoints mirrors
+  // its remaining waypoints for the map.
+  let navActive: ActiveRoute | null = null;
+
+  function applyNavStatus(status: VIAM.Status | undefined) {
+    navActive = activeRouteFromGoal(status?.goal);
+    globalData.navWaypoints = navActive ? navActive.remaining : [];
+    globalData.navState = navActive ? (navActive.suspended ? "suspended" : "active") : null;
+    const progress = navActive && !navActive.suspended ? status?.goal?.progress : undefined;
+    globalData.navDistanceRemainingM = progress ? progress.distanceRemainingM : null;
+  }
+
+  // Pause keeps the goal (cursor, reached waypoints) so Resume picks it up.
+  async function pauseNavRoute() {
+    const nav = navClient();
+    if (!nav) return;
+    try {
+      applyNavStatus(await nav.suspend("paused from chartplotter"));
+    } catch (e) {
+      errorHandler(e, "suspend");
+    }
+  }
+
+  async function resumeNavRoute() {
+    const nav = navClient();
+    if (!nav) return;
+    try {
+      applyNavStatus(await nav.resume());
+    } catch (e) {
+      errorHandler(e, "resume");
+    }
+  }
+
+  function navClient(): VIAM.NavigationClient | null {
+    if (!globalClient || !globalConfig.navServiceName) return null;
+    return new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
+  }
+
+  // Apply an edit: the navigation API has no per-waypoint calls, so the whole
+  // route is re-sent (or canceled when empty). The returned status is the new
+  // truth, ids included, so no optimistic placeholders are needed.
+  async function setNavRemaining(remaining: LatLng[], what: string) {
+    const nav = navClient();
+    if (!nav) return;
+    const update = routeUpdate(navActive, remaining);
+    try {
+      const status =
+        update.kind === "cancel"
+          ? await nav.cancel()
+          : await nav.navigateRoute({
+              waypoints: update.waypoints.map(latLngWaypoint),
+              startIndex: update.startIndex,
+            });
+      applyNavStatus(status);
+    } catch (e) {
+      errorHandler(e, what);
+    }
+  }
+
   async function addNavWaypoint(lat: number, lng: number) {
-    if (!globalClient || !globalConfig.navServiceName) {
+    if (!navClient()) {
       globalLogger.warn("no navigation service configured; cannot add waypoint");
       return;
     }
-    try {
-      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).addWayPoint({
-        latitude: lat,
-        longitude: lng,
-      });
-      // Optimistically append; the next poll will reconcile with the service.
-      globalData.navWaypoints = [
-        ...globalData.navWaypoints,
-        { id: `pending-${Date.now()}`, lat, lng },
-      ];
-    } catch (e) {
-      errorHandler(e, "addWayPoint");
-    }
+    await setNavRemaining(withAppended(navActive?.remaining ?? [], { lat, lng }), "addWaypoint");
   }
 
   async function insertNavWaypoint(beforeId: string, lat: number, lng: number) {
-    if (!globalClient || !globalConfig.navServiceName) return;
-    try {
-      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
-        VIAM.Struct.fromJson({ insert_waypoint: { before_id: beforeId, lat, lng } })
-      );
-      // Optimistically splice; the next poll will reconcile with the service.
-      const idx = beforeId ? globalData.navWaypoints.findIndex((wp) => wp.id === beforeId) : -1;
-      const placeholder = { id: `pending-${Date.now()}`, lat, lng };
-      if (idx >= 0) {
-        globalData.navWaypoints = [
-          ...globalData.navWaypoints.slice(0, idx),
-          placeholder,
-          ...globalData.navWaypoints.slice(idx),
-        ];
-      } else {
-        globalData.navWaypoints = [...globalData.navWaypoints, placeholder];
-      }
-    } catch (e) {
-      errorHandler(e, "insertWayPoint");
-    }
+    await setNavRemaining(
+      withInserted(navActive?.remaining ?? [], beforeId, { lat, lng }),
+      "insertWaypoint"
+    );
   }
 
   async function moveNavWaypoint(id: string, lat: number, lng: number) {
-    if (!globalClient || !globalConfig.navServiceName) return;
-    if (!id || id.startsWith("pending-")) return;
-    try {
-      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).doCommand(
-        VIAM.Struct.fromJson({ move_waypoint: { id, lat, lng } })
-      );
-      // Optimistic local update; the next poll will reconcile.
-      globalData.navWaypoints = globalData.navWaypoints.map((wp) =>
-        wp.id === id ? { ...wp, lat, lng } : wp
-      );
-    } catch (e) {
-      errorHandler(e, "moveWayPoint");
-    }
+    if (!id || !navActive) return;
+    await setNavRemaining(withMoved(navActive.remaining, id, { lat, lng }), "moveWaypoint");
   }
 
   async function removeNavWaypoint(id: string) {
-    if (!globalClient || !globalConfig.navServiceName) return;
-    if (!id || id.startsWith("pending-")) return;
-    // Drop locally first so the marker disappears immediately.
-    globalData.navWaypoints = globalData.navWaypoints.filter((wp) => wp.id !== id);
-    try {
-      await new VIAM.NavigationClient(globalClient, globalConfig.navServiceName).removeWayPoint(id);
-    } catch (e) {
-      errorHandler(e, "removeWayPoint");
-    }
+    if (!id || !navActive) return;
+    await setNavRemaining(withRemoved(navActive.remaining, id), "removeWaypoint");
   }
 
   async function clearNavWaypoints() {
-    if (!globalClient || !globalConfig.navServiceName) return;
-    var nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
-    var existing = [...globalData.navWaypoints];
+    const nav = navClient();
+    if (!nav) return;
     // Snap the local state immediately so the UI feels responsive.
     globalData.navWaypoints = [];
-    for (var wp of existing) {
-      if (!wp.id || wp.id.startsWith("pending-")) continue;
-      try {
-        await nav.removeWayPoint(wp.id);
-      } catch (e) {
-        errorHandler(e, "removeWayPoint");
-      }
+    try {
+      applyNavStatus(await nav.cancel());
+    } catch (e) {
+      errorHandler(e, "cancel");
     }
   }
 
-  // Load a saved route into the nav service: one atomic set_waypoints replaces
-  // the whole active list (see nav.go). We then refresh the local mirror from
-  // the service so waypoint ids are the real backend ObjectIDs (needed for
-  // subsequent move/insert/remove), not optimistic placeholders.
-  async function loadNavRoute(waypoints: { lat: number; lng: number }[]) {
-    if (!globalClient || !globalConfig.navServiceName) return;
-    const nav = new VIAM.NavigationClient(globalClient, globalConfig.navServiceName);
-    // doCommand requires a protobuf Struct, not a plain object — a plain object
-    // serializes to an EMPTY command (so the backend sees no verb and returns
-    // "DoCommand unimplemented"). Same wrap as insert/move waypoint above.
-    await nav.doCommand(
-      VIAM.Struct.fromJson({
-        set_waypoints: { waypoints: waypoints.map((w) => ({ lat: w.lat, lng: w.lng })) },
-      })
+  // Load a route into the nav service as a new route goal. A saved route goes
+  // by id (the service resolves it, and reports its name back); a reversed or
+  // auto-planned one goes inline.
+  async function loadNavRoute(waypoints: { lat: number; lng: number }[], routeId?: string) {
+    const nav = navClient();
+    if (!nav) return;
+    // A suspended goal must be canceled before a new one can start.
+    if (navActive?.suspended) await nav.cancel();
+    applyNavStatus(
+      await (routeId
+        ? nav.navigateRoute({ routeName: routeId })
+        : nav.navigateRoute({ waypoints: waypoints.map(latLngWaypoint) }))
     );
-    const wps = await nav.getWayPoints();
-    globalData.navWaypoints = (wps ?? [])
-      .filter((wp) => wp.location != null)
-      .map((wp) => ({ id: wp.id, lat: wp.location!.latitude, lng: wp.location!.longitude }));
   }
 
   // One-shot "click the map to choose a position", used by the Routes panel to
@@ -2567,33 +2577,7 @@
 {:else}
   {#snippet routesOverlay()}
     <RoutesPanel
-      getRoutesApi={() =>
-        globalClient && globalConfig.navServiceName
-          ? ({
-              doCommand: async (cmd) => {
-                try {
-                  // doCommand requires a protobuf Struct; a plain object
-                  // serializes to an EMPTY command, so the backend sees no verb
-                  // and returns "DoCommand unimplemented". Wrap like insert/move.
-                  // Round-trip through JSON first to drop any `undefined` values
-                  // (e.g. an optional route field) — Struct.fromJson rejects them
-                  // ("cannot decode google.protobuf.Value from JSON undefined").
-                  const clean = JSON.parse(JSON.stringify(cmd));
-                  return await new VIAM.NavigationClient(
-                    globalClient,
-                    globalConfig.navServiceName
-                  ).doCommand(VIAM.Struct.fromJson(clean));
-                } catch (e) {
-                  console.error(
-                    "routes doCommand failed",
-                    { nav: globalConfig.navServiceName, command: Object.keys(cmd)[0] },
-                    e
-                  );
-                  throw e;
-                }
-              },
-            } as RoutesApi)
-          : null}
+      getRoutesApi={navClient}
       currentWaypoints={globalData.navWaypoints}
       positionHistory={globalData.posHistory}
       boatPosition={globalData.pos
@@ -2651,6 +2635,10 @@
       onInsertWaypoint={globalConfig.navServiceName ? insertNavWaypoint : undefined}
       onRemoveWaypoint={globalConfig.navServiceName ? removeNavWaypoint : undefined}
       onClearWaypoints={globalConfig.navServiceName ? clearNavWaypoints : undefined}
+      navState={globalData.navState}
+      navDistanceRemainingM={globalData.navDistanceRemainingM}
+      onPauseRoute={globalConfig.navServiceName ? pauseNavRoute : undefined}
+      onResumeRoute={globalConfig.navServiceName ? resumeNavRoute : undefined}
       airstreamConfigured={globalConfig.airstreamName !== ""}
       webSendersConfigured={globalConfig.aisWebSenderNames.length > 0}
       onAirstreamBboxChange={globalConfig.airstreamName !== "" ? onAirstreamBboxChange : undefined}

@@ -296,7 +296,7 @@ light up the display API for good.
 |----------|---------|
 | `GET /api/info` | which endpoints are configured + camera names |
 | `GET /api/state` | `{lat, lng, sog_kn, heading_deg, cog_deg, depth_ft, ts}` |
-| `GET /api/route` | `{destination_lat/lng, distance_to_waypoint_m, closing_velocity_m_s, waypoints[]}` |
+| `GET /api/route` | `{destination_lat/lng, distance_to_waypoint_m, closing_velocity_m_s, waypoints[], nav_state, nav_route_name, nav_distance_remaining_m}` — `waypoints` are the nav goal's remaining waypoints (`id` = index in the goal's route) |
 | `GET /api/track` | own-boat track `{points: [{lat, lng, ts}]}`, oldest first — sampled every 10 s in memory (24 h kept), seeded on start with captured position history from the Viam data API when the machine has cloud credentials |
 | `GET /api/camera/{name}.jpg` | latest still frame from the named camera |
 
@@ -304,13 +304,35 @@ light up the display API for good.
 
 ## navigation
 
-`erh:viam-chartplotter:nav` — a `rdk:service:navigation` service that stores the
-UI's waypoints/route persistently and reports progress to the next waypoint.
+`erh:viam-chartplotter:nav` — a `rdk:service:navigation` service (the
+locations / routes / goals API, rdk ≥ v1.13) for a GPS map. It doesn't steer
+the boat: a goal is the list of waypoints the skipper or autopilot is
+following, and with a `movement_sensor` the service advances the goal's
+cursor as the boat reaches each waypoint (including rounding a mark without
+entering the arrival radius, and rejoining a route mid-way).
+
+- **Active route** — `NavigateRoute` with a saved route (by name or id) or
+  inline waypoints; `GetNavigationStatus` reports the goal (state, the route's
+  waypoints and current index, distance remaining). Clients edit the active
+  route by re-sending it with `start_index` at the current index, so reached
+  waypoints stay on record. `Cancel` clears it; `Suspend`/`Resume` pause it.
+- **Single targets** — `NavigateToPoint` / `NavigateToLocation` / `GoToPoint` /
+  `GoToLocation` / `ExecutePlan` set a one-point goal. Plans are straight lines.
+- **Saved locations** — `AddLocation` (defaults to the boat's position) and the
+  rest of the location CRUD, persisted with the goal.
+- **Saved routes** — the route RPCs read and write the same location-metadata
+  routes as the web Routes panel (inherited parent-location routes are
+  read-only). Routes are addressed by id or name. The fields the API's `Route`
+  has no slot for travel in `extra` (`notes`, `color`, `source` on `AddRoute`;
+  `notes`, `color` on `UpdateRoute`) and come back through the
+  `{"routes_meta": true}` DoCommand: `{routes: [{id, name, notes?, color?,
+  source, createdAt, updatedAt, stats, scope}]}` in `ListRoutes` order.
+- Zones and costmaps are not supported.
 
 | attribute | type | default | description |
 |-----------|------|---------|-------------|
 | `movement_sensor` | string | — | name of a movement sensor for position (becomes a dependency) |
-| `data_path` | string | — | file path to persist waypoints across restarts |
+| `data_path` | string | — | file path to persist saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
 | `n2k_sender` | string | — | name of a generic component whose DoCommand sends raw NMEA 2000 PGNs (e.g. a `viam-labs:viamboat:sender`; becomes a dependency). Enables `send_waypoints_n2k`. |
 
 ```json
@@ -325,7 +347,7 @@ UI's waypoints/route persistently and reports progress to the next waypoint.
 
 With `n2k_sender` configured, the DoCommand
 `{"send_waypoints_n2k": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
-pushes the current waypoint list onto the NMEA 2000 bus as a Route and WP
+pushes the active goal's remaining waypoints onto the NMEA 2000 bus as a Route and WP
 Service transfer — one PGN 130066 (Route/WP-List Attributes) followed by PGN
 130067 (Route – WP Name & Position) messages, chunked to fit fast-packets — so
 a chartplotter (e.g. Garmin) on the same backbone can pick the route up. All

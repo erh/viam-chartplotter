@@ -13,7 +13,6 @@ import (
 
 	"github.com/golang/geo/r3"
 	geo "github.com/kellydunn/golang-geo"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
@@ -112,11 +111,7 @@ func TestDisplayAPIRoute(t *testing.T) {
 			}, nil
 		},
 	}
-	nav := &inject.NavigationService{
-		WaypointsFunc: func(ctx context.Context, extra map[string]interface{}) ([]navigation.Waypoint, error) {
-			return []navigation.Waypoint{{ID: primitive.NilObjectID, Lat: 41.0, Long: -73.5}}, nil
-		},
-	}
+	nav := fakeRouteNav(navPoint{Lat: 40.0, Lng: -73.0}, navPoint{Lat: 41.0, Lng: -73.5})
 	api := &DisplayAPI{logger: logging.NewTestLogger(t), route: routeSensor, nav: nav}
 	srv := displayAPIServer(t, api)
 
@@ -332,5 +327,16 @@ func TestChartplotterConfigValidate(t *testing.T) {
 		if opt[i] != want[i] {
 			t.Fatalf("optional deps = %v, want %v", opt, want)
 		}
+	}
+}
+
+// fakeRouteNav is a nav service whose status is an active route goal over
+// pts with the first one already reached.
+func fakeRouteNav(pts ...navPoint) *inject.NavigationService {
+	return &inject.NavigationService{
+		GetNavigationStatusFunc: func(ctx context.Context, extra map[string]interface{}) (navigation.Status, error) {
+			g := &navGoal{Mode: goalModeRoute, RouteName: "Run", Waypoints: pts, Index: 1, State: goalActive}
+			return navigation.Status{Goal: goalStatus(g, navPoint{}, false)}, nil
+		},
 	}
 }

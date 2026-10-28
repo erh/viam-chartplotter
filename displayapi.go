@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -901,22 +902,84 @@ func (a *DisplayAPI) handleRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if nav != nil {
-		wps, err := nav.Waypoints(ctx, nil)
+		st, err := nav.GetNavigationStatus(ctx, nil)
 		if err != nil {
-			a.logger.Debugf("display api: nav waypoints: %v", err)
+			a.logger.Debugf("display api: nav status: %v", err)
 		} else {
+			// Remaining waypoints of the open goal, in order. "id" is the
+			// waypoint's index in the goal's full list (reached ones
+			// included), which is stable while the goal is.
+			wps := remainingGoalWaypoints(st.Goal)
 			list := make([]map[string]any, 0, len(wps))
 			for _, wp := range wps {
 				list = append(list, map[string]any{
-					"id":  wp.ID.Hex(),
+					"id":  strconv.Itoa(wp.Index),
 					"lat": wp.Lat,
-					"lng": wp.Long,
+					"lng": wp.Lng,
 				})
 			}
 			out["waypoints"] = list
+			if g := st.Goal; g != nil {
+				out["nav_state"] = goalStateName(g.State)
+				if g.Route != nil && g.Route.Name != "" {
+					out["nav_route_name"] = g.Route.Name
+				}
+				if g.Progress != nil && g.State == navigation.GoalStateActive {
+					out["nav_distance_remaining_m"] = g.Progress.DistanceRemainingM
+				}
+			}
 		}
 	}
 	writeAPIJSON(w, http.StatusOK, out)
+}
+
+// indexedPoint is a goal waypoint with its index in the goal's full list.
+type indexedPoint struct {
+	Index    int
+	Lat, Lng float64
+}
+
+// remainingGoalWaypoints is the not-yet-reached waypoints of an open
+// (active or suspended) goal: a route's waypoints from its cursor on, or a
+// single-target goal's target. Waypoints that only name a saved location
+// carry no coordinates and are skipped.
+func remainingGoalWaypoints(g *navigation.GoalStatus) []indexedPoint {
+	if g == nil || (g.State != navigation.GoalStateActive && g.State != navigation.GoalStateSuspended) {
+		return nil
+	}
+	var out []indexedPoint
+	add := func(i int, p *navigation.Position) {
+		if p == nil || p.GeoPose == nil || p.GeoPose.Location == nil {
+			return
+		}
+		out = append(out, indexedPoint{Index: i, Lat: p.GeoPose.Location.Lat(), Lng: p.GeoPose.Location.Lng()})
+	}
+	if r := g.Route; r != nil {
+		for i := int(r.Index); i < len(r.Waypoints); i++ {
+			add(i, r.Waypoints[i].Position)
+		}
+		return out
+	}
+	add(0, &g.Target)
+	return out
+}
+
+// goalStateName is the display API's spelling of a goal state.
+func goalStateName(s navigation.GoalState) string {
+	switch s {
+	case navigation.GoalStateActive:
+		return "active"
+	case navigation.GoalStateSuspended:
+		return "suspended"
+	case navigation.GoalStateSucceeded:
+		return "succeeded"
+	case navigation.GoalStateFailed:
+		return "failed"
+	case navigation.GoalStateCanceled:
+		return "canceled"
+	default:
+		return "unspecified"
+	}
 }
 
 // handleCamera serves the latest still frame from the named camera as a

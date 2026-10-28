@@ -169,13 +169,30 @@ class BoatState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Active nav-service waypoints (E1/E2), refreshed by the 5 s poll and
+  // Active route's remaining waypoints (E1/E2), refreshed by the 5 s poll and
   // replaced optimistically by edits (pending-<ts> ids until the next poll
-  // brings back the backend's real ObjectIDs).
+  // brings back the service's index ids).
   List<NavWaypoint> navWaypoints = const [];
+
+  /// The active goal is paused (Suspend), from the last nav status.
+  bool navSuspended = false;
+
+  /// The nav service's own distance still to sail, in meters: only while
+  /// the goal is active and the service reports progress.
+  double? navDistanceRemainingM;
 
   void setNavWaypoints(List<NavWaypoint> wps) {
     navWaypoints = wps;
+    _notify();
+  }
+
+  /// Apply a nav status: the remaining waypoints plus the goal's pause state
+  /// and the service's distance remaining.
+  void setNavStatus(List<NavWaypoint> wps,
+      {required bool suspended, double? distanceRemainingM}) {
+    navWaypoints = wps;
+    navSuspended = suspended;
+    navDistanceRemainingM = distanceRemainingM;
     _notify();
   }
 

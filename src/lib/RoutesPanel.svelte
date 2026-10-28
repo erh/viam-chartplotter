@@ -1,6 +1,7 @@
 <script lang="ts">
   // Routes panel: list/load/save/delete routes stored in the Viam location
-  // metadata via the nav service (routes_* DoCommand, see nav_routes.go), plus
+  // metadata via the nav service (its Route RPCs plus the routes_meta DoCommand;
+  // see routeStore.ts and nav_routes.go), plus
   // capture the recorded track between two times as a new route. The nav API is
   // read lazily through a getter (the robot client is assigned asynchronously
   // and isn't a reactive prop), so the panel always sees the current value.
@@ -17,11 +18,11 @@
   } from "./autoRoute";
   import {
     listRoutes,
-    saveRoute,
+    createRoute,
+    replaceRouteWaypoints,
+    updateRoute,
     deleteRoute,
-    renameRoute,
     sizeWarning,
-    newRouteId,
     nextColor,
     type Route,
     type RoutesApi,
@@ -34,7 +35,8 @@
     // The boat's current position, when known — the usual starting point for
     // an auto-route. Null in chart-only mode.
     boatPosition?: LatLng | null;
-    onLoadRoute: (waypoints: LatLng[]) => Promise<void>;
+    // routeId, when given, is a saved route the nav service can load by id.
+    onLoadRoute: (waypoints: LatLng[], routeId?: string) => Promise<void>;
     // Optional: pull the recorded track for an explicit [t0,t1] window straight
     // from tabular data (beyond the in-memory positionHistory). When absent the
     // track form falls back to filtering positionHistory.
@@ -218,7 +220,7 @@
     busy = true;
     error = null;
     try {
-      await onLoadRoute(waypoints);
+      await onLoadRoute(waypoints, reverse ? undefined : route.id);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -236,25 +238,17 @@
     const name = saveCurrentName.trim();
     if (!name) return;
     const waypoints = currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng }));
-    const now = new Date().toISOString();
-    const route: Route = {
-      id: newRouteId(),
-      name,
-      source: "manual",
-      color: saveCurrentColor,
-      createdAt: now,
-      updatedAt: now,
-      waypoints,
-    };
-    await withStore((api) => saveRoute(api, route));
+    await withStore((api) =>
+      createRoute(api, { name, source: "manual", color: saveCurrentColor, waypoints })
+    );
     saveCurrentOpen = false;
   }
 
-  // Change an existing route's color (persisted via routes_rename, which carries
-  // the color field). The expanded preview re-renders in the new color.
+  // Change an existing route's color (UpdateRoute carries it in extra). The
+  // expanded preview re-renders in the new color.
   async function setColor(r: Route, color: string) {
     if (color === r.color) return;
-    await withStore((api) => renameRoute(api, r.id, { color }, new Date().toISOString()));
+    await withStore((api) => updateRoute(api, r.id, { color }));
   }
 
   function startRename(r: Route) {
@@ -264,7 +258,7 @@
   async function commitRename(r: Route) {
     const name = renameValue.trim();
     if (name && name !== r.name) {
-      await withStore((api) => renameRoute(api, r.id, { name }, new Date().toISOString()));
+      await withStore((api) => updateRoute(api, r.id, { name }));
     }
     renamingId = null;
   }
@@ -276,7 +270,7 @@
   }
 
   // Overwrite a route's geometry with the current active waypoints, keeping its
-  // id/name/etc. Updates the route where it already lives (see doRoutesSave).
+  // id/name/etc.
   async function doReplaceWithCurrent(r: Route) {
     if (currentWaypoints.length < 2) {
       error = "Need at least 2 active waypoints to replace a route.";
@@ -289,17 +283,13 @@
     ) {
       return;
     }
-    const updated: Route = {
-      id: r.id,
-      name: r.name,
-      notes: r.notes,
-      color: r.color,
-      source: r.source,
-      createdAt: r.createdAt,
-      updatedAt: new Date().toISOString(),
-      waypoints: currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
-    };
-    await withStore((api) => saveRoute(api, updated));
+    await withStore((api) =>
+      replaceRouteWaypoints(
+        api,
+        r.id,
+        currentWaypoints.map((w) => ({ lat: w.lat, lng: w.lng }))
+      )
+    );
   }
 
   // Clicking a route expands its options menu and previews it on the map;
@@ -401,17 +391,14 @@
   async function commitSaveTrack() {
     const name = trackName.trim();
     if (!name || trackPreview.waypoints.length < 2) return;
-    const now = new Date().toISOString();
-    const route: Route = {
-      id: newRouteId(),
-      name,
-      source: "track",
-      color: trackColor,
-      createdAt: now,
-      updatedAt: now,
-      waypoints: trackPreview.waypoints,
-    };
-    await withStore((api) => saveRoute(api, route));
+    await withStore((api) =>
+      createRoute(api, {
+        name,
+        source: "track",
+        color: trackColor,
+        waypoints: trackPreview.waypoints,
+      })
+    );
     trackFormOpen = false;
   }
 
@@ -582,15 +569,11 @@
   async function saveAutoAsRoute() {
     const name = autoName.trim();
     if (!name || !autoResult || autoResult.waypoints.length < 2) return;
-    const now = new Date().toISOString();
     await withStore((api) =>
-      saveRoute(api, {
-        id: newRouteId(),
+      createRoute(api, {
         name,
         source: "auto",
         color: autoColor,
-        createdAt: now,
-        updatedAt: now,
         waypoints: autoResult!.waypoints,
       })
     );

@@ -8,7 +8,6 @@ import (
 
 	"github.com/golang/geo/r3"
 	geo "github.com/kellydunn/golang-geo"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/components/sensor"
@@ -123,11 +122,7 @@ func TestDisplayAPIFallbackFromPicks(t *testing.T) {
 			return map[string]interface{}{"Depth": 10.0}, nil
 		},
 	}
-	nav := &inject.NavigationService{
-		WaypointsFunc: func(ctx context.Context, extra map[string]interface{}) ([]navigation.Waypoint, error) {
-			return []navigation.Waypoint{{ID: primitive.NilObjectID, Lat: 41.0, Long: -73.5}}, nil
-		},
-	}
+	nav := fakeRouteNav(navPoint{Lat: 40.0, Lng: -73.0}, navPoint{Lat: 41.0, Lng: -73.5})
 
 	api := &DisplayAPI{
 		logger: logger,

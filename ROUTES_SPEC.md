@@ -1,5 +1,12 @@
 # Spec: Routes as a first-class feature
 
+> **Superseded in part (rdk v1.13 navigation API).** The nav service no longer
+> has a waypoint list or the `set_waypoints` / `move_waypoint` /
+> `insert_waypoint` DoCommands. The active route is a `NavigateRoute` goal
+> (loading a saved route is `NavigateRoute` with its id; clearing is `Cancel`;
+> edits re-send the route with `start_index`). The location-metadata route
+> store and `routes_*` verbs below are unchanged. See README → navigation.
+
 ## Goal
 
 Make **routes** first-class objects in the chartplotter:

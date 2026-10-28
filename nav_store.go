@@ -1,7 +1,6 @@
 package vc
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,28 +9,109 @@ import (
 	"sync"
 	"time"
 
-	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-
-	"go.viam.com/rdk/services/navigation"
 )
 
-// diskNavStore is a navigation.NavStore that mirrors its waypoints to a JSON
-// file on disk so they survive module restarts. Every mutation rewrites the
-// file via a tmp+rename to avoid leaving a half-written file on crash.
-type diskNavStore struct {
-	mu        sync.Mutex
-	path      string
-	waypoints []*navigation.Waypoint
+// navPoint is one GPS position as persisted: a waypoint, a saved location, or
+// a goal target. Heading is optional; the wire always carries one (the
+// navigation API requires heading or orientation on every GeoPose), so a
+// missing heading goes out as 0.
+type navPoint struct {
+	Lat     float64  `json:"lat"`
+	Lng     float64  `json:"lng"`
+	Heading *float64 `json:"heading,omitempty"`
 }
 
-// persistedWaypoint is the on-disk schema. We keep our own struct rather than
-// serialising navigation.Waypoint directly so the file stays human-friendly
-// (string ID, named lat/long fields) and decoupled from any future bson
-// changes upstream. Visited waypoints stay on disk so the trip log survives
-// restarts; Waypoints() filters them out at read time.
-type persistedWaypoint struct {
+// savedLocation is a named navPoint (navigation.Location).
+type savedLocation struct {
+	Name string `json:"name"`
+	navPoint
+}
+
+// Goal states as persisted. They map 1:1 onto navigation.GoalState.
+const (
+	goalActive    = "active"
+	goalSuspended = "suspended"
+	goalSucceeded = "succeeded"
+	goalFailed    = "failed"
+	goalCanceled  = "canceled"
+)
+
+// Goal modes as persisted. They map 1:1 onto navigation.NavMode.
+const (
+	goalModeRoute   = "route"
+	goalModeDirect  = "direct"
+	goalModePlanned = "planned"
+)
+
+// navGoal is the latest navigation goal. Every goal is stored as an ordered
+// waypoint list with a cursor — a single-point goal (NavigateToPoint,
+// GoToLocation, ...) is a one-waypoint list — so the arrival poller handles
+// them all the same way. Waypoints[:Index] have been reached and stay
+// recorded as a trip log; Waypoints[Index] is the current target.
+type navGoal struct {
+	Mode          string     `json:"mode"`
+	RouteName     string     `json:"route_name,omitempty"`
+	Location      string     `json:"location,omitempty"`
+	Waypoints     []navPoint `json:"waypoints"`
+	Index         int        `json:"index"`
+	Loop          bool       `json:"loop,omitempty"`
+	Lap           int        `json:"lap,omitempty"`
+	State         string     `json:"state"`
+	SuspendReason string     `json:"suspend_reason,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+}
+
+// open reports whether the goal is still being pursued (active or suspended).
+func (g *navGoal) open() bool {
+	return g != nil && (g.State == goalActive || g.State == goalSuspended)
+}
+
+// remaining is the not-yet-reached part of the goal's waypoints.
+func (g *navGoal) remaining() []navPoint {
+	if g == nil || g.Index >= len(g.Waypoints) {
+		return nil
+	}
+	return g.Waypoints[g.Index:]
+}
+
+// advance marks n waypoints starting at the cursor reached. Past the last one
+// a looping goal wraps to a new lap; anything else succeeds.
+func (g *navGoal) advance(n int, now time.Time) {
+	g.Index += n
+	if g.Index < len(g.Waypoints) {
+		return
+	}
+	if g.Loop && len(g.Waypoints) > 0 {
+		g.Index = 0
+		g.Lap++
+		return
+	}
+	g.Index = len(g.Waypoints)
+	g.State = goalSucceeded
+	g.FinishedAt = &now
+}
+
+// finish moves an open goal to a terminal state.
+func (g *navGoal) finish(state string, now time.Time) {
+	g.State = state
+	g.SuspendReason = ""
+	g.FinishedAt = &now
+}
+
+// navState is everything the nav service persists.
+type navState struct {
+	Version   int             `json:"version"`
+	Locations []savedLocation `json:"locations"`
+	Goal      *navGoal        `json:"goal,omitempty"`
+}
+
+const navStateVersion = 2
+
+// legacyWaypoint is the pre-v2 file format: a bare JSON array of waypoints,
+// with reached ones flagged visited.
+type legacyWaypoint struct {
 	ID      string  `json:"id"`
 	Lat     float64 `json:"lat"`
 	Long    float64 `json:"long"`
@@ -39,10 +119,20 @@ type persistedWaypoint struct {
 	Visited bool    `json:"visited,omitempty"`
 }
 
+// diskNavStore holds the nav service's saved locations and latest goal and
+// mirrors them to a JSON file so they survive module restarts. Every mutation
+// rewrites the file via a tmp+rename to avoid leaving a half-written file on
+// crash.
+type diskNavStore struct {
+	mu    sync.Mutex
+	path  string
+	state navState
+}
+
 func newDiskNavStore(path string) (*diskNavStore, error) {
-	s := &diskNavStore{path: path}
+	s := &diskNavStore{path: path, state: navState{Version: navStateVersion}}
 	if err := s.load(); err != nil {
-		return nil, errors.Wrapf(err, "failed to load nav waypoints from %q", path)
+		return nil, errors.Wrapf(err, "failed to load nav state from %q", path)
 	}
 	return s, nil
 }
@@ -58,43 +148,66 @@ func (s *diskNavStore) load() error {
 		}
 		return err
 	}
-	if len(data) == 0 {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
 		return nil
 	}
-	var raw []persistedWaypoint
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if strings.HasPrefix(trimmed, "[") {
+		var raw []legacyWaypoint
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		s.state.Goal = goalFromLegacy(raw, time.Now())
+		return nil
+	}
+	var st navState
+	if err := json.Unmarshal(data, &st); err != nil {
 		return err
 	}
-	out := make([]*navigation.Waypoint, 0, len(raw))
-	for _, p := range raw {
-		id, err := primitive.ObjectIDFromHex(p.ID)
-		if err != nil {
-			// Skip an unparseable ID rather than refusing to load the whole
-			// file; a stale waypoint is less disruptive than a refusal to
-			// start.
-			id = primitive.NewObjectID()
+	st.Version = navStateVersion
+	if g := st.Goal; g != nil {
+		if g.Index < 0 {
+			g.Index = 0
 		}
-		out = append(out, &navigation.Waypoint{
-			ID:      id,
-			Lat:     p.Lat,
-			Long:    p.Long,
-			Order:   p.Order,
-			Visited: p.Visited,
-		})
+		if g.Index > len(g.Waypoints) {
+			g.Index = len(g.Waypoints)
+		}
 	}
-	s.waypoints = out
+	s.state = st
 	return nil
 }
 
-// snapshot copies the current on-disk waypoints file to a timestamped
-// sibling, e.g. nav.json -> nav.2026-05-07T15-04-23.123.json. Best-effort:
-// any error (file missing, write failure) is swallowed so a backup
-// problem never blocks a real mutation. Caller must hold s.mu so the
-// file content can't be mid-write under us.
+// goalFromLegacy converts a pre-v2 waypoint list into an active route goal:
+// the leading visited waypoints become the reached prefix, and visited
+// waypoints after the first unvisited one (which the old store also hid) are
+// dropped. An all-visited or empty list is no goal.
+func goalFromLegacy(raw []legacyWaypoint, now time.Time) *navGoal {
+	g := &navGoal{Mode: goalModeRoute, State: goalActive, StartedAt: now}
+	seenUnvisited := false
+	for _, w := range raw {
+		if w.Visited && seenUnvisited {
+			continue
+		}
+		if w.Visited {
+			g.Index++
+		} else {
+			seenUnvisited = true
+		}
+		g.Waypoints = append(g.Waypoints, navPoint{Lat: w.Lat, Lng: w.Long})
+	}
+	if !seenUnvisited {
+		return nil
+	}
+	return g
+}
+
+// snapshot copies the current on-disk file to a timestamped sibling, e.g.
+// nav.json -> nav.2026-05-07T15-04-23.123.json. Best-effort: any error (file
+// missing, write failure) is swallowed so a backup problem never blocks a
+// real mutation. Caller must hold s.mu so the file can't be mid-write.
 //
-// Called from user-driven mutators (Add/Remove/Insert/Move) before the
-// in-memory list is changed. Auto-arrival's WaypointVisited deliberately
-// does not snapshot — it fires once per passed waypoint and would
+// User-driven mutations snapshot; the arrival poller's progress updates
+// deliberately do not — they fire once per passed waypoint and would
 // otherwise produce dozens of backups during normal cruising.
 func (s *diskNavStore) snapshot() {
 	if s.path == "" {
@@ -109,11 +222,10 @@ func (s *diskNavStore) snapshot() {
 	ts := time.Now().Format("2006-01-02T15-04-05.000")
 	ext := filepath.Ext(s.path)
 	base := strings.TrimSuffix(s.path, ext)
-	backupPath := fmt.Sprintf("%s.%s%s", base, ts, ext)
-	_ = os.WriteFile(backupPath, data, 0o644)
+	_ = os.WriteFile(fmt.Sprintf("%s.%s%s", base, ts, ext), data, 0o644)
 }
 
-// save flushes the current waypoint slice to disk. Caller must hold s.mu.
+// save flushes the state to disk. Caller must hold s.mu.
 func (s *diskNavStore) save() error {
 	if s.path == "" {
 		return nil
@@ -121,17 +233,7 @@ func (s *diskNavStore) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	out := make([]persistedWaypoint, 0, len(s.waypoints))
-	for _, wp := range s.waypoints {
-		out = append(out, persistedWaypoint{
-			ID:      wp.ID.Hex(),
-			Lat:     wp.Lat,
-			Long:    wp.Long,
-			Order:   wp.Order,
-			Visited: wp.Visited,
-		})
-	}
-	data, err := json.MarshalIndent(out, "", "  ")
+	data, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -142,222 +244,70 @@ func (s *diskNavStore) save() error {
 	return os.Rename(tmp, s.path)
 }
 
-func (s *diskNavStore) Waypoints(ctx context.Context) ([]navigation.Waypoint, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// cloneState deep-copies a navState (JSON round trip — the state is small).
+func cloneState(st navState) navState {
+	data, err := json.Marshal(st)
+	if err != nil {
+		panic(err) // plain data; cannot fail
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]navigation.Waypoint, 0, len(s.waypoints))
-	for _, wp := range s.waypoints {
-		if wp.Visited {
-			continue
-		}
-		out = append(out, *wp)
+	var out navState
+	if err := json.Unmarshal(data, &out); err != nil {
+		panic(err)
 	}
-	return out, nil
+	return out
 }
 
-func (s *diskNavStore) AddWaypoint(ctx context.Context, point *geo.Point) (navigation.Waypoint, error) {
-	if err := ctx.Err(); err != nil {
-		return navigation.Waypoint{}, err
-	}
+// mutate applies fn to the state and persists it, rolling memory back if fn
+// or the write fails so disk and memory stay in sync. userDriven snapshots
+// the previous file first (see snapshot).
+func (s *diskNavStore) mutate(userDriven bool, fn func(st *navState) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.snapshot()
-	wp := &navigation.Waypoint{
-		ID:   primitive.NewObjectID(),
-		Lat:  point.Lat(),
-		Long: point.Lng(),
-	}
-	s.waypoints = append(s.waypoints, wp)
-	if err := s.save(); err != nil {
-		// Roll back the in-memory append so disk and memory stay in sync.
-		s.waypoints = s.waypoints[:len(s.waypoints)-1]
-		return navigation.Waypoint{}, err
-	}
-	return *wp, nil
-}
-
-func (s *diskNavStore) RemoveWaypoint(ctx context.Context, id primitive.ObjectID) error {
-	if err := ctx.Err(); err != nil {
+	prev := cloneState(s.state)
+	if err := fn(&s.state); err != nil {
+		s.state = prev
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.waypoints
-	next := make([]*navigation.Waypoint, 0, len(prev))
-	for _, wp := range prev {
-		if wp.ID == id {
-			continue
-		}
-		next = append(next, wp)
+	if userDriven {
+		s.snapshot()
 	}
-	if len(next) == len(prev) {
-		return nil
-	}
-	s.snapshot()
-	s.waypoints = next
 	if err := s.save(); err != nil {
-		s.waypoints = prev
+		s.state = prev
 		return err
 	}
 	return nil
 }
 
-// InsertWaypoint inserts a new waypoint immediately before the waypoint with
-// the given ID, preserving the order of every other waypoint. If beforeID is
-// the zero ObjectID the new waypoint is appended to the end (equivalent to
-// AddWaypoint). It is not part of the upstream NavStore interface; the
-// chartplotter UI uses it (via DoCommand) to "add waypoint here" between two
-// existing legs.
-func (s *diskNavStore) InsertWaypoint(
-	ctx context.Context,
-	point *geo.Point,
-	beforeID primitive.ObjectID,
-) (navigation.Waypoint, error) {
-	if err := ctx.Err(); err != nil {
-		return navigation.Waypoint{}, err
-	}
-	if point == nil {
-		return navigation.Waypoint{}, errors.New("waypoint location is required")
-	}
+// Goal returns a copy of the latest goal, or nil if there has never been one.
+func (s *diskNavStore) Goal() *navGoal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	wp := &navigation.Waypoint{
-		ID:   primitive.NewObjectID(),
-		Lat:  point.Lat(),
-		Long: point.Lng(),
-	}
-	insertAt := len(s.waypoints)
-	if !beforeID.IsZero() {
-		found := false
-		for i, existing := range s.waypoints {
-			if existing.ID == beforeID {
-				insertAt = i
-				found = true
-				break
-			}
-		}
-		if !found {
-			return navigation.Waypoint{}, errors.Errorf("no waypoint with id %s", beforeID.Hex())
-		}
-	}
-	s.snapshot()
-	prev := s.waypoints
-	next := make([]*navigation.Waypoint, 0, len(prev)+1)
-	next = append(next, prev[:insertAt]...)
-	next = append(next, wp)
-	next = append(next, prev[insertAt:]...)
-	s.waypoints = next
-	if err := s.save(); err != nil {
-		s.waypoints = prev
-		return navigation.Waypoint{}, err
-	}
-	return *wp, nil
-}
-
-// MoveWaypoint updates the lat/long of an existing waypoint in place,
-// preserving its ID and order. It is not part of the upstream NavStore
-// interface; the chartplotter UI uses it (via DoCommand) to support
-// drag-to-edit on the map.
-func (s *diskNavStore) MoveWaypoint(ctx context.Context, id primitive.ObjectID, point *geo.Point) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if point == nil {
-		return errors.New("waypoint location is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, wp := range s.waypoints {
-		if wp.ID != id {
-			continue
-		}
-		s.snapshot()
-		oldLat, oldLong := wp.Lat, wp.Long
-		wp.Lat = point.Lat()
-		wp.Long = point.Lng()
-		if err := s.save(); err != nil {
-			wp.Lat = oldLat
-			wp.Long = oldLong
-			return err
-		}
+	if s.state.Goal == nil {
 		return nil
 	}
-	return errors.Errorf("no waypoint with id %s", id.Hex())
+	g := cloneState(navState{Goal: s.state.Goal}).Goal
+	return g
 }
 
-// ReplaceWaypoints atomically swaps the entire active waypoint list for the
-// given ordered points. Every previous waypoint (including visited ones) is
-// discarded and a fresh ObjectID + sequential Order is assigned to each new
-// point, so loading a saved route can't collide with stale IDs. An empty
-// points slice clears the route. It is not part of the upstream NavStore
-// interface; the chartplotter UI uses it (via DoCommand) to load a saved route
-// in one shot rather than N AddWaypoint round-trips. Returns the new count.
-func (s *diskNavStore) ReplaceWaypoints(ctx context.Context, points []*geo.Point) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	for i, p := range points {
-		if p == nil {
-			return 0, errors.Errorf("waypoint %d is nil", i)
-		}
-	}
+// Locations returns a copy of the saved locations.
+func (s *diskNavStore) Locations() []savedLocation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := make([]*navigation.Waypoint, 0, len(points))
-	for i, p := range points {
-		next = append(next, &navigation.Waypoint{
-			ID:    primitive.NewObjectID(),
-			Lat:   p.Lat(),
-			Long:  p.Lng(),
-			Order: i,
-		})
-	}
-	s.snapshot()
-	prev := s.waypoints
-	s.waypoints = next
-	if err := s.save(); err != nil {
-		s.waypoints = prev
-		return 0, err
-	}
-	return len(next), nil
+	return append([]savedLocation(nil), s.state.Locations...)
 }
 
-func (s *diskNavStore) NextWaypoint(ctx context.Context) (navigation.Waypoint, error) {
-	if err := ctx.Err(); err != nil {
-		return navigation.Waypoint{}, err
-	}
+// LocationByName returns the saved location with the given name.
+func (s *diskNavStore) LocationByName(name string) (savedLocation, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, wp := range s.waypoints {
-		if !wp.Visited {
-			return *wp, nil
+	for _, l := range s.state.Locations {
+		if l.Name == name {
+			return l, true
 		}
 	}
-	return navigation.Waypoint{}, errors.New("no more waypoints")
+	return savedLocation{}, false
 }
 
-func (s *diskNavStore) WaypointVisited(ctx context.Context, id primitive.ObjectID) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	changed := false
-	for _, wp := range s.waypoints {
-		if wp.ID == id && !wp.Visited {
-			wp.Visited = true
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	return s.save()
-}
-
-func (s *diskNavStore) Close(ctx context.Context) error {
+func (s *diskNavStore) Close() error {
 	return nil
 }

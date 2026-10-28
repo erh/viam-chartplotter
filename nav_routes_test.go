@@ -205,44 +205,6 @@ func TestRoutesDelete(t *testing.T) {
 	}
 }
 
-func TestRoutesRename(t *testing.T) {
-	ctx := context.Background()
-	store := newFakeMetaStore(nil)
-	orig := mkRouteRec()
-	orig.ID = "a"
-	if err := routesSave(ctx, store, orig); err != nil {
-		t.Fatal(err)
-	}
-	err := routesRename(ctx, store, "a", map[string]interface{}{
-		"name":      "Renamed",
-		"notes":     "hi",
-		"color":     "#123456",
-		"updatedAt": "2026-07-01T00:00:00Z",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := routesList(ctx, store)
-	r := got[0]
-	if r.Name != "Renamed" || r.Notes != "hi" || r.Color != "#123456" {
-		t.Errorf("rename fields wrong: %+v", r)
-	}
-	if r.UpdatedAt != "2026-07-01T00:00:00Z" {
-		t.Errorf("updatedAt = %q", r.UpdatedAt)
-	}
-	if len(r.Waypoints) != 2 || r.Waypoints[0].Lat != 41.1 {
-		t.Errorf("geometry changed during rename: %+v", r.Waypoints)
-	}
-}
-
-func TestRoutesRenameUnknown(t *testing.T) {
-	ctx := context.Background()
-	err := routesRename(ctx, newFakeMetaStore(nil), "ghost", map[string]interface{}{"name": "x"})
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("expected not-found error, got %v", err)
-	}
-}
-
 func TestRoutesSchemaGuard(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeMetaStore(map[string]interface{}{

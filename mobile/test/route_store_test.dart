@@ -2,22 +2,50 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:viam_chartplotter_mobile/routes/route_store.dart';
 
-/// routeStore.test.ts translated. Records every DoCommand the wrapper issues
-/// and returns a canned response — the heavy read-modify-write/guard logic
-/// lives and is tested in Go (nav_routes_test.go); here we only verify the
-/// client shapes the commands right and maps responses back.
+/// routeStore.test.ts translated. Records every call the wrapper issues and
+/// returns canned responses: the heavy read-modify-write/guard logic lives
+/// and is tested in Go (nav_routes_test.go); here we only verify the client
+/// shapes the calls right and pairs responses back.
 class FakeApi implements RoutesApi {
-  final calls = <Map<String, dynamic>>[];
+  final calls = <List<Object?>>[];
+  List<ApiRoute> apiRoutes = [];
   Map<String, dynamic> response = {};
 
   @override
+  Future<List<ApiRoute>> listApiRoutes() async {
+    calls.add(['listRoutes']);
+    return apiRoutes;
+  }
+
+  @override
+  Future<void> addRoute(String name, List<LatLng> waypoints,
+      Map<String, dynamic> extra) async {
+    calls.add(['addRoute', name, waypoints, extra]);
+  }
+
+  @override
+  Future<void> updateRoute(String id,
+      {String? newName,
+      List<LatLng>? waypoints,
+      Map<String, dynamic>? extra}) async {
+    calls.add(['updateRoute', id, newName, waypoints, extra]);
+  }
+
+  @override
+  Future<void> deleteRoute(String id) async {
+    calls.add(['deleteRoute', id]);
+  }
+
+  @override
   Future<Map<String, dynamic>> doCommand(Map<String, dynamic> cmd) async {
-    calls.add(cmd);
+    calls.add(['doCommand', cmd]);
     return response;
   }
 
-  Map<String, dynamic> get last => calls.last;
+  List<Object?> get last => calls.last;
 }
+
+const _wps = [LatLng(41.1, -71.5), LatLng(41.2, -71.4)];
 
 Route mkRoute({
   String id = 'rte_a',
@@ -33,22 +61,25 @@ Route mkRoute({
     color: color,
     createdAt: now,
     updatedAt: now,
-    waypoints: waypoints ??
-        const [LatLng(41.1, -71.5), LatLng(41.2, -71.4)],
+    waypoints: waypoints ?? _wps,
     scope: scope,
   );
 }
 
-void main() {
-  group('newRouteId', () {
-    test('has the rte_ prefix and is unique across calls', () {
-      final a = newRouteId();
-      final b = newRouteId();
-      expect(a, matches(r'^rte_[a-z0-9]+_[0-9a-f]{4}$'));
-      expect(a, isNot(equals(b)));
-    });
-  });
+Map<String, dynamic> meta(String id, String name, {String? scope}) => {
+      'id': id,
+      'name': name,
+      'source': 'manual',
+      'createdAt': '2026-06-19T00:00:00Z',
+      'updatedAt': '2026-06-19T00:00:00Z',
+      'stats': {'distanceNm': 6.2, 'count': 2},
+      if (scope != null) 'scope': scope,
+    };
 
+ApiRoute apiRoute(String name, [List<LatLng> wps = _wps]) =>
+    (name: name, waypoints: wps);
+
+void main() {
   group('nextColor', () {
     test('returns an unused palette color', () {
       expect(nextColor([mkRoute(color: '#ff8800')]), isNot('#ff8800'));
@@ -78,67 +109,100 @@ void main() {
     });
   });
 
-  group('listRoutes', () {
-    test('issues routes_list and returns the routes', () async {
-      final api = FakeApi()
-        ..response = {
-          'routes': [mkRoute(id: 'x').toJson()]
-        };
-      final routes = await listRoutes(api);
-      expect(api.last, {'routes_list': true});
-      expect(routes, hasLength(1));
-      expect(routes.first.id, 'x');
+  group('pairRoutes', () {
+    test('pairs by index when the names line up', () {
+      final routes = pairRoutes(
+          [apiRoute('A'), apiRoute('B')], [meta('a', 'A'), meta('b', 'B')]);
+      expect([for (final r in routes) r.id], ['a', 'b']);
+      expect(routes.first.waypoints, _wps);
+      expect(routes.first.distanceNm, 6.2);
     });
 
-    test('defaults to empty when the routes field is missing', () async {
-      final api = FakeApi()..response = {};
-      expect(await listRoutes(api), isEmpty);
+    test('falls back to the first unused name match', () {
+      final routes = pairRoutes([apiRoute('B'), apiRoute('A')],
+          [meta('a', 'A'), meta('b', 'B')]);
+      expect([for (final r in routes) r.id], ['b', 'a']);
     });
 
-    test('parent scope reads back as read-only', () async {
-      final api = FakeApi()
-        ..response = {
-          'routes': [mkRoute(id: 'p', scope: 'parent').toJson()]
-        };
-      final routes = await listRoutes(api);
-      expect(routes.single.readOnly, isTrue);
+    test('keeps duplicate names apart', () {
+      final routes = pairRoutes([apiRoute('A'), apiRoute('A')],
+          [meta('a1', 'A'), meta('a2', 'A')]);
+      expect([for (final r in routes) r.id], ['a1', 'a2']);
+    });
+
+    test('drops a route with no metadata', () {
+      final routes =
+          pairRoutes([apiRoute('A'), apiRoute('New')], [meta('a', 'A')]);
+      expect([for (final r in routes) r.id], ['a']);
     });
   });
 
-  group('saveRoute', () {
-    test('issues routes_save with the route', () async {
-      final api = FakeApi()..response = {'ok': true, 'scope': 'location'};
-      final r = mkRoute();
-      await saveRoute(api, r);
-      expect(api.last, {
-        'routes_save': {'route': r.toJson()}
-      });
+  group('listRoutes', () {
+    test('combines ListRoutes with routes_meta', () async {
+      final api = FakeApi()
+        ..apiRoutes = [apiRoute('A')]
+        ..response = {
+          'routes': [meta('a', 'A', scope: 'parent')]
+        };
+      final routes = await listRoutes(api);
+      expect(api.calls, [
+        ['listRoutes'],
+        [
+          'doCommand',
+          {'routes_meta': true}
+        ],
+      ]);
+      expect(routes.single.id, 'a');
+      expect(routes.single.readOnly, isTrue);
+    });
+
+    test('is empty when routes_meta has no routes field', () async {
+      final api = FakeApi()..apiRoutes = [apiRoute('A')];
+      expect(await listRoutes(api), isEmpty);
+    });
+  });
+
+  group('createRoute', () {
+    test('sends name and waypoints, library fields in extra', () async {
+      final api = FakeApi();
+      await createRoute(api,
+          name: 'N', source: 'track', color: '#123456', waypoints: _wps);
+      expect(api.last, [
+        'addRoute',
+        'N',
+        _wps,
+        {'source': 'track', 'color': '#123456'}
+      ]);
+    });
+  });
+
+  group('replaceRouteWaypoints', () {
+    test('updates only the waypoints, by id', () async {
+      final api = FakeApi();
+      await replaceRouteWaypoints(api, 'rte_a', _wps);
+      expect(api.last, ['updateRoute', 'rte_a', null, _wps, null]);
+    });
+  });
+
+  group('updateRouteFields', () {
+    test('renames via newName, notes/color via extra', () async {
+      final api = FakeApi();
+      await updateRouteFields(api, 'rte_a', name: 'New', color: '#123456');
+      expect(api.last, [
+        'updateRoute',
+        'rte_a',
+        'New',
+        null,
+        {'color': '#123456'}
+      ]);
     });
   });
 
   group('deleteRoute', () {
-    test('issues routes_delete with the id', () async {
+    test('deletes by id', () async {
       final api = FakeApi();
       await deleteRoute(api, 'rte_a');
-      expect(api.last, {
-        'routes_delete': {'id': 'rte_a'}
-      });
-    });
-  });
-
-  group('renameRoute', () {
-    test('issues routes_rename with fields + updatedAt', () async {
-      final api = FakeApi();
-      await renameRoute(api, 'rte_a',
-          name: 'New', color: '#123456', nowIso: '2026-07-01T00:00:00Z');
-      expect(api.last, {
-        'routes_rename': {
-          'id': 'rte_a',
-          'name': 'New',
-          'color': '#123456',
-          'updatedAt': '2026-07-01T00:00:00Z',
-        }
-      });
+      expect(api.last, ['deleteRoute', 'rte_a']);
     });
   });
 }

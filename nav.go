@@ -3,14 +3,12 @@ package vc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"go.viam.com/rdk/app"
 	"go.viam.com/rdk/components/generic"
@@ -18,7 +16,6 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/navigation"
-	"go.viam.com/rdk/spatialmath"
 )
 
 var NavModel = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("nav")
@@ -33,11 +30,12 @@ func init() {
 }
 
 // NavConfig is the config for the chartplotter navigation service.
-// MovementSensor is optional; when set, Location() reports the live
-// position/heading of that movement sensor.
+// MovementSensor is optional; when set, the service reports the live
+// position/heading of that movement sensor and auto-advances route goals as
+// the boat reaches each waypoint.
 //
-// DataPath, when set, is used as the JSON file that mirrors the waypoint
-// list across restarts. When empty, waypoints persist to
+// DataPath, when set, is used as the JSON file that persists saved locations
+// and the latest goal across restarts. When empty, state persists to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
 //
 // N2KSender is optional; when set it names a generic component (e.g. a
@@ -137,11 +135,10 @@ func newNav(
 		logger: logger,
 		store:  store,
 	}
-	svc.mode.Store(uint32(navigation.ModeManual))
-	logger.Infof("nav waypoints persisted at %s", dataPath)
+	logger.Infof("nav state persisted at %s", dataPath)
 
 	if cfg.MovementSensor == "" {
-		logger.Warnf("nav auto-arrival disabled: no `movement_sensor` configured; waypoints will only be removed by explicit RemoveWaypoint calls")
+		logger.Warnf("nav auto-arrival disabled: no `movement_sensor` configured; route goals only change via explicit API calls")
 	} else {
 		ms, err := movementsensor.FromDependencies(deps, cfg.MovementSensor)
 		if err != nil {
@@ -165,30 +162,32 @@ func newNav(
 	return svc, nil
 }
 
+// navService is a GPS-map navigation service for a boat. It doesn't drive
+// anything: a goal (a route, or a single point/location) is a list of
+// waypoints the skipper is steering for, and the arrival poller advances the
+// goal's cursor as the boat reaches each one. Saved locations and the latest
+// goal persist in diskNavStore; saved routes live in the Viam location
+// metadata (nav_routes.go). See nav_service.go for the navigation API.
 type navService struct {
 	resource.AlwaysRebuild
 
 	name   resource.Name
 	logger logging.Logger
 
-	mu    sync.Mutex
-	store navigation.NavStore
+	store *diskNavStore
 	ms    movementsensor.MovementSensor
 
 	// Optional generic component that sends raw NMEA 2000 PGNs via its
 	// DoCommand (config `n2k_sender`); nil disables send_waypoints_n2k.
 	n2kSender resource.Resource
 
-	// mode is held atomically so reads don't need to take the mutex.
-	mode atomic.Uint32
-
 	// Cancellation for the background arrival poller, if started.
 	arrivalCancel context.CancelFunc
 	arrivalDone   chan struct{}
 
 	// Rolling approach memory for the current waypoint and the one
-	// following it. Read/written only from the arrival poller goroutine,
-	// so no synchronisation needed.
+	// following it. Read/written only from the arrival poller goroutine
+	// (arrival_status reads it racily, for diagnostics only).
 	arrivalState   ArrivalState
 	lastArrivalLog time.Time
 	// Rolling confirmation memory for mid-route rejoin detection
@@ -198,7 +197,7 @@ type navService struct {
 	// Lazily-created Viam app client used to read/write saved routes in the
 	// location metadata (see nav_routes.go). It authenticates with the
 	// machine's own VIAM_API_KEY/VIAM_API_KEY_ID env vars and uses
-	// VIAM_LOCATION_ID, so route storage works regardless of how the browser
+	// VIAM_LOCATION_ID, so route storage works regardless of how the client
 	// connected to the machine. routesMu serializes both the lazy init and the
 	// metadata read-modify-write.
 	routesMu   sync.Mutex
@@ -217,6 +216,14 @@ type navService struct {
 	picksPath string
 }
 
+// waypointKey identifies a waypoint to the arrival and rejoin memories. It is
+// the coordinates rather than the index so the memory survives a client
+// re-sending the route with an edit elsewhere in it (every edit replaces the
+// whole goal), while a moved waypoint correctly starts fresh.
+func waypointKey(p navPoint) string {
+	return fmt.Sprintf("%.7f,%.7f", p.Lat, p.Lng)
+}
+
 // maybeArrivalInfo throttles a poller-status info log to one per
 // arrivalLogInterval. Used for the silent early-return paths in
 // checkArrival so we can tell *why* a tick did nothing without flooding
@@ -231,8 +238,8 @@ func (s *navService) maybeArrivalInfo(msg string, kvs ...interface{}) {
 }
 
 // startArrivalPoller launches a background goroutine that periodically
-// checks the boat's distance to the next unvisited waypoint and marks it
-// visited (so it disappears from Waypoints()) once arrival is detected.
+// checks the boat's distance to the current goal waypoint and advances the
+// goal once arrival is detected.
 func (s *navService) startArrivalPoller() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.arrivalCancel = cancel
@@ -267,9 +274,27 @@ func (s *navService) startArrivalPoller() {
 	}()
 }
 
+// advanceGoal marks n waypoints reached on the goal that started at
+// startedAt with its cursor at fromIndex. It is a no-op when the goal was
+// replaced, suspended or moved on since the poller read it, so a client's
+// edit landing mid-tick is never clobbered by stale progress.
+func (s *navService) advanceGoal(startedAt time.Time, fromIndex, n int) (bool, error) {
+	applied := false
+	err := s.store.mutate(false, func(st *navState) error {
+		g := st.Goal
+		if g == nil || g.State != goalActive || !g.StartedAt.Equal(startedAt) || g.Index != fromIndex {
+			return nil
+		}
+		g.advance(n, time.Now())
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
 // checkArrival is one tick of the arrival poller: pull the boat's
-// position, look up the current waypoint (and the one following it, if
-// any), and mark the current waypoint visited when one of:
+// position, look up the goal's current waypoint (and the one following it,
+// if any), and mark the current waypoint reached when one of:
 //   - distanceToWaypoint < arrivalDistanceMeters (we're there), or
 //   - distanceToWaypoint < nearWaypointMeters AND we've moved past our
 //     closest approach to the current waypoint AND we just hit a new
@@ -279,9 +304,9 @@ func (s *navService) startArrivalPoller() {
 //     we got within lastWaypointPassMinDistanceMeters and have since
 //     moved at least lastWaypointPassFactor× that minimum away.
 //
-// Errors are surfaced at warn so an unhealthy sensor or store is visible
-// in logs; the loop still keeps running so a transient blip doesn't
-// disable auto-arrival.
+// Only an active goal advances; a suspended one is left alone. Errors are
+// surfaced at warn so an unhealthy sensor or store is visible in logs; the
+// loop still keeps running so a transient blip doesn't disable auto-arrival.
 func (s *navService) checkArrival(ctx context.Context) {
 	if s.ms == nil {
 		return
@@ -302,14 +327,18 @@ func (s *navService) checkArrival(ctx context.Context) {
 			"lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
-	wps, err := s.store.Waypoints(ctx)
-	if err != nil {
-		s.logger.Warnw("arrival poller: Waypoints failed", "err", err)
+	g := s.store.Goal()
+	if g == nil || g.State != goalActive {
+		state := "none"
+		if g != nil {
+			state = g.State
+		}
+		s.maybeArrivalInfo("arrival poller: no active goal",
+			"state", state, "lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
+	wps := g.remaining()
 	if len(wps) == 0 {
-		s.maybeArrivalInfo("arrival poller: no unvisited waypoints",
-			"lat", pt.Lat(), "lng", pt.Lng())
 		return
 	}
 	waypoint := wps[0]
@@ -320,7 +349,7 @@ func (s *navService) checkArrival(ctx context.Context) {
 	// wps[0] and would steer for a mark behind the beam forever.
 	rwps := make([]RejoinWaypoint, len(wps))
 	for i, w := range wps {
-		rwps[i] = RejoinWaypoint{ID: w.ID.Hex(), Lat: w.Lat, Lng: w.Long}
+		rwps[i] = RejoinWaypoint{ID: waypointKey(w), Lat: w.Lat, Lng: w.Lng}
 	}
 	rejoin := decideRejoin(pt.Lat(), pt.Lng(), rwps, s.rejoinState)
 	// One line when a candidate leg STARTS being tracked, so "rejoin didn't
@@ -333,14 +362,10 @@ func (s *navService) checkArrival(ctx context.Context) {
 	}
 	s.rejoinState = rejoin.NewState
 	if rejoin.SkipCount > 0 {
-		s.logger.Infof("route rejoin: marking %d leading waypoints visited (%s)",
+		s.logger.Infof("route rejoin: marking %d leading waypoints reached (%s)",
 			rejoin.SkipCount, rejoin.Reason)
-		for i := 0; i < rejoin.SkipCount; i++ {
-			if err := s.store.WaypointVisited(ctx, wps[i].ID); err != nil {
-				s.logger.Warnw("route rejoin: WaypointVisited failed",
-					"err", err, "id", wps[i].ID.Hex())
-				break // keep order; retry from a fresh list next tick
-			}
+		if _, err := s.advanceGoal(g.StartedAt, g.Index, rejoin.SkipCount); err != nil {
+			s.logger.Warnw("route rejoin: advancing goal failed", "err", err)
 		}
 		// The active pair just changed wholesale — stale approach memory
 		// must not colour the next arrival decision.
@@ -353,16 +378,16 @@ func (s *navService) checkArrival(ctx context.Context) {
 	in := ArrivalInput{
 		BoatLat:     pt.Lat(),
 		BoatLng:     pt.Lng(),
-		WaypointID:  waypoint.ID.Hex(),
+		WaypointID:  waypointKey(waypoint),
 		WaypointLat: waypoint.Lat,
-		WaypointLng: waypoint.Long,
+		WaypointLng: waypoint.Lng,
 	}
 	if len(wps) >= 2 {
 		following := wps[1]
 		in.HasFollowing = true
-		in.FollowingWaypointID = following.ID.Hex()
+		in.FollowingWaypointID = waypointKey(following)
 		in.FollowingWaypointLat = following.Lat
-		in.FollowingWaypointLng = following.Long
+		in.FollowingWaypointLng = following.Lng
 	}
 
 	prevState := s.arrivalState
@@ -396,141 +421,52 @@ func (s *navService) checkArrival(ctx context.Context) {
 	if !decision.Arrived {
 		return
 	}
-	if err := s.store.WaypointVisited(ctx, waypoint.ID); err != nil {
-		s.logger.Warnw("arrival poller: WaypointVisited failed", "err", err, "id", waypoint.ID.Hex())
+	applied, err := s.advanceGoal(g.StartedAt, g.Index, 1)
+	if err != nil {
+		s.logger.Warnw("arrival poller: advancing goal failed", "err", err, "index", g.Index)
 		return
 	}
-	s.logger.Infof("arrived at waypoint %s (%.0f m, %s); marking visited",
-		waypoint.ID.Hex(), decision.DistanceToWaypoint, decision.Reason)
+	if applied {
+		s.logger.Infof("arrived at waypoint %d of %d (%.0f m, %s)",
+			g.Index+1, len(g.Waypoints), decision.DistanceToWaypoint, decision.Reason)
+	}
 }
 
 func (s *navService) Name() resource.Name { return s.name }
 
-// Status satisfies the resource.Resource interface (added in rdk).
+// Status satisfies the resource.Resource interface.
 func (s *navService) Status(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
-}
-
-func (s *navService) Mode(ctx context.Context, extra map[string]interface{}) (navigation.Mode, error) {
-	return navigation.Mode(s.mode.Load()), nil
-}
-
-func (s *navService) SetMode(ctx context.Context, mode navigation.Mode, extra map[string]interface{}) error {
-	switch mode {
-	case navigation.ModeManual, navigation.ModeWaypoint, navigation.ModeExplore:
-	default:
-		return errors.Errorf("unknown navigation mode %v", mode)
-	}
-	s.mode.Store(uint32(mode))
-	return nil
-}
-
-func (s *navService) Location(ctx context.Context, extra map[string]interface{}) (*spatialmath.GeoPose, error) {
-	if s.ms == nil {
-		return spatialmath.NewGeoPose(geo.NewPoint(0, 0), 0), nil
-	}
-	pt, _, err := s.ms.Position(ctx, extra)
-	if err != nil {
-		return nil, err
-	}
-	heading, err := s.ms.CompassHeading(ctx, extra)
-	if err != nil {
-		// Heading may not be supported on every movement_sensor; fall back to 0.
-		heading = 0
-	}
-	return spatialmath.NewGeoPose(pt, heading), nil
-}
-
-func (s *navService) Waypoints(ctx context.Context, extra map[string]interface{}) ([]navigation.Waypoint, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.store.Waypoints(ctx)
-}
-
-func (s *navService) AddWaypoint(ctx context.Context, point *geo.Point, extra map[string]interface{}) error {
-	if point == nil {
-		return errors.New("waypoint location is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.store.AddWaypoint(ctx, point)
-	return err
-}
-
-func (s *navService) RemoveWaypoint(ctx context.Context, id primitive.ObjectID, extra map[string]interface{}) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.store.RemoveWaypoint(ctx, id)
-}
-
-func (s *navService) Obstacles(ctx context.Context, extra map[string]interface{}) ([]*spatialmath.GeoGeometry, error) {
-	return nil, nil
-}
-
-func (s *navService) Paths(ctx context.Context, extra map[string]interface{}) ([]*navigation.Path, error) {
-	return nil, nil
-}
-
-func (s *navService) Properties(ctx context.Context) (navigation.Properties, error) {
-	return navigation.Properties{MapType: navigation.GPSMap}, nil
 }
 
 // DoCommand exposes service-specific commands that don't have a first-class
 // gRPC method on the navigation API:
 //
-//	{"move_waypoint":   {"id": "<hex>", "lat": <float>, "lng": <float>}}
-//	{"insert_waypoint": {"before_id": "<hex>", "lat": <float>, "lng": <float>}}
-//	{"set_waypoints":   {"waypoints": [{"lat": <float>, "lng": <float>}, ...]}}
-//	{"routes_list":     true}
-//	{"routes_save":     {"route": {<route>}}}
-//	{"routes_delete":   {"id": "<id>"}}
-//	{"routes_rename":   {"id": "<id>", "name"?: ..., "notes"?: ..., "color"?: ..., "updatedAt"?: ...}}
+//	{"routes_meta":     true}
 //	{"arrival_status":  true}
 //	{"send_waypoints_n2k": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
 //	{"set_display_resources": {"movement_sensor"?: ..., "depth_sensor"?: ..., "route_sensor"?: ..., "cameras"?: [...]}}
 //
-// The routes_* verbs read/write saved routes in the location metadata via the
-// Viam app API (see nav_routes.go), so the browser doesn't need its own cloud
-// credentials.
+// routes_meta returns the saved-route fields the API's Route message can't
+// carry (id, notes, color, source, dates, stats, scope), in ListRoutes order
+// (see nav_routes.go). Routes themselves are read and written through the
+// Route RPCs, with notes/color/source in extra.
 //
-// send_waypoints_n2k pushes the current waypoint list onto the NMEA 2000 bus
-// as a Route and WP Service transfer (PGNs 130066 + 130067) via the
-// configured n2k_sender component (see nav_n2k.go). All payload fields are
-// optional; pass true for the defaults.
+// send_waypoints_n2k pushes the active goal's remaining waypoints onto the
+// NMEA 2000 bus as a Route and WP Service transfer (PGNs 130066 + 130067) via
+// the configured n2k_sender component (see nav_n2k.go). All payload fields
+// are optional; pass true for the defaults.
 //
 // set_display_resources records which machine resources the web app picked
 // during its own discovery (see displaypicks.go); the LAN display API falls
 // back to them for anything the chartplotter config doesn't name.
 //
-// move_waypoint updates an existing waypoint in place (preserving its ID and
-// order). insert_waypoint inserts a new waypoint immediately before the
-// waypoint with the given before_id; an empty/missing before_id is equivalent
-// to AddWayPoint (append). set_waypoints atomically replaces the entire active
-// list with the given ordered points (used to load a saved route); an empty
-// array clears the route. arrival_status returns a snapshot of the
-// auto-arrival poller so an operator can see, on demand, why a pass didn't
-// fire (current target, boat position, distances, minDistance, etc.).
+// arrival_status returns a snapshot of the auto-arrival poller so an operator
+// can see, on demand, why a pass didn't fire (current target, boat position,
+// distances, minDistance, etc.).
 func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	if raw, ok := cmd["move_waypoint"]; ok {
-		return s.doMoveWaypoint(ctx, raw)
-	}
-	if raw, ok := cmd["insert_waypoint"]; ok {
-		return s.doInsertWaypoint(ctx, raw)
-	}
-	if raw, ok := cmd["set_waypoints"]; ok {
-		return s.doSetWaypoints(ctx, raw)
-	}
-	if _, ok := cmd["routes_list"]; ok {
-		return s.doRoutesList(ctx)
-	}
-	if raw, ok := cmd["routes_save"]; ok {
-		return s.doRoutesSave(ctx, raw)
-	}
-	if raw, ok := cmd["routes_delete"]; ok {
-		return s.doRoutesDelete(ctx, raw)
-	}
-	if raw, ok := cmd["routes_rename"]; ok {
-		return s.doRoutesRename(ctx, raw)
+	if _, ok := cmd["routes_meta"]; ok {
+		return s.doRoutesMeta(ctx)
 	}
 	if _, ok := cmd["arrival_status"]; ok {
 		return s.doArrivalStatus(ctx)
@@ -577,7 +513,7 @@ func (s *navService) doSetDisplayResources(raw interface{}) (map[string]interfac
 }
 
 // doArrivalStatus returns a snapshot of the arrival poller's current
-// view: boat position, the current waypoint and its distance, the
+// view: boat position, the goal's current waypoint and its distance, the
 // rolling minimum, the following-waypoint distance and minimum (if any),
 // and whether auto-arrival is enabled. Cheap — no side effects on poller
 // state.
@@ -604,152 +540,45 @@ func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{
 	out["lat"] = pt.Lat()
 	out["lng"] = pt.Lng()
 
-	wps, err := s.store.Waypoints(ctx)
-	if err != nil {
-		out["waypoints_error"] = err.Error()
+	g := s.store.Goal()
+	if g == nil {
+		out["note"] = "no goal"
 		return out, nil
+	}
+	out["goal_state"] = g.State
+	out["goal_index"] = g.Index
+	wps := g.remaining()
+	if !g.open() {
+		wps = nil
 	}
 	out["wps_remaining"] = len(wps)
 	if len(wps) == 0 {
-		out["note"] = "no unvisited waypoints"
+		out["note"] = "no remaining waypoints"
 		return out, nil
 	}
 
 	waypoint := wps[0]
-	distanceToWaypoint := pt.GreatCircleDistance(geo.NewPoint(waypoint.Lat, waypoint.Long)) * 1000
-	out["waypoint_id"] = waypoint.ID.Hex()
+	distanceToWaypoint := haversineMeters(pt.Lat(), pt.Lng(), waypoint.Lat, waypoint.Lng)
+	out["waypoint_id"] = waypointKey(waypoint)
 	out["waypoint_lat"] = waypoint.Lat
-	out["waypoint_lng"] = waypoint.Long
+	out["waypoint_lng"] = waypoint.Lng
 	out["distance_to_waypoint_m"] = distanceToWaypoint
 
-	if s.arrivalState.WaypointID == waypoint.ID.Hex() {
+	if s.arrivalState.WaypointID == waypointKey(waypoint) {
 		out["min_distance_to_waypoint_m"] = s.arrivalState.MinDistanceToWaypoint
 		out["away_from_min_m"] = distanceToWaypoint - s.arrivalState.MinDistanceToWaypoint
 	}
 
 	if len(wps) >= 2 {
 		following := wps[1]
-		distanceToFollowingWaypoint := pt.GreatCircleDistance(geo.NewPoint(following.Lat, following.Long)) * 1000
-		out["following_waypoint_id"] = following.ID.Hex()
-		out["distance_to_following_waypoint_m"] = distanceToFollowingWaypoint
-		if s.arrivalState.FollowingWaypointID == following.ID.Hex() {
+		out["following_waypoint_id"] = waypointKey(following)
+		out["distance_to_following_waypoint_m"] = haversineMeters(pt.Lat(), pt.Lng(), following.Lat, following.Lng)
+		if s.arrivalState.FollowingWaypointID == waypointKey(following) {
 			out["min_distance_to_following_waypoint_m"] = s.arrivalState.MinDistanceToFollowingWaypoint
 			out["max_distance_to_following_waypoint_m"] = s.arrivalState.MaxDistanceToFollowingWaypoint
 		}
 	}
 	return out, nil
-}
-
-func (s *navService) doMoveWaypoint(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("move_waypoint payload must be an object")
-	}
-	idStr, _ := m["id"].(string)
-	if idStr == "" {
-		return nil, errors.New("move_waypoint.id is required")
-	}
-	id, err := primitive.ObjectIDFromHex(idStr)
-	if err != nil {
-		return nil, errors.Wrapf(err, "invalid move_waypoint.id %q", idStr)
-	}
-	lat, latOK := m["lat"].(float64)
-	lng, lngOK := m["lng"].(float64)
-	if !latOK || !lngOK {
-		return nil, errors.New("move_waypoint.lat and move_waypoint.lng are required numbers")
-	}
-	mover, ok := s.store.(interface {
-		MoveWaypoint(ctx context.Context, id primitive.ObjectID, point *geo.Point) error
-	})
-	if !ok {
-		return nil, errors.New("waypoint store does not support move")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := mover.MoveWaypoint(ctx, id, geo.NewPoint(lat, lng)); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"ok": true}, nil
-}
-
-func (s *navService) doInsertWaypoint(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("insert_waypoint payload must be an object")
-	}
-	lat, latOK := m["lat"].(float64)
-	lng, lngOK := m["lng"].(float64)
-	if !latOK || !lngOK {
-		return nil, errors.New("insert_waypoint.lat and insert_waypoint.lng are required numbers")
-	}
-	var beforeID primitive.ObjectID
-	if idStr, _ := m["before_id"].(string); idStr != "" {
-		parsed, err := primitive.ObjectIDFromHex(idStr)
-		if err != nil {
-			return nil, errors.Wrapf(err, "invalid insert_waypoint.before_id %q", idStr)
-		}
-		beforeID = parsed
-	}
-	inserter, ok := s.store.(interface {
-		InsertWaypoint(ctx context.Context, point *geo.Point, beforeID primitive.ObjectID) (navigation.Waypoint, error)
-	})
-	if !ok {
-		return nil, errors.New("waypoint store does not support insert")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	wp, err := inserter.InsertWaypoint(ctx, geo.NewPoint(lat, lng), beforeID)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"ok": true, "id": wp.ID.Hex()}, nil
-}
-
-// doSetWaypoints replaces the whole active waypoint list in one shot. The
-// payload's "waypoints" is an ordered array of {lat,lng} objects; an empty or
-// missing array clears the route. Every point is validated before any mutation
-// so a single bad coordinate rejects the whole batch (no partial load).
-func (s *navService) doSetWaypoints(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("set_waypoints payload must be an object")
-	}
-	var list []interface{}
-	if raw, ok := m["waypoints"]; ok && raw != nil {
-		list, ok = raw.([]interface{})
-		if !ok {
-			return nil, errors.New("set_waypoints.waypoints must be an array")
-		}
-	}
-	points := make([]*geo.Point, 0, len(list))
-	for i, item := range list {
-		wp, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, errors.Errorf("set_waypoints.waypoints[%d] must be an object", i)
-		}
-		lat, latOK := wp["lat"].(float64)
-		lng, lngOK := wp["lng"].(float64)
-		if !latOK || !lngOK {
-			return nil, errors.Errorf("set_waypoints.waypoints[%d] needs numeric lat and lng", i)
-		}
-		if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
-			return nil, errors.Errorf("set_waypoints.waypoints[%d] out of range (lat=%v lng=%v)", i, lat, lng)
-		}
-		points = append(points, geo.NewPoint(lat, lng))
-	}
-	replacer, ok := s.store.(interface {
-		ReplaceWaypoints(ctx context.Context, points []*geo.Point) (int, error)
-	})
-	if !ok {
-		return nil, errors.New("waypoint store does not support set_waypoints")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	count, err := replacer.ReplaceWaypoints(ctx, points)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"ok": true, "count": count}, nil
 }
 
 func (s *navService) Close(ctx context.Context) error {
@@ -770,7 +599,5 @@ func (s *navService) Close(ctx context.Context) error {
 		s.appClient = nil
 	}
 	s.routesMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.store.Close(ctx)
+	return s.store.Close()
 }

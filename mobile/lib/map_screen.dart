@@ -149,7 +149,7 @@ class _MapScreenState extends State<MapScreen> {
   // ---- waypoint editing (E1) -------------------------------------------
   // Long-press adds; tapping a waypoint opens a sheet with move / insert /
   // delete / clear. Move and insert arm a tap-to-place mode (banner below):
-  // one deliberate tap = one move_waypoint/insert_waypoint, which is the
+  // one deliberate tap = one route edit (NavigateRoute), which is the
   // touch equivalent of the web's drag-commit-on-release.
   String? _movingWaypointId;
   String? _insertBeforeId;
@@ -165,7 +165,7 @@ class _MapScreenState extends State<MapScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Waypoint edit failed: $e')));
+          .showSnackBar(SnackBar(content: Text('Route update failed: $e')));
     }
   }
 
@@ -1613,7 +1613,14 @@ class _MapScreenState extends State<MapScreen> {
                     // Next-waypoint / final ETAs while navigating (E5).
                     if (s.navigating || s.navWaypoints.isNotEmpty) ...[
                       const SizedBox(height: 6),
-                      EtaPill(state: s),
+                      EtaPill(
+                        state: s,
+                        onTogglePause: widget.connection.navApi == null
+                            ? null
+                            : () => _navEdit(s.navSuspended
+                                ? widget.connection.resumeNav
+                                : widget.connection.pauseNav),
+                      ),
                     ],
                     // Measure readout (J1).
                     if (_measureMode) ...[

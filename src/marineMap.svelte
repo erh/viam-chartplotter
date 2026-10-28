@@ -8,6 +8,7 @@
   import viamLogoUrl from "./assets/viam-logo.png";
   import type { BoatInfo, PositionPoint, Detection, DetectionConfig } from "./lib/BoatInfo";
   import { getCountryFromMmsi, flagEmoji } from "./lib/mmsi";
+  import { metresToNm } from "./lib/autoRoute";
   import {
     searchChart,
     framingFor,
@@ -811,6 +812,10 @@
     onInsertWaypoint,
     onRemoveWaypoint,
     onClearWaypoints,
+    navState = null,
+    navDistanceRemainingM = null,
+    onPauseRoute,
+    onResumeRoute,
     onReady,
     boatDetailSlot,
     leftOverlay,
@@ -910,6 +915,14 @@
     onRemoveWaypoint?: (id: string) => void;
     /** Called when the user clicks the clear-route button. */
     onClearWaypoints?: () => void;
+    /** The nav goal's state: "active", "suspended" (paused), or null for none. */
+    navState?: "active" | "suspended" | null;
+    /** The nav service's distance to go along the active goal, in metres. */
+    navDistanceRemainingM?: number | null;
+    /** Called when the user pauses the active route (the goal is kept). */
+    onPauseRoute?: () => void;
+    /** Called when the user resumes a paused route. */
+    onResumeRoute?: () => void;
     /** When true, parent controls visibility via setVisibleBoats API instead of auto-showing new boats */
     externalVisibilityControl?: boolean;
     /** When false, offline boats are hidden from the boats panel (default: true) */
@@ -5789,6 +5802,12 @@
       {/if}
       {#if routeStats}
         <div class="data-panel-section data-panel-nav">
+          {#if navState === "suspended"}
+            <div class="data-panel-row">
+              <span class="data-panel-label">Route</span>
+              <span class="data-panel-value"><span class="route-paused">Paused</span></span>
+            </div>
+          {/if}
           <div class="data-panel-row">
             <span class="data-panel-label">Next</span>
             <span class="data-panel-value">
@@ -5808,6 +5827,15 @@
                 >
                 · {formatDurationMin(routeStats.final.minutes)}
                 · ETA {formatEta(routeStats.final.minutes)}
+              </span>
+            </div>
+          {/if}
+          {#if navState === "active" && navDistanceRemainingM != null}
+            <div class="data-panel-row">
+              <span class="data-panel-label">To go</span>
+              <span class="data-panel-value">
+                <span class="data-panel-bold">{metresToNm(navDistanceRemainingM).toFixed(1)}</span
+                ><sup>nm</sup>
               </span>
             </div>
           {/if}
@@ -6678,6 +6706,25 @@
             aria-label={clearConfirmArmed ? "Confirm clear route" : "Clear route"}
           >
             {clearConfirmArmed ? "?" : "✕"}
+          </button>
+        {/if}
+        {#if navState === "active" && onPauseRoute}
+          <button
+            class="pause-route-btn"
+            onclick={onPauseRoute}
+            data-tip="Pause the route (keeps your place)"
+            aria-label="Pause route"
+          >
+            ❚❚
+          </button>
+        {:else if navState === "suspended" && onResumeRoute}
+          <button
+            class="pause-route-btn paused"
+            onclick={onResumeRoute}
+            data-tip="Route paused — click to resume"
+            aria-label="Resume route"
+          >
+            ▶
           </button>
         {/if}
       </div>
@@ -7862,6 +7909,40 @@
 
   .clear-waypoints-btn.armed:hover {
     background: #b91c1c;
+  }
+
+  .pause-route-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #1e3a8a;
+    font-size: 12px;
+    font-weight: bold;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .pause-route-btn:hover {
+    background: #e0e7ff;
+    border-color: #1e3a8a;
+  }
+
+  /* Paused: amber so a stopped route stands out until it's resumed. */
+  .pause-route-btn.paused {
+    background: #f59e0b;
+    color: white;
+    border-color: #b45309;
+  }
+
+  .route-paused {
+    color: #f59e0b;
+    font-weight: bold;
   }
 
   /* When the data panel is hidden, the map is full-width. Only

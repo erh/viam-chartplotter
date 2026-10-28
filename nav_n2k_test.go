@@ -5,18 +5,16 @@ import (
 	"strings"
 	"testing"
 
-	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
 
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/services/navigation"
 )
 
-func mkWaypoints(n int) []navigation.Waypoint {
-	wps := make([]navigation.Waypoint, n)
+func mkWaypoints(n int) []navPoint {
+	wps := make([]navPoint, n)
 	for i := range wps {
-		wps[i] = navigation.Waypoint{Lat: 41.0 + float64(i)*0.01, Long: -71.5 - float64(i)*0.01}
+		wps[i] = navPoint{Lat: 41.0 + float64(i)*0.01, Lng: -71.5 - float64(i)*0.01}
 	}
 	return wps
 }
@@ -185,16 +183,9 @@ func (f *fakeN2KSender) DoCommand(_ context.Context, cmd map[string]interface{})
 
 func TestDoSendWaypointsN2K(t *testing.T) {
 	ctx := context.Background()
-	st := tempStore(t)
-	if _, err := st.ReplaceWaypoints(ctx, []*geo.Point{
-		geo.NewPoint(41.1631, -71.5784),
-		geo.NewPoint(41.2042, -71.5511),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	sender := &fakeN2KSender{}
-	svc := &navService{logger: logging.NewTestLogger(t), store: st, n2kSender: sender}
+	svc := &navService{logger: logging.NewTestLogger(t), store: tempStore(t), n2kSender: sender}
+	startRoute(t, svc, navPoint{Lat: 41.1631, Lng: -71.5784}, navPoint{Lat: 41.2042, Lng: -71.5511})
 
 	out, err := svc.DoCommand(ctx, map[string]interface{}{
 		"send_waypoints_n2k": map[string]interface{}{"route_name": "Test Route"},
@@ -229,15 +220,12 @@ func TestDoSendWaypointsN2KErrors(t *testing.T) {
 	}
 
 	// Sender failure surfaces with message context.
-	st := tempStore(t)
-	if _, err := st.ReplaceWaypoints(ctx, []*geo.Point{geo.NewPoint(1, 1)}); err != nil {
-		t.Fatal(err)
-	}
 	svc = &navService{
 		logger:    logging.NewTestLogger(t),
-		store:     st,
+		store:     tempStore(t),
 		n2kSender: &fakeN2KSender{err: errors.New("bus offline")},
 	}
+	startRoute(t, svc, navPoint{Lat: 1, Lng: 1})
 	if _, err := svc.doSendWaypointsN2K(ctx, true); err == nil || !strings.Contains(err.Error(), "bus offline") {
 		t.Fatalf("expected sender error, got %v", err)
 	}

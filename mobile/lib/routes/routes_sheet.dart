@@ -16,7 +16,7 @@ import 'route_store.dart';
 typedef RoutePreview = ({List<LatLng> points, Color color});
 
 /// Saved-routes bottom sheet (E2): list, load, load-reversed, rename, delete,
-/// colour pick, preview-on-map. The mobile RoutesPanel. All persistence goes
+/// through the nav service (Route RPCs plus routes_meta) via [api]; previews are
 /// through the nav service's routes_* DoCommands via [api]; previews are
 /// pushed up to MapScreen through [onPreviews] and stay on the chart after
 /// the sheet closes (unlike web's sidebar, the sheet covers the map — a
@@ -37,9 +37,11 @@ class RoutesSheet extends StatefulWidget {
   final BoatState state;
   final RoutesApi api;
 
-  /// Replace the active route with these waypoints (one atomic
-  /// set_waypoints). Throws on failure so the sheet can show why.
-  final Future<void> Function(List<LatLng> waypoints) onLoad;
+  /// Replace the active route with [waypoints] (one NavigateRoute); [routeId]
+  /// names the saved route when it's loaded as-is (a reversed load is sent
+  /// inline). Throws on failure so the sheet can show why.
+  final Future<void> Function(List<LatLng> waypoints, {String? routeId})
+      onLoad;
 
   /// Push the current preview set (and the toggles that produced it, so a
   /// reopened sheet restores them) up to the map.
@@ -161,7 +163,7 @@ class _RoutesSheetState extends State<RoutesSheet> {
       _error = null;
     });
     try {
-      await widget.onLoad(wps);
+      await widget.onLoad(wps, routeId: reversed ? null : r.id);
       if (mounted) Navigator.of(context).pop(); // show the map, route is live
     } catch (e) {
       if (mounted) {
@@ -213,13 +215,12 @@ class _RoutesSheetState extends State<RoutesSheet> {
     );
     if (ok != true) return;
     final name = nameCtl.text.trim();
-    await _withStore((api) => renameRoute(
+    await _withStore((api) => updateRouteFields(
           api,
           r.id,
-          name: name.isEmpty ? null : name,
+          name: name.isEmpty || name == r.name ? null : name,
           notes: notesCtl.text.trim(),
           color: color,
-          nowIso: DateTime.now().toUtc().toIso8601String(),
         ));
   }
 
@@ -285,18 +286,12 @@ class _RoutesSheetState extends State<RoutesSheet> {
     );
     final name = nameCtl.text.trim();
     if (ok != true || name.isEmpty) return;
-    final now = DateTime.now().toUtc().toIso8601String();
-    await _withStore((api) => saveRoute(
+    await _withStore((api) => createRoute(
           api,
-          Route(
-            id: newRouteId(),
-            name: name,
-            color: color,
-            source: 'manual',
-            createdAt: now,
-            updatedAt: now,
-            waypoints: wps,
-          ),
+          name: name,
+          color: color,
+          source: 'manual',
+          waypoints: wps,
         ));
   }
 
@@ -460,18 +455,12 @@ class _RoutesSheetState extends State<RoutesSheet> {
     final s = simplified;
     final name = nameCtl.text.trim();
     if (saved == true && s != null && s.waypoints.length >= 2) {
-      final now = DateTime.now().toUtc().toIso8601String();
-      await _withStore((api) => saveRoute(
+      await _withStore((api) => createRoute(
             api,
-            Route(
-              id: newRouteId(),
-              name: name.isEmpty ? 'Track route' : name,
-              color: nextColor(_routes),
-              source: 'track',
-              createdAt: now,
-              updatedAt: now,
-              waypoints: s.waypoints,
-            ),
+            name: name.isEmpty ? 'Track route' : name,
+            color: nextColor(_routes),
+            source: 'track',
+            waypoints: s.waypoints,
           ));
     }
     widget.onTrackPreview?.call(null); // candidate gone; the list previews it

@@ -259,8 +259,12 @@ class _SogCogPillState extends State<SogCogPill> {
 }
 
 class EtaPill extends StatelessWidget {
-  const EtaPill({super.key, required this.state});
+  const EtaPill({super.key, required this.state, this.onTogglePause});
   final BoatState state;
+
+  /// Pause (Suspend) or resume the active goal; null hides the button (no
+  /// nav service).
+  final VoidCallback? onTogglePause;
 
   @override
   Widget build(BuildContext context) {
@@ -274,46 +278,76 @@ class EtaPill extends StatelessWidget {
       if (nm != null) '${nm.toStringAsFixed(2)} nm',
       if (nm != null) formatDurationMin(mins), // blank (—), never zero (E5)
     ];
-    if (parts.isEmpty && stats == null) return const SizedBox.shrink();
+    final paused = state.navSuspended;
+    final remainingM = state.navDistanceRemainingM;
+    final showPause = onTogglePause != null && state.navWaypoints.isNotEmpty;
+    if (parts.isEmpty && stats == null && !paused && remainingM == null) {
+      return const SizedBox.shrink();
+    }
     // Final line (E5): the whole remaining route, only when there's more
     // than one waypoint (web shows Final the same way).
     final showFinal = stats != null && stats.waypointCount > 1;
+    const sub = TextStyle(
+        color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w500);
+    final lines = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (paused)
+          const Text(
+            'Paused',
+            style: TextStyle(
+                color: Colors.amberAccent,
+                fontSize: 14,
+                fontWeight: FontWeight.w700),
+          ),
+        if (parts.isNotEmpty)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.flag, size: 14, color: Colors.purpleAccent),
+              const SizedBox(width: 6),
+              Text(
+                parts.join('  ·  '),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        if (showFinal)
+          Text(
+            'Final ${stats.finalNm.toStringAsFixed(1)} nm'
+            '  ·  ${formatDurationMin(stats.finalMinutes)}'
+            '  ·  ETA ${formatEta(stats.finalMinutes)}',
+            style: sub,
+          ),
+        // The nav service's own figure, measured along its planned path.
+        if (remainingM != null)
+          Text('Remaining ${metersToNm(remainingM).toStringAsFixed(1)} nm',
+              style: sub),
+      ],
+    );
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: EdgeInsets.fromLTRB(12, 6, showPause ? 4 : 12, 6),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (parts.isNotEmpty)
-            Row(
+      child: showPause
+          ? Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.flag, size: 14, color: Colors.purpleAccent),
-                const SizedBox(width: 6),
-                Text(
-                  parts.join('  ·  '),
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600),
+                lines,
+                IconButton(
+                  tooltip: paused ? 'Resume route' : 'Pause route',
+                  icon: Icon(paused ? Icons.play_arrow : Icons.pause,
+                      color: Colors.white),
+                  onPressed: onTogglePause,
                 ),
               ],
-            ),
-          if (showFinal)
-            Text(
-              'Final ${stats.finalNm.toStringAsFixed(1)} nm'
-              '  ·  ${formatDurationMin(stats.finalMinutes)}'
-              '  ·  ETA ${formatEta(stats.finalMinutes)}',
-              style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500),
-            ),
-        ],
-      ),
+            )
+          : lines,
     );
   }
 }

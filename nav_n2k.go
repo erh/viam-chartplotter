@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
-
-	"go.viam.com/rdk/services/navigation"
 )
 
 // NMEA 2000 "Route and WP Service" transfer of the active waypoint list.
@@ -124,7 +122,7 @@ func n2kSenderCmd(pgn int, opts n2kRouteOptions, fields map[string]interface{}) 
 // waypoint list: one 130066 attributes message, then 130067 name & position
 // messages chunked to fit a fast-packet each. Pure — no I/O — so the wire
 // content is unit-testable.
-func n2kRouteMessages(wps []navigation.Waypoint, opts n2kRouteOptions) ([]map[string]interface{}, error) {
+func n2kRouteMessages(wps []navPoint, opts n2kRouteOptions) ([]map[string]interface{}, error) {
 	if len(wps) == 0 {
 		return nil, errors.New("no waypoints to send")
 	}
@@ -161,7 +159,7 @@ func n2kRouteMessages(wps []navigation.Waypoint, opts n2kRouteOptions) ([]map[st
 				"WP ID":        i,
 				"WP Name":      name,
 				"WP Latitude":  wps[i].Lat,
-				"WP Longitude": wps[i].Long,
+				"WP Longitude": wps[i].Lng,
 			})
 		}
 		msgs = append(msgs, n2kSenderCmd(pgnRouteWPNamePosition, opts, map[string]interface{}{
@@ -178,7 +176,7 @@ func n2kRouteMessages(wps []navigation.Waypoint, opts n2kRouteOptions) ([]map[st
 }
 
 // doSendWaypointsN2K handles {"send_waypoints_n2k": {...}}: it snapshots the
-// current (unvisited) waypoint list and pushes it out the configured
+// active goal's remaining waypoints and pushes it out the configured
 // n2k_sender as an NMEA 2000 Route and WP Service transfer.
 func (s *navService) doSendWaypointsN2K(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
 	if s.n2kSender == nil {
@@ -189,11 +187,9 @@ func (s *navService) doSendWaypointsN2K(ctx context.Context, raw interface{}) (m
 		return nil, err
 	}
 
-	s.mu.Lock()
-	wps, err := s.store.Waypoints(ctx)
-	s.mu.Unlock()
-	if err != nil {
-		return nil, err
+	var wps []navPoint
+	if g := s.store.Goal(); g.open() {
+		wps = g.remaining()
 	}
 
 	msgs, err := n2kRouteMessages(wps, opts)

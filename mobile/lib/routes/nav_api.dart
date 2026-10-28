@@ -1,92 +1,103 @@
 import 'package:latlong2/latlong.dart';
 import 'package:viam_sdk/viam_sdk.dart';
-// The Dart SDK ships no high-level NavigationClient (a flagged beta gap), so
-// this wraps the generated gRPC stubs directly, borrowing the channel from
-// any existing resource client (they all expose one via ResourceRPCClient).
-// ignore: implementation_imports
-import 'package:viam_sdk/src/gen/common/v1/common.pb.dart' as common_pb;
-// ignore: implementation_imports
-import 'package:viam_sdk/src/gen/service/navigation/v1/navigation.pb.dart'
-    as nav_pb;
-// ignore: implementation_imports
-import 'package:viam_sdk/src/gen/service/navigation/v1/navigation.pbgrpc.dart'
-    as nav_grpc;
-// ignore: implementation_imports
-import 'package:viam_sdk/src/utils.dart' show MapStructUtils, StructUtils;
 
+import 'nav_route.dart';
 import 'route_store.dart';
 
-/// Thin client for the machine's navigation service (E1/E2): waypoint CRUD
-/// via the typed RPCs, everything else via DoCommand verbs. DoCommand goes
-/// through toStruct() — the web app has a scar where a plain object
-/// serialised to an EMPTY command (App.svelte:2329); the Struct conversion
-/// here is explicit for the same reason.
+/// Thin wrapper over the SDK's NavigationClient for the machine's nav
+/// service (E1/E2). The active route is the service's goal: read with
+/// GetNavigationStatus, set with NavigateRoute, paused with Suspend/Resume,
+/// cleared with Cancel (see nav_route.dart). The saved-route library uses
+/// the Route RPCs plus the routes_meta DoCommand (see route_store.dart).
 class NavApi implements RoutesApi {
-  NavApi(this._client, this.name);
+  NavApi(this._client);
 
-  final nav_grpc.NavigationServiceClient _client;
-  final String name;
+  final NavigationClient _client;
 
-  /// The nav service named [name] on the robot, borrowing [channelDonor]'s
-  /// channel (any resource client on the same robot works).
-  static NavApi? fromRobot(RobotClient robot, String name,
-      {required Resource channelDonor}) {
-    if (channelDonor is! ResourceRPCClient) return null;
-    final channel = (channelDonor as ResourceRPCClient).channel;
-    return NavApi(nav_grpc.NavigationServiceClient(channel), name);
+  String get name => _client.name;
+
+  static NavApi fromRobot(RobotClient robot, String name) =>
+      NavApi(NavigationClient.fromRobot(robot, name));
+
+  Future<NavRoute> getRoute() async =>
+      navRouteFromStatus(await _client.getNavigationStatus());
+
+  /// Make [req] the active route, or cancel when it leaves nothing to sail.
+  Future<void> setRoute(NavRouteRequest req) async {
+    if (req.isCancel) {
+      await _client.cancel();
+      return;
+    }
+    await _client.navigateRoute(
+      waypoints: [for (final p in req.waypoints) navWaypointProto(p)],
+      startIndex: req.startIndex,
+    );
   }
 
-  Future<List<NavWaypoint>> getWaypoints() async {
-    final resp = await _client
-        .getWaypoints(nav_pb.GetWaypointsRequest()..name = name);
-    return [
-      for (final w in resp.waypoints)
-        NavWaypoint(
-          id: w.id,
-          pos: LatLng(w.location.latitude, w.location.longitude),
-        ),
-    ];
+  /// Start a saved route by its id (the service accepts a route's id or
+  /// name; the id is unambiguous).
+  Future<void> navigateSavedRoute(String routeId) async {
+    await _client.navigateRoute(routeName: routeId);
   }
 
-  Future<void> addWaypoint(double lat, double lng) async {
-    await _client.addWaypoint(nav_pb.AddWaypointRequest()
-      ..name = name
-      ..location = (common_pb.GeoPoint()
-        ..latitude = lat
-        ..longitude = lng));
+  /// Start an inline route from its first waypoint.
+  Future<void> navigateWaypoints(List<LatLng> waypoints) =>
+      setRoute(navRouteRequest(const [], [
+        for (var i = 0; i < waypoints.length; i++)
+          NavWaypoint(id: '$i', pos: waypoints[i])
+      ]));
+
+  Future<void> cancel() async {
+    await _client.cancel();
   }
 
-  Future<void> removeWaypoint(String id) async {
-    await _client.removeWaypoint(nav_pb.RemoveWaypointRequest()
-      ..name = name
-      ..id = id);
+  /// Pause the goal; returns the route as the service now reports it.
+  Future<NavRoute> suspend() async =>
+      navRouteFromStatus(await _client.suspend(reason: 'paused from app'));
+
+  /// Resume a paused goal; returns the route as the service now reports it.
+  Future<NavRoute> resume() async =>
+      navRouteFromStatus(await _client.resume());
+
+  @override
+  Future<List<ApiRoute>> listApiRoutes() async => [
+        for (final r in await _client.listRoutes())
+          (
+            name: r.name,
+            waypoints: [
+              for (final w in r.waypoints)
+                if (waypointLatLng(w) case final p?) p
+            ],
+          )
+      ];
+
+  @override
+  Future<void> addRoute(
+      String name, List<LatLng> waypoints, Map<String, dynamic> extra) async {
+    await _client.addRoute(
+        name, [for (final p in waypoints) navWaypointProto(p)],
+        extra: extra);
   }
 
   @override
-  Future<Map<String, dynamic>> doCommand(Map<String, dynamic> cmd) async {
-    final request = common_pb.DoCommandRequest()
-      ..name = name
-      ..command = cmd.toStruct();
-    final response = await _client.doCommand(request);
-    return response.result.toMap();
+  Future<void> updateRoute(String id,
+      {String? newName,
+      List<LatLng>? waypoints,
+      Map<String, dynamic>? extra}) async {
+    await _client.updateRoute(
+      id,
+      newName: newName,
+      waypoints: waypoints == null
+          ? null
+          : [for (final p in waypoints) navWaypointProto(p)],
+      extra: extra == null || extra.isEmpty ? null : extra,
+    );
   }
 
-  Future<void> insertWaypoint(String beforeId, double lat, double lng) =>
-      doCommand({
-        'insert_waypoint': {'before_id': beforeId, 'lat': lat, 'lng': lng}
-      });
+  @override
+  Future<void> deleteRoute(String id) => _client.deleteRoute(id);
 
-  Future<void> moveWaypoint(String id, double lat, double lng) => doCommand({
-        'move_waypoint': {'id': id, 'lat': lat, 'lng': lng}
-      });
-
-  /// One atomic replace — how a saved route gets loaded (E2). Callers must
-  /// refetch afterwards so local ids become real backend ObjectIDs.
-  Future<void> setWaypoints(List<LatLng> waypoints) => doCommand({
-        'set_waypoints': {
-          'waypoints': [
-            for (final w in waypoints) {'lat': w.latitude, 'lng': w.longitude}
-          ]
-        }
-      });
+  @override
+  Future<Map<String, dynamic>> doCommand(Map<String, dynamic> cmd) =>
+      _client.doCommand(cmd);
 }

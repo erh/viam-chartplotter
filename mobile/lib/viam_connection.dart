@@ -10,6 +10,7 @@ import 'chart/areas.dart';
 import 'config.dart';
 import 'history.dart';
 import 'routes/nav_api.dart';
+import 'routes/nav_route.dart';
 import 'track.dart';
 import 'routes/route_store.dart';
 import 'settings.dart';
@@ -324,7 +325,6 @@ class ViamConnection {
             _windSensorName ??
             _seatempSensorName ??
             (_tankNames.isEmpty ? null : _tankNames.first));
-    // After the sensor names: NavApi borrows a channel from one of them.
     _discoverNavService(robot);
     final cameras = _discoverCameras(robot);
     state.setCameras(cameras);
@@ -522,13 +522,12 @@ class ViamConnection {
     return null;
   }
 
-  /// Find the machine's navigation service and build the waypoint/routes
-  /// client (E1/E2). The Dart SDK has no high-level NavigationClient, so
-  /// NavApi wraps the generated stubs — it needs an existing resource client
-  /// to borrow a channel from (any sensor on the same robot works).
+  /// Find the machine's navigation service and build the route/routes
+  /// client (E1/E2) on the SDK's NavigationClient.
   void _discoverNavService(RobotClient robot) {
     _navServiceName = null;
     _navApi = null;
+    _navReached = const [];
     try {
       for (final rn in robot.resourceNames) {
         if (rn.subtype == 'navigation') {
@@ -539,48 +538,70 @@ class ViamConnection {
     } catch (_) {}
     final navName = _navServiceName;
     if (navName == null) return;
-    final donorName = _movementSensorName ??
-        _fallbackSensorName ??
-        _aisSensorName ??
-        _routeSensorName;
-    if (donorName == null) return; // no resource to borrow a channel from
-    final donor = donorName == _movementSensorName
-        ? MovementSensor.fromRobot(robot, donorName) as Resource
-        : Sensor.fromRobot(robot, donorName) as Resource;
-    _navApi = NavApi.fromRobot(robot, navName, channelDonor: donor);
+    try {
+      _navApi = NavApi.fromRobot(robot, navName);
+    } catch (_) {
+      // Not in the robot's resource registry (yet); routes stay unavailable.
+    }
   }
 
   /// The nav-service client, or null when the machine has none. The routes
   /// sheet and waypoint editing key their availability off this.
   NavApi? get navApi => _navApi;
 
-  /// Fetch the active waypoint list now (also the 5 s poll body). Edits call
-  /// this right after their RPC so optimistic pending-ids become the
-  /// backend's real ObjectIDs as fast as possible.
+  /// The active route's already-reached waypoints from the last status, so
+  /// an edit can re-send them ahead of the new remaining list.
+  List<LatLng> _navReached = const [];
+
+  /// Fetch the active route now (also the 5 s poll body). Edits call this
+  /// right after their RPC so optimistic pending-ids become the service's
+  /// index ids as fast as possible — and a failed RPC is undone by it.
   Future<void> refreshNavWaypoints() async {
     final nav = _navApi;
     if (nav == null) return;
     try {
-      final wps = await nav.getWaypoints().timeout(_sensorTimeout);
-      state.setNavWaypoints(wps);
+      _applyNavRoute(await nav.getRoute().timeout(_sensorTimeout));
     } catch (_) {}
   }
 
-  /// Load a saved route as the active route (E2): one atomic set_waypoints,
-  /// then a refetch so the ids are real. Throws so the sheet can show why.
-  Future<void> loadRouteWaypoints(List<LatLng> waypoints) async {
-    final nav = _navApi;
-    if (nav == null) throw StateError('No navigation service');
-    await nav.setWaypoints(waypoints).timeout(_sensorTimeout);
+  void _applyNavRoute(NavRoute route) {
+    _navReached = route.reached;
+    state.setNavStatus(route.remaining,
+        suspended: route.suspended,
+        distanceRemainingM: route.distanceRemainingM);
+  }
+
+  /// Pause the active goal (Suspend). The boat stops steering to it, but the
+  /// route and cursor are kept for Resume.
+  Future<void> pauseNav() async =>
+      _applyNavRoute(await _navOrThrow().suspend().timeout(_sensorTimeout));
+
+  /// Resume a paused goal.
+  Future<void> resumeNav() async =>
+      _applyNavRoute(await _navOrThrow().resume().timeout(_sensorTimeout));
+
+  /// Load a route as the active route (E2): a saved one by [routeId], or
+  /// inline [waypoints] (reversed saved routes, auto-routes). Replaces any
+  /// current route; throws so the sheet can show why.
+  Future<void> loadRouteWaypoints(List<LatLng> waypoints,
+      {String? routeId}) async {
+    final nav = _navOrThrow();
+    // A suspended goal must be canceled before a new one can start.
+    if (state.navSuspended) await nav.cancel().timeout(_sensorTimeout);
+    if (routeId != null) {
+      await nav.navigateSavedRoute(routeId).timeout(_sensorTimeout);
+    } else {
+      await nav.navigateWaypoints(waypoints).timeout(_sensorTimeout);
+    }
     await refreshNavWaypoints();
   }
 
   // ---- waypoint edits (E1) ---------------------------------------------
-  // Each applies optimistically (pending-<ts> ids for adds), fires the RPC,
-  // then refetches so local state converges on the backend's ids — a failed
-  // RPC is undone by the same refetch. Move/insert/remove need a REAL id;
-  // a pending one means the add hasn't landed yet, so we refuse rather than
-  // send an id the backend has never heard of.
+  // The navigation API has no per-waypoint verbs: each edit applies the pure
+  // list transform optimistically (pending-<ts> ids for new points), then
+  // re-sends the whole route — reached prefix + new remaining list — with
+  // NavigateRoute, or Cancel when nothing is left. The refetch after it
+  // converges local state on the service's (or undoes a failed edit).
 
   NavApi _navOrThrow() {
     final nav = _navApi;
@@ -588,78 +609,40 @@ class ViamConnection {
     return nav;
   }
 
-  Future<void> addNavWaypoint(LatLng pos) async {
+  Future<void> _applyNavEdit(List<NavWaypoint> remaining) async {
     final nav = _navOrThrow();
-    state.setNavWaypoints(waypointsWithAdded(state.navWaypoints,
-        NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
+    state.setNavWaypoints(remaining);
     try {
       await nav
-          .addWaypoint(pos.latitude, pos.longitude)
+          .setRoute(navRouteRequest(_navReached, remaining))
           .timeout(_sensorTimeout);
     } finally {
       await refreshNavWaypoints();
     }
   }
 
-  Future<void> moveNavWaypoint(String id, LatLng pos) async {
-    final nav = _navOrThrow();
-    if (id.startsWith('pending-')) {
-      throw StateError('Waypoint is still syncing — try again in a moment');
-    }
-    state.setNavWaypoints(waypointsWithMoved(state.navWaypoints, id, pos));
-    try {
-      await nav
-          .moveWaypoint(id, pos.latitude, pos.longitude)
-          .timeout(_sensorTimeout);
-    } finally {
-      await refreshNavWaypoints();
-    }
-  }
+  Future<void> addNavWaypoint(LatLng pos) => _applyNavEdit(waypointsWithAdded(
+      state.navWaypoints,
+      NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
 
-  Future<void> insertNavWaypointBefore(String beforeId, LatLng pos) async {
-    final nav = _navOrThrow();
-    if (beforeId.startsWith('pending-')) {
-      throw StateError('Waypoint is still syncing — try again in a moment');
-    }
-    state.setNavWaypoints(waypointsWithInsertedBefore(
-        state.navWaypoints,
-        beforeId,
-        NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
-    try {
-      await nav
-          .insertWaypoint(beforeId, pos.latitude, pos.longitude)
-          .timeout(_sensorTimeout);
-    } finally {
-      await refreshNavWaypoints();
-    }
-  }
+  Future<void> moveNavWaypoint(String id, LatLng pos) =>
+      _applyNavEdit(waypointsWithMoved(state.navWaypoints, id, pos));
 
-  Future<void> removeNavWaypoint(String id) async {
-    // A pending waypoint only exists locally: drop it and let the next poll
-    // reconcile whatever the in-flight add ends up creating.
-    state.setNavWaypoints(waypointsWithRemoved(state.navWaypoints, id));
-    if (id.startsWith('pending-')) return;
-    final nav = _navOrThrow();
-    try {
-      await nav.removeWaypoint(id).timeout(_sensorTimeout);
-    } finally {
-      await refreshNavWaypoints();
-    }
-  }
+  Future<void> insertNavWaypointBefore(String beforeId, LatLng pos) =>
+      _applyNavEdit(waypointsWithInsertedBefore(
+          state.navWaypoints,
+          beforeId,
+          NavWaypoint(id: pendingWaypointId(DateTime.now()), pos: pos)));
 
-  /// Clear the whole active route: the nav service has no clear verb, so
-  /// loop removeWaypoint over the real ids (web does the same).
+  Future<void> removeNavWaypoint(String id) =>
+      _applyNavEdit(waypointsWithRemoved(state.navWaypoints, id));
+
+  /// Clear the whole active route: Cancel the goal.
   Future<void> clearNavWaypoints() async {
     final nav = _navOrThrow();
-    final ids = [
-      for (final w in state.navWaypoints)
-        if (!w.isPending) w.id
-    ];
     state.setNavWaypoints(const []);
     try {
-      for (final id in ids) {
-        await nav.removeWaypoint(id).timeout(_sensorTimeout);
-      }
+      await nav.cancel().timeout(_sensorTimeout);
     } finally {
       await refreshNavWaypoints();
     }
@@ -925,7 +908,8 @@ class ViamConnection {
 
     // Active nav-service waypoints (E1): slow cadence, offset from the AIS
     // and systems ticks so the slow-cycle reads don't all pile into one tick.
-    if (_navApi != null && _tickN % 5 == 3) await refreshNavWaypoints();
+    // Own cadence, not awaited: a slow nav service mustn't stall the poll.
+    if (_navApi != null && _tickN % 5 == 3) unawaited(refreshNavWaypoints());
   }
 
   /// How long to wait before the next re-dial, given [attempts] failures so
