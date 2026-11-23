@@ -333,7 +333,7 @@ entering the arrival radius, and rejoining a route mid-way).
 |-----------|------|---------|-------------|
 | `movement_sensor` | string | — | name of a movement sensor for position (becomes a dependency) |
 | `data_path` | string | — | file path to persist saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
-| `n2k_sender` | string | — | name of a generic component whose DoCommand sends raw NMEA 2000 PGNs (e.g. a `viam-labs:viamboat:sender`; becomes a dependency). Enables `send_waypoints_n2k`. |
+| `base` | string | — | name of a base to steer by heading (e.g. an [`n2k-base`](#n2k-base); becomes a dependency; requires `movement_sensor`). Enables steering and `send_waypoints`. |
 
 ```json
 {
@@ -341,18 +341,61 @@ entering the arrival radius, and rejoining a route mid-way).
   "namespace": "rdk",
   "type": "navigation",
   "model": "erh:viam-chartplotter:nav",
-  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json", "n2k_sender": "n2k-sender" }
+  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json", "base": "autopilot" }
 }
 ```
 
-With `n2k_sender` configured, the DoCommand
-`{"send_waypoints_n2k": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
-pushes the active goal's remaining waypoints onto the NMEA 2000 bus as a Route and WP
-Service transfer — one PGN 130066 (Route/WP-List Attributes) followed by PGN
-130067 (Route – WP Name & Position) messages, chunked to fit fast-packets — so
-a chartplotter (e.g. Garmin) on the same backbone can pick the route up. All
-payload fields are optional; pass `true` for the defaults (route name
-"Chartplotter", broadcast).
+With a `base` configured, the service steers: every arrival-poller tick (5 s)
+with an active goal it sends the base
+`DoCommand({"set_heading": <degrees true>})`, the great-circle bearing from the
+boat to the next waypoint. When the goal stops being active (completed,
+canceled, suspended) it calls the base's `Stop` once. Two DoCommands go with it:
+
+- `{"set_heading": <degrees>}` — steer the base by hand (the poller overrides
+  it on its next tick while a goal is active).
+- `{"send_waypoints": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
+  (alias `send_waypoints_n2k`) — hands the active goal's remaining waypoints to
+  the base as `{"send_waypoints": {..., "waypoints": [{"lat", "lng"}, ...]}}`.
+  All fields are optional; pass `true` for the defaults.
+
+---
+
+## n2k-base
+
+`erh:viam-chartplotter:n2k-base` (`rdk:component:base`) steers a boat through
+an NMEA 2000 autopilot. It doesn't own a CAN interface: it sends raw PGNs via a
+generic sender component (e.g. `viam-labs:viamboat:sender`) whose DoCommand
+accepts `{"pgn", "priority", "dst", "fields"}` with canboat field names.
+
+| attribute | type | default | description |
+|-----------|------|---------|-------------|
+| `sender` | string | **required** | name of the generic sender component (becomes a dependency) |
+| `dst` | int | broadcast | source address of the autopilot to address commands to |
+
+```json
+{
+  "name": "autopilot",
+  "api": "rdk:component:base",
+  "model": "erh:viam-chartplotter:n2k-base",
+  "attributes": { "sender": "n2k-sender" }
+}
+```
+
+DoCommand:
+
+- `{"set_heading": <degrees true>}` — sends PGN 127237 Heading/Track Control
+  (`Steering Mode` "Heading Control", `Heading Reference` "True",
+  `Heading-To-Steer (Course)` in degrees).
+- `{"get_heading": true}` — the last heading commanded, or `null`.
+- `{"send_waypoints": {"waypoints": [{"lat", "lng"}, ...], "route_name"?, "database_id"?, "route_id"?, "dst"?}}`
+  — a Route and WP Service transfer: one PGN 130066 (Route/WP-List Attributes)
+  followed by PGN 130067 (Route – WP Name & Position) messages, chunked to fit
+  fast-packets, so a chartplotter (e.g. Garmin) on the same backbone can pick
+  the route up. Defaults: route name "Chartplotter", the base's `dst`.
+
+`Stop` forgets the heading but sends nothing — the autopilot keeps holding the
+last heading; putting it in standby is left to the helm. `MoveStraight`,
+`Spin`, `SetPower` and `SetVelocity` return an error.
 
 ---
 

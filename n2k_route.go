@@ -1,7 +1,6 @@
 package vc
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/pkg/errors"
@@ -9,8 +8,8 @@ import (
 
 // NMEA 2000 "Route and WP Service" transfer of the active waypoint list.
 //
-// The nav service doesn't own a CAN interface; it delegates to a configured
-// generic sender component (`n2k_sender`, e.g. viam-labs:viamboat:sender)
+// The n2k-base doesn't own a CAN interface; it delegates to its configured
+// generic sender component (`sender`, e.g. viam-labs:viamboat:sender)
 // whose DoCommand accepts {"pgn", "priority", "dst", "fields"} and marshals
 // the fields with canboat field names. A transfer is one PGN 130066
 // (Route/WP-List Attributes) announcing the route, followed by PGN 130067
@@ -53,7 +52,7 @@ type n2kRouteOptions struct {
 	Dst int
 }
 
-// parseN2KRouteOptions accepts the send_waypoints_n2k payload: either a
+// parseN2KRouteOptions accepts the send_waypoints payload: either a
 // non-object truthy value for all defaults, or an options object. Numbers
 // arrive as float64 when the command crosses gRPC.
 func parseN2KRouteOptions(raw interface{}) (n2kRouteOptions, error) {
@@ -85,17 +84,17 @@ func parseN2KRouteOptions(raw interface{}) (n2kRouteOptions, error) {
 		case int:
 			*target = n
 		default:
-			return opts, errors.Errorf("send_waypoints_n2k.%s must be a number, got %T", key, v)
+			return opts, errors.Errorf("send_waypoints.%s must be a number, got %T", key, v)
 		}
 	}
 	if opts.DatabaseID < 0 || opts.DatabaseID > 252 {
-		return opts, errors.Errorf("send_waypoints_n2k.database_id out of range: %d", opts.DatabaseID)
+		return opts, errors.Errorf("send_waypoints.database_id out of range: %d", opts.DatabaseID)
 	}
 	if opts.RouteID < 0 || opts.RouteID > 252 {
-		return opts, errors.Errorf("send_waypoints_n2k.route_id out of range: %d", opts.RouteID)
+		return opts, errors.Errorf("send_waypoints.route_id out of range: %d", opts.RouteID)
 	}
 	if opts.Dst > 255 {
-		return opts, errors.Errorf("send_waypoints_n2k.dst out of range: %d", opts.Dst)
+		return opts, errors.Errorf("send_waypoints.dst out of range: %d", opts.Dst)
 	}
 	return opts, nil
 }
@@ -173,40 +172,4 @@ func n2kRouteMessages(wps []navPoint, opts n2kRouteOptions) ([]map[string]interf
 		start += len(list)
 	}
 	return msgs, nil
-}
-
-// doSendWaypointsN2K handles {"send_waypoints_n2k": {...}}: it snapshots the
-// active goal's remaining waypoints and pushes it out the configured
-// n2k_sender as an NMEA 2000 Route and WP Service transfer.
-func (s *navService) doSendWaypointsN2K(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
-	if s.n2kSender == nil {
-		return nil, errors.New("send_waypoints_n2k: nav service has no n2k_sender configured")
-	}
-	opts, err := parseN2KRouteOptions(raw)
-	if err != nil {
-		return nil, err
-	}
-
-	var wps []navPoint
-	if g := s.store.Goal(); g.open() {
-		wps = g.remaining()
-	}
-
-	msgs, err := n2kRouteMessages(wps, opts)
-	if err != nil {
-		return nil, err
-	}
-	for i, msg := range msgs {
-		if _, err := s.n2kSender.DoCommand(ctx, msg); err != nil {
-			return nil, errors.Wrapf(err, "send_waypoints_n2k: sender failed on message %d of %d (pgn %v)",
-				i+1, len(msgs), msg["pgn"])
-		}
-	}
-	s.logger.Infof("sent %d waypoints as n2k route %q (%d messages)", len(wps), opts.RouteName, len(msgs))
-	return map[string]interface{}{
-		"ok":         true,
-		"waypoints":  len(wps),
-		"messages":   len(msgs),
-		"route_name": opts.RouteName,
-	}, nil
 }

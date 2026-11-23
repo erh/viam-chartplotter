@@ -11,7 +11,7 @@ import (
 	"github.com/pkg/errors"
 
 	"go.viam.com/rdk/app"
-	"go.viam.com/rdk/components/generic"
+	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -38,13 +38,15 @@ func init() {
 // and the latest goal across restarts. When empty, state persists to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
 //
-// N2KSender is optional; when set it names a generic component (e.g. a
-// viam-labs:viamboat:sender) whose DoCommand sends raw NMEA 2000 PGNs, and it
-// enables the send_waypoints_n2k DoCommand (see nav_n2k.go).
+// Base is optional; when set it names the base the service steers by
+// setting its heading toward the active goal's next waypoint (see
+// nav_steer.go), e.g. an erh:viam-chartplotter:n2k-base driving an NMEA 2000
+// autopilot. It requires MovementSensor, and also enables the send_waypoints
+// DoCommand, which hands the active route to the base.
 type NavConfig struct {
 	MovementSensor string `json:"movement_sensor,omitempty"`
 	DataPath       string `json:"data_path,omitempty"`
-	N2KSender      string `json:"n2k_sender,omitempty"`
+	Base           string `json:"base,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -54,8 +56,11 @@ func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.MovementSensor != "" {
 		deps = append(deps, cfg.MovementSensor)
 	}
-	if cfg.N2KSender != "" {
-		deps = append(deps, cfg.N2KSender)
+	if cfg.Base != "" {
+		if cfg.MovementSensor == "" {
+			return nil, nil, errors.Errorf("%s: base requires movement_sensor (steering needs the boat's position)", path)
+		}
+		deps = append(deps, cfg.Base)
 	}
 	return deps, nil, nil
 }
@@ -144,6 +149,17 @@ func newNav(
 	}
 	logger.Infof("nav state persisted at %s", dataPath)
 
+	// The base must be in place before the arrival poller starts: the poller
+	// does the steering.
+	if cfg.Base != "" {
+		b, err := base.FromDependencies(deps, cfg.Base)
+		if err != nil {
+			return nil, errors.Wrapf(err, "could not get base %q", cfg.Base)
+		}
+		svc.base = b
+		logger.Infof("nav steering enabled: setting heading on base %q", cfg.Base)
+	}
+
 	if cfg.MovementSensor == "" {
 		logger.Warnf("nav auto-arrival disabled: no `movement_sensor` configured; route goals only change via explicit API calls")
 	} else {
@@ -155,15 +171,6 @@ func newNav(
 		svc.startArrivalPoller()
 		logger.Infof("nav auto-arrival enabled: arrival<%.0fm, near<%.0fm, polling every %s",
 			arrivalDistanceMeters, nearWaypointMeters, arrivalCheckInterval)
-	}
-
-	if cfg.N2KSender != "" {
-		sender, err := generic.FromDependencies(deps, cfg.N2KSender)
-		if err != nil {
-			return nil, errors.Wrapf(err, "could not get n2k_sender %q", cfg.N2KSender)
-		}
-		svc.n2kSender = sender
-		logger.Infof("nav n2k waypoint export enabled via sender %q", cfg.N2KSender)
 	}
 
 	return svc, nil
@@ -184,9 +191,13 @@ type navService struct {
 	store *diskNavStore
 	ms    movementsensor.MovementSensor
 
-	// Optional generic component that sends raw NMEA 2000 PGNs via its
-	// DoCommand (config `n2k_sender`); nil disables send_waypoints_n2k.
-	n2kSender resource.Resource
+	// Optional base the service steers by heading (config `base`, see
+	// nav_steer.go); nil disables steering and send_waypoints.
+	base base.Base
+	// steerMu guards steerHeading, the last heading sent to base (nil when
+	// not steering).
+	steerMu      sync.Mutex
+	steerHeading *float64
 
 	// Cancellation for the background arrival poller, if started.
 	arrivalCancel context.CancelFunc
@@ -362,6 +373,9 @@ func (s *navService) checkArrival(ctx context.Context) error {
 			"lat", pt.Lat(), "lng", pt.Lng())
 		return nil
 	}
+	// Steer after this tick's arrival/rejoin decisions have advanced the
+	// goal, so the heading points at the waypoint that is next now.
+	defer s.steer(ctx, pt.Lat(), pt.Lng())
 	g := s.store.Goal()
 	if g == nil || g.State != goalActive {
 		state := "none"
@@ -480,7 +494,8 @@ func (s *navService) Status(ctx context.Context) (map[string]interface{}, error)
 //
 //	{"routes_meta":     true}
 //	{"arrival_status":  true}
-//	{"send_waypoints_n2k": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
+//	{"send_waypoints": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
+//	{"set_heading":     <degrees true>}
 //	{"set_display_resources": {"movement_sensor"?: ..., "depth_sensor"?: ..., "route_sensor"?: ..., "cameras"?: [...]}}
 //
 // routes_meta returns the saved-route fields the API's Route message can't
@@ -488,10 +503,14 @@ func (s *navService) Status(ctx context.Context) (map[string]interface{}, error)
 // (see nav_routes.go). Routes themselves are read and written through the
 // Route RPCs, with notes/color/source in extra.
 //
-// send_waypoints_n2k pushes the active goal's remaining waypoints onto the
-// NMEA 2000 bus as a Route and WP Service transfer (PGNs 130066 + 130067) via
-// the configured n2k_sender component (see nav_n2k.go). All payload fields
-// are optional; pass true for the defaults.
+// send_waypoints hands the active goal's remaining waypoints to the
+// configured base as {"send_waypoints": {..., "waypoints": [{lat, lng}]}};
+// the n2k-base puts them on the NMEA 2000 bus as a Route and WP Service
+// transfer (see n2k_route.go). All payload fields are optional; pass true for
+// the defaults. send_waypoints_n2k is accepted as an alias.
+//
+// set_heading steers the base by hand. The poller overrides it on its next
+// tick while a goal is active.
 //
 // set_display_resources records which machine resources the web app picked
 // during its own discovery (see displaypicks.go); the LAN display API falls
@@ -507,8 +526,21 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	if _, ok := cmd["arrival_status"]; ok {
 		return s.doArrivalStatus(ctx)
 	}
+	if raw, ok := cmd["send_waypoints"]; ok {
+		return s.doSendWaypoints(ctx, raw)
+	}
 	if raw, ok := cmd["send_waypoints_n2k"]; ok {
-		return s.doSendWaypointsN2K(ctx, raw)
+		return s.doSendWaypoints(ctx, raw)
+	}
+	if raw, ok := cmd["set_heading"]; ok {
+		h, ok := raw.(float64)
+		if !ok {
+			return nil, errors.Errorf("set_heading must be a number of degrees, got %T", raw)
+		}
+		if err := s.setBaseHeading(ctx, h); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"heading": normalizeDegrees(h)}, nil
 	}
 	if raw, ok := cmd["set_display_resources"]; ok {
 		return s.doSetDisplayResources(raw)
@@ -556,6 +588,7 @@ func (s *navService) doSetDisplayResources(raw interface{}) (map[string]interfac
 func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{}, error) {
 	out := map[string]interface{}{
 		"auto_arrival_enabled": s.ms != nil && s.arrivalCancel != nil,
+		"steering_enabled":     s.base != nil,
 		"arrival_distance_m":   arrivalDistanceMeters,
 		"near_waypoint_m":      nearWaypointMeters,
 		"check_interval":       arrivalCheckInterval.String(),

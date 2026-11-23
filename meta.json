@@ -18,6 +18,12 @@
       "markdown_link": "README.md#navigation"
     },
     {
+      "api": "rdk:component:base",
+      "model": "erh:viam-chartplotter:n2k-base",
+      "description": "Steers a boat through an NMEA 2000 autopilot: set_heading sends PGN 127237 via a generic N2K sender component; also transfers routes (PGN 130066/130067).",
+      "markdown_link": "README.md#n2k-base"
+    },
+    {
       "api": "rdk:component:generic",
       "model": "erh:viam-chartplotter:area",
       "description": "A geographic region drawn on the chart: GeoJSON geometry or center + radius (optionally a bearing-limited wedge), with a display color and an optional recurring MM-DD date window.",

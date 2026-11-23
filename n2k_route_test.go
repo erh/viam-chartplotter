@@ -181,14 +181,24 @@ func (f *fakeN2KSender) DoCommand(_ context.Context, cmd map[string]interface{})
 	return map[string]interface{}{"sent": true}, nil
 }
 
-func TestDoSendWaypointsN2K(t *testing.T) {
+func wpPayload(pts ...navPoint) []interface{} {
+	out := make([]interface{}, len(pts))
+	for i, p := range pts {
+		out[i] = map[string]interface{}{"lat": p.Lat, "lng": p.Lng}
+	}
+	return out
+}
+
+func TestN2KBaseSendWaypoints(t *testing.T) {
 	ctx := context.Background()
 	sender := &fakeN2KSender{}
-	svc := &navService{logger: logging.NewTestLogger(t), store: tempStore(t), n2kSender: sender}
-	startRoute(t, svc, navPoint{Lat: 41.1631, Lng: -71.5784}, navPoint{Lat: 41.2042, Lng: -71.5511})
+	b := &n2kBase{logger: logging.NewTestLogger(t), sender: sender, dst: 9}
 
-	out, err := svc.DoCommand(ctx, map[string]interface{}{
-		"send_waypoints_n2k": map[string]interface{}{"route_name": "Test Route"},
+	out, err := b.DoCommand(ctx, map[string]interface{}{
+		"send_waypoints": map[string]interface{}{
+			"route_name": "Test Route",
+			"waypoints":  wpPayload(navPoint{Lat: 41.1631, Lng: -71.5784}, navPoint{Lat: 41.2042, Lng: -71.5511}),
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,31 +212,97 @@ func TestDoSendWaypointsN2K(t *testing.T) {
 	if sender.cmds[0]["pgn"] != pgnRouteWPListAttributes || sender.cmds[1]["pgn"] != pgnRouteWPNamePosition {
 		t.Fatalf("wrong pgn order: %v, %v", sender.cmds[0]["pgn"], sender.cmds[1]["pgn"])
 	}
+	// The base's configured dst applies when the payload doesn't set one.
+	if sender.cmds[0]["dst"] != 9 {
+		t.Fatalf("dst = %v, want base default 9", sender.cmds[0]["dst"])
+	}
 }
 
-func TestDoSendWaypointsN2KErrors(t *testing.T) {
+func TestN2KBaseSendWaypointsErrors(t *testing.T) {
 	ctx := context.Background()
+	b := &n2kBase{logger: logging.NewTestLogger(t), sender: &fakeN2KSender{}, dst: -1}
 
-	// No sender configured.
-	svc := &navService{logger: logging.NewTestLogger(t), store: tempStore(t)}
-	if _, err := svc.doSendWaypointsN2K(ctx, true); err == nil || !strings.Contains(err.Error(), "n2k_sender") {
-		t.Fatalf("expected no-sender error, got %v", err)
+	if _, err := b.sendWaypoints(ctx, map[string]interface{}{}); err == nil || !strings.Contains(err.Error(), "waypoints is required") {
+		t.Fatalf("expected missing-waypoints error, got %v", err)
 	}
-
-	// Empty waypoint list.
-	svc = &navService{logger: logging.NewTestLogger(t), store: tempStore(t), n2kSender: &fakeN2KSender{}}
-	if _, err := svc.doSendWaypointsN2K(ctx, true); err == nil || !strings.Contains(err.Error(), "no waypoints") {
+	if _, err := b.sendWaypoints(ctx, map[string]interface{}{"waypoints": []interface{}{}}); err == nil || !strings.Contains(err.Error(), "no waypoints") {
 		t.Fatalf("expected empty-list error, got %v", err)
+	}
+	if _, err := b.sendWaypoints(ctx, map[string]interface{}{"waypoints": []interface{}{map[string]interface{}{"lat": 1.0}}}); err == nil {
+		t.Fatal("expected error for waypoint without lng")
 	}
 
 	// Sender failure surfaces with message context.
-	svc = &navService{
-		logger:    logging.NewTestLogger(t),
-		store:     tempStore(t),
-		n2kSender: &fakeN2KSender{err: errors.New("bus offline")},
-	}
-	startRoute(t, svc, navPoint{Lat: 1, Lng: 1})
-	if _, err := svc.doSendWaypointsN2K(ctx, true); err == nil || !strings.Contains(err.Error(), "bus offline") {
+	b = &n2kBase{logger: logging.NewTestLogger(t), sender: &fakeN2KSender{err: errors.New("bus offline")}, dst: -1}
+	_, err := b.sendWaypoints(ctx, map[string]interface{}{"waypoints": wpPayload(navPoint{Lat: 1, Lng: 1})})
+	if err == nil || !strings.Contains(err.Error(), "bus offline") {
 		t.Fatalf("expected sender error, got %v", err)
+	}
+}
+
+func TestN2KBaseSetHeading(t *testing.T) {
+	ctx := context.Background()
+	sender := &fakeN2KSender{}
+	b := &n2kBase{logger: logging.NewTestLogger(t), sender: sender, dst: -1}
+
+	if moving, _ := b.IsMoving(ctx); moving {
+		t.Fatal("fresh base should not be moving")
+	}
+	out, err := b.DoCommand(ctx, map[string]interface{}{"set_heading": -90.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["heading"] != 270.0 {
+		t.Fatalf("heading = %v, want normalised 270", out["heading"])
+	}
+	if len(sender.cmds) != 1 {
+		t.Fatalf("sender got %d commands, want 1", len(sender.cmds))
+	}
+	cmd := sender.cmds[0]
+	if cmd["pgn"] != pgnHeadingTrackControl || cmd["priority"] != headingPriority {
+		t.Fatalf("bad envelope: %v", cmd)
+	}
+	if _, hasDst := cmd["dst"]; hasDst {
+		t.Fatalf("dst should be omitted when broadcasting: %v", cmd)
+	}
+	fields := cmd["fields"].(map[string]interface{})
+	if fields["Heading-To-Steer (Course)"] != 270.0 || fields["Heading Reference"] != "True" {
+		t.Fatalf("bad fields: %v", fields)
+	}
+	if moving, _ := b.IsMoving(ctx); !moving {
+		t.Fatal("base should be moving after set_heading")
+	}
+	got, _ := b.DoCommand(ctx, map[string]interface{}{"get_heading": true})
+	if got["heading"] != 270.0 {
+		t.Fatalf("get_heading = %v", got)
+	}
+
+	// Stop forgets the heading and sends nothing to the bus.
+	if err := b.Stop(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if moving, _ := b.IsMoving(ctx); moving || len(sender.cmds) != 1 {
+		t.Fatalf("after Stop: moving=%v, sender cmds=%d", moving, len(sender.cmds))
+	}
+
+	if _, err := b.DoCommand(ctx, map[string]interface{}{"set_heading": "north"}); err == nil {
+		t.Fatal("expected type error for string heading")
+	}
+	if err := b.Spin(ctx, 90, 10, nil); err == nil {
+		t.Fatal("Spin should be unsupported")
+	}
+}
+
+func TestN2KBaseConfigValidate(t *testing.T) {
+	if _, _, err := (&N2KBaseConfig{}).Validate("b"); err == nil {
+		t.Fatal("expected sender-required error")
+	}
+	deps, _, err := (&N2KBaseConfig{Sender: "n2k-sender"}).Validate("b")
+	if err != nil || len(deps) != 1 || deps[0] != "n2k-sender" {
+		t.Fatalf("deps=%v err=%v", deps, err)
+	}
+	bad := 300
+	if _, _, err := (&N2KBaseConfig{Sender: "s", Dst: &bad}).Validate("b"); err == nil {
+		t.Fatal("expected dst range error")
 	}
 }
