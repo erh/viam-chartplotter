@@ -512,6 +512,7 @@ func (s *navService) Cancel(ctx context.Context, extra map[string]interface{}) (
 	if err != nil {
 		return navigation.Status{}, err
 	}
+	s.stopSteering(ctx)
 	return s.GetNavigationStatus(ctx, extra)
 }
 

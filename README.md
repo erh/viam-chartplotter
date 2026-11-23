@@ -7,7 +7,8 @@ several models — one serves the app, the others keep MongoDB populated.
 | model | API | role |
 |-------|-----|------|
 | [`chartplotter`](#chartplotter) | generic | the web UI + tile/weather server (reads charts + weather from Mongo) |
-| [`nav`](#navigation) | navigation | persistent waypoint/route navigation service for the UI |
+| [`nav`](#navigation) | navigation | persistent waypoint/route navigation service for the UI; optionally steers a base |
+| [`n2k-base`](#n2k-base) | base | steers the boat through an NMEA 2000 autopilot (set a heading, push a route) |
 | [`area`](#area) | generic | a region (GeoJSON or center+radius) + color the chartplotter draws as an overlay |
 | [`datasync`](#datasync) | generic | keeps the `noaa` collection current (whole NOAA ENC catalog) |
 | [`weathersync`](#weathersync) | generic | decodes weather forecasts into the `weather` collection |
@@ -305,11 +306,51 @@ light up the display API for good.
 ## navigation
 
 `erh:viam-chartplotter:nav` — a `rdk:service:navigation` service (the
-locations / routes / goals API, rdk ≥ v1.13) for a GPS map. It doesn't steer
-the boat: a goal is the list of waypoints the skipper or autopilot is
-following, and with a `movement_sensor` the service advances the goal's
-cursor as the boat reaches each waypoint (including rounding a mark without
-entering the arrival radius, and rejoining a route mid-way).
+locations / routes / goals API, rdk ≥ v1.13) for a GPS map. It keeps track of
+**where the boat is going**: the active route, saved locations and saved
+routes. Optionally it also **steers**, by pointing a base at the next waypoint.
+
+What each attribute turns on:
+
+| you configure | you get |
+|---------------|---------|
+| nothing | routes, goals and saved locations through the API; the goal only moves when a client calls the API |
+| `movement_sensor` | **auto-arrival**: the goal advances by itself as the boat reaches each waypoint (including rounding a mark without entering the arrival radius, and rejoining a route mid-way) |
+| `movement_sensor` + `base` | auto-arrival **and steering**: every 5 s the service tells the base which heading to hold to reach the next waypoint |
+
+### attributes
+
+| attribute | type | default | description |
+|-----------|------|---------|-------------|
+| `movement_sensor` | string | — | movement sensor giving the boat's position (becomes a dependency). Needed for auto-arrival and steering. |
+| `data_path` | string | OS cache dir | file that persists saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
+| `base` | string | — | base to steer (becomes a dependency), usually an [`n2k-base`](#n2k-base). Requires `movement_sensor`. |
+
+Tracking only:
+
+```json
+{
+  "name": "nav",
+  "namespace": "rdk",
+  "type": "navigation",
+  "model": "erh:viam-chartplotter:nav",
+  "attributes": { "movement_sensor": "gps" }
+}
+```
+
+Tracking and steering (see [n2k-base](#n2k-base) for the full autopilot setup):
+
+```json
+{
+  "name": "nav",
+  "namespace": "rdk",
+  "type": "navigation",
+  "model": "erh:viam-chartplotter:nav",
+  "attributes": { "movement_sensor": "gps", "base": "autopilot" }
+}
+```
+
+### using it
 
 - **Active route** — `NavigateRoute` with a saved route (by name or id) or
   inline waypoints; `GetNavigationStatus` reports the goal (state, the route's
@@ -325,34 +366,140 @@ entering the arrival radius, and rejoining a route mid-way).
   read-only). Routes are addressed by id or name. The fields the API's `Route`
   has no slot for travel in `extra` (`notes`, `color`, `source` on `AddRoute`;
   `notes`, `color` on `UpdateRoute`) and come back through the
-  `{"routes_meta": true}` DoCommand: `{routes: [{id, name, notes?, color?,
-  source, createdAt, updatedAt, stats, scope}]}` in `ListRoutes` order.
+  `routes_meta` DoCommand below.
 - Zones and costmaps are not supported.
 
-| attribute | type | default | description |
-|-----------|------|---------|-------------|
-| `movement_sensor` | string | — | name of a movement sensor for position (becomes a dependency) |
-| `data_path` | string | — | file path to persist saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
-| `n2k_sender` | string | — | name of a generic component whose DoCommand sends raw NMEA 2000 PGNs (e.g. a `viam-labs:viamboat:sender`; becomes a dependency). Enables `send_waypoints_n2k`. |
+### steering
+
+With a `base` configured, while a goal is **active**:
+
+1. Every 5 s the service reads the boat's position and compass heading from
+   `movement_sensor`.
+2. If the boat has reached the current waypoint, the goal moves on to the next.
+3. It computes the bearing from the boat to the waypoint it is now heading for,
+   and the turn from the current heading to that bearing, and calls the base's
+   standard **`Spin(turn)`** — positive turns left, negative right, the short
+   way round (±180°). Re-sending every tick keeps the autopilot's input fresh.
+
+Steering uses only the standard base API (`Spin` and `Stop`), so any base can
+be steered, not just an `n2k-base`. The `movement_sensor` must report a
+compass heading; without one the service tracks the route but doesn't steer.
+
+When the goal stops being active — the last waypoint is reached, or it is
+canceled or suspended — the service calls the base's `Stop` once. So to start
+steering, start a route or goal (from the web Routes panel or `NavigateRoute`);
+to stop, cancel or suspend it.
+
+The heading always points straight at the next waypoint from wherever the
+boat is now, so after being set off the line the boat heads directly for the
+mark rather than back onto the original track.
+
+### DoCommands
+
+| command | what it does |
+|---------|--------------|
+| `{"arrival_status": true}` | snapshot of auto-arrival: boat position, current waypoint, distances, and whether auto-arrival and steering are enabled. Use it to see why a waypoint didn't advance. |
+| `{"routes_meta": true}` | the saved-route fields `Route` can't carry: `{routes: [{id, name, notes?, color?, source, createdAt, updatedAt, stats, scope}]}`, in `ListRoutes` order |
+| `{"send_waypoints": true}` | hand the active goal's remaining waypoints to the base (needs `base`). On an `n2k-base` this puts the route on the NMEA 2000 bus for other plotters. Optional fields: `{"route_name", "database_id", "route_id", "dst"}`. Alias: `send_waypoints_n2k`. |
+| `{"set_display_resources": {...}}` | used by the web app to record which sensors/cameras it picked, for the LAN display API |
+
+---
+
+## n2k-base
+
+`erh:viam-chartplotter:n2k-base` — a `rdk:component:base` that steers the boat
+through an **NMEA 2000 autopilot**, using the standard base API: `Spin(angle)`
+means "turn this many degrees from where the boat is pointing now", so the base
+reads the boat's current heading from its `movement_sensor` and tells the
+autopilot to hold the new heading. The autopilot does the turning. The base can
+also put a route on the NMEA 2000 bus so another chartplotter (e.g. a Garmin)
+can show it.
+
+Example: the boat is heading 010°. `Spin(30)` (30° left) → the autopilot is told
+to hold 340°. `Spin(-90)` (90° right) → 100°.
+
+It doesn't talk to the CAN bus itself. It sends each message through a
+**sender**: a generic component whose DoCommand accepts
+`{"pgn", "priority", "dst", "fields"}` with canboat field names, such as
+`viam-labs:viamboat:sender`.
+
+### how the pieces connect
+
+```
+nav service ──Spin(turn)──▶ n2k-base ──PGN 127237──▶ sender ──▶ NMEA 2000 bus ──▶ autopilot
+  (movement_sensor: gps)     (movement_sensor: gps,
+                              sender: n2k-sender)
+```
+
+A full setup has three resources — the sender, this base, and the nav service
+pointing at it. Give the base and nav the **same** movement sensor: nav works
+out the turn from that sensor's heading and the base turns it back into a
+heading from the same reading, so the autopilot is told the bearing to the
+waypoint exactly.
 
 ```json
 {
-  "name": "nav",
-  "namespace": "rdk",
-  "type": "navigation",
-  "model": "erh:viam-chartplotter:nav",
-  "attributes": { "movement_sensor": "gps", "data_path": "/data/nav.json", "n2k_sender": "n2k-sender" }
+  "components": [
+    {
+      "name": "n2k-sender",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:viamboat:sender",
+      "attributes": {}
+    },
+    {
+      "name": "autopilot",
+      "api": "rdk:component:base",
+      "model": "erh:viam-chartplotter:n2k-base",
+      "attributes": { "sender": "n2k-sender", "movement_sensor": "gps" }
+    }
+  ],
+  "services": [
+    {
+      "name": "nav",
+      "api": "rdk:service:navigation",
+      "model": "erh:viam-chartplotter:nav",
+      "attributes": { "movement_sensor": "gps", "base": "autopilot" }
+    }
+  ]
 }
 ```
 
-With `n2k_sender` configured, the DoCommand
-`{"send_waypoints_n2k": {"route_name"?: string, "database_id"?: int, "route_id"?: int, "dst"?: int}}`
-pushes the active goal's remaining waypoints onto the NMEA 2000 bus as a Route and WP
-Service transfer — one PGN 130066 (Route/WP-List Attributes) followed by PGN
-130067 (Route – WP Name & Position) messages, chunked to fit fast-packets — so
-a chartplotter (e.g. Garmin) on the same backbone can pick the route up. All
-payload fields are optional; pass `true` for the defaults (route name
-"Chartplotter", broadcast).
+(Configure the sender and `gps` per their own modules' docs.)
+
+### attributes
+
+| attribute | type | default | description |
+|-----------|------|---------|-------------|
+| `sender` | string | **required** | name of the generic sender component (becomes a dependency) |
+| `movement_sensor` | string | **required** | movement sensor whose compass heading `Spin` turns from (becomes a dependency). Use one that reports **true** heading: the autopilot is told the result as a true heading. |
+| `dst` | int (0–255) | broadcast | NMEA 2000 source address of the autopilot. Set it to send commands to the autopilot only; leave it out to send them to every device. |
+
+### what the base API methods do
+
+| method | behaviour |
+|--------|-----------|
+| `Spin(angle, degsPerSec)` | tell the autopilot to hold current heading − `angle` (positive = left). Sends PGN 127237 Heading/Track Control with `Steering Mode` "Heading Control", `Heading Reference` "True" and `Heading-To-Steer (Course)`. Returns once the command is sent; the autopilot makes the turn and keeps holding the heading. `degsPerSec` is ignored — the autopilot picks its own turn rate — except that `0` means `Stop`, as for any base. |
+| `Stop` | forgets the heading and sends **nothing** to the bus: the autopilot keeps holding the last heading it was given. Taking the autopilot out of auto (standby) is left to the person at the helm. |
+| `IsMoving` | true while a heading is set (between `Spin` and `Stop`) |
+| `MoveStraight`, `SetPower`, `SetVelocity` | return an error — an autopilot is steered by heading, not by distance, power or speed |
+| `GetProperties`, `GetGeometries` | empty |
+
+### DoCommand
+
+Route transfer has no base API method, so it is a DoCommand:
+
+| command | what it does |
+|---------|--------------|
+| `{"send_waypoints": {"waypoints": [{"lat": 41.16, "lng": -71.58}, ...]}}` | put a route on the bus: one PGN 130066 (Route/WP-List Attributes) then PGN 130067 (Route – WP Name & Position) messages, split to fit fast-packets; up to 252 waypoints, named `WP001`, `WP002`, …. Optional: `route_name` (default "Chartplotter"), `database_id`, `route_id` (default 1), `dst` (default the base's `dst`). The nav service's `send_waypoints` fills in `waypoints` from the active route for you. |
+
+### before you rely on it
+
+- The autopilot must be **engaged** (in auto / heading-hold) for heading
+  commands to have any effect; the base doesn't engage it.
+- PGN 127237 support varies between autopilot makers. Some only accept heading
+  commands through PGN 126208 or their own proprietary messages. Test a small
+  `Spin` (e.g. 10° from an SDK script), tied up or in open water, before
+  letting the nav service steer.
 
 ---
 
