@@ -138,6 +138,12 @@ const followingClosingMarginMeters = 50.0
 const arrivalLogInterval = 30 * time.Second
 const arrivalLogProximityMeters = 30000.0
 
+// noGoalLogInterval throttles the "no active goal" poller-status line. With
+// no waypoints set the boat isn't navigating and nothing changes tick to
+// tick, so 30 s would just be noise; once an hour is enough to confirm the
+// poller is alive.
+const noGoalLogInterval = time.Hour
+
 func newNav(
 	ctx context.Context,
 	deps resource.Dependencies,
@@ -277,8 +283,14 @@ func waypointKey(p navPoint) string {
 // checkArrival so we can tell *why* a tick did nothing without flooding
 // the log every 5 s.
 func (s *navService) maybeArrivalInfo(msg string, kvs ...interface{}) {
+	s.maybeArrivalInfoEvery(arrivalLogInterval, msg, kvs...)
+}
+
+// maybeArrivalInfoEvery is maybeArrivalInfo with a caller-chosen throttle, so
+// quiet states (no waypoints set) can log far less often than the default.
+func (s *navService) maybeArrivalInfoEvery(interval time.Duration, msg string, kvs ...interface{}) {
 	now := time.Now()
-	if now.Sub(s.lastArrivalLog) < arrivalLogInterval {
+	if now.Sub(s.lastArrivalLog) < interval {
 		return
 	}
 	s.lastArrivalLog = now
@@ -409,7 +421,7 @@ func (s *navService) checkArrival(ctx context.Context) error {
 		if g != nil {
 			state = g.State
 		}
-		s.maybeArrivalInfo("arrival poller: no active goal",
+		s.maybeArrivalInfoEvery(noGoalLogInterval, "arrival poller: no active goal",
 			"state", state, "lat", pt.Lat(), "lng", pt.Lng())
 		return nil
 	}
