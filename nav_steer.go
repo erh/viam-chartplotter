@@ -3,27 +3,73 @@ package vc
 import (
 	"context"
 	"math"
+	"time"
 
+	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
 )
 
-// Steering: when the nav service has a `base`, it steers it with the base
-// API's Spin. Every arrival-poller tick with an active goal, it computes the
-// initial great-circle bearing from the boat to the goal's next waypoint and
-// the turn from the boat's current compass heading to that bearing, and calls
-// Spin(turn) — positive is a turn to the left, as the base API defines it.
-// On the n2k-base (n2k_base.go) a Spin becomes "hold current heading - angle",
-// i.e. the bearing itself. Re-sending every tick doubles as the keepalive
-// autopilots expect from a navigation source. When the goal stops being
-// active (reached, canceled, suspended) the base is stopped once.
+// Steering: when the nav service has a `base`, a steering loop runs every
+// steerInterval. While a goal is active it reads the boat's position and
+// compass heading, takes the initial great-circle bearing to the goal's next
+// waypoint and the turn from the current heading to that bearing (positive =
+// left, as the base API defines it), and commands the base in one of two
+// modes:
+//
+//   - Turn only (no speed_knots): Spin(turn). For a base that holds a heading
+//     while something else sets the speed — on the n2k-base (n2k_base.go) a
+//     Spin becomes "autopilot, hold current heading - turn", i.e. the bearing.
+//     Re-sending every tick doubles as the autopilot's keepalive.
+//   - Drive (speed_knots set): SetVelocity(forward, turn rate). For a base that
+//     moves the boat itself (thrusters). The turn rate is proportional to the
+//     heading error, capped; forward speed falls off as the error grows and is
+//     zero when the waypoint is more than 90° off the bow (turn first).
+//
+// When the goal stops being active (last waypoint reached, canceled,
+// suspended) the base is stopped once. In drive mode the base is also stopped
+// when position or heading can't be read, so it never runs blind on a stale
+// command; and when the service closes.
+//
+// Waypoint arrival is still decided by the arrival poller (nav.go); the
+// steering loop just reads the goal it leaves behind.
 
-// steerLogDeltaDeg: a heading change smaller than this isn't logged.
-const steerLogDeltaDeg = 5.0
+const (
+	// steerInterval is how often the steering loop commands the base.
+	steerInterval = time.Second
+	// steerLogDeltaDeg: a bearing change smaller than this isn't logged.
+	steerLogDeltaDeg = 5.0
+	// steerLogInterval throttles repeated steering warnings.
+	steerLogInterval = 30 * time.Second
 
-// steerSpinDegsPerSec is the rate passed to Spin. The base API treats 0 as
-// "stop", so it must be nonzero; an autopilot picks its own turn rate, and the
-// n2k-base ignores it.
-const steerSpinDegsPerSec = 5.0
+	// steerSpinDegsPerSec is the rate passed to Spin. The base API treats 0
+	// as "stop", so it must be nonzero; an autopilot picks its own turn rate,
+	// and the n2k-base ignores it.
+	steerSpinDegsPerSec = 5.0
+
+	// steerTurnGain is the drive-mode turn rate per degree of heading error
+	// (deg/s per deg): 10° off -> 10°/s.
+	steerTurnGain = 1.0
+	// steerMaxTurnDegsPerSec caps the drive-mode turn rate.
+	steerMaxTurnDegsPerSec = 20.0
+
+	// metersPerSecPerKnot converts the config's knots to the base API's SI.
+	metersPerSecPerKnot = 1852.0 / 3600.0
+	// maxSpeedKnots: no boat goes faster (the water speed record is ~276 kn);
+	// a bigger speed_knots is a typo or a unit mix-up, not a setting.
+	maxSpeedKnots = 200.0
+)
+
+// velocityCommand is the drive-mode SetVelocity for a heading error of
+// turnDeg (positive = waypoint is to the left) at cruising speed speedMPS:
+// forward speed in mm/s (base API linear Y) and turn rate in deg/s (base API
+// angular Z, positive = left).
+func velocityCommand(turnDeg, speedMPS float64) (linearMmPerSec, angularDegsPerSec float64) {
+	angularDegsPerSec = math.Max(-steerMaxTurnDegsPerSec, math.Min(steerMaxTurnDegsPerSec, steerTurnGain*turnDeg))
+	if math.Abs(turnDeg) < 90 {
+		linearMmPerSec = speedMPS * 1000 * math.Cos(turnDeg*math.Pi/180)
+	}
+	return linearMmPerSec, angularDegsPerSec
+}
 
 // bearingDegrees is the initial great-circle bearing from a to b, degrees
 // true in [0, 360).
@@ -55,50 +101,112 @@ func turnDegrees(from, to float64) float64 {
 	return d
 }
 
+// startSteering launches the steering loop.
+func (s *navService) startSteering() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.steerCancel = cancel
+	s.steerDone = make(chan struct{})
+	go func() {
+		defer close(s.steerDone)
+		ticker := time.NewTicker(steerInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.steer(ctx)
+			}
+		}
+	}()
+}
+
+// driving reports whether the base is driven with SetVelocity.
+func (s *navService) driving() bool { return s.speedMPS > 0 }
+
+// maybeSteerWarn throttles a steering warning to one per steerLogInterval.
+// Call with steerMu held.
+func (s *navService) maybeSteerWarn(msg string, kvs ...interface{}) {
+	now := time.Now()
+	if now.Sub(s.lastSteerLog) < steerLogInterval {
+		return
+	}
+	s.lastSteerLog = now
+	s.logger.Warnw(msg, kvs...)
+}
+
 // stopSteering stops the base if this service was steering it.
-func (s *navService) stopSteering(ctx context.Context) {
+func (s *navService) stopSteering(ctx context.Context, reason string) {
 	s.steerMu.Lock()
 	defer s.steerMu.Unlock()
+	s.stopSteeringLocked(ctx, reason)
+}
+
+func (s *navService) stopSteeringLocked(ctx context.Context, reason string) {
 	if s.base == nil || s.steerHeading == nil {
 		return
 	}
 	s.steerHeading = nil
 	if err := s.base.Stop(ctx, nil); err != nil {
-		s.logger.Warnw("steering: base Stop failed", "err", err)
+		s.logger.Warnw("steering: base Stop failed", "err", err, "reason", reason)
 		return
 	}
-	s.logger.Info("steering: stopped (no active goal)")
+	s.logger.Infof("steering: stopped (%s)", reason)
 }
 
 // steer is one steering tick: point the base at the active goal's next
-// waypoint, or stop it when there's no active goal.
-func (s *navService) steer(ctx context.Context, boatLat, boatLng float64) {
-	if s.base == nil {
+// waypoint (and, in drive mode, move toward it), or stop it when there's no
+// active goal.
+func (s *navService) steer(ctx context.Context) {
+	if s.base == nil || s.ms == nil {
 		return
 	}
 	g := s.store.Goal()
 	if g == nil || g.State != goalActive || len(g.remaining()) == 0 {
-		s.stopSteering(ctx)
+		s.stopSteering(ctx, "no active goal")
 		return
 	}
 	wp := g.remaining()[0]
-	h := bearingDegrees(boatLat, boatLng, wp.Lat, wp.Lng)
-
-	cur, err := s.ms.CompassHeading(ctx, nil)
-	if err != nil || math.IsNaN(cur) {
-		s.maybeArrivalInfo("steering: movement sensor has no compass heading; not steering", "err", err)
-		return
-	}
-	turn := turnDegrees(cur, h)
 
 	s.steerMu.Lock()
 	defer s.steerMu.Unlock()
-	if err := s.base.Spin(ctx, turn, steerSpinDegsPerSec, nil); err != nil {
-		s.logger.Warnw("steering: base Spin failed", "err", err, "bearing", h, "turn", turn)
+
+	// lost handles a missing fix: a driven base is stopped rather than left
+	// running on its last command; an autopilot keeps its last heading.
+	lost := func(msg string, err error) {
+		s.maybeSteerWarn("steering: "+msg, "err", err)
+		if s.driving() {
+			s.stopSteeringLocked(ctx, msg)
+		}
+	}
+	pt, _, err := s.ms.Position(ctx, nil)
+	if err != nil || pt == nil || (pt.Lat() == 0 && pt.Lng() == 0) {
+		lost("no position fix", err)
+		return
+	}
+	cur, err := s.ms.CompassHeading(ctx, nil)
+	if err != nil || math.IsNaN(cur) {
+		lost("movement sensor has no compass heading", err)
+		return
+	}
+	h := bearingDegrees(pt.Lat(), pt.Lng(), wp.Lat, wp.Lng)
+	turn := turnDegrees(cur, h)
+
+	if s.driving() {
+		lin, ang := velocityCommand(turn, s.speedMPS)
+		err = s.base.SetVelocity(ctx, r3.Vector{Y: lin}, r3.Vector{Z: ang}, nil)
+	} else {
+		err = s.base.Spin(ctx, turn, steerSpinDegsPerSec, nil)
+	}
+	if err != nil {
+		s.maybeSteerWarn("steering: commanding base failed", "err", err, "bearing", h, "turn", turn)
+		if s.driving() {
+			s.stopSteeringLocked(ctx, "commanding base failed")
+		}
 		return
 	}
 	if s.steerHeading == nil || headingDelta(*s.steerHeading, h) >= steerLogDeltaDeg {
-		s.logger.Infof("steering: heading %.0f° to waypoint %d of %d", h, g.Index+1, len(g.Waypoints))
+		s.logger.Infof("steering: bearing %.0f° to waypoint %d of %d (heading %.0f°)", h, g.Index+1, len(g.Waypoints), cur)
 	}
 	s.steerHeading = &h
 }
