@@ -319,7 +319,7 @@ What each attribute turns on:
 | nothing | routes, goals and saved locations through the API; the goal only moves when a client calls the API |
 | `movement_sensor` | **auto-arrival**: the goal advances by itself as the boat reaches each waypoint (including rounding a mark without entering the arrival radius, and rejoining a route mid-way) |
 | `movement_sensor` + `base` | auto-arrival **and turning**: every second the service turns the base toward the next waypoint (`Spin`). Something else — an autopilot's throttle, the skipper — sets the speed. |
-| `movement_sensor` + `base` + `speed_mps` | auto-arrival **and driving**: every second the service drives the base toward the next waypoint at that speed (`SetVelocity`), and stops it at the end of the route |
+| `movement_sensor` + `base` + `speed_knots` | auto-arrival **and driving**: every second the service drives the base toward the next waypoint at that speed (`SetVelocity`), and stops it at the end of the route |
 
 ### attributes
 
@@ -328,7 +328,7 @@ What each attribute turns on:
 | `movement_sensor` | string | — | movement sensor giving the boat's position (becomes a dependency). Needed for auto-arrival and steering. |
 | `data_path` | string | OS cache dir | file that persists saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
 | `base` | string | — | base to steer (becomes a dependency): an [`n2k-base`](#n2k-base) autopilot, or a base that drives the boat itself, like thrusters. Requires `movement_sensor`. |
-| `speed_mps` | float | — (turn only) | cruising speed in **metres/second** (1 knot ≈ 0.514 m/s). Set it when the base moves the boat itself: the service then drives the base along the route at this speed. Leave it out for an autopilot. Requires `base`. |
+| `speed_knots` | float | — (turn only) | cruising speed in **knots**, up to 200 (anything faster is rejected as a typo). Set it when the base moves the boat itself: the service then drives the base along the route at this speed. Leave it out for an autopilot. Requires `base`. |
 
 Tracking only:
 
@@ -355,7 +355,7 @@ the speed (see [n2k-base](#n2k-base) for the full setup):
 }
 ```
 
-Driving a thruster base along the route at 1 m/s (about 2 knots):
+Driving a thruster base along the route at 2 knots:
 
 ```json
 {
@@ -363,7 +363,7 @@ Driving a thruster base along the route at 1 m/s (about 2 knots):
   "namespace": "rdk",
   "type": "navigation",
   "model": "erh:viam-chartplotter:nav",
-  "attributes": { "movement_sensor": "gps", "base": "boat", "speed_mps": 1.0 }
+  "attributes": { "movement_sensor": "gps", "base": "boat", "speed_knots": 2 }
 }
 ```
 
@@ -400,14 +400,14 @@ second:
 
 | mode | when | each second the service calls | use it for |
 |------|------|-------------------------------|------------|
-| **turn** | no `speed_mps` | `Spin(turn)` | a base that holds a heading while something else sets the speed — an [`n2k-base`](#n2k-base) autopilot. Re-sending every second keeps the autopilot's input fresh. |
-| **drive** | `speed_mps` set | `SetVelocity(forward, turn rate)` | a base that moves the boat itself, like port/starboard thrusters |
+| **turn** | no `speed_knots` | `Spin(turn)` | a base that holds a heading while something else sets the speed — an [`n2k-base`](#n2k-base) autopilot. Re-sending every second keeps the autopilot's input fresh. |
+| **drive** | `speed_knots` set | `SetVelocity(forward, turn rate)` | a base that moves the boat itself, like port/starboard thrusters |
 
 In **drive** mode:
 
 - **Turn rate** is 1°/s for every degree the bow is off the bearing, capped at
   20°/s. So 10° off → turn at 10°/s.
-- **Forward speed** is `speed_mps` when on course, and drops as the bow swings
+- **Forward speed** is `speed_knots` when on course, and drops as the bow swings
   off (× cos of the error: 30° off → 87 %, 60° off → 50 %). With the waypoint
   more than 90° off the bow the boat turns without moving forward.
 - **The base is stopped** if the position or compass heading can't be read, if

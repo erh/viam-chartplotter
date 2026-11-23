@@ -44,16 +44,16 @@ func init() {
 // MovementSensor, and also enables the send_waypoints DoCommand, which hands
 // the active route to the base.
 //
-// SpeedMPS picks how the base is steered. Unset (0): the service only turns
+// SpeedKnots picks how the base is steered. Unset (0): the service only turns
 // it, with Spin — for a base that holds a heading while something else sets
 // the speed, like the erh:viam-chartplotter:n2k-base autopilot. Set: the
-// service drives it along the route at that speed (metres/second) with
+// service drives it along the route at that speed (knots) with
 // SetVelocity — for a base that moves the boat itself, like thrusters.
 type NavConfig struct {
 	MovementSensor string  `json:"movement_sensor,omitempty"`
 	DataPath       string  `json:"data_path,omitempty"`
 	Base           string  `json:"base,omitempty"`
-	SpeedMPS       float64 `json:"speed_mps,omitempty"`
+	SpeedKnots     float64 `json:"speed_knots,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -69,11 +69,14 @@ func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 		}
 		deps = append(deps, cfg.Base)
 	}
-	if cfg.SpeedMPS < 0 || math.IsNaN(cfg.SpeedMPS) || math.IsInf(cfg.SpeedMPS, 0) {
-		return nil, nil, errors.Errorf("%s: speed_mps must be a positive number of metres/second", path)
+	if cfg.SpeedKnots < 0 || math.IsNaN(cfg.SpeedKnots) || math.IsInf(cfg.SpeedKnots, 0) {
+		return nil, nil, errors.Errorf("%s: speed_knots must be a positive number of knots", path)
 	}
-	if cfg.SpeedMPS > 0 && cfg.Base == "" {
-		return nil, nil, errors.Errorf("%s: speed_mps requires base", path)
+	if cfg.SpeedKnots > maxSpeedKnots {
+		return nil, nil, errors.Errorf("%s: speed_knots %v is impossible for a boat (max %v)", path, cfg.SpeedKnots, maxSpeedKnots)
+	}
+	if cfg.SpeedKnots > 0 && cfg.Base == "" {
+		return nil, nil, errors.Errorf("%s: speed_knots requires base", path)
 	}
 	return deps, nil, nil
 }
@@ -168,7 +171,7 @@ func newNav(
 			return nil, errors.Wrapf(err, "could not get base %q", cfg.Base)
 		}
 		svc.base = b
-		svc.speedMPS = cfg.SpeedMPS
+		svc.speedMPS = cfg.SpeedKnots * metersPerSecPerKnot
 	}
 
 	if cfg.MovementSensor == "" {
@@ -185,7 +188,8 @@ func newNav(
 		if svc.base != nil {
 			svc.startSteering()
 			if svc.speedMPS > 0 {
-				logger.Infof("nav steering enabled: driving base %q at %.2f m/s with SetVelocity", cfg.Base, svc.speedMPS)
+				logger.Infof("nav steering enabled: driving base %q at %.1f knots (%.2f m/s) with SetVelocity",
+					cfg.Base, cfg.SpeedKnots, svc.speedMPS)
 			} else {
 				logger.Infof("nav steering enabled: turning base %q with Spin (speed is not set)", cfg.Base)
 			}
@@ -213,7 +217,8 @@ type navService struct {
 	// Optional base the service steers by heading (config `base`, see
 	// nav_steer.go); nil disables steering and send_waypoints.
 	base base.Base
-	// speedMPS > 0 drives the base with SetVelocity; 0 only turns it (Spin).
+	// speedMPS (config speed_knots, converted) > 0 drives the base with
+	// SetVelocity; 0 only turns it (Spin).
 	speedMPS float64
 	// steerMu guards steerHeading, the bearing last steered for (nil when
 	// not steering), and lastSteerLog.
@@ -597,7 +602,7 @@ func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{
 	out := map[string]interface{}{
 		"auto_arrival_enabled": s.ms != nil && s.arrivalCancel != nil,
 		"steering_enabled":     s.base != nil,
-		"steering_speed_mps":   s.speedMPS,
+		"steering_speed_knots": s.speedMPS / metersPerSecPerKnot,
 		"arrival_distance_m":   arrivalDistanceMeters,
 		"near_waypoint_m":      nearWaypointMeters,
 		"check_interval":       arrivalCheckInterval.String(),

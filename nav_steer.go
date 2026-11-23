@@ -16,11 +16,11 @@ import (
 // left, as the base API defines it), and commands the base in one of two
 // modes:
 //
-//   - Turn only (no speed_mps): Spin(turn). For a base that holds a heading
+//   - Turn only (no speed_knots): Spin(turn). For a base that holds a heading
 //     while something else sets the speed — on the n2k-base (n2k_base.go) a
 //     Spin becomes "autopilot, hold current heading - turn", i.e. the bearing.
 //     Re-sending every tick doubles as the autopilot's keepalive.
-//   - Drive (speed_mps set): SetVelocity(forward, turn rate). For a base that
+//   - Drive (speed_knots set): SetVelocity(forward, turn rate). For a base that
 //     moves the boat itself (thrusters). The turn rate is proportional to the
 //     heading error, capped; forward speed falls off as the error grows and is
 //     zero when the waypoint is more than 90° off the bow (turn first).
@@ -51,6 +51,12 @@ const (
 	steerTurnGain = 1.0
 	// steerMaxTurnDegsPerSec caps the drive-mode turn rate.
 	steerMaxTurnDegsPerSec = 20.0
+
+	// metersPerSecPerKnot converts the config's knots to the base API's SI.
+	metersPerSecPerKnot = 1852.0 / 3600.0
+	// maxSpeedKnots: no boat goes faster (the water speed record is ~276 kn);
+	// a bigger speed_knots is a typo or a unit mix-up, not a setting.
+	maxSpeedKnots = 200.0
 )
 
 // velocityCommand is the drive-mode SetVelocity for a heading error of

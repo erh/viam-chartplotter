@@ -306,14 +306,22 @@ func TestNavCloseStopsDrivenBase(t *testing.T) {
 }
 
 func TestNavConfigSpeed(t *testing.T) {
-	if _, _, err := (&NavConfig{MovementSensor: "gps", SpeedMPS: 2}).Validate("nav"); err == nil {
-		t.Fatal("expected error: speed_mps without base")
+	if _, _, err := (&NavConfig{MovementSensor: "gps", SpeedKnots: 2}).Validate("nav"); err == nil {
+		t.Fatal("expected error: speed_knots without base")
 	}
-	if _, _, err := (&NavConfig{MovementSensor: "gps", Base: "boat", SpeedMPS: -1}).Validate("nav"); err == nil {
-		t.Fatal("expected error: negative speed_mps")
+	if _, _, err := (&NavConfig{MovementSensor: "gps", Base: "boat", SpeedKnots: -1}).Validate("nav"); err == nil {
+		t.Fatal("expected error: negative speed_knots")
 	}
-	if _, _, err := (&NavConfig{MovementSensor: "gps", Base: "boat", SpeedMPS: 2}).Validate("nav"); err != nil {
-		t.Fatal(err)
+	if _, _, err := (&NavConfig{MovementSensor: "gps", Base: "boat", SpeedKnots: 201}).Validate("nav"); err == nil || !strings.Contains(err.Error(), "impossible") {
+		t.Fatalf("expected impossible-speed error, got %v", err)
+	}
+	for _, kn := range []float64{2, 200} {
+		if _, _, err := (&NavConfig{MovementSensor: "gps", Base: "boat", SpeedKnots: kn}).Validate("nav"); err != nil {
+			t.Fatalf("%v knots: %v", kn, err)
+		}
+	}
+	if got := 1 * metersPerSecPerKnot; math.Abs(got-0.5144) > 1e-4 {
+		t.Fatalf("1 knot = %v m/s", got)
 	}
 }
 
