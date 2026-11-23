@@ -64,6 +64,13 @@ func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 // distance to the next waypoint.
 const arrivalCheckInterval = 5 * time.Second
 
+// arrivalMaxBackoff caps the exponential backoff the poller applies after a
+// movement-sensor Position failure. A GPS that isn't ready yet reports "no
+// data for gps yet" on every call; without backoff that floods the log every
+// arrivalCheckInterval. We double the wait from arrivalCheckInterval up to
+// this ceiling, then reset to the normal cadence on the first good fix.
+const arrivalMaxBackoff = 2 * time.Minute
+
 // arrivalDistanceMeters: when distanceToWaypoint drops below this, we've
 // arrived at the waypoint regardless of any other signal.
 const arrivalDistanceMeters = 50.0
@@ -254,13 +261,37 @@ func (s *navService) startArrivalPoller() {
 		heartbeat := time.NewTicker(time.Minute)
 		defer heartbeat.Stop()
 		s.logger.Info("arrival poller: starting first tick")
-		s.checkArrival(ctx)
+		// backoff is the current extra wait after a Position failure (0 when
+		// healthy). tick runs one check and adjusts the ticker: on failure it
+		// doubles the wait up to arrivalMaxBackoff; on the first success after
+		// a failure it restores the normal cadence.
+		var backoff time.Duration
+		tick := func() {
+			if err := s.checkArrival(ctx); err != nil {
+				if backoff == 0 {
+					backoff = arrivalCheckInterval
+				}
+				backoff *= 2
+				if backoff > arrivalMaxBackoff {
+					backoff = arrivalMaxBackoff
+				}
+				s.logger.Infow("arrival poller: backing off after sensor error",
+					"backoff", backoff.String())
+				ticker.Reset(backoff)
+				return
+			}
+			if backoff != 0 {
+				backoff = 0
+				ticker.Reset(arrivalCheckInterval)
+			}
+		}
+		tick()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.checkArrival(ctx)
+				tick()
 			case <-heartbeat.C:
 				s.logger.Infow("arrival poller: alive",
 					"interval", arrivalCheckInterval.String(),
@@ -307,25 +338,29 @@ func (s *navService) advanceGoal(startedAt time.Time, fromIndex, n int) (bool, e
 // Only an active goal advances; a suspended one is left alone. Errors are
 // surfaced at warn so an unhealthy sensor or store is visible in logs; the
 // loop still keeps running so a transient blip doesn't disable auto-arrival.
-func (s *navService) checkArrival(ctx context.Context) {
+//
+// A non-nil return signals a sensor-read failure the caller should back off
+// on; all other early returns (nil position, no goal, nothing to do) return
+// nil because the poller should stay on its normal cadence.
+func (s *navService) checkArrival(ctx context.Context) error {
 	if s.ms == nil {
-		return
+		return nil
 	}
 	pt, _, err := s.ms.Position(ctx, nil)
 	if err != nil {
 		s.logger.Warnw("arrival poller: movement sensor Position failed", "err", err)
-		return
+		return err
 	}
 	if pt == nil {
 		s.maybeArrivalInfo("arrival poller: movement sensor returned nil position")
-		return
+		return nil
 	}
 	// Bail on null-island fixes; some movement sensors emit (0,0) before they
 	// have a lock and that would falsely "arrive" at any waypoint near it.
 	if pt.Lat() == 0 && pt.Lng() == 0 {
 		s.maybeArrivalInfo("arrival poller: skipping null-island fix",
 			"lat", pt.Lat(), "lng", pt.Lng())
-		return
+		return nil
 	}
 	g := s.store.Goal()
 	if g == nil || g.State != goalActive {
@@ -335,11 +370,11 @@ func (s *navService) checkArrival(ctx context.Context) {
 		}
 		s.maybeArrivalInfo("arrival poller: no active goal",
 			"state", state, "lat", pt.Lat(), "lng", pt.Lng())
-		return
+		return nil
 	}
 	wps := g.remaining()
 	if len(wps) == 0 {
-		return
+		return nil
 	}
 	waypoint := wps[0]
 
@@ -370,7 +405,7 @@ func (s *navService) checkArrival(ctx context.Context) {
 		// The active pair just changed wholesale — stale approach memory
 		// must not colour the next arrival decision.
 		s.arrivalState = ArrivalState{}
-		return
+		return nil
 	}
 
 	// Build the per-tick input for decideArrival. The decision logic is
@@ -419,17 +454,18 @@ func (s *navService) checkArrival(ctx context.Context) {
 	}
 
 	if !decision.Arrived {
-		return
+		return nil
 	}
 	applied, err := s.advanceGoal(g.StartedAt, g.Index, 1)
 	if err != nil {
 		s.logger.Warnw("arrival poller: advancing goal failed", "err", err, "index", g.Index)
-		return
+		return nil
 	}
 	if applied {
 		s.logger.Infof("arrived at waypoint %d of %d (%.0f m, %s)",
 			g.Index+1, len(g.Waypoints), decision.DistanceToWaypoint, decision.Reason)
 	}
+	return nil
 }
 
 func (s *navService) Name() resource.Name { return s.name }
