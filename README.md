@@ -308,7 +308,9 @@ light up the display API for good.
 `erh:viam-chartplotter:nav` — a `rdk:service:navigation` service (the
 locations / routes / goals API, rdk ≥ v1.13) for a GPS map. It keeps track of
 **where the boat is going**: the active route, saved locations and saved
-routes. Optionally it also **steers**, by pointing a base at the next waypoint.
+routes. Optionally it also **steers** a base toward the next waypoint — either
+just turning it (for an autopilot) or driving it along the route at a set
+speed (for thrusters).
 
 What each attribute turns on:
 
@@ -316,7 +318,8 @@ What each attribute turns on:
 |---------------|---------|
 | nothing | routes, goals and saved locations through the API; the goal only moves when a client calls the API |
 | `movement_sensor` | **auto-arrival**: the goal advances by itself as the boat reaches each waypoint (including rounding a mark without entering the arrival radius, and rejoining a route mid-way) |
-| `movement_sensor` + `base` | auto-arrival **and steering**: every 5 s the service tells the base which heading to hold to reach the next waypoint |
+| `movement_sensor` + `base` | auto-arrival **and turning**: every second the service turns the base toward the next waypoint (`Spin`). Something else — an autopilot's throttle, the skipper — sets the speed. |
+| `movement_sensor` + `base` + `speed_mps` | auto-arrival **and driving**: every second the service drives the base toward the next waypoint at that speed (`SetVelocity`), and stops it at the end of the route |
 
 ### attributes
 
@@ -324,7 +327,8 @@ What each attribute turns on:
 |-----------|------|---------|-------------|
 | `movement_sensor` | string | — | movement sensor giving the boat's position (becomes a dependency). Needed for auto-arrival and steering. |
 | `data_path` | string | OS cache dir | file that persists saved locations and the latest goal across restarts (an old waypoint-list file is migrated to a route goal) |
-| `base` | string | — | base to steer (becomes a dependency), usually an [`n2k-base`](#n2k-base). Requires `movement_sensor`. |
+| `base` | string | — | base to steer (becomes a dependency): an [`n2k-base`](#n2k-base) autopilot, or a base that drives the boat itself, like thrusters. Requires `movement_sensor`. |
+| `speed_mps` | float | — (turn only) | cruising speed in **metres/second** (1 knot ≈ 0.514 m/s). Set it when the base moves the boat itself: the service then drives the base along the route at this speed. Leave it out for an autopilot. Requires `base`. |
 
 Tracking only:
 
@@ -338,7 +342,8 @@ Tracking only:
 }
 ```
 
-Tracking and steering (see [n2k-base](#n2k-base) for the full autopilot setup):
+Steering an autopilot — nav sets the heading, the autopilot's throttle sets
+the speed (see [n2k-base](#n2k-base) for the full setup):
 
 ```json
 {
@@ -347,6 +352,18 @@ Tracking and steering (see [n2k-base](#n2k-base) for the full autopilot setup):
   "type": "navigation",
   "model": "erh:viam-chartplotter:nav",
   "attributes": { "movement_sensor": "gps", "base": "autopilot" }
+}
+```
+
+Driving a thruster base along the route at 1 m/s (about 2 knots):
+
+```json
+{
+  "name": "nav",
+  "namespace": "rdk",
+  "type": "navigation",
+  "model": "erh:viam-chartplotter:nav",
+  "attributes": { "movement_sensor": "gps", "base": "boat", "speed_mps": 1.0 }
 }
 ```
 
@@ -371,28 +388,46 @@ Tracking and steering (see [n2k-base](#n2k-base) for the full autopilot setup):
 
 ### steering
 
-With a `base` configured, while a goal is **active**:
+With a `base` configured, while a goal is **active**, the service steers every
+second:
 
-1. Every 5 s the service reads the boat's position and compass heading from
-   `movement_sensor`.
-2. If the boat has reached the current waypoint, the goal moves on to the next.
-3. It computes the bearing from the boat to the waypoint it is now heading for,
-   and the turn from the current heading to that bearing, and calls the base's
-   standard **`Spin(turn)`** — positive turns left, negative right, the short
-   way round (±180°). Re-sending every tick keeps the autopilot's input fresh.
+1. It reads the boat's position and compass heading from `movement_sensor`.
+2. It computes the bearing to the next waypoint, and the turn from the current
+   heading to that bearing — the short way round, positive = left, as the base
+   API counts it. (Moving on to the next waypoint is the job of auto-arrival,
+   which checks every 5 s.)
+3. It commands the base, in one of two modes:
 
-Steering uses only the standard base API (`Spin` and `Stop`), so any base can
-be steered, not just an `n2k-base`. The `movement_sensor` must report a
-compass heading; without one the service tracks the route but doesn't steer.
+| mode | when | each second the service calls | use it for |
+|------|------|-------------------------------|------------|
+| **turn** | no `speed_mps` | `Spin(turn)` | a base that holds a heading while something else sets the speed — an [`n2k-base`](#n2k-base) autopilot. Re-sending every second keeps the autopilot's input fresh. |
+| **drive** | `speed_mps` set | `SetVelocity(forward, turn rate)` | a base that moves the boat itself, like port/starboard thrusters |
 
-When the goal stops being active — the last waypoint is reached, or it is
-canceled or suspended — the service calls the base's `Stop` once. So to start
-steering, start a route or goal (from the web Routes panel or `NavigateRoute`);
-to stop, cancel or suspend it.
+In **drive** mode:
 
-The heading always points straight at the next waypoint from wherever the
-boat is now, so after being set off the line the boat heads directly for the
-mark rather than back onto the original track.
+- **Turn rate** is 1°/s for every degree the bow is off the bearing, capped at
+  20°/s. So 10° off → turn at 10°/s.
+- **Forward speed** is `speed_mps` when on course, and drops as the bow swings
+  off (× cos of the error: 30° off → 87 %, 60° off → 50 %). With the waypoint
+  more than 90° off the bow the boat turns without moving forward.
+- **The base is stopped** if the position or compass heading can't be read, if
+  a command fails, when the route ends, and when the service shuts down — it
+  never keeps running on a stale command. It starts again on the next good
+  reading.
+
+In both modes:
+
+- When the goal stops being active — the last waypoint is reached, or it is
+  canceled or suspended — the service calls the base's `Stop` once. So to start
+  steering, start a route or goal (from the web Routes panel or
+  `NavigateRoute`); to stop, cancel or suspend it.
+- The `movement_sensor` must report a compass heading; without one the
+  service tracks the route but doesn't steer.
+- The boat heads straight for the next waypoint from wherever it is now, so
+  after being set off the line it goes directly for the mark rather than back
+  onto the original track.
+- Only the standard base API is used (`Spin`, `SetVelocity`, `Stop`), so any
+  base that implements it can be steered.
 
 ### DoCommands
 

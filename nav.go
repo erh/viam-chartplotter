@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"time"
@@ -38,15 +39,21 @@ func init() {
 // and the latest goal across restarts. When empty, state persists to
 // "<user-cache-dir>/viam-chartplotter/nav/<resource_name>.json".
 //
-// Base is optional; when set it names the base the service steers by
-// setting its heading toward the active goal's next waypoint (see
-// nav_steer.go), e.g. an erh:viam-chartplotter:n2k-base driving an NMEA 2000
-// autopilot. It requires MovementSensor, and also enables the send_waypoints
-// DoCommand, which hands the active route to the base.
+// Base is optional; when set it names the base the service steers toward
+// the active goal's next waypoint (see nav_steer.go). It requires
+// MovementSensor, and also enables the send_waypoints DoCommand, which hands
+// the active route to the base.
+//
+// SpeedMPS picks how the base is steered. Unset (0): the service only turns
+// it, with Spin — for a base that holds a heading while something else sets
+// the speed, like the erh:viam-chartplotter:n2k-base autopilot. Set: the
+// service drives it along the route at that speed (metres/second) with
+// SetVelocity — for a base that moves the boat itself, like thrusters.
 type NavConfig struct {
-	MovementSensor string `json:"movement_sensor,omitempty"`
-	DataPath       string `json:"data_path,omitempty"`
-	Base           string `json:"base,omitempty"`
+	MovementSensor string  `json:"movement_sensor,omitempty"`
+	DataPath       string  `json:"data_path,omitempty"`
+	Base           string  `json:"base,omitempty"`
+	SpeedMPS       float64 `json:"speed_mps,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and returns the
@@ -61,6 +68,12 @@ func (cfg *NavConfig) Validate(path string) ([]string, []string, error) {
 			return nil, nil, errors.Errorf("%s: base requires movement_sensor (steering needs the boat's position)", path)
 		}
 		deps = append(deps, cfg.Base)
+	}
+	if cfg.SpeedMPS < 0 || math.IsNaN(cfg.SpeedMPS) || math.IsInf(cfg.SpeedMPS, 0) {
+		return nil, nil, errors.Errorf("%s: speed_mps must be a positive number of metres/second", path)
+	}
+	if cfg.SpeedMPS > 0 && cfg.Base == "" {
+		return nil, nil, errors.Errorf("%s: speed_mps requires base", path)
 	}
 	return deps, nil, nil
 }
@@ -149,15 +162,13 @@ func newNav(
 	}
 	logger.Infof("nav state persisted at %s", dataPath)
 
-	// The base must be in place before the arrival poller starts: the poller
-	// does the steering.
 	if cfg.Base != "" {
 		b, err := base.FromDependencies(deps, cfg.Base)
 		if err != nil {
 			return nil, errors.Wrapf(err, "could not get base %q", cfg.Base)
 		}
 		svc.base = b
-		logger.Infof("nav steering enabled: setting heading on base %q", cfg.Base)
+		svc.speedMPS = cfg.SpeedMPS
 	}
 
 	if cfg.MovementSensor == "" {
@@ -171,6 +182,14 @@ func newNav(
 		svc.startArrivalPoller()
 		logger.Infof("nav auto-arrival enabled: arrival<%.0fm, near<%.0fm, polling every %s",
 			arrivalDistanceMeters, nearWaypointMeters, arrivalCheckInterval)
+		if svc.base != nil {
+			svc.startSteering()
+			if svc.speedMPS > 0 {
+				logger.Infof("nav steering enabled: driving base %q at %.2f m/s with SetVelocity", cfg.Base, svc.speedMPS)
+			} else {
+				logger.Infof("nav steering enabled: turning base %q with Spin (speed is not set)", cfg.Base)
+			}
+		}
 	}
 
 	return svc, nil
@@ -194,10 +213,16 @@ type navService struct {
 	// Optional base the service steers by heading (config `base`, see
 	// nav_steer.go); nil disables steering and send_waypoints.
 	base base.Base
-	// steerMu guards steerHeading, the last heading sent to base (nil when
-	// not steering).
+	// speedMPS > 0 drives the base with SetVelocity; 0 only turns it (Spin).
+	speedMPS float64
+	// steerMu guards steerHeading, the bearing last steered for (nil when
+	// not steering), and lastSteerLog.
 	steerMu      sync.Mutex
 	steerHeading *float64
+	lastSteerLog time.Time
+	// Cancellation for the steering loop, if started.
+	steerCancel context.CancelFunc
+	steerDone   chan struct{}
 
 	// Cancellation for the background arrival poller, if started.
 	arrivalCancel context.CancelFunc
@@ -373,9 +398,6 @@ func (s *navService) checkArrival(ctx context.Context) error {
 			"lat", pt.Lat(), "lng", pt.Lng())
 		return nil
 	}
-	// Steer after this tick's arrival/rejoin decisions have advanced the
-	// goal, so the heading points at the waypoint that is next now.
-	defer s.steer(ctx, pt.Lat(), pt.Lng())
 	g := s.store.Goal()
 	if g == nil || g.State != goalActive {
 		state := "none"
@@ -575,6 +597,7 @@ func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{
 	out := map[string]interface{}{
 		"auto_arrival_enabled": s.ms != nil && s.arrivalCancel != nil,
 		"steering_enabled":     s.base != nil,
+		"steering_speed_mps":   s.speedMPS,
 		"arrival_distance_m":   arrivalDistanceMeters,
 		"near_waypoint_m":      nearWaypointMeters,
 		"check_interval":       arrivalCheckInterval.String(),
@@ -637,6 +660,16 @@ func (s *navService) doArrivalStatus(ctx context.Context) (map[string]interface{
 }
 
 func (s *navService) Close(ctx context.Context) error {
+	// Stop steering before anything else: a driven base must not keep
+	// running on the last command after the service is gone.
+	if s.steerCancel != nil {
+		s.steerCancel()
+		select {
+		case <-s.steerDone:
+		case <-ctx.Done():
+		}
+	}
+	s.stopSteering(ctx, "nav service closing")
 	if s.arrivalCancel != nil {
 		s.arrivalCancel()
 		// Wait for the poller to exit so we don't race the store Close().
