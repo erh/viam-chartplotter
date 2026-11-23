@@ -7,17 +7,23 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Steering: when the nav service has a `base`, it steers by setting the
-// base's heading. Every arrival-poller tick with an active goal, it computes
-// the initial great-circle bearing from the boat to the goal's next waypoint
-// and sends {"set_heading": <degrees true>} to the base's DoCommand (see
-// n2k_base.go for the NMEA 2000 autopilot implementation). Re-sending every
-// tick doubles as the keepalive autopilots expect from a navigation source.
-// When the goal stops being active (reached, canceled, suspended) the base
-// is stopped once.
+// Steering: when the nav service has a `base`, it steers it with the base
+// API's Spin. Every arrival-poller tick with an active goal, it computes the
+// initial great-circle bearing from the boat to the goal's next waypoint and
+// the turn from the boat's current compass heading to that bearing, and calls
+// Spin(turn) — positive is a turn to the left, as the base API defines it.
+// On the n2k-base (n2k_base.go) a Spin becomes "hold current heading - angle",
+// i.e. the bearing itself. Re-sending every tick doubles as the keepalive
+// autopilots expect from a navigation source. When the goal stops being
+// active (reached, canceled, suspended) the base is stopped once.
 
 // steerLogDeltaDeg: a heading change smaller than this isn't logged.
 const steerLogDeltaDeg = 5.0
+
+// steerSpinDegsPerSec is the rate passed to Spin. The base API treats 0 as
+// "stop", so it must be nonzero; an autopilot picks its own turn rate, and the
+// n2k-base ignores it.
+const steerSpinDegsPerSec = 5.0
 
 // bearingDegrees is the initial great-circle bearing from a to b, degrees
 // true in [0, 360).
@@ -38,13 +44,15 @@ func headingDelta(a, b float64) float64 {
 	return d
 }
 
-// setBaseHeading sends one heading command to the configured base.
-func (s *navService) setBaseHeading(ctx context.Context, headingDeg float64) error {
-	if s.base == nil {
-		return errors.New("nav service has no base configured")
+// turnDegrees is the Spin angle that turns a boat heading `from` onto `to`
+// the short way: in (-180, 180], positive to the left (counter-clockwise), as
+// the base API defines Spin.
+func turnDegrees(from, to float64) float64 {
+	d := normalizeDegrees(from - to)
+	if d > 180 {
+		d -= 360
 	}
-	_, err := s.base.DoCommand(ctx, map[string]interface{}{"set_heading": normalizeDegrees(headingDeg)})
-	return err
+	return d
 }
 
 // stopSteering stops the base if this service was steering it.
@@ -76,10 +84,17 @@ func (s *navService) steer(ctx context.Context, boatLat, boatLng float64) {
 	wp := g.remaining()[0]
 	h := bearingDegrees(boatLat, boatLng, wp.Lat, wp.Lng)
 
+	cur, err := s.ms.CompassHeading(ctx, nil)
+	if err != nil || math.IsNaN(cur) {
+		s.maybeArrivalInfo("steering: movement sensor has no compass heading; not steering", "err", err)
+		return
+	}
+	turn := turnDegrees(cur, h)
+
 	s.steerMu.Lock()
 	defer s.steerMu.Unlock()
-	if err := s.setBaseHeading(ctx, h); err != nil {
-		s.logger.Warnw("steering: set_heading failed", "err", err, "heading", h)
+	if err := s.base.Spin(ctx, turn, steerSpinDegsPerSec, nil); err != nil {
+		s.logger.Warnw("steering: base Spin failed", "err", err, "bearing", h, "turn", turn)
 		return
 	}
 	if s.steerHeading == nil || headingDelta(*s.steerHeading, h) >= steerLogDeltaDeg {

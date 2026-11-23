@@ -10,6 +10,7 @@ import (
 
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/generic"
+	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
@@ -17,17 +18,20 @@ import (
 
 // N2KBaseModel is a base that steers a boat through an NMEA 2000 autopilot.
 //
-// A boat isn't driven with MoveStraight/Spin/SetVelocity: the nav service
-// (or anything else) tells the base which heading to hold, and the autopilot
-// does the steering. The base talks to the bus through a generic sender
-// component (e.g. viam-labs:viamboat:sender) whose DoCommand accepts
-// {"pgn", "priority", "dst", "fields"} with canboat field names.
+// It is steered with the base API's Spin: Spin(angle) means "turn angle
+// degrees from where the boat is pointing now" (positive = left, as the base
+// API defines it), so the base reads the boat's current compass heading from
+// its movement sensor and tells the autopilot to hold current - angle. The
+// autopilot does the turning, at its own rate. MoveStraight, SetPower and
+// SetVelocity have no autopilot equivalent and return an error.
 //
-// DoCommand:
+// The base talks to the bus through a generic sender component (e.g.
+// viam-labs:viamboat:sender) whose DoCommand accepts {"pgn", "priority",
+// "dst", "fields"} with canboat field names.
 //
-//	{"set_heading": <degrees true>}
+// DoCommand (route transfer, which the base API has no method for):
+//
 //	{"send_waypoints": {"waypoints": [{"lat", "lng"}, ...], "route_name"?, "database_id"?, "route_id"?, "dst"?}}
-//	{"get_heading": true}
 var N2KBaseModel = resource.ModelNamespace("erh").WithFamily("viam-chartplotter").WithModel("n2k-base")
 
 func init() {
@@ -40,21 +44,26 @@ func init() {
 }
 
 // N2KBaseConfig: Sender names the generic component that puts raw PGNs on
-// the bus. Dst, when set, addresses heading commands to one device (the
-// autopilot's source address) instead of broadcasting them.
+// the bus. MovementSensor supplies the compass heading Spin turns from. Dst,
+// when set, addresses commands to one device (the autopilot's source
+// address) instead of broadcasting them.
 type N2KBaseConfig struct {
-	Sender string `json:"sender"`
-	Dst    *int   `json:"dst,omitempty"`
+	Sender         string `json:"sender"`
+	MovementSensor string `json:"movement_sensor"`
+	Dst            *int   `json:"dst,omitempty"`
 }
 
 func (cfg *N2KBaseConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Sender == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "sender")
 	}
+	if cfg.MovementSensor == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "movement_sensor")
+	}
 	if cfg.Dst != nil && (*cfg.Dst < 0 || *cfg.Dst > 255) {
 		return nil, nil, errors.Errorf("%s: dst out of range: %d", path, *cfg.Dst)
 	}
-	return []string{cfg.Sender}, nil, nil
+	return []string{cfg.Sender, cfg.MovementSensor}, nil, nil
 }
 
 const (
@@ -105,11 +114,15 @@ func newN2KBase(
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not get sender %q", cfg.Sender)
 	}
+	ms, err := movementsensor.FromDependencies(deps, cfg.MovementSensor)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not get movement_sensor %q", cfg.MovementSensor)
+	}
 	dst := -1
 	if cfg.Dst != nil {
 		dst = *cfg.Dst
 	}
-	return &n2kBase{name: conf.ResourceName(), logger: logger, sender: sender, dst: dst}, nil
+	return &n2kBase{name: conf.ResourceName(), logger: logger, sender: sender, ms: ms, dst: dst}, nil
 }
 
 type n2kBase struct {
@@ -118,6 +131,7 @@ type n2kBase struct {
 	name   resource.Name
 	logger logging.Logger
 	sender resource.Resource
+	ms     movementsensor.MovementSensor
 	dst    int
 
 	mu sync.Mutex
@@ -133,14 +147,14 @@ func (b *n2kBase) Status(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
 }
 
-// SetHeading commands the autopilot to hold headingDeg (degrees true).
-func (b *n2kBase) SetHeading(ctx context.Context, headingDeg float64) error {
+// setHeading commands the autopilot to hold headingDeg.
+func (b *n2kBase) setHeading(ctx context.Context, headingDeg float64) error {
 	if math.IsNaN(headingDeg) || math.IsInf(headingDeg, 0) {
 		return errors.Errorf("invalid heading %v", headingDeg)
 	}
 	h := normalizeDegrees(headingDeg)
 	if _, err := b.sender.DoCommand(ctx, n2kHeadingCmd(h, b.dst)); err != nil {
-		return errors.Wrap(err, "set_heading: sender failed")
+		return errors.Wrap(err, "heading command: sender failed")
 	}
 	b.mu.Lock()
 	b.heading = &h
@@ -208,26 +222,8 @@ func parseWaypointList(raw interface{}) ([]navPoint, error) {
 }
 
 func (b *n2kBase) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	if raw, ok := cmd["set_heading"]; ok {
-		h, ok := raw.(float64)
-		if !ok {
-			return nil, errors.Errorf("set_heading must be a number of degrees, got %T", raw)
-		}
-		if err := b.SetHeading(ctx, h); err != nil {
-			return nil, err
-		}
-		return map[string]interface{}{"heading": normalizeDegrees(h)}, nil
-	}
 	if raw, ok := cmd["send_waypoints"]; ok {
 		return b.sendWaypoints(ctx, raw)
-	}
-	if _, ok := cmd["get_heading"]; ok {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		if b.heading == nil {
-			return map[string]interface{}{"heading": nil}, nil
-		}
-		return map[string]interface{}{"heading": *b.heading}, nil
 	}
 	return nil, resource.ErrDoUnimplemented
 }
@@ -248,14 +244,32 @@ func (b *n2kBase) IsMoving(ctx context.Context) (bool, error) {
 	return b.heading != nil, nil
 }
 
-var errHeadingOnly = errors.New("the n2k base is steered by heading: use DoCommand {\"set_heading\": degrees}")
+var errHeadingOnly = errors.New("the n2k base steers an autopilot by heading: use Spin")
 
 func (b *n2kBase) MoveStraight(ctx context.Context, distanceMm int, mmPerSec float64, extra map[string]interface{}) error {
 	return errHeadingOnly
 }
 
+// Spin turns the boat angleDeg from its current heading (positive = left)
+// by asking the autopilot to hold current - angleDeg. It returns once the
+// command is sent: the autopilot carries out the turn and keeps holding the
+// heading. degsPerSec is ignored (the autopilot picks its own turn rate),
+// except that 0 means Stop, as the base API defines.
 func (b *n2kBase) Spin(ctx context.Context, angleDeg, degsPerSec float64, extra map[string]interface{}) error {
-	return errHeadingOnly
+	if degsPerSec == 0 {
+		return b.Stop(ctx, extra)
+	}
+	if math.IsNaN(angleDeg) || math.IsInf(angleDeg, 0) {
+		return errors.Errorf("invalid spin angle %v", angleDeg)
+	}
+	cur, err := b.ms.CompassHeading(ctx, extra)
+	if err != nil {
+		return errors.Wrap(err, "spin: reading compass heading")
+	}
+	if math.IsNaN(cur) {
+		return errors.New("spin: movement sensor has no compass heading")
+	}
+	return b.setHeading(ctx, cur-angleDeg)
 }
 
 func (b *n2kBase) SetPower(ctx context.Context, linear, angular r3.Vector, extra map[string]interface{}) error {

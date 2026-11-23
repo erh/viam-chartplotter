@@ -495,7 +495,6 @@ func (s *navService) Status(ctx context.Context) (map[string]interface{}, error)
 //	{"routes_meta":     true}
 //	{"arrival_status":  true}
 //	{"send_waypoints": {"route_name"?: ..., "database_id"?: ..., "route_id"?: ..., "dst"?: ...}}
-//	{"set_heading":     <degrees true>}
 //	{"set_display_resources": {"movement_sensor"?: ..., "depth_sensor"?: ..., "route_sensor"?: ..., "cameras"?: [...]}}
 //
 // routes_meta returns the saved-route fields the API's Route message can't
@@ -508,9 +507,6 @@ func (s *navService) Status(ctx context.Context) (map[string]interface{}, error)
 // the n2k-base puts them on the NMEA 2000 bus as a Route and WP Service
 // transfer (see n2k_route.go). All payload fields are optional; pass true for
 // the defaults. send_waypoints_n2k is accepted as an alias.
-//
-// set_heading steers the base by hand. The poller overrides it on its next
-// tick while a goal is active.
 //
 // set_display_resources records which machine resources the web app picked
 // during its own discovery (see displaypicks.go); the LAN display API falls
@@ -531,16 +527,6 @@ func (s *navService) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 	if raw, ok := cmd["send_waypoints_n2k"]; ok {
 		return s.doSendWaypoints(ctx, raw)
-	}
-	if raw, ok := cmd["set_heading"]; ok {
-		h, ok := raw.(float64)
-		if !ok {
-			return nil, errors.Errorf("set_heading must be a number of degrees, got %T", raw)
-		}
-		if err := s.setBaseHeading(ctx, h); err != nil {
-			return nil, err
-		}
-		return map[string]interface{}{"heading": normalizeDegrees(h)}, nil
 	}
 	if raw, ok := cmd["set_display_resources"]; ok {
 		return s.doSetDisplayResources(raw)

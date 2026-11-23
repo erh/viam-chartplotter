@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkg/errors"
+
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/testutils/inject"
 )
@@ -34,70 +36,112 @@ func TestBearingDegrees(t *testing.T) {
 	}
 }
 
-// recordingBase is an inject.Base that records set_heading commands and Stops.
+// recordingBase is an inject.Base that records Spin angles and Stops.
 func recordingBase() (*inject.Base, *[]float64, *int) {
 	b := inject.NewBase("autopilot")
-	var headings []float64
+	var spins []float64
 	stops := 0
-	b.DoFunc = func(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-		if h, ok := cmd["set_heading"].(float64); ok {
-			headings = append(headings, h)
+	b.SpinFunc = func(ctx context.Context, angleDeg, degsPerSec float64, extra map[string]interface{}) error {
+		if degsPerSec == 0 {
+			return errors.New("nav must not Spin at 0 deg/s (that means stop)")
 		}
-		return map[string]interface{}{}, nil
+		spins = append(spins, angleDeg)
+		return nil
 	}
 	b.StopFunc = func(ctx context.Context, extra map[string]interface{}) error {
 		stops++
 		return nil
 	}
-	return b, &headings, &stops
+	return b, &spins, &stops
+}
+
+func TestTurnDegrees(t *testing.T) {
+	for _, tc := range []struct{ from, to, want float64 }{
+		{90, 0, 90},    // east -> north: 90 left
+		{0, 90, -90},   // north -> east: 90 right
+		{10, 350, 20},  // short way across north, left
+		{350, 10, -20}, // short way across north, right
+		{0, 180, 180},  // dead astern: (-180, 180]
+		{45, 45, 0},
+	} {
+		if got := turnDegrees(tc.from, tc.to); math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("turnDegrees(%v, %v) = %v, want %v", tc.from, tc.to, got, tc.want)
+		}
+	}
 }
 
 func TestNavSteersBaseTowardNextWaypoint(t *testing.T) {
 	ctx := context.Background()
 	at := navPoint{Lat: 41.0, Lng: -71.0}
-	b, headings, stops := recordingBase()
+	b, spins, stops := recordingBase()
+	// boat() reports compass heading 090.
 	svc := &navService{logger: logging.NewTestLogger(t), store: tempStore(t), ms: boat(&at), base: b}
 
 	// No goal: nothing sent, nothing to stop.
 	if err := svc.checkArrival(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(*headings) != 0 || *stops != 0 {
-		t.Fatalf("idle tick: headings=%v stops=%d", *headings, *stops)
+	if len(*spins) != 0 || *stops != 0 {
+		t.Fatalf("idle tick: spins=%v stops=%d", *spins, *stops)
 	}
 
-	// Route due north: steer 0°.
+	// Route due north while pointing east: turn 90 left.
 	startRoute(t, svc, navPoint{Lat: 41.5, Lng: -71.0}, navPoint{Lat: 41.5, Lng: -70.5})
 	if err := svc.checkArrival(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(*headings) != 1 || math.Abs((*headings)[0]) > 1e-6 {
-		t.Fatalf("headings = %v, want [0]", *headings)
+	if len(*spins) != 1 || math.Abs((*spins)[0]-90) > 1e-6 {
+		t.Fatalf("spins = %v, want [90]", *spins)
 	}
 
-	// Arrive at the first waypoint: the same tick steers for the second
-	// (east-ish).
+	// Arrive at the first waypoint: the same tick steers for the second,
+	// which is roughly east — already the heading, so a small turn.
 	at = navPoint{Lat: 41.5, Lng: -71.0}
 	if err := svc.checkArrival(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := (*headings)[len(*headings)-1]; got < 80 || got > 100 {
-		t.Fatalf("after arrival heading = %v, want ~90", got)
+	if got := (*spins)[len(*spins)-1]; math.Abs(got) > 10 {
+		t.Fatalf("after arrival spin = %v, want ~0", got)
 	}
 
-	// Cancel stops the base once.
+	// Cancel stops the base once; later ticks send nothing.
 	if _, err := svc.Cancel(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 	if *stops != 1 {
 		t.Fatalf("stops after cancel = %d, want 1", *stops)
 	}
-	n := len(*headings)
+	n := len(*spins)
 	if err := svc.checkArrival(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(*headings) != n || *stops != 1 {
-		t.Fatalf("tick after cancel: headings %d->%d, stops=%d", n, len(*headings), *stops)
+	if len(*spins) != n || *stops != 1 {
+		t.Fatalf("tick after cancel: spins %d->%d, stops=%d", n, len(*spins), *stops)
+	}
+}
+
+// End to end: nav steering a real n2k-base that shares nav's movement
+// sensor tells the autopilot to hold the bearing to the waypoint itself.
+func TestNavSteersN2KBaseToBearing(t *testing.T) {
+	ctx := context.Background()
+	at := navPoint{Lat: 41.0, Lng: -71.0}
+	ms := boat(&at)
+	sender := &fakeN2KSender{}
+	nb := &n2kBase{logger: logging.NewTestLogger(t), sender: sender, ms: ms, dst: -1}
+	svc := &navService{logger: logging.NewTestLogger(t), store: tempStore(t), ms: ms, base: nb}
+
+	wp := navPoint{Lat: 41.3, Lng: -70.6}
+	startRoute(t, svc, wp)
+	if err := svc.checkArrival(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.cmds) != 1 {
+		t.Fatalf("sender got %d commands, want 1", len(sender.cmds))
+	}
+	got := sender.cmds[0]["fields"].(map[string]interface{})["Heading-To-Steer (Course)"].(float64)
+	want := bearingDegrees(at.Lat, at.Lng, wp.Lat, wp.Lng)
+	if math.Abs(got-want) > 1e-6 {
+		t.Fatalf("autopilot told %v, want bearing %v", got, want)
 	}
 }
 

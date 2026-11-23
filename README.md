@@ -373,11 +373,17 @@ Tracking and steering (see [n2k-base](#n2k-base) for the full autopilot setup):
 
 With a `base` configured, while a goal is **active**:
 
-1. Every 5 s the service reads the boat's position from `movement_sensor`.
+1. Every 5 s the service reads the boat's position and compass heading from
+   `movement_sensor`.
 2. If the boat has reached the current waypoint, the goal moves on to the next.
-3. It computes the bearing (degrees true) from the boat to the waypoint it is
-   now heading for, and sends the base `DoCommand({"set_heading": <bearing>})`.
-   Re-sending every tick keeps the autopilot's input fresh.
+3. It computes the bearing from the boat to the waypoint it is now heading for,
+   and the turn from the current heading to that bearing, and calls the base's
+   standard **`Spin(turn)`** — positive turns left, negative right, the short
+   way round (±180°). Re-sending every tick keeps the autopilot's input fresh.
+
+Steering uses only the standard base API (`Spin` and `Stop`), so any base can
+be steered, not just an `n2k-base`. The `movement_sensor` must report a
+compass heading; without one the service tracks the route but doesn't steer.
 
 When the goal stops being active — the last waypoint is reached, or it is
 canceled or suspended — the service calls the base's `Stop` once. So to start
@@ -394,7 +400,6 @@ mark rather than back onto the original track.
 |---------|--------------|
 | `{"arrival_status": true}` | snapshot of auto-arrival: boat position, current waypoint, distances, and whether auto-arrival and steering are enabled. Use it to see why a waypoint didn't advance. |
 | `{"routes_meta": true}` | the saved-route fields `Route` can't carry: `{routes: [{id, name, notes?, color?, source, createdAt, updatedAt, stats, scope}]}`, in `ListRoutes` order |
-| `{"set_heading": 270}` | steer the base by hand (needs `base`). While a goal is active the next tick overrides it, so cancel the goal first. |
 | `{"send_waypoints": true}` | hand the active goal's remaining waypoints to the base (needs `base`). On an `n2k-base` this puts the route on the NMEA 2000 bus for other plotters. Optional fields: `{"route_name", "database_id", "route_id", "dst"}`. Alias: `send_waypoints_n2k`. |
 | `{"set_display_resources": {...}}` | used by the web app to record which sensors/cameras it picked, for the LAN display API |
 
@@ -403,9 +408,15 @@ mark rather than back onto the original track.
 ## n2k-base
 
 `erh:viam-chartplotter:n2k-base` — a `rdk:component:base` that steers the boat
-through an **NMEA 2000 autopilot**. You give it a heading; it tells the
-autopilot to hold that heading. It can also put a route on the NMEA 2000 bus so
-another chartplotter (e.g. a Garmin) can show it.
+through an **NMEA 2000 autopilot**, using the standard base API: `Spin(angle)`
+means "turn this many degrees from where the boat is pointing now", so the base
+reads the boat's current heading from its `movement_sensor` and tells the
+autopilot to hold the new heading. The autopilot does the turning. The base can
+also put a route on the NMEA 2000 bus so another chartplotter (e.g. a Garmin)
+can show it.
+
+Example: the boat is heading 010°. `Spin(30)` (30° left) → the autopilot is told
+to hold 340°. `Spin(-90)` (90° right) → 100°.
 
 It doesn't talk to the CAN bus itself. It sends each message through a
 **sender**: a generic component whose DoCommand accepts
@@ -415,12 +426,16 @@ It doesn't talk to the CAN bus itself. It sends each message through a
 ### how the pieces connect
 
 ```
-nav service ──set_heading──▶ n2k-base ──PGN 127237──▶ sender ──▶ NMEA 2000 bus ──▶ autopilot
-  (movement_sensor: gps)      (sender: n2k-sender)
+nav service ──Spin(turn)──▶ n2k-base ──PGN 127237──▶ sender ──▶ NMEA 2000 bus ──▶ autopilot
+  (movement_sensor: gps)     (movement_sensor: gps,
+                              sender: n2k-sender)
 ```
 
 A full setup has three resources — the sender, this base, and the nav service
-pointing at it:
+pointing at it. Give the base and nav the **same** movement sensor: nav works
+out the turn from that sensor's heading and the base turns it back into a
+heading from the same reading, so the autopilot is told the bearing to the
+waypoint exactly.
 
 ```json
 {
@@ -435,7 +450,7 @@ pointing at it:
       "name": "autopilot",
       "api": "rdk:component:base",
       "model": "erh:viam-chartplotter:n2k-base",
-      "attributes": { "sender": "n2k-sender" }
+      "attributes": { "sender": "n2k-sender", "movement_sensor": "gps" }
     }
   ],
   "services": [
@@ -456,33 +471,35 @@ pointing at it:
 | attribute | type | default | description |
 |-----------|------|---------|-------------|
 | `sender` | string | **required** | name of the generic sender component (becomes a dependency) |
+| `movement_sensor` | string | **required** | movement sensor whose compass heading `Spin` turns from (becomes a dependency). Use one that reports **true** heading: the autopilot is told the result as a true heading. |
 | `dst` | int (0–255) | broadcast | NMEA 2000 source address of the autopilot. Set it to send commands to the autopilot only; leave it out to send them to every device. |
-
-### DoCommands
-
-| command | what it does |
-|---------|--------------|
-| `{"set_heading": 270}` | tell the autopilot to hold this heading (degrees **true**, any value — it is normalised to 0–360). Sends PGN 127237 Heading/Track Control with `Steering Mode` "Heading Control", `Heading Reference` "True" and `Heading-To-Steer (Course)` set. |
-| `{"get_heading": true}` | `{"heading": <degrees>}`, the last heading sent, or `null` when not steering |
-| `{"send_waypoints": {"waypoints": [{"lat": 41.16, "lng": -71.58}, ...]}}` | put a route on the bus: one PGN 130066 (Route/WP-List Attributes) then PGN 130067 (Route – WP Name & Position) messages, split to fit fast-packets; up to 252 waypoints, named `WP001`, `WP002`, …. Optional: `route_name` (default "Chartplotter"), `database_id`, `route_id` (default 1), `dst` (default the base's `dst`). The nav service's `send_waypoints` fills in `waypoints` from the active route for you. |
 
 ### what the base API methods do
 
 | method | behaviour |
 |--------|-----------|
+| `Spin(angle, degsPerSec)` | tell the autopilot to hold current heading − `angle` (positive = left). Sends PGN 127237 Heading/Track Control with `Steering Mode` "Heading Control", `Heading Reference` "True" and `Heading-To-Steer (Course)`. Returns once the command is sent; the autopilot makes the turn and keeps holding the heading. `degsPerSec` is ignored — the autopilot picks its own turn rate — except that `0` means `Stop`, as for any base. |
 | `Stop` | forgets the heading and sends **nothing** to the bus: the autopilot keeps holding the last heading it was given. Taking the autopilot out of auto (standby) is left to the person at the helm. |
-| `IsMoving` | true while a heading is set (between `set_heading` and `Stop`) |
-| `MoveStraight`, `Spin`, `SetPower`, `SetVelocity` | return an error — a boat on autopilot is steered by heading, not by speed or turn commands |
+| `IsMoving` | true while a heading is set (between `Spin` and `Stop`) |
+| `MoveStraight`, `SetPower`, `SetVelocity` | return an error — an autopilot is steered by heading, not by distance, power or speed |
 | `GetProperties`, `GetGeometries` | empty |
+
+### DoCommand
+
+Route transfer has no base API method, so it is a DoCommand:
+
+| command | what it does |
+|---------|--------------|
+| `{"send_waypoints": {"waypoints": [{"lat": 41.16, "lng": -71.58}, ...]}}` | put a route on the bus: one PGN 130066 (Route/WP-List Attributes) then PGN 130067 (Route – WP Name & Position) messages, split to fit fast-packets; up to 252 waypoints, named `WP001`, `WP002`, …. Optional: `route_name` (default "Chartplotter"), `database_id`, `route_id` (default 1), `dst` (default the base's `dst`). The nav service's `send_waypoints` fills in `waypoints` from the active route for you. |
 
 ### before you rely on it
 
 - The autopilot must be **engaged** (in auto / heading-hold) for heading
   commands to have any effect; the base doesn't engage it.
 - PGN 127237 support varies between autopilot makers. Some only accept heading
-  commands through PGN 126208 or their own proprietary messages. Test with
-  `{"set_heading": ...}` from the Viam app's control tab, tied up or in open
-  water, before letting the nav service steer.
+  commands through PGN 126208 or their own proprietary messages. Test a small
+  `Spin` (e.g. 10° from an SDK script), tied up or in open water, before
+  letting the nav service steer.
 
 ---
 
